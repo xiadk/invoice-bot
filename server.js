@@ -461,7 +461,11 @@ async function doSend(loginIds) {
       if (!loginLost && loginIds.indexOf(loginId) < loginIds.length - 1 && !taskState.stopRequested) {
         const gap = gapMin + Math.random() * (gapMax - gapMin);
         taskLog(`… 等待 ${Math.round(gap / 1000)}s 后发下一家`);
-        await sleep(gap);
+        // 分段等待：让「停止」在等待期间也能立即生效（否则点了停止还要干等整个间隔）
+        const tEnd = Date.now() + gap;
+        while (Date.now() < tEnd && !taskState.stopRequested) {
+          await sleep(Math.min(500, tEnd - Date.now()));
+        }
       }
     }
   } catch (e) {
@@ -823,7 +827,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && p === '/api/task/stop') {
       if (taskState.running) {
         taskState.stopRequested = true;
-        taskLog('⏸ 收到停止请求，将在当前卖家完成后停止');
+        taskLog('⏸ 收到停止请求：当前卖家发完即停（若正在等待间隔，则立即停止）');
       }
       return sendJson(res, 200, { ok: true });
     }

@@ -756,6 +756,8 @@ async function markAll(btn) {
 }
 
 // ── 任务进度轮询 ──
+/** 时长格式化：<90 秒显示秒，否则显示分钟 */
+const fmtDur = (ms) => { const s = Math.max(0, Math.round(ms / 1000)); return s < 90 ? `${s}秒` : `${Math.round(s / 60)}分`; };
 async function pollTask() {
   try {
     const r = await fetch('/api/task');
@@ -763,8 +765,15 @@ async function pollTask() {
     const wrap = document.getElementById('progressWrap');
     if (t.running || (t.finishedAt && t.logs.length && Date.now() - new Date(t.finishedAt).getTime() < 8000)) {
       wrap.classList.add('show');
+      // 已用时长 + 按当前速率自校准的预计剩余（done=0 时只显示已用）
+      let timeInfo = '';
+      if (t.startedAt) {
+        const elapsed = Date.now() - new Date(t.startedAt).getTime();
+        timeInfo = ` · 已用${fmtDur(elapsed)}`;
+        if (t.running && t.done > 0) timeInfo += ` · 约剩${fmtDur((t.total - t.done) * (elapsed / t.done))}`;
+      }
       document.getElementById('progressText').textContent =
-        (t.type === 'send' ? '发送催收消息' : '任务') + `：${t.done}/${t.total}` + (t.current ? ` · 当前: ${t.current}` : '') + ` · 成功${t.ok} 失败${t.fail}`;
+        (t.type === 'send' ? '发送催收消息' : '任务') + `：${t.done}/${t.total}` + (t.current ? ` · 当前: ${t.current}` : '') + ` · 成功${t.ok} 失败${t.fail}` + timeInfo;
       document.getElementById('progressFill').style.width = (t.total ? (t.done / t.total * 100) : 0) + '%';
       document.getElementById('logPanel').innerHTML = t.logs.slice(-40).map(l => `<div>${l.time} ${esc(l.text)}</div>`).join('');
       document.getElementById('logPanel').scrollTop = 99999;
