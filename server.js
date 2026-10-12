@@ -652,6 +652,9 @@ const server = http.createServer(async (req, res) => {
         FROM issued_invoice
       `);
       const unmatched = await db.query('SELECT COUNT(*) AS n FROM v_unmatched_seller_name');
+      const ignoredCnt = await db.query(
+        'SELECT COUNT(*) AS n FROM seller_name_mapping WHERE is_ignored = 1'
+      );
       const manual = await db.query(
         "SELECT COUNT(*) AS n FROM invoice_order WHERE state_source = 'manual'"
       );
@@ -661,6 +664,7 @@ const server = http.createServer(async (req, res) => {
         sendStats,
         invoiceSummary: invSummary[0] || null,
         unmatchedNameCount: unmatched[0] ? unmatched[0].n : 0,
+        ignoredNameCount: ignoredCnt[0] ? ignoredCnt[0].n : 0,
         manualIssuedCount: manual[0] ? manual[0].n : 0,
         generatedAt: new Date().toLocaleString('zh-CN', { hour12: false }),
       });

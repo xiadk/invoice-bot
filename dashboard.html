@@ -245,7 +245,7 @@
 
 <script>
 let COMPANIES = [], SENT = new Set(), selected = new Set(), filter = 'all', keyword = '';
-let INV_SUMMARY = null, UNMATCHED_CNT = 0, MANUAL_CNT = 0;
+let INV_SUMMARY = null, UNMATCHED_CNT = 0, IGNORED_CNT = 0, MANUAL_CNT = 0;
 let taskTimer = null;
 let MAP = { mappings: [], unmatched: [], sellers: [] };
 const DETAIL_CACHE = {};      // loginId -> 明细（订单+已开票+催收记录）
@@ -314,6 +314,7 @@ async function loadData() {
   SENT = new Set(d.sentList || []);
   INV_SUMMARY = d.invoiceSummary || null;
   UNMATCHED_CNT = d.unmatchedNameCount || 0;
+  IGNORED_CNT = d.ignoredNameCount || 0;
   MANUAL_CNT = d.manualIssuedCount || 0;
   const memberCnt = COMPANIES.reduce((a, c) => a + c.memberCount, 0);
   document.getElementById('meta').textContent =
@@ -336,7 +337,7 @@ function stats() {
     <div class="stat-card warn"><div class="num">${yuan(pendingAmt)}</div><div class="label">待开票金额</div><div class="sub">${hasPending} 家公司有待开票</div></div>
     <div class="stat-card done"><div class="num">${MANUAL_CNT}</div><div class="label">人工确认已开票</div><div class="sub">订单数（商家线下开票）</div></div>
     <div class="stat-card"><div class="num">${sentCnt}</div><div class="label">已催收会员名</div><div class="sub">累计成功 ${members.reduce((a, m) => a + (m.sendCount || 0), 0)} 次（失败不计）</div></div>
-    <div class="stat-card ${UNMATCHED_CNT > 0 ? 'warn' : 'done'}"><div class="num">${UNMATCHED_CNT}</div><div class="label">未匹配销方名称</div><div class="sub">${UNMATCHED_CNT > 0 ? '需人工比对' : '全部已匹配'}</div></div>`;
+    <div class="stat-card ${UNMATCHED_CNT > 0 ? 'warn' : 'done'}"><div class="num">${UNMATCHED_CNT}</div><div class="label">未匹配销方名称</div><div class="sub">${UNMATCHED_CNT > 0 ? '需人工比对' : (IGNORED_CNT > 0 ? `已匹配或已忽略（忽略 ${IGNORED_CNT} 个）` : '全部已匹配')}</div></div>`;
 }
 function visibleCompanies() {
   return COMPANIES.filter(c => {
@@ -730,7 +731,7 @@ function renderMapping() {
 
   const up = pageOf('unmatched', unmatched.length);
   const unmatchedHtml = unmatched.length === 0
-    ? '<div class="empty-hint">✓ 所有销方名称都已匹配到 1688 商家，无需人工比对。</div>'
+    ? `<div class="empty-hint">✓ 所有销方名称都已处理：已匹配到 1688 商家，或已忽略${(MAP.ignored || []).length ? `（当前已忽略 ${(MAP.ignored || []).length} 个，可在下方展开恢复）` : ''}。</div>`
     : `<div class="warn-box">以下 ${unmatched.length} 个税务局销方名称没有匹配上 1688 商家：选好对应的商家点「保存」；若<b>确认没有</b>对应的 1688 商家，点「忽略」把它移出列表（之后不再展示，可在下方「已忽略」里恢复）。</div>
        <table>
          <thead><tr>
