@@ -96,10 +96,12 @@ invoice-bot/
 - **销方名称忽略**：映射页「忽略」= 确认无对应 1688 商家 → `is_ignored=1`、从待比对列表移除、`autoMapSellers` 跳过、`issued_invoice.seller_company` 清空；「已忽略」区可恢复；`/api/data.ignoredNameCount` 供统计卡展示
 
 **发送流程**（lib/sender.js sendToSeller，勿轻改）：
-1. 开聊天页 `def_cbu_web_im/index.html?touid=cnalichn{loginId}` + bringToFront
-2. 等 iframe `def_cbu_web_im_core` 内 `pre.edit[contenteditable=true]` 稳定（**每次操作重新 getFrame，iframe 会重建**）
-3. ensureContact：空状态文案（"您尚未选择联系人"）消失判定；未选中点左侧会话列表；**不确定时不拦截**
-4. sendMessage：清草稿(Ctrl+A+Delete) → `keyboard.insertText`（**绝不能用 type()，\n 会逐行发送**）→ 验证编辑器有内容 → 点 `button.send-btn` → 验证消息尾部30字出现在聊天记录
+1. `openChatReady`：开聊天页 `def_cbu_web_im/index.html?touid=cnalichn{loginId}` + bringToFront → **轮询**等 iframe `def_cbu_web_im_core` 内 `pre.edit[contenteditable=true]`（找到后 1.6s 复确认，**每次操作重新 getFrame，iframe 会重建**）
+2. ensureContact：空状态文案（"您尚未选择联系人"）消失判定（轮询）；未选中点左侧会话列表；**不确定时不拦截**
+3. sendMessage：清草稿(Ctrl+A+Delete) → `keyboard.insertText`（**绝不能用 type()，\n 会逐行发送**）→ 轮询验证编辑器有内容 → 点 `button.send-btn` → 轮询验证消息尾部30字出现在聊天记录
+4. 消息之间随机停 1.2~2.5s（仅非最后一条）
+
+**性能与限流（2026-10-12）**：等待一律「轮询到条件满足即继续」，不再固定盲等（原单家约 45s → 现约 10~15s）。家与家的 `sendGapMinSec/MaxSec`（默认 15~30s）是**防限流主开关**，可在看板设置页调；总时长 ≈ 家数 ×（间隔均值 + 单家约 15s）。
 
 **消息结构**（buildMessages）：3 条 = 模板({amount}/{companyName}/{taxNo}/{email} 变量) + 订单清单(单行「；」分隔，>450字分块) + 提醒。模板在 config.json messages 段。
 

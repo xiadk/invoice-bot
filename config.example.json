@@ -30,7 +30,11 @@
     "headless": false,
     "minActionGapMs": 800,
     "maxActionGapMs": 2500,
-    "navigationTimeoutMs": 60000
+    "navigationTimeoutMs": 60000,
+    "_commentGap": "sendGapMinSec/MaxSec = 两家卖家之间的随机等待秒数（防限流主要参数，看板配置页可改）。dailySendLimit = 命令行发送每日上限家数",
+    "sendGapMinSec": 15,
+    "sendGapMaxSec": 30,
+    "dailySendLimit": 50
   },
   "mysql": {
     "_comment4": "看板数据源数据库。本机自带的 MariaDB 实例默认即为下列配置（启动: scripts/mysql-start.bat）",

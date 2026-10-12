@@ -244,6 +244,7 @@
         <div class="form-row"><label>卖家间隔最小（秒）</label><input id="cfg-gapMin" type="number" min="5"></div>
         <div class="form-row"><label>卖家间隔最大（秒）</label><input id="cfg-gapMax" type="number" min="5"></div>
       </div>
+      <div class="hint">两家之间的随机等待（防限流的主要参数）。调小=更快但更频繁；默认 15~30 秒，仍属保守范围。单家「发送动作」本身约 15 秒（打开聊天窗 + 逐条发送验证），总时长 ≈ 家数 ×（间隔均值 + 约 15 秒）。</div>
       <div class="form-row"><label>订单清单单条消息字数上限</label><input id="cfg-chunkMax" type="number" min="100" max="450"><div class="hint">平台单条消息上限500字，建议不超过450</div></div>
     </div>
     <div class="setting-card full">
@@ -784,12 +785,16 @@ async function batchSend() {
   if (!confirm(`确认给 ${selected.size} 个会员名发送催收消息？\n每个会员名 3 条消息（模板+订单清单+提醒），金额与订单号按该会员名统计；间隔${gap}`)) return;
   await doSend([...selected]);
 }
+// 单家「发送动作」耗时（打开聊天窗 + 逐条发送并验证）的估算基准，用于时长预估
+const PER_SELLER_WORK_SEC = 15;
 async function getGapHint() {
   try {
     const r = await fetch('/api/config'); const d = await r.json();
     const rt = d.config.runtime || {};
-    return `${rt.sendGapMinSec || 30}~${rt.sendGapMaxSec || 60}秒，预计总时长约${Math.round(selected.size * ((Number(rt.sendGapMinSec)||30)+(Number(rt.sendGapMaxSec)||60))/2/60)}分钟`;
-  } catch (e) { return '30~60秒'; }
+    const lo = Number(rt.sendGapMinSec) || 15, hi = Number(rt.sendGapMaxSec) || 30;
+    const perSeller = (lo + hi) / 2 + PER_SELLER_WORK_SEC; // 间隔均值 + 发送动作耗时
+    return `${lo}~${hi}秒，预计总时长约${Math.round(selected.size * perSeller / 60)}分钟`;
+  } catch (e) { return '15~30秒'; }
 }
 async function doSend(ids) {
   try {

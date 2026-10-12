@@ -131,8 +131,8 @@ async function main() {
   const config = JSON.parse(fs.readFileSync(path.join(ROOT, 'config.json'), 'utf-8'));
   const rt = config.runtime || {};
   const dailyLimit = rt.dailySendLimit || 50;
-  const gapMin = (rt.sendGapMinSec || 40) * 1000;
-  const gapMax = (rt.sendGapMaxSec || 90) * 1000;
+  const gapMin = (rt.sendGapMinSec || 15) * 1000;
+  const gapMax = (rt.sendGapMaxSec || 30) * 1000;
 
   const { browser, context } = await launch();
   const page = await context.newPage();

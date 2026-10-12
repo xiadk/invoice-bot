@@ -395,8 +395,8 @@ async function doSend(loginIds) {
   if (taskState.running) throw new Error('已有任务在运行中');
   const config = JSON.parse(fs.readFileSync(path.join(ROOT, 'config.json'), 'utf-8'));
   const rt = config.runtime || {};
-  const gapMin = (rt.sendGapMinSec || 30) * 1000;
-  const gapMax = (rt.sendGapMaxSec || 60) * 1000;
+  const gapMin = (rt.sendGapMinSec || 15) * 1000;
+  const gapMax = (rt.sendGapMaxSec || 30) * 1000;
   const data = await loadSellers();
 
   Object.assign(taskState, { running: true, type: 'send', total: loginIds.length, done: 0, ok: 0, fail: 0, current: null, stopRequested: false, startedAt: new Date().toISOString(), finishedAt: null, logs: [] });
@@ -431,11 +431,12 @@ async function doSend(loginIds) {
       // 本次催收快照（金额 = 该会员名待开票金额；订单号 = 本次催收的订单，用「；」分隔），供看板查看历史
       const collectAmount = Number(seller.pendingAmount) || 0;
       const collectOrderNos = msgSeller.orders.map((o) => o.orderId).join('；');
+      const tSell = Date.now();
       try {
         await sendToSeller(context, msgSeller, messages);
         await recordSent(seller.sellerLogin, seller.company, 'ok', 'web', collectAmount, collectOrderNos);
         taskState.ok++;
-        taskLog(`✓ ${seller.company} 发送成功 (${messages.length}条消息) · 催收次数 +1`);
+        taskLog(`✓ ${seller.company} 发送成功 (${messages.length}条消息, ${Math.round((Date.now() - tSell) / 1000)}s) · 催收次数 +1`);
       } catch (e) {
         await recordSent(seller.sellerLogin, seller.company, 'fail', 'web', collectAmount, collectOrderNos);
         taskState.fail++;
