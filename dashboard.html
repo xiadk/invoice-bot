@@ -2,17 +2,22 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>1688 发票催收控制台</title>
 <style>
   :root { --primary: #ff6a00; --bg: #f5f6f8; --card: #fff; --border: #e8e9eb; --text: #26282c; --sub: #8a8f99; }
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body { font-family: "Microsoft YaHei", "PingFang SC", sans-serif; background: var(--bg); color: var(--text); }
-  .nav { background: #fff; border-bottom: 1px solid var(--border); padding: 0 20px; display: flex; align-items: center; gap: 24px; }
-  .nav h1 { font-size: 16px; padding: 14px 0; color: var(--primary); }
+  .nav { background: #fff; border-bottom: 1px solid var(--border); padding: 0 20px; display: flex; align-items: center; gap: 20px; }
+  .nav h1 { font-size: 16px; padding: 14px 0; color: var(--primary); white-space: nowrap; }
   .nav-tabs { display: flex; height: 100%; }
   .nav-tab { padding: 14px 18px; cursor: pointer; font-size: 14px; border-bottom: 2px solid transparent; }
   .nav-tab.active { color: var(--primary); border-bottom-color: var(--primary); font-weight: 600; }
-  .nav .meta { margin-left: auto; color: var(--sub); font-size: 12px; }
+  .nav .meta { margin-left: auto; color: var(--sub); font-size: 12px; text-align: right; line-height: 1.5; }
+  .nav-right { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+  .user-chip { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+  .user-chip .avatar { width: 26px; height: 26px; border-radius: 50%; background: #fff1e6; color: var(--primary); display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 12px; }
+  .user-chip .role-tag { font-size: 11px; background: #e3f2fd; color: #1565c0; border-radius: 4px; padding: 1px 6px; }
   .page { display: none; padding: 20px; }
   .page.active { display: block; }
   .stats { display: flex; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
@@ -27,7 +32,7 @@
   .hint b { color: var(--text); }
   .toolbar { display: flex; gap: 10px; margin-bottom: 12px; align-items: center; flex-wrap: wrap; }
   .toolbar input[type=text] { padding: 8px 12px; border: 1px solid var(--border); border-radius: 6px; width: 240px; font-size: 13px; }
-  .btn { padding: 8px 16px; border: none; border-radius: 6px; cursor: pointer; font-size: 13px; }
+  .btn { padding: 8px 16px; border: none; border-radius: 6px; cursor: pointer; font-size: 13px; font-family: inherit; }
   .btn-primary { background: var(--primary); color: #fff; }
   .btn-outline { background: #fff; color: var(--primary); border: 1px solid var(--primary); }
   .btn-plain { background: #fff; color: var(--text); border: 1px solid var(--border); }
@@ -49,8 +54,8 @@
   .badge.issued { background: #e8f5e9; color: #2e7d32; }
   .badge.gray { background: #eef0f2; color: #6b7280; }
   .badge.manual { background: #e3f2fd; color: #1565c0; }
+  .badge.disabled { background: #fdecea; color: #d32f2f; }
   .orders-detail { margin: 0; padding: 0; list-style: none; max-height: 0; overflow: hidden; transition: max-height .3s; }
-  /* 公司 → 会员名 子树（独立子行，展开时显示） */
   .sub-tr { display: none; }
   .sub-tr.open { display: table-row; }
   .sub-tr > td { background: #fbfbfc; padding: 10px 12px 4px; }
@@ -81,16 +86,15 @@
   .filter-tabs { display: flex; gap: 8px; }
   .filter-tab { padding: 6px 14px; border-radius: 16px; cursor: pointer; font-size: 13px; background: #fff; border: 1px solid var(--border); }
   .filter-tab.active { background: var(--primary); color: #fff; border-color: var(--primary); }
-  /* 设置页 */
-  .settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; max-width: 1100px; }
+  .settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; max-width: 1200px; }
   .setting-card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 18px; }
   .setting-card h3 { font-size: 14px; margin-bottom: 14px; color: var(--primary); }
   .setting-card.full { grid-column: 1 / -1; }
   .form-row { margin-bottom: 12px; }
   .form-row label { display: block; font-size: 12px; color: var(--sub); margin-bottom: 4px; }
-  .form-row input, .form-row textarea { width: 100%; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; font-size: 13px; font-family: inherit; }
+  .form-row input, .form-row textarea, .form-row select { width: 100%; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; font-size: 13px; font-family: inherit; background: #fff; color: var(--text); }
   .form-row textarea { min-height: 74px; resize: vertical; }
-  .form-row input:focus, .form-row textarea:focus { outline: none; border-color: var(--primary); }
+  .form-row input:focus, .form-row textarea:focus, .form-row select:focus { outline: none; border-color: var(--primary); }
   .form-row .hint { font-size: 11px; color: var(--sub); margin-top: 3px; }
   .form-inline { display: flex; gap: 10px; }
   .form-inline .form-row { flex: 1; }
@@ -98,7 +102,6 @@
   .save-ok { color: #2e7d32; font-size: 13px; display: none; }
   .save-ok.show { display: inline; }
   .preview-box { background: #fafbfc; border: 1px dashed var(--border); border-radius: 6px; padding: 12px; font-size: 12px; line-height: 1.7; white-space: pre-wrap; word-break: break-all; }
-  /* 映射页 */
   .page-head { max-width: 1300px; margin-bottom: 14px; }
   .page-head h2 { font-size: 16px; margin-bottom: 6px; }
   .page-head p { font-size: 12px; color: var(--sub); line-height: 1.8; }
@@ -108,26 +111,23 @@
   .map-note { padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; font-size: 12px; width: 160px; }
   .empty-hint { background: #e8f5e9; color: #2e7d32; border-radius: 8px; padding: 14px 16px; font-size: 13px; }
   .warn-box { background: #fff8e1; border: 1px solid #ffe082; color: #8d6e00; border-radius: 8px; padding: 12px 16px; font-size: 12px; line-height: 1.8; margin-bottom: 12px; }
-  /* 分页条 */
   .pager { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 10px 2px 6px; font-size: 12px; color: var(--sub); }
   .pager .pager-info { margin-right: auto; }
   .pager select { padding: 4px 6px; border: 1px solid var(--border); border-radius: 6px; font-size: 12px; background: #fff; color: var(--text); }
   .pager .btn[disabled] { opacity: .45; cursor: not-allowed; }
-  /* 已忽略区（默认收起） */
   .ignored-box { margin: 14px 0 4px; border: 1px dashed var(--border); border-radius: 8px; padding: 4px 12px; }
   .ignored-box > summary { cursor: pointer; font-size: 13px; color: var(--sub); padding: 8px 0; }
   .ignored-box > summary:hover { color: var(--primary); }
   .ignored-box table { margin-top: 6px; }
-  /* 工具栏条件框 */
   .tb-field { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--sub); }
   .tb-field select { padding: 7px 8px; border: 1px solid var(--border); border-radius: 6px; font-size: 13px; background: #fff; color: var(--text); }
-  /* 催收次数可点击 */
   .hist-link { cursor: pointer; text-decoration: underline dotted; text-underline-offset: 2px; }
   .hist-link:hover { color: var(--primary); }
-  /* 历史催收记录弹窗 */
   .modal-mask { position: fixed; inset: 0; background: rgba(0,0,0,.35); display: none; align-items: center; justify-content: center; z-index: 100; padding: 24px; }
   .modal-mask.show { display: flex; }
   .modal { background: #fff; border-radius: 10px; width: 100%; max-width: 900px; max-height: 84vh; display: flex; flex-direction: column; box-shadow: 0 12px 40px rgba(0,0,0,.2); }
+  .modal.wide { max-width: 1080px; }
+  .modal.small { max-width: 420px; }
   .modal-head { display: flex; align-items: center; padding: 14px 18px; border-bottom: 1px solid var(--border); }
   .modal-head b { font-size: 15px; }
   .modal-close { margin-left: auto; cursor: pointer; font-size: 22px; line-height: 1; color: var(--sub); }
@@ -138,6 +138,34 @@
   .hist-table td, .hist-table th { font-size: 12px; }
   .hist-table .order-nos { word-break: break-all; line-height: 1.7; font-family: Consolas, monospace; }
   .muted { color: var(--sub); }
+  /* 顶部横幅（查看他人数据 / 强制改密） */
+  .banner { display: none; margin: 0; padding: 10px 20px; font-size: 13px; align-items: center; gap: 12px; }
+  .banner.show { display: flex; }
+  .banner.view { background: #e3f2fd; color: #0d47a1; border-bottom: 1px solid #bbdefb; }
+  .banner.warn { background: #fff8e1; color: #8d6e00; border-bottom: 1px solid #ffe082; }
+  .banner .btn { padding: 4px 12px; font-size: 12px; }
+  /* 云端登录直播 */
+  .live-grid { display: flex; gap: 14px; align-items: flex-start; }
+  .live-screen { flex: 1; background: #111; border-radius: 8px; overflow: hidden; position: relative; min-height: 420px; display: flex; align-items: center; justify-content: center; }
+  .live-screen img { width: 100%; display: block; cursor: crosshair; user-select: none; -webkit-user-drag: none; -webkit-user-select: none; touch-action: none; }
+  .live-side { width: 260px; flex: none; }
+  .live-status { font-size: 12px; color: var(--sub); line-height: 1.8; margin-bottom: 10px; word-break: break-all; }
+  .live-status b { color: var(--text); }
+  .live-log { background: #26282c; color: #b9f6ca; font-family: Consolas, monospace; font-size: 11px; border-radius: 6px; padding: 8px; height: 140px; overflow-y: auto; margin-top: 10px; }
+  .live-side .btn { width: 100%; margin-bottom: 8px; }
+  .live-kb { width: 100%; min-height: 62px; border: 1px solid var(--border); border-radius: 6px; padding: 8px; font-size: 12px; font-family: inherit; resize: vertical; }
+  /* 手机 / 平板：直播面板改为上下堆叠，画面自适应宽度，保证任意浏览器都能登录 */
+  @media (max-width: 860px) {
+    .modal.wide { max-width: 96vw; }
+    .live-grid { flex-direction: column; }
+    .live-screen { width: 100%; min-height: 0; }
+    .live-side { width: 100%; }
+    .live-log { height: 90px; }
+  }
+  /* 系统管理 */
+  .admin-form-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+  .admin-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+  .tag-admin { background: #fff1e6; color: #c2410c; }
 </style>
 </head>
 <body>
@@ -146,9 +174,29 @@
   <div class="nav-tabs">
     <div class="nav-tab active" data-page="board" onclick="switchPage('board')">看板</div>
     <div class="nav-tab" data-page="mapping" onclick="switchPage('mapping')">名称映射</div>
-    <div class="nav-tab" data-page="settings" onclick="switchPage('settings')">设置</div>
+    <div class="nav-tab" data-page="admin" id="tabAdmin" style="display:none" onclick="switchPage('admin')">系统管理</div>
   </div>
-  <div class="meta" id="meta"></div>
+  <div class="nav-right">
+    <button class="btn btn-outline btn-sm" id="btnLogin1688" onclick="openLiveModal()" title="在网页里直接操作服务器上的浏览器完成 1688 登录，登录态按账号独立保存">登录 1688</button>
+    <div class="user-chip">
+      <div class="avatar" id="userAvatar">-</div>
+      <div>
+        <div id="userName">—</div>
+        <div class="loginid" id="userRole"></div>
+      </div>
+      <button class="btn btn-plain btn-sm" onclick="openPwdModal()" title="修改当前账号密码">改密</button>
+      <button class="btn btn-plain btn-sm" onclick="logout()">退出</button>
+    </div>
+  </div>
+</div>
+
+<div class="banner view" id="tenantBanner">
+  <span>👁 正在以超级管理员身份查看 <b id="tenantName"></b> 的看板与映射数据（<b>只读</b>，不能发送/修改）。</span>
+  <button class="btn btn-plain" onclick="exitTenantView()">退出查看</button>
+</div>
+<div class="banner warn" id="pwdBanner">
+  <span>⚠ 检测到账号使用了初始/管理员重置的密码，建议立即修改。</span>
+  <button class="btn btn-plain" onclick="openPwdModal()">立即修改密码</button>
 </div>
 
 <!-- ══════════ 看板页 ══════════ -->
@@ -157,10 +205,9 @@
   <div class="hint">
     <b>看板结构：</b>一行 = <b>一家公司</b>（发票是公司口径开的）；点「展开会员名」能看到这家公司名下的各个 <b>1688 会员名（店铺）</b>，每个店铺各自带订单和催收按钮。
     <br><b>统计口径：</b>「已开票金额（税务局）」= 税务局导出文件的<b>价税合计</b>逐行相加（含税，与订单实付款同口径）；「N 张发票」= 按<b>数电发票号码去重</b>后的发票张数。
-    税务局导出是<b>一张发票上的每个货物各占一行</b>，多行共用同一个数电发票号码，所以<b>张数常小于明细行数</b>。
-    <br><b>催收口径（按会员名）：</b>点某个店铺的「催收消息」，<b>{amount}</b> 取<b>该会员名的待开票金额</b>，<b>{orderId}</b> 为<b>该会员名除已开票外的全部订单号</b>（平台已开票 + 人工确认的都排除）。
-    <br><b>筛选：</b><b>催收状态</b> = 已催收（有成功催收记录的公司）/ 最近一周、半个月、一个月、三个月未催收（最近 N 天没有成功催收记录，含从未催收）；<b>开票状态</b> = 待开票金额为 0（已开票）/ 大于 0（未开票）。以上条件与搜索框可<b>任意组合</b>；点「催收次数」可查看历史催收记录。
-    <br><b>排序：</b>按<b>最近催收时间倒序</b>排列（从没催收过的沉底），催收时间相同则按<b>待开票金额倒序</b>。
+    <br><b>催收口径（按会员名）：</b>点某个店铺的「催收消息」，<b>{amount}</b> 取<b>该会员名的待开票金额</b>，<b>{orderId}</b> 为<b>该会员名除已开票外的全部订单号</b>。
+    <br><b>筛选：</b><b>催收状态</b> = 已催收 / 最近一周、半个月、一个月、三个月未催收；<b>开票状态</b> = 待开票金额为 0（已开票）/ 大于 0（未开票）。可与搜索框<b>任意组合</b>；点「催收次数」可查看历史催收记录。
+    <br><b>排序：</b>按<b>最近催收时间倒序</b>（从没催收过的沉底），催收时间相同则按<b>待开票金额倒序</b>。
   </div>
   <div class="progress-wrap" id="progressWrap">
     <div class="progress-head">
@@ -203,17 +250,18 @@
         <th style="width:32px"></th>
         <th>公司 / 会员名</th>
         <th style="width:130px">订单 / 金额</th>
-        <th style="width:180px" title="该公司在税务局导出文件里的发票额与张数（金额 = 价税合计逐行相加；张数 = 按数电票号去重）">已开票金额（税务局）</th>
+        <th style="width:180px" title="该公司在税务局导出文件里的发票额与张数">已开票金额（税务局）</th>
         <th style="width:110px" title="公司订单金额 − 公司已开票金额（不小于 0）">待开票金额</th>
-        <th style="width:180px" title="平台状态 + 人工确认；展开会员名后可对单个订单标记已开票">订单开票状态</th>
-        <th style="width:130px" title="send_log 表：该公司各会员名最近一次成功催收的时间（失败尝试不算）">最近催收时间</th>
-        <th style="width:80px" title="send_log 表：只统计成功发送（result='ok'）的次数，失败尝试不计入">催收次数</th>
+        <th style="width:180px" title="平台状态 + 人工确认">订单开票状态</th>
+        <th style="width:130px" title="最近一次成功催收的时间（失败尝试不算）">最近催收时间</th>
+        <th style="width:80px" title="只统计成功发送的次数">催收次数</th>
         <th style="width:120px">操作</th>
       </tr>
     </thead>
     <tbody id="tbody"><tr><td colspan="9" style="text-align:center;color:#8a8f99;padding:40px">数据加载中...</td></tr></tbody>
   </table>
   <div id="dashPager"></div>
+  <div class="meta" id="meta" style="margin-top:10px;font-size:12px;color:#8a8f99"></div>
 </div>
 
 <!-- ══════════ 名称映射页 ══════════ -->
@@ -221,34 +269,40 @@
   <div class="page-head">
     <h2>税务局销方名称 → 1688 商家名称 映射</h2>
     <p>
-      「已开票订单」里的<b>销方名称</b>是税务局口径，跟订单里的<b>商家名称</b>不一致，所以要靠这张映射表建立名称关系，看板才能把发票金额统计到对应商家。
-      导入时会自动匹配（名称完全一致 / 包含 / 登录ID / 备注线索）；自动匹配不上的会列在下面「待人工比对」，你选好对应的 1688 商家保存即可，之后统计一律按映射表走。
-      若某个销方名称<b>确认没有</b>对应的 1688 商家，点该行的「忽略」把它移出列表，之后不再展示、不再参与自动匹配与统计（可在下方「已忽略」区随时恢复）。
+      「已开票订单」里的<b>销方名称</b>是税务局口径，跟订单里的<b>商家名称</b>不一致，所以要靠这张映射表建立名称关系。
+      导入时会自动匹配（名称完全一致 / 包含 / 登录ID / 备注线索）；自动匹配不上的会列在下面「待人工比对」，选好对应的 1688 商家保存即可。
+      若某个销方名称<b>确认没有</b>对应的 1688 商家，点「忽略」把它移出列表（可在下方「已忽略」区恢复）。
     </p>
   </div>
   <div id="mapBody">加载中...</div>
 </div>
 
-<!-- ══════════ 设置页 ══════════ -->
-<div class="page" id="page-settings">
+<!-- ══════════ 系统管理页（仅超级管理员） ══════════ -->
+<div class="page" id="page-admin">
+  <div class="page-head">
+    <h2>系统管理</h2>
+    <p>仅超级管理员可见。可在此维护账号（新增 / 重置密码 / 禁用 / 删除）、查看任意用户的看板与映射数据，以及调整全局发送参数与话术模板。</p>
+  </div>
+
   <div class="settings-grid">
     <div class="setting-card">
-      <h3>开票抬头（消息中的抬头信息）</h3>
+      <h3>我的开票抬头（催收话术中的抬头信息）</h3>
       <div class="form-row"><label>公司名称</label><input id="cfg-companyName"></div>
       <div class="form-row"><label>纳税人识别号</label><input id="cfg-taxNo"></div>
       <div class="form-row"><label>收票邮箱</label><input id="cfg-email" placeholder="发票接收邮箱"></div>
+      <div class="hint">这是<b>当前登录账号</b>的抬头。其他用户的抬头在下方「用户管理」里逐个维护。</div>
     </div>
     <div class="setting-card">
-      <h3>发送参数</h3>
+      <h3>全局发送参数</h3>
       <div class="form-inline">
         <div class="form-row"><label>卖家间隔最小（秒）</label><input id="cfg-gapMin" type="number" min="5"></div>
         <div class="form-row"><label>卖家间隔最大（秒）</label><input id="cfg-gapMax" type="number" min="5"></div>
       </div>
-      <div class="hint">两家之间的随机等待（防限流的主要参数）。调小=更快但更频繁；默认 15~30 秒，仍属保守范围。单家「发送动作」本身约 15 秒（打开聊天窗 + 逐条发送验证），总时长 ≈ 家数 ×（间隔均值 + 约 15 秒）。</div>
-      <div class="form-row"><label>订单清单单条消息字数上限</label><input id="cfg-chunkMax" type="number" min="100" max="450"><div class="hint">平台单条消息上限500字，建议不超过450</div></div>
+      <div class="hint">两家之间的随机等待（防限流主要参数），对所有用户生效。总时长 ≈ 家数 ×（间隔均值 + 约 15 秒）。</div>
+      <div class="form-row"><label>订单清单单条消息字数上限</label><input id="cfg-chunkMax" type="number" min="100" max="450"><div class="hint">平台单条消息上限 500 字，建议不超过 450</div></div>
     </div>
     <div class="setting-card full">
-      <h3>消息模板 <span style="font-weight:400;font-size:12px;color:#8a8f99">（可用变量见提示）</span></h3>
+      <h3>消息模板 <span style="font-weight:400;font-size:12px;color:#8a8f99">（对所有用户生效；{companyName}/{taxNo}/{email} 取各用户自己的抬头）</span></h3>
       <div class="form-row">
         <label>① 模板消息（开头语，含总金额与抬头）</label>
         <textarea id="cfg-template"></textarea>
@@ -274,6 +328,27 @@
     <button class="btn btn-outline" onclick="loadConfigUI()">放弃修改</button>
     <span class="save-ok" id="saveOk">✓ 已保存</span>
   </div>
+
+  <div class="section-title">用户管理 <span class="cnt" id="userCount"></span>
+    <button class="btn btn-outline btn-sm" style="margin-left:10px" onclick="loadUsers()">刷新</button>
+  </div>
+  <div class="setting-card full" style="margin-bottom:14px">
+    <h3>新增用户</h3>
+    <div class="admin-form-grid">
+      <div class="form-row"><label>登录账号 *</label><input id="nu-username" placeholder="4~64 位字母/数字/_ . -"></div>
+      <div class="form-row"><label>初始密码 *</label><input id="nu-password" placeholder="至少 4 位"></div>
+      <div class="form-row"><label>角色</label><select id="nu-role"><option value="user">普通用户</option><option value="admin">超级管理员</option></select></div>
+      <div class="form-row"><label>公司名称（开票抬头）</label><input id="nu-company" placeholder="如：中山仕赫贸易有限公司"></div>
+      <div class="form-row"><label>纳税人识别号</label><input id="nu-taxNo"></div>
+      <div class="form-row"><label>收票邮箱</label><input id="nu-email"></div>
+      <div class="form-row" style="grid-column:1/-1"><label>备注</label><input id="nu-note" placeholder="可选"></div>
+    </div>
+    <div class="settings-actions" style="margin-top:6px">
+      <button class="btn btn-primary" id="btnCreateUser" onclick="createUser()">创建用户</button>
+      <span class="save-ok" id="createOk">✓ 已创建</span>
+    </div>
+  </div>
+  <div id="userTable">加载中...</div>
 </div>
 
 <datalist id="sellerOptions"></datalist>
@@ -289,17 +364,76 @@
   </div>
 </div>
 
+<!-- ══════════ 云端 1688 登录直播弹窗 ══════════ -->
+<div class="modal-mask" id="liveModal" onclick="if (event.target === this) closeLiveModal()">
+  <div class="modal wide">
+    <div class="modal-head">
+      <b>登录 1688（云端浏览器实时画面）</b>
+      <span class="modal-close" onclick="closeLiveModal()" title="关闭">×</span>
+    </div>
+    <div class="modal-body">
+      <div class="warn-box" style="margin-bottom:12px">
+        下面的画面是<b>服务器上的浏览器</b>实时投屏。直接在这里<b>扫码</b>或输入账号密码即可登录，登录态只保存到<b>当前账号</b>的名下，其他用户看不到。
+        登录成功后点右侧「保存登录态」即可，之后发催收消息会自动复用。
+      </div>
+      <div class="live-grid">
+        <div class="live-screen" id="liveScreen">
+          <div class="muted" id="livePlaceholder" style="color:#9aa0a6;font-size:13px">正在启动云端浏览器…</div>
+          <img id="liveImg" alt="" style="display:none">
+        </div>
+        <div class="live-side">
+          <div class="live-status" id="liveStatus">状态：连接中…</div>
+          <button class="btn btn-primary" onclick="saveLiveState()">保存登录态</button>
+          <button class="btn btn-plain" onclick="liveNav('https://login.1688.com/member/signin.htm')">回到登录页</button>
+          <button class="btn btn-plain" onclick="liveNav('https://work.1688.com/home/page/index.htm')">打开工作台</button>
+          <button class="btn btn-plain" onclick="liveBack()">后退</button>
+          <button class="btn btn-plain" onclick="liveReload()">刷新画面</button>
+          <button class="btn btn-danger" onclick="closeLiveModal()">关闭浏览器</button>
+          <div class="form-row" style="margin-top:10px">
+            <label>键盘输入（点击此框后直接打字 / 粘贴，会同步到左侧画面）</label>
+            <textarea class="live-kb" id="liveKb" placeholder="在这里输入文字、账号、密码或验证码…"></textarea>
+          </div>
+          <div style="display:flex;gap:6px">
+            <button class="btn btn-plain btn-sm" style="flex:1" onclick="liveKey('Enter')">回车</button>
+            <button class="btn btn-plain btn-sm" style="flex:1" onclick="liveKey('Tab')">Tab</button>
+            <button class="btn btn-plain btn-sm" style="flex:1" onclick="liveKey('Backspace')">退格</button>
+          </div>
+          <div class="live-log" id="liveLog"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════ 修改密码弹窗 ══════════ -->
+<div class="modal-mask" id="pwdModal" onclick="if (event.target === this) closePwdModal()">
+  <div class="modal small">
+    <div class="modal-head"><b>修改密码</b><span class="modal-close" onclick="closePwdModal()">×</span></div>
+    <div class="modal-body">
+      <div class="form-row"><label>原密码</label><input type="password" id="pw-old" autocomplete="current-password"></div>
+      <div class="form-row"><label>新密码（至少 4 位）</label><input type="password" id="pw-new" autocomplete="new-password"></div>
+      <div class="form-row"><label>确认新密码</label><input type="password" id="pw-new2" autocomplete="new-password"></div>
+      <div style="display:flex;gap:10px;margin-top:6px">
+        <button class="btn btn-primary" id="btnPwd" onclick="submitPwd()">确定修改</button>
+        <button class="btn btn-plain" onclick="closePwdModal()">取消</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script>
+// ══════════════ 全局状态 ══════════════
+let ME = null;                 // 当前登录用户
+let VIEW_TENANT = null;        // 管理员正在查看的租户ID（null=自己）
+let READONLY = false;          // 查看他人数据时为只读
 let COMPANIES = [], SENT = new Set(), selected = new Set(), filter = 'all', keyword = '';
-// 组合筛选：催收状态（默认 collected=已催收；7/15/30/90=最近 N 天未催收）、开票状态（空=全部 / invoiced / pending）
 let collectStateFilter = 'collected', invoiceStateFilter = '';
 let INV_SUMMARY = null, UNMATCHED_CNT = 0, IGNORED_CNT = 0, MANUAL_CNT = 0;
 let taskTimer = null;
 let MAP = { mappings: [], unmatched: [], sellers: [] };
-const DETAIL_CACHE = {};      // loginId -> 明细（订单+已开票+催收记录）
-const EXPANDED = new Set();   // 展开了会员名子树的公司
-const ORDER_OPEN = new Set(); // 展开了订单明细的会员名
-// 分页状态：dash=看板公司表；unmatched=映射页「待人工比对」；mapping=映射页「已维护映射」；ignored=映射页「已忽略」
+const DETAIL_CACHE = {};
+const EXPANDED = new Set();
+const ORDER_OPEN = new Set();
 const PAGER = {
   dash: { page: 1, size: 20 },
   unmatched: { page: 1, size: 20 },
@@ -308,15 +442,69 @@ const PAGER = {
 };
 const PAGE_SIZES = [10, 20, 50, 100];
 
-const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const yuan = v => '¥' + Number(v || 0).toFixed(2);
 const statusText = st => ({ none: '未申请', applying: '已申请', issued: '已开票' }[st] || st);
-/** 选择器转义（公司名可能含括号/引号） */
 const q = s => (window.CSS && CSS.escape ? CSS.escape(String(s)) : String(s).replace(/["\\]/g, '\\$&'));
 const sentKey = m => m.sellerLogin || m.loginId;
 
-// ── 分页（前端切片：数据已在内存，统计卡/筛选/搜索都基于全量） ──
-/** 取某张表的当前分页信息（页码越界自动收敛）；slice(arr) 返回当前页数据 */
+// ══════════════ 请求封装（自动带租户 + 401 跳登录） ══════════════
+function withTenant(url) {
+  if (VIEW_TENANT == null) return url;
+  return url + (url.includes('?') ? '&' : '?') + 'tenant=' + encodeURIComponent(VIEW_TENANT);
+}
+async function api(path, opts) {
+  const r = await fetch(withTenant(path), Object.assign({ credentials: 'same-origin' }, opts || {}));
+  if (r.status === 401) { location.href = '/login'; throw new Error('登录已失效'); }
+  return r.json();
+}
+function goLogin() { location.href = '/login'; }
+async function logout() {
+  await fetch('/api/auth/logout', { method: 'POST', credentials: 'same-origin' }).catch(() => {});
+  goLogin();
+}
+
+// ══════════════ 初始化：加载当前用户 → 角色化导航 ══════════════
+async function boot() {
+  let d;
+  try { d = await api('/api/auth/me'); } catch (e) { return; }
+  if (!d || !d.user) { goLogin(); return; }
+  ME = d.user;
+  document.getElementById('userAvatar').textContent = (ME.username || '?').slice(0, 1).toUpperCase();
+  document.getElementById('userName').textContent = ME.displayName || ME.username;
+  document.getElementById('userRole').innerHTML = (ME.role === 'admin' ? '<span class="role-tag tag-admin">超级管理员</span>' : '普通用户')
+    + (ME.companyName ? ' · ' + esc(ME.companyName) : '');
+  if (ME.role === 'admin') document.getElementById('tabAdmin').style.display = '';
+  if (ME.mustChangePassword) document.getElementById('pwdBanner').classList.add('show');
+  // 无 1688 登录态 → 自动弹出登录直播（每次会话只自动弹一次，其余靠顶部按钮/横幅提示）
+  if (d.needLogin1688 && !sessionStorage.getItem('autoLoginPrompted')) {
+    sessionStorage.setItem('autoLoginPrompted', '1');
+    setTimeout(() => openLiveModal(true), 600);
+  }
+  await loadData();
+  pollTask();
+  taskTimer = setInterval(pollTask, 2000);
+}
+
+// ══════════════ 租户查看（超级管理员） ══════════════
+function setTenantView(id, label) {
+  VIEW_TENANT = id;
+  READONLY = Number(id) !== Number(ME.id);
+  const banner = document.getElementById('tenantBanner');
+  document.getElementById('tenantName').textContent = label || ('#' + id);
+  banner.classList.toggle('show', READONLY);
+  DETAIL_CACHE_RESET();
+  selected.clear();
+  document.getElementById('btnSend').disabled = READONLY;
+  document.getElementById('btnImport').disabled = READONLY;
+  EXPANDED.clear(); ORDER_OPEN.clear();
+  resetPage('dash');
+  switchPage('board');
+  loadData();
+}
+function exitTenantView() { setTenantView(ME.id, null); }
+
+// ══════════════ 分页 ══════════════
 function pageOf(key, total) {
   const st = PAGER[key];
   const pages = Math.max(1, Math.ceil(total / st.size));
@@ -324,7 +512,6 @@ function pageOf(key, total) {
   if (st.page < 1) st.page = 1;
   return { page: st.page, size: st.size, pages, total, slice: (arr) => arr.slice((st.page - 1) * st.size, st.page * st.size) };
 }
-/** 分页条 HTML（每页条数 10/20/50/100 + 首页/上一页/下一页/末页） */
 function pagerHtml(key, total) {
   const p = pageOf(key, total);
   const st = PAGER[key];
@@ -342,21 +529,20 @@ function pagerHtml(key, total) {
 function gotoPage(key, p) { PAGER[key].page = p; rerender(key); }
 function setPageSize(key, size) { PAGER[key].size = Number(size) || 20; PAGER[key].page = 1; rerender(key); }
 function resetPage(key) { PAGER[key].page = 1; }
-/** 按分页所属页面重绘 */
 function rerender(key) { key === 'dash' ? render() : renderMapping(); }
 
-// ── 页面切换 ──
+// ══════════════ 页面切换 ══════════════
 function switchPage(p) {
+  if (p === 'admin' && (!ME || ME.role !== 'admin')) p = 'board';
   document.querySelectorAll('.nav-tab').forEach(t => t.classList.toggle('active', t.dataset.page === p));
   document.querySelectorAll('.page').forEach(pg => pg.classList.toggle('active', pg.id === 'page-' + p));
-  if (p === 'settings') loadConfigUI();
+  if (p === 'admin') { loadConfigUI(); loadUsers(); }
   if (p === 'mapping') loadMapping();
 }
 
-// ── 看板 ──
+// ══════════════ 看板 ══════════════
 async function loadData() {
-  const r = await fetch('/api/data');
-  const d = await r.json();
+  const d = await api('/api/data');
   if (d.error) { alert('加载数据失败: ' + d.error); return; }
   COMPANIES = d.companies || [];
   SENT = new Set(d.sentList || []);
@@ -366,15 +552,14 @@ async function loadData() {
   MANUAL_CNT = d.manualIssuedCount || 0;
   const memberCnt = COMPANIES.reduce((a, c) => a + c.memberCount, 0);
   document.getElementById('meta').textContent =
-    '数据: ' + d.generatedAt + ' · ' + COMPANIES.length + ' 家公司 / ' + memberCnt + ' 个会员名 · 数据源 MySQL';
+    '数据: ' + d.generatedAt + ' · ' + COMPANIES.length + ' 家公司 / ' + memberCnt + ' 个会员名 · 数据源 MySQL'
+    + (d.tenant ? ' · 租户: ' + d.tenant.username : '');
   render();
 }
 function stats() {
   const orderAmt = COMPANIES.reduce((a, c) => a + Number(c.totalAmount), 0);
   const orderCnt = COMPANIES.reduce((a, c) => a + c.total, 0);
-  // 已开票金额 = 税务局文件（issued_invoice）已开票明细金额总和
   const invAmt = INV_SUMMARY ? Number(INV_SUMMARY.amount) : 0;
-  // 待开票金额 = 各公司（订单金额 − 税务局已开票金额）之和
   const pendingAmt = COMPANIES.reduce((a, c) => a + Number(c.pendingAmount), 0);
   const hasPending = COMPANIES.filter(c => Number(c.pendingAmount) > 0).length;
   const members = COMPANIES.flatMap(c => c.members);
@@ -387,14 +572,12 @@ function stats() {
     <div class="stat-card"><div class="num">${sentCnt}</div><div class="label">已催收会员名</div><div class="sub">累计成功 ${members.reduce((a, m) => a + (m.sendCount || 0), 0)} 次（失败不计）</div></div>
     <div class="stat-card ${UNMATCHED_CNT > 0 ? 'warn' : 'done'}"><div class="num">${UNMATCHED_CNT}</div><div class="label">未匹配销方名称</div><div class="sub">${UNMATCHED_CNT > 0 ? '需人工比对' : (IGNORED_CNT > 0 ? `已匹配或已忽略（忽略 ${IGNORED_CNT} 个）` : '全部已匹配')}</div></div>`;
 }
-/** 公司级「最近催收时间」转毫秒（无催收=0，便于排序沉底） */
 function lastSentTs(c) {
   return c.lastSentAt ? new Date(String(c.lastSentAt).replace(' ', 'T')).getTime() : 0;
 }
 function visibleCompanies() {
   const now = Date.now();
   const list = COMPANIES.filter(c => {
-    // 催收状态：已催收 = 有成功催收记录；7/15/30/90 = 最近 N 天没有成功催收记录（含从未催收）
     if (collectStateFilter === 'collected') {
       if (!(Number(c.sendCount) > 0)) return false;
     } else if (collectStateFilter) {
@@ -402,7 +585,6 @@ function visibleCompanies() {
       const last = lastSentTs(c);
       if (last && now - last < days * 86400000) return false;
     }
-    // 开票状态：待开票金额 = 0 视为已开票；> 0 视为未开票
     if (invoiceStateFilter === 'invoiced' && Number(c.pendingAmount) !== 0) return false;
     if (invoiceStateFilter === 'pending' && !(Number(c.pendingAmount) > 0)) return false;
     if (keyword) {
@@ -412,7 +594,6 @@ function visibleCompanies() {
     }
     return true;
   });
-  // 排序：最近催收时间倒序（从没催收过的沉底）；催收时间相同则按待开票金额倒序
   list.sort((a, b) => {
     const ta = lastSentTs(a), tb = lastSentTs(b);
     if (tb !== ta) return tb - ta;
@@ -420,15 +601,15 @@ function visibleCompanies() {
   });
   return list;
 }
-/** 会员名一行（公司子树里的一项）：各自带订单/金额、待开票金额、状态、催收按钮、订单明细 */
 function memberHtml(m, c) {
   const pending = Number(m.pendingAmount);
   const sc = Number(m.sendCount) || 0;
   const sent = SENT.has(sentKey(m));
+  const markBtn = (act) => READONLY ? '' : `<button class="btn btn-outline btn-sm" data-id="${esc(m.loginId)}" data-order="${esc(act.order)}" data-action="${act.action}" onclick="markOrder(this)">${act.label}</button>`;
   return `<div class="member" data-id="${esc(m.loginId)}">
     <div class="member-line">
-      <input type="checkbox" data-id="${esc(m.loginId)}" ${selected.has(m.loginId) ? 'checked' : ''} ${m.canSend ? '' : 'disabled'}
-             title="${m.canSend ? '' : '该会员名没有可催收订单'}" onchange="toggleSel(this.dataset.id, this.checked)">
+      <input type="checkbox" data-id="${esc(m.loginId)}" ${selected.has(m.loginId) ? 'checked' : ''} ${(m.canSend && !READONLY) ? '' : 'disabled'}
+             title="${READONLY ? '只读模式' : (m.canSend ? '' : '该会员名没有可催收订单')}" onchange="toggleSel(this.dataset.id, this.checked)">
       <div class="m-name">
         <b>${esc(m.sellerLogin || m.loginId)}</b>${sent ? '<span class="sent-tag">已催收</span>' : ''}
         <div class="loginid">${m.total} 单 · ${yuan(m.totalAmount)}</div>
@@ -436,8 +617,8 @@ function memberHtml(m, c) {
       <div class="m-kv">
         <span class="kv-label">税务局已开票</span>
         ${m.invoiceOwnerLoginId
-          ? `<span class="loginid">已计入「${esc(m.invoiceOwnerLabel)}」</span>`
-          : `<span class="amount ${m.invoiceCount ? 'ok' : 'zero'}">${yuan(m.invoicedAmount)}</span> <span class="loginid">${m.invoiceCount} 张 / ${m.invoiceRowCount} 行</span>`}
+      ? `<span class="loginid">已计入「${esc(m.invoiceOwnerLabel)}」</span>`
+      : `<span class="amount ${m.invoiceCount ? 'ok' : 'zero'}">${yuan(m.invoicedAmount)}</span> <span class="loginid">${m.invoiceCount} 张 / ${m.invoiceRowCount} 行</span>`}
       </div>
       <div class="m-kv"><span class="kv-label">待开票金额</span><span class="amount ${pending > 0 ? '' : 'zero'}">${yuan(pending)}</span></div>
       <div class="m-kv">
@@ -447,8 +628,8 @@ function memberHtml(m, c) {
       </div>
       <div class="m-kv"><span class="kv-label">最近催收</span>${m.lastSentAt ? esc(String(m.lastSentAt).slice(0, 16)) : '<span class="loginid">—</span>'} <span class="loginid hist-link" data-id="${esc(m.loginId)}" onclick="openMemberHistory(this)" title="点此查看该会员名的历史催收记录">· ${sc} 次</span></div>
       <div class="row-actions">
-        <button class="btn btn-primary btn-sm" ${m.canSend ? '' : 'disabled'}
-                title="${m.canSend ? '给该店铺发催收消息（{amount}=本店待开票金额，{orderId}=本店未开票订单号）' : (m.unissuedCount > 0 ? '无待开票金额' : '本店订单已全部开票（含人工确认）')}"
+        <button class="btn btn-primary btn-sm" ${(m.canSend && !READONLY) ? '' : 'disabled'}
+                title="${READONLY ? '只读模式' : (m.canSend ? '给该店铺发催收消息' : (m.unissuedCount > 0 ? '无待开票金额' : '本店订单已全部开票'))}"
                 onclick="sendOne(this.dataset.id)" data-id="${esc(m.loginId)}">催收消息</button>
         <span class="toggle-orders" data-id="${esc(m.loginId)}" onclick="toggleMemberOrders(this)">订单明细</span>
       </div>
@@ -456,8 +637,6 @@ function memberHtml(m, c) {
     <ul class="orders-detail" data-loaded="0"><li style="color:#8a8f99">点击「订单明细」加载...</li></ul>
   </div>`;
 }
-
-/** 公司一行 + 会员名子树（独立子行，默认收起） */
 function companyRows(c) {
   const key = c.company;
   const pending = Number(c.pendingAmount);
@@ -467,7 +646,7 @@ function companyRows(c) {
   const allSel = sendable.length > 0 && sendable.every(m => selected.has(m.loginId));
   const members = c.members.map(m => esc(m.sellerLogin || m.loginId)).join('、');
   return `<tr class="company-row" data-company="${esc(key)}">
-      <td><input type="checkbox" data-company="${esc(key)}" ${allSel ? 'checked' : ''} ${sendable.length ? '' : 'disabled'}
+      <td><input type="checkbox" data-company="${esc(key)}" ${allSel ? 'checked' : ''} ${(sendable.length && !READONLY) ? '' : 'disabled'}
                  title="勾选/取消该公司下全部可催收会员名" onchange="toggleCompany(this.dataset.company, this.checked)"></td>
       <td>
         <div class="company">${esc(c.company)}</div>
@@ -477,11 +656,11 @@ function companyRows(c) {
       <td>${c.total} 单<br><span class="amount">${yuan(c.totalAmount)}</span></td>
       <td>
         <span class="amount ${c.invoiceCount ? 'ok' : 'zero'}">${yuan(c.invoicedAmount)}</span><br>
-        <span class="loginid" title="金额=税务局导出文件「价税合计」逐行相加；张数=按数电票号去重（一张票多个货物多行只算 1 张）。该公司税务局明细共 ${c.invoiceRowCount || 0} 行">${c.invoiceCount} 张发票${c.lastInvoiceDate ? ' · 最近 ' + String(c.lastInvoiceDate).slice(0, 10) : ''}</span>
+        <span class="loginid" title="金额=税务局导出文件「价税合计」逐行相加；张数=按数电票号去重">${c.invoiceCount} 张发票${c.lastInvoiceDate ? ' · 最近 ' + String(c.lastInvoiceDate).slice(0, 10) : ''}</span>
         ${c.overInvoiced ? '<br><span class="badge gray">发票额已覆盖订单</span>' : ''}
-        ${Number(c.manualIssuedCount) ? `<br><span class="badge manual" title="订单级人工确认（商家线下开票），不计入上方的税务局金额">人工确认 ${c.manualIssuedCount} 单 · ${yuan(c.manualIssuedAmount)}</span>` : ''}
+        ${Number(c.manualIssuedCount) ? `<br><span class="badge manual" title="订单级人工确认，不计入上方的税务局金额">人工确认 ${c.manualIssuedCount} 单 · ${yuan(c.manualIssuedAmount)}</span>` : ''}
       </td>
-      <td><span class="amount ${pending > 0 ? '' : 'zero'}">${yuan(pending)}</span>${pending > 0 && !(c.unissuedCount > 0) ? '<br><span class="badge manual" title="所有订单都已人工确认开票，无需再催收；金额按税务局口径暂未体现">订单已全部确认开票</span>' : ''}</td>
+      <td><span class="amount ${pending > 0 ? '' : 'zero'}">${yuan(pending)}</span>${pending > 0 && !(c.unissuedCount > 0) ? '<br><span class="badge manual" title="所有订单都已人工确认开票，无需再催收">订单已全部确认开票</span>' : ''}</td>
       <td>
         <span class="badge none">未申请 ${c.noneCount}</span>
         <span class="badge applying">已申请 ${c.applyingCount}</span>
@@ -490,9 +669,9 @@ function companyRows(c) {
       </td>
       <td>${c.lastSentAt ? esc(String(c.lastSentAt).slice(0, 16)) : '<span class="loginid">—</span>'}</td>
       <td>${sc
-        ? `<span class="badge issued hist-link" data-company="${esc(key)}" onclick="openCompanyHistory(this)"
+      ? `<span class="badge issued hist-link" data-company="${esc(key)}" onclick="openCompanyHistory(this)"
                  title="点此查看历史催收记录（成功 ${sc} 次${Number(c.sendFailCount) ? ` · 失败尝试 ${c.sendFailCount} 次` : ''}）">${sc}</span>`
-        : '<span class="loginid">0</span>'}</td>
+      : '<span class="loginid">0</span>'}</td>
       <td><button class="btn btn-outline btn-sm" data-company="${esc(key)}" data-cnt="${c.memberCount}" onclick="toggleMembers(this)">${subOpen ? '收起会员名' : `展开会员名(${c.memberCount})`}</button></td>
     </tr>
     <tr class="sub-tr ${subOpen ? 'open' : ''}" data-company="${esc(key)}"><td colspan="9">
@@ -502,7 +681,6 @@ function companyRows(c) {
       </div>
     </td></tr>`;
 }
-
 function render() {
   stats();
   const all = visibleCompanies();
@@ -518,8 +696,6 @@ function render() {
   pagerBox.innerHTML = pagerHtml('dash', all.length);
   restoreExpanded();
 }
-
-/** 重渲染后恢复展开状态（公司子树 / 会员名订单明细） */
 function restoreExpanded() {
   for (const key of EXPANDED) {
     const sub = document.querySelector(`tr.sub-tr[data-company="${q(key)}"]`);
@@ -534,9 +710,8 @@ function restoreExpanded() {
     loadDetail(box.querySelector('.orders-detail'), lid, false);
   }
 }
-
-/** 公司复选框：勾选/取消该公司下全部可催收会员名（只改 DOM，不整表重绘） */
 function toggleCompany(key, on) {
+  if (READONLY) return;
   const c = COMPANIES.find(x => x.company === key);
   if (!c) return;
   for (const m of c.members) {
@@ -547,8 +722,7 @@ function toggleCompany(key, on) {
   }
   document.getElementById('selCount').textContent = selected.size;
 }
-function toggleSel(id, on) { on ? selected.add(id) : selected.delete(id); syncCompanyChecks(); document.getElementById('selCount').textContent = selected.size; }
-/** 同步公司级复选框的勾选/半选状态 */
+function toggleSel(id, on) { if (READONLY) return; on ? selected.add(id) : selected.delete(id); syncCompanyChecks(); document.getElementById('selCount').textContent = selected.size; }
 function syncCompanyChecks() {
   for (const c of COMPANIES) {
     const sendable = c.members.filter(m => m.canSend);
@@ -560,8 +734,8 @@ function syncCompanyChecks() {
     cb.indeterminate = n > 0 && n < sendable.length;
   }
 }
-/** 全选「当前页」：只勾选当前分页里公司的可催收会员名（不含其他分页） */
 function selectAll() {
+  if (READONLY) { alert('只读模式下不能选择发送对象'); return; }
   const all = visibleCompanies();
   const p = pageOf('dash', all.length);
   p.slice(all).forEach(c => c.members.forEach(m => { if (m.canSend) selected.add(m.loginId); }));
@@ -569,7 +743,7 @@ function selectAll() {
 }
 function clearSel() { selected.clear(); render(); document.getElementById('selCount').textContent = 0; }
 
-// ── 历史催收记录（点「催收次数」查看） ──
+// ══════════════ 历史催收记录 ══════════════
 function openCompanyHistory(el) { showCollectHistory({ company: el.dataset.company }, el.dataset.company); }
 function openMemberHistory(el) { showCollectHistory({ loginId: el.dataset.id }, el.dataset.id); }
 function closeHist() { document.getElementById('histModal').classList.remove('show'); }
@@ -580,8 +754,7 @@ async function showCollectHistory(params, label) {
   modal.classList.add('show');
   body.innerHTML = '<div class="muted">加载中...</div>';
   try {
-    const r = await fetch('/api/collect-history?' + new URLSearchParams(params).toString());
-    const d = await r.json();
+    const d = await api('/api/collect-history?' + new URLSearchParams(params).toString());
     if (d.error) { body.innerHTML = '<div style="color:#d32f2f">' + esc(d.error) + '</div>'; return; }
     const logs = d.logs || [];
     if (!logs.length) { body.innerHTML = '<div class="muted">暂无催收记录</div>'; return; }
@@ -611,7 +784,7 @@ async function showCollectHistory(params, label) {
   }
 }
 
-/** 公司子树：展开/收起会员名 */
+// ══════════════ 会员名子树 / 订单明细 ══════════════
 function toggleMembers(btn) {
   const key = btn.dataset.company;
   const sub = document.querySelector(`tr.sub-tr[data-company="${q(key)}"]`);
@@ -620,8 +793,6 @@ function toggleMembers(btn) {
   open ? EXPANDED.add(key) : EXPANDED.delete(key);
   btn.textContent = open ? '收起会员名' : `展开会员名(${btn.dataset.cnt})`;
 }
-
-/** 会员名：展开/收起该会员名的订单明细（按需从数据库加载） */
 async function toggleMemberOrders(el) {
   const lid = el.dataset.id;
   const box = el.closest('.member');
@@ -635,8 +806,6 @@ async function toggleMemberOrders(el) {
     el.textContent = '订单明细';
   }
 }
-
-/** 加载并渲染某个会员名的明细（force=true 忽略缓存） */
 async function loadDetail(ul, id, force) {
   if (!ul) return;
   if (ul.dataset.loaded === '1' && !force) return;
@@ -644,8 +813,7 @@ async function loadDetail(ul, id, force) {
   try {
     let d = DETAIL_CACHE[id];
     if (!d || force) {
-      const r = await fetch('/api/seller-detail?loginId=' + encodeURIComponent(id));
-      d = await r.json();
+      d = await api('/api/seller-detail?loginId=' + encodeURIComponent(id));
       DETAIL_CACHE[id] = d;
     }
     renderDetail(ul, id, d);
@@ -654,13 +822,11 @@ async function loadDetail(ul, id, force) {
     ul.innerHTML = '<li style="color:#d32f2f">加载失败: ' + esc(e.message) + '</li>';
   }
 }
-
-/** 渲染明细：订单行带「标记已开票 / 取消人工确认」按钮（订单维度人工确认），支持整卖家批量 */
 function renderDetail(ul, id, d) {
   const orders = d.orders || [];
   const pendingCnt = orders.filter(o => o.invoice_state !== 'issued').length;
   const manualCnt = orders.filter(o => o.state_source === 'manual').length;
-  const bulkHtml = pendingCnt || manualCnt
+  const bulkHtml = (!READONLY && (pendingCnt || manualCnt))
     ? `<span class="row-actions">
          ${pendingCnt ? `<button class="btn btn-outline btn-sm" data-id="${esc(id)}" data-cnt="${pendingCnt}" data-action="confirm-all" onclick="markAll(this)">全部标记已开票(${pendingCnt})</button>` : ''}
          ${manualCnt ? `<button class="btn btn-plain btn-sm" data-id="${esc(id)}" data-cnt="${manualCnt}" data-action="cancel-all" onclick="markAll(this)">取消人工确认(${manualCnt})</button>` : ''}
@@ -668,9 +834,9 @@ function renderDetail(ul, id, d) {
     : '';
   const ordersHtml = orders.map(o => {
     const manual = o.state_source === 'manual';
-    const btn = manual
+    const btn = READONLY ? '' : (manual
       ? `<button class="btn btn-plain btn-sm" data-id="${esc(id)}" data-order="${esc(o.order_no)}" data-action="cancel" onclick="markOrder(this)">取消人工确认</button>`
-      : `<button class="btn btn-outline btn-sm" data-id="${esc(id)}" data-order="${esc(o.order_no)}" data-action="confirm" onclick="markOrder(this)">标记已开票</button>`;
+      : `<button class="btn btn-outline btn-sm" data-id="${esc(id)}" data-order="${esc(o.order_no)}" data-action="confirm" onclick="markOrder(this)">标记已开票</button>`);
     return `<li>
       <span class="oid">${esc(o.order_no)}</span>
       <span class="amt">${yuan(o.pay_amount)}</span>
@@ -679,43 +845,40 @@ function renderDetail(ul, id, d) {
       <span class="row-actions">${btn}</span>
     </li>`;
   }).join('') || '<li>无订单</li>';
-  // 已开票明细：一行 = 发票上的一条货物明细；同一张发票的多个货物行共用同一「数电发票号码」
   const invAll = d.invoices || [];
   const invCnt = Number(d.invoiceCount) || 0;
   const invHtml = invAll.length
     ? invAll.map(v => {
-        const no = v.e_invoice_no || v.invoice_no || '-';
-        const same = invAll.filter(x => (x.e_invoice_no || x.invoice_no) === no).length > 1;
-        return `<li>
+      const no = v.e_invoice_no || v.invoice_no || '-';
+      const same = invAll.filter(x => (x.e_invoice_no || x.invoice_no) === no).length > 1;
+      return `<li>
           <span class="oid" title="数电发票号码（同一张发票的多条货物明细共用同一个号码）">${esc(no)}</span>
           <span class="amt">${yuan(v.total_amount)}</span>
           <span>${esc(String(v.invoice_date || '').slice(0, 16))}</span>
           <span>${esc(v.goods_name || v.seller_name || '')}</span>
           ${same ? '<span class="badge gray" title="同属一张发票的另一条货物明细，只计 1 张发票">同票</span>' : ''}
         </li>`;
-      }).join('')
+    }).join('')
     : '<li>暂无已开票记录</li>';
-  // 催收记录明细（一行=一次发送尝试；「催收次数」只计成功，失败另列）
   const chText = { web: '看板', cli: '命令行', legacy: '历史导入' };
   const logsAll = d.sendLogs || [];
   const logOk = logsAll.filter(l => l.result === 'ok').length;
   const logFail = logsAll.length - logOk;
   const sendLogsHtml = logsAll.length
     ? logsAll.map(l => {
-        const ok = l.result === 'ok';
-        return `<li>
+      const ok = l.result === 'ok';
+      return `<li>
           <span>${esc(String(l.sent_at || '').slice(0, 16))}</span>
           <span class="badge ${ok ? 'issued' : 'none'}">${ok ? '成功' : '失败'}</span>
           <span>${esc(chText[l.channel] || l.channel || '')}</span>${!ok && l.error ? `<span class="muted" title="失败原因">${esc(l.error)}</span>` : ''}
         </li>`;
-      }).join('')
+    }).join('')
     : '<li>从未催收</li>';
   const invSecTitle = `已开票明细（税务局：${invAll.length} 行货物明细 · ${invCnt} 张发票${invAll.length > invCnt ? '，同号明细合并计 1 张' : ''}）`;
-  ul.innerHTML = `<li class="sec"><span>订单明细（共 ${orders.length} 单）· 商家线下开票可单个或「全部标记已开票」</span>${bulkHtml}</li>${ordersHtml}<li class="sec">${invSecTitle}<span class="loginid" style="font-weight:400"> 行 = 发票上的货物条目；一张发票开了多个货物会占多行，共用同一「数电发票号码」，因此张数可能小于行数</span></li>${invHtml}<li class="sec">催收记录（成功 ${logOk} 次${logFail ? ` · 失败 ${logFail} 次` : ''}，最近 ${logsAll.length} 条）</li>${sendLogsHtml}`;
+  ul.innerHTML = `<li class="sec"><span>订单明细（共 ${orders.length} 单）· 商家线下开票可单个或「全部标记已开票」</span>${bulkHtml}</li>${ordersHtml}<li class="sec">${invSecTitle}<span class="loginid" style="font-weight:400"> 行 = 发票上的货物条目；一张发票开了多个货物会占多行，共用同一「数电发票号码」</span></li>${invHtml}<li class="sec">催收记录（成功 ${logOk} 次${logFail ? ` · 失败 ${logFail} 次` : ''}，最近 ${logsAll.length} 条）</li>${sendLogsHtml}`;
 }
-
-/** 订单维度人工确认 / 取消确认 */
 async function markOrder(btn) {
+  if (READONLY) return;
   const id = btn.dataset.id, orderNo = btn.dataset.order, action = btn.dataset.action;
   const tip = action === 'confirm'
     ? `确认把订单 ${orderNo} 标记为「已开票」？（商家线下开票时使用）`
@@ -723,19 +886,17 @@ async function markOrder(btn) {
   if (!confirm(tip)) return;
   btn.disabled = true; btn.textContent = '处理中...';
   try {
-    const r = await fetch('/api/order-state', {
+    const d = await api('/api/order-state', {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ orderNo, action }),
     });
-    const d = await r.json();
     if (d.error) { alert('操作失败: ' + d.error); btn.disabled = false; btn.textContent = action === 'confirm' ? '标记已开票' : '取消人工确认'; return; }
     delete DETAIL_CACHE[id];
-    await loadData();  // 重渲染，restoreExpanded() 会恢复展开状态并重新拉该会员名明细
+    await loadData();
   } catch (e) { alert('操作失败: ' + e.message); btn.disabled = false; }
 }
-
-/** 整卖家批量：全部标记已开票 / 取消全部人工确认 */
 async function markAll(btn) {
+  if (READONLY) return;
   const id = btn.dataset.id, action = btn.dataset.action, cnt = btn.dataset.cnt;
   const isConfirm = action === 'confirm-all';
   const tip = isConfirm
@@ -744,28 +905,24 @@ async function markAll(btn) {
   if (!confirm(tip)) return;
   btn.disabled = true; const old = btn.textContent; btn.textContent = '处理中...';
   try {
-    const r = await fetch('/api/order-state', {
+    const d = await api('/api/order-state', {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ loginId: id, action }),
     });
-    const d = await r.json();
     if (d.error) { alert('操作失败: ' + d.error); btn.disabled = false; btn.textContent = old; return; }
     delete DETAIL_CACHE[id];
     await loadData();
   } catch (e) { alert('操作失败: ' + e.message); btn.disabled = false; btn.textContent = old; }
 }
 
-// ── 任务进度轮询 ──
-/** 时长格式化：<90 秒显示秒，否则显示分钟 */
+// ══════════════ 任务进度 ══════════════
 const fmtDur = (ms) => { const s = Math.max(0, Math.round(ms / 1000)); return s < 90 ? `${s}秒` : `${Math.round(s / 60)}分`; };
 async function pollTask() {
   try {
-    const r = await fetch('/api/task');
-    const t = await r.json();
+    const t = await api('/api/task');
     const wrap = document.getElementById('progressWrap');
     if (t.running || (t.finishedAt && t.logs.length && Date.now() - new Date(t.finishedAt).getTime() < 8000)) {
       wrap.classList.add('show');
-      // 已用时长 + 按当前速率自校准的预计剩余（done=0 时只显示已用）
       let timeInfo = '';
       if (t.startedAt) {
         const elapsed = Date.now() - new Date(t.startedAt).getTime();
@@ -777,53 +934,50 @@ async function pollTask() {
       document.getElementById('progressFill').style.width = (t.total ? (t.done / t.total * 100) : 0) + '%';
       document.getElementById('logPanel').innerHTML = t.logs.slice(-40).map(l => `<div>${l.time} ${esc(l.text)}</div>`).join('');
       document.getElementById('logPanel').scrollTop = 99999;
-      document.getElementById('btnSend').disabled = t.running;
+      document.getElementById('btnSend').disabled = t.running || READONLY;
       if (!t.running && t.finishedAt) { DETAIL_CACHE_RESET(); loadData(); }
     } else {
       wrap.classList.remove('show');
-      document.getElementById('btnSend').disabled = false;
+      document.getElementById('btnSend').disabled = READONLY;
     }
-  } catch (e) {}
+  } catch (e) { }
 }
 function DETAIL_CACHE_RESET() { for (const k in DETAIL_CACHE) delete DETAIL_CACHE[k]; }
-async function stopTask() { if (confirm('确认停止？当前卖家发完后停止')) await fetch('/api/task/stop', { method: 'POST' }); }
+async function stopTask() { if (confirm('确认停止？当前卖家发完后停止')) await api('/api/task/stop', { method: 'POST' }); }
 
-// ── 发送 ──
-async function sendOne(loginId) { await doSend([loginId]); }
+// ══════════════ 发送 ══════════════
+async function sendOne(loginId) { if (READONLY) return; await doSend([loginId]); }
 async function batchSend() {
+  if (READONLY) { alert('只读模式下不能发送催收消息'); return; }
   if (selected.size === 0) { alert('请先勾选会员名（展开公司后可用公司/会员名复选框勾选）'); return; }
   const gap = await getGapHint();
   if (!confirm(`确认给 ${selected.size} 个会员名发送催收消息？\n每个会员名 3 条消息（模板+订单清单+提醒），金额与订单号按该会员名统计；间隔${gap}`)) return;
   await doSend([...selected]);
 }
-// 单家「发送动作」耗时（打开聊天窗 + 逐条发送并验证）的估算基准，用于时长预估
 const PER_SELLER_WORK_SEC = 15;
 async function getGapHint() {
   try {
-    const r = await fetch('/api/config'); const d = await r.json();
+    const d = await api('/api/config');
     const rt = d.config.runtime || {};
     const lo = Number(rt.sendGapMinSec) || 15, hi = Number(rt.sendGapMaxSec) || 30;
-    const perSeller = (lo + hi) / 2 + PER_SELLER_WORK_SEC; // 间隔均值 + 发送动作耗时
+    const perSeller = (lo + hi) / 2 + PER_SELLER_WORK_SEC;
     return `${lo}~${hi}秒，预计总时长约${Math.round(selected.size * perSeller / 60)}分钟`;
   } catch (e) { return '15~30秒'; }
 }
 async function doSend(ids) {
   try {
-    const r = await fetch('/api/send', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ loginIds: ids }) });
-    const d = await r.json();
+    const d = await api('/api/send', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ loginIds: ids }) });
     if (d.error) { alert('启动失败: ' + d.error); return; }
     pollTask();
   } catch (e) { alert('请求失败: ' + e.message); }
 }
-
-// ── 重新导入数据 ──
 async function importData() {
-  if (!confirm('重新扫描 data/完成订单 与 data/已开票订单 下的 Excel 并导入数据库？\n（订单表与已开票表会按文件内容重建，人工维护的名称映射会保留）')) return;
+  if (READONLY) { alert('只读模式下不能导入'); return; }
+  if (!confirm('重新扫描 【本账号】 data 目录下的 Excel 并导入数据库？\n（订单表与已开票表会按文件内容重建，人工维护的名称映射会保留）')) return;
   const btn = document.getElementById('btnImport');
   btn.disabled = true; const old = btn.textContent; btn.textContent = '导入中...';
   try {
-    const r = await fetch('/api/import', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({}) });
-    const d = await r.json();
+    const d = await api('/api/import', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({}) });
     if (d.error) { alert('导入失败: ' + d.error); return; }
     alert('导入完成：\n' + (d.steps || []).join('\n'));
     DETAIL_CACHE_RESET();
@@ -833,30 +987,30 @@ async function importData() {
   btn.disabled = false; btn.textContent = old;
 }
 
-// ── 名称映射页 ──
+// ══════════════ 名称映射页 ══════════════
 async function loadMapping() {
   const box = document.getElementById('mapBody');
   box.innerHTML = '加载中...';
   try {
-    const r = await fetch('/api/mapping');
-    MAP = await r.json();
+    MAP = await api('/api/mapping');
     renderMapping();
   } catch (e) { box.innerHTML = '<div class="warn-box">加载失败: ' + esc(e.message) + '</div>'; }
 }
 function renderMapping() {
   const box = document.getElementById('mapBody');
-  // 下拉候选（datalist，避免为每行渲染几千个 option）
   document.getElementById('sellerOptions').innerHTML =
     (MAP.sellers || []).map(s => `<option value="${esc(s.company)}">${esc(s.sellerLogin || s.loginId)}</option>`).join('');
 
   const unmatched = MAP.unmatched || [];
-  const mappings = MAP.mappings || [];   // 有效映射
-  const ignored = MAP.ignored || [];     // 已忽略（确认无对应 1688 商家）
+  const mappings = MAP.mappings || [];
+  const ignored = MAP.ignored || [];
+  const ro = READONLY;
+  const roTip = ro ? '<div class="warn-box">只读模式：正在查看他人数据，不能修改映射。</div>' : '';
 
   const up = pageOf('unmatched', unmatched.length);
   const unmatchedHtml = unmatched.length === 0
     ? `<div class="empty-hint">✓ 所有销方名称都已处理：已匹配到 1688 商家，或已忽略${(MAP.ignored || []).length ? `（当前已忽略 ${(MAP.ignored || []).length} 个，可在下方展开恢复）` : ''}。</div>`
-    : `<div class="warn-box">以下 ${unmatched.length} 个税务局销方名称没有匹配上 1688 商家：选好对应的商家点「保存」；若<b>确认没有</b>对应的 1688 商家，点「忽略」把它移出列表（之后不再展示，可在下方「已忽略」里恢复）。</div>
+    : `<div class="warn-box">以下 ${unmatched.length} 个税务局销方名称没有匹配上 1688 商家：选好对应的商家点「保存」；若<b>确认没有</b>对应的 1688 商家，点「忽略」把它移出列表（可在下方「已忽略」里恢复）。</div>
        <table>
          <thead><tr>
            <th>税务局销方名称</th><th style="width:150px">销方税号</th>
@@ -873,9 +1027,10 @@ function renderMapping() {
            <td class="loginid">${esc(String(u.last_invoice_date || '').slice(0, 10))}</td>
            <td class="loginid">${esc(u.remark || '')}</td>
            <td>
+             ${ro ? '<span class="muted">只读</span>' : `
              <input class="map-input" list="sellerOptions" placeholder="输入1688公司名搜索" data-tax="${esc(u.tax_seller_name)}">
              <button class="btn btn-primary btn-sm" data-tax="${esc(u.tax_seller_name)}" onclick="saveMap(this)">保存</button>
-             <button class="btn btn-outline btn-sm" data-tax="${esc(u.tax_seller_name)}" onclick="ignoreMap(this)" title="确认没有对应的 1688 商家，移出待比对列表">忽略</button>
+             <button class="btn btn-outline btn-sm" data-tax="${esc(u.tax_seller_name)}" onclick="ignoreMap(this)" title="确认没有对应的 1688 商家，移出待比对列表">忽略</button>`}
            </td>
          </tr>`).join('')}
          </tbody>
@@ -900,8 +1055,9 @@ function renderMapping() {
            <td><span class="amount ok">${yuan(m.invoice_amount)}</span></td>
            <td class="loginid">${esc(String(m.updated_at || '').slice(0, 16))}</td>
            <td>
+             ${ro ? '<span class="muted">只读</span>' : `
              <button class="btn btn-danger btn-sm" data-tax="${esc(m.tax_seller_name)}" onclick="delMap(this)">删除</button>
-             <button class="btn btn-outline btn-sm" data-tax="${esc(m.tax_seller_name)}" data-company="${esc(m.seller_company || '')}" onclick="ignoreMap(this)" title="确认没有对应的 1688 商家，改为忽略">忽略</button>
+             <button class="btn btn-outline btn-sm" data-tax="${esc(m.tax_seller_name)}" data-company="${esc(m.seller_company || '')}" onclick="ignoreMap(this)" title="确认没有对应的 1688 商家，改为忽略">忽略</button>`}
            </td>
          </tr>`).join('')}
          </tbody>
@@ -923,14 +1079,14 @@ function renderMapping() {
              <td class="loginid">${esc(g.note || '')}</td>
              <td><span class="amount ok">${yuan(g.invoice_amount)}</span></td>
              <td class="loginid">${esc(String(g.updated_at || '').slice(0, 16))}</td>
-             <td><button class="btn btn-outline btn-sm" data-tax="${esc(g.tax_seller_name)}" onclick="unignoreMap(this)">恢复</button></td>
+             <td>${ro ? '<span class="muted">只读</span>' : `<button class="btn btn-outline btn-sm" data-tax="${esc(g.tax_seller_name)}" onclick="unignoreMap(this)">恢复</button>`}</td>
            </tr>`).join('')}
            </tbody>
          </table>
          ${pagerHtml('ignored', ignored.length)}
        </details>`;
 
-  box.innerHTML = `<div class="section-title">待人工比对 <span class="cnt">（${unmatched.length} 个销方名称未匹配）</span></div>
+  box.innerHTML = `${roTip}<div class="section-title">待人工比对 <span class="cnt">（${unmatched.length} 个销方名称未匹配）</span></div>
     ${unmatchedHtml}
     <div class="section-title">已维护映射 <span class="cnt">（${mappings.length} 条）</span></div>
     ${mappingHtml}
@@ -945,11 +1101,10 @@ async function saveMap(btn) {
   if (!hit) { alert('没找到这个商家，请从下拉候选里选（输入关键字会自动提示）'); return; }
   btn.disabled = true; btn.textContent = '保存中';
   try {
-    const r = await fetch('/api/mapping', {
+    const d = await api('/api/mapping', {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ taxSellerName, sellerCompany: hit.company, sellerLogin: hit.sellerLogin || hit.loginId }),
     });
-    const d = await r.json();
     if (d.error) { alert('保存失败: ' + d.error); btn.disabled = false; btn.textContent = '保存'; return; }
     DETAIL_CACHE_RESET();
     await loadMapping();
@@ -959,58 +1114,53 @@ async function saveMap(btn) {
 async function delMap(btn) {
   const taxSellerName = btn.dataset.tax;
   if (!confirm(`确认删除「${taxSellerName}」的映射？删除后该销方名称重新变为待人工比对。`)) return;
-  await fetch('/api/mapping/delete', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ taxSellerName }) });
+  await api('/api/mapping/delete', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ taxSellerName }) });
   DETAIL_CACHE_RESET();
   await loadMapping(); await loadData();
 }
-/** 忽略：确认该税务局销方名称没有对应的 1688 商家，移出待比对列表、不再参与统计 */
 async function ignoreMap(btn) {
   const taxSellerName = btn.dataset.tax;
-  // 已维护映射行点忽略会清掉现有映射，确认文案要明确提示
   const curMap = btn.dataset.company || '';
   const extra = curMap ? `\n\n注意：该名称当前已映射到「${curMap}」，忽略后将清除这个映射。` : '';
   if (!confirm(`确认「${taxSellerName}」没有对应的 1688 商家？\n\n忽略后该销方名称将从「待人工比对」列表移除，不再参与自动匹配与看板统计；以后可在「已忽略」里恢复。${extra}`)) return;
   const old = btn.textContent; btn.disabled = true; btn.textContent = '处理中';
   try {
-    const r = await fetch('/api/mapping/ignore', {
+    const d = await api('/api/mapping/ignore', {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ taxSellerName, ignored: true }),
     });
-    const d = await r.json();
     if (d.error) { alert('操作失败: ' + d.error); btn.disabled = false; btn.textContent = old; return; }
     DETAIL_CACHE_RESET();
     await loadMapping(); await loadData();
   } catch (e) { alert('操作失败: ' + e.message); btn.disabled = false; btn.textContent = old; }
 }
-/** 恢复：把已忽略的销方名称放回「待人工比对」列表 */
 async function unignoreMap(btn) {
   const taxSellerName = btn.dataset.tax;
   if (!confirm(`把「${taxSellerName}」恢复为待人工比对？`)) return;
   const old = btn.textContent; btn.disabled = true; btn.textContent = '处理中';
   try {
-    const r = await fetch('/api/mapping/ignore', {
+    const d = await api('/api/mapping/ignore', {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ taxSellerName, ignored: false }),
     });
-    const d = await r.json();
     if (d.error) { alert('操作失败: ' + d.error); btn.disabled = false; btn.textContent = old; return; }
     DETAIL_CACHE_RESET();
     await loadMapping(); await loadData();
   } catch (e) { alert('操作失败: ' + e.message); btn.disabled = false; btn.textContent = old; }
 }
 
-// ── 设置页 ──
+// ══════════════ 系统管理：配置 ══════════════
 async function loadConfigUI() {
+  if (!ME || ME.role !== 'admin') return;
   try {
-    const r = await fetch('/api/config');
-    const d = await r.json();
+    const d = await api('/api/config');
     const c = d.config || {};
     const b = c.buyerInfo || {}, rt = c.runtime || {}, m = c.messages || d.defaultMessages || {};
     document.getElementById('cfg-companyName').value = b.companyName || '';
     document.getElementById('cfg-taxNo').value = b.taxNo || '';
     document.getElementById('cfg-email').value = b.email || '';
-    document.getElementById('cfg-gapMin').value = rt.sendGapMinSec || 30;
-    document.getElementById('cfg-gapMax').value = rt.sendGapMaxSec || 60;
+    document.getElementById('cfg-gapMin').value = rt.sendGapMinSec || 15;
+    document.getElementById('cfg-gapMax').value = rt.sendGapMaxSec || 30;
     document.getElementById('cfg-chunkMax').value = m.orderChunkMax || 450;
     document.getElementById('cfg-template').value = m.template || '';
     document.getElementById('cfg-orderItem').value = m.orderItem || '';
@@ -1027,8 +1177,8 @@ function collectConfig() {
       email: document.getElementById('cfg-email').value.trim(),
     },
     runtime: {
-      sendGapMinSec: Number(document.getElementById('cfg-gapMin').value) || 30,
-      sendGapMaxSec: Number(document.getElementById('cfg-gapMax').value) || 60,
+      sendGapMinSec: Number(document.getElementById('cfg-gapMin').value) || 15,
+      sendGapMaxSec: Number(document.getElementById('cfg-gapMax').value) || 30,
     },
     messages: {
       template: document.getElementById('cfg-template').value,
@@ -1049,14 +1199,298 @@ function updatePreview() {
     `【消息①】\n${m1}\n\n【消息② 订单清单（多个订单用；连接成一条）】\n${m2}\n\n【消息③ 提醒】\n${c.messages.reminder}`;
 }
 async function saveConfig() {
+  if (!ME || ME.role !== 'admin') { alert('仅超级管理员可修改'); return; }
   try {
-    const r = await fetch('/api/config', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ config: collectConfig() }) });
-    const d = await r.json();
-    if (d.ok) { document.getElementById('saveOk').classList.add('show'); setTimeout(() => document.getElementById('saveOk').classList.remove('show'), 2500); }
-    else alert('保存失败: ' + d.error);
+    const d = await api('/api/config', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ config: collectConfig() }) });
+    if (d.ok) {
+      document.getElementById('saveOk').classList.add('show');
+      setTimeout(() => document.getElementById('saveOk').classList.remove('show'), 2500);
+      ME.companyName = collectConfig().buyerInfo.companyName;
+    } else alert('保存失败: ' + d.error);
   } catch (e) { alert('保存失败: ' + e.message); }
 }
 
+// ══════════════ 系统管理：用户 ══════════════
+async function loadUsers() {
+  if (!ME || ME.role !== 'admin') return;
+  const box = document.getElementById('userTable');
+  try {
+    const d = await api('/api/admin/users');
+    if (d.error) { box.innerHTML = '<div class="warn-box">' + esc(d.error) + '</div>'; return; }
+    const users = d.users || [];
+    document.getElementById('userCount').textContent = `（${users.length} 个账号）`;
+    box.innerHTML = `<table>
+      <thead><tr>
+        <th style="width:60px">ID</th><th style="width:150px">账号</th><th style="width:100px">角色</th><th style="width:80px">状态</th>
+        <th>公司名称 / 抬头</th><th style="width:170px">税号</th><th style="width:180px">收票邮箱</th>
+        <th style="width:130px">数据量</th><th style="width:140px">最近登录</th><th style="width:260px">操作</th>
+      </tr></thead><tbody>
+      ${users.map(u => `<tr>
+        <td>${u.id}</td>
+        <td><b>${esc(u.username)}</b>${u.mustChangePassword ? '<br><span class="loginid">需改密</span>' : ''}</td>
+        <td>${u.role === 'admin' ? '<span class="badge tag-admin">超级管理员</span>' : '<span class="badge gray">普通用户</span>'}</td>
+        <td>${u.status === 'active' ? '<span class="badge issued">正常</span>' : '<span class="badge disabled">已禁用</span>'}</td>
+        <td>${esc(u.companyName || '—')}${u.note ? `<br><span class="loginid">${esc(u.note)}</span>` : ''}</td>
+        <td class="loginid">${esc(u.taxNo || '—')}</td>
+        <td class="loginid">${esc(u.email || '—')}</td>
+        <td class="loginid">${u.orderCount} 单 / ${u.mappingCount} 映射</td>
+        <td class="loginid">${esc(String(u.lastLoginAt || '').slice(0, 16) || '—')}</td>
+        <td><div class="admin-actions">
+          <button class="btn btn-outline btn-sm" onclick="viewUserData(${u.id}, '${esc(u.username)}')">查看数据</button>
+          <button class="btn btn-plain btn-sm" onclick="editUser(${u.id})">编辑</button>
+          <button class="btn btn-plain btn-sm" onclick="resetPwd(${u.id}, '${esc(u.username)}')">重置密码</button>
+          ${u.username === 'admin' ? '' : (u.status === 'active'
+        ? `<button class="btn btn-danger btn-sm" onclick="toggleStatus(${u.id}, 'disabled', '${esc(u.username)}')">禁用</button>`
+        : `<button class="btn btn-outline btn-sm" onclick="toggleStatus(${u.id}, 'active', '${esc(u.username)}')">启用</button>`)}
+          ${u.username === 'admin' ? '' : `<button class="btn btn-danger btn-sm" onclick="deleteUserRow(${u.id}, '${esc(u.username)}')">删除</button>`}
+        </div></td>
+      </tr>`).join('')}
+      </tbody></table>`;
+    window._USERS = users;
+  } catch (e) { box.innerHTML = '<div class="warn-box">加载失败: ' + esc(e.message) + '</div>'; }
+}
+async function createUser() {
+  const payload = {
+    username: document.getElementById('nu-username').value.trim(),
+    password: document.getElementById('nu-password').value,
+    role: document.getElementById('nu-role').value,
+    companyName: document.getElementById('nu-company').value.trim(),
+    taxNo: document.getElementById('nu-taxNo').value.trim(),
+    email: document.getElementById('nu-email').value.trim(),
+    note: document.getElementById('nu-note').value.trim(),
+  };
+  if (!payload.username || !payload.password) { alert('请填写账号与初始密码'); return; }
+  const btn = document.getElementById('btnCreateUser');
+  btn.disabled = true; const old = btn.textContent; btn.textContent = '创建中…';
+  try {
+    const d = await api('/api/admin/users/create', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) });
+    if (d.error) { alert('创建失败: ' + d.error); btn.disabled = false; btn.textContent = old; return; }
+    ['nu-username', 'nu-password', 'nu-company', 'nu-taxNo', 'nu-email', 'nu-note'].forEach(id => document.getElementById(id).value = '');
+    document.getElementById('createOk').classList.add('show');
+    setTimeout(() => document.getElementById('createOk').classList.remove('show'), 2500);
+    await loadUsers();
+  } catch (e) { alert('创建失败: ' + e.message); }
+  btn.disabled = false; btn.textContent = old;
+}
+function viewUserData(id, username) { setTenantView(id, username); }
+function editUser(id) {
+  const u = (window._USERS || []).find(x => x.id === id);
+  if (!u) return;
+  const companyName = prompt('公司名称（开票抬头）：', u.companyName || '');
+  if (companyName === null) return;
+  const taxNo = prompt('纳税人识别号：', u.taxNo || '');
+  if (taxNo === null) return;
+  const email = prompt('收票邮箱：', u.email || '');
+  if (email === null) return;
+  const note = prompt('备注：', u.note || '');
+  if (note === null) return;
+  api('/api/admin/users/update', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ id, companyName, taxNo, email, note, role: u.role }),
+  }).then(d => { if (d.error) alert('保存失败: ' + d.error); else loadUsers(); });
+}
+async function resetPwd(id, username) {
+  const pw = prompt(`为「${username}」设置新密码（至少 4 位）：`);
+  if (!pw) return;
+  const d = await api('/api/admin/users/password', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id, password: pw }) });
+  if (d.error) alert('重置失败: ' + d.error); else alert('已重置「' + username + '」的密码；该用户现有的登录会话已失效。');
+}
+async function toggleStatus(id, status, username) {
+  const tip = status === 'disabled' ? `确认禁用「${username}」？禁用后该账号无法登录，已登录的会话立即失效。` : `确认启用「${username}」？`;
+  if (!confirm(tip)) return;
+  const d = await api('/api/admin/users/status', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id, status }) });
+  if (d.error) alert('操作失败: ' + d.error); else loadUsers();
+}
+async function deleteUserRow(id, username) {
+  const purge = confirm(`删除账号「${username}」？\n\n点「确定」= 同时清除该账号的所有业务数据（订单/发票/映射/催收记录，不可恢复）\n点「取消」= 仅删除账号、保留数据`);
+  let confirmUsername = '';
+  if (purge) {
+    confirmUsername = prompt(`这是不可恢复的操作。请再次输入用户名「${username}」以确认清除其全部数据：`) || '';
+    if (confirmUsername !== username) { alert('用户名不匹配，已取消。'); return; }
+  } else {
+    if (!confirm(`仅删除账号「${username}」（保留其数据）？`)) return;
+  }
+  const d = await api('/api/admin/users/delete', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ id, username: confirmUsername, purge }),
+  });
+  if (d.error) alert('删除失败: ' + d.error);
+  else { alert(`已删除「${username}」${purge ? '，并清除其数据 ' + d.purged + ' 行' : ''}。`); loadUsers(); }
+}
+
+// ══════════════ 修改密码 ══════════════
+function openPwdModal() { document.getElementById('pwdModal').classList.add('show'); document.getElementById('pw-old').focus(); }
+function closePwdModal() {
+  document.getElementById('pwdModal').classList.remove('show');
+  document.getElementById('pw-old').value = ''; document.getElementById('pw-new').value = ''; document.getElementById('pw-new2').value = '';
+}
+async function submitPwd() {
+  const oldP = document.getElementById('pw-old').value;
+  const newP = document.getElementById('pw-new').value;
+  const new2 = document.getElementById('pw-new2').value;
+  if (!newP || newP.length < 4) { alert('新密码至少 4 位'); return; }
+  if (newP !== new2) { alert('两次输入的新密码不一致'); return; }
+  const btn = document.getElementById('btnPwd');
+  btn.disabled = true; const t = btn.textContent; btn.textContent = '提交中…';
+  try {
+    const d = await fetch('/api/auth/password', {
+      method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ oldPassword: oldP, newPassword: newP }),
+    }).then(r => r.json());
+    if (d.error) { alert(d.error); btn.disabled = false; btn.textContent = t; return; }
+    alert('密码已修改，请使用新密码。');
+    closePwdModal();
+    document.getElementById('pwdBanner').classList.remove('show');
+    if (ME) ME.mustChangePassword = false;
+    btn.disabled = false; btn.textContent = t;
+  } catch (e) { alert('修改失败: ' + e.message); btn.disabled = false; btn.textContent = t; }
+}
+
+// ══════════════ 云端 1688 登录（WebSocket 直播） ══════════════
+let LIVE_WS = null, LIVE_IMG = null, LIVE_OPEN = false;
+let _framePending = null, _frameRaf = false, _lastMove = 0;
+
+function liveLog(text) {
+  const box = document.getElementById('liveLog');
+  if (!box) return;
+  const div = document.createElement('div');
+  div.textContent = new Date().toLocaleTimeString('zh-CN', { hour12: false }) + ' ' + text;
+  box.appendChild(div);
+  box.scrollTop = 99999;
+  while (box.childNodes.length > 200) box.removeChild(box.firstChild);
+}
+function liveSetStatus(t) { document.getElementById('liveStatus').innerHTML = t; }
+
+function openLiveModal(auto) {
+  document.getElementById('liveModal').classList.add('show');
+  LIVE_OPEN = true;
+  const img = document.getElementById('liveImg');
+  LIVE_IMG = img;
+  img.style.display = 'none';
+  document.getElementById('livePlaceholder').style.display = '';
+  document.getElementById('liveLog').innerHTML = '';
+  liveSetStatus('状态：正在连接云端浏览器…');
+  connectLive(auto);
+}
+function closeLiveModal() {
+  document.getElementById('liveModal').classList.remove('show');
+  LIVE_OPEN = false;
+  // 关闭窗口不销毁远端会话（用户可能只是切去看板），用「关闭浏览器」按钮才真正销毁
+  closeLiveRemote().catch(() => {});
+  if (LIVE_WS) { try { LIVE_WS.close(); } catch (e) { } LIVE_WS = null; }
+}
+async function closeLiveRemote() {
+  try { await api('/api/browser/close', { method: 'POST' }); } catch (e) { }
+}
+function connectLive() {
+  if (LIVE_WS) { try { LIVE_WS.close(); } catch (e) { } }
+  if (typeof WebSocket === 'undefined') { liveLog('当前浏览器不支持 WebSocket，请换用 Chrome / Edge / Firefox / Safari 等主流浏览器'); liveSetStatus('<b style="color:#d32f2f">浏览器不支持实时画面</b>'); return; }
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  let ws;
+  try { ws = new WebSocket(`${proto}//${location.host}/ws/browser`); } catch (e) { liveLog('WebSocket 创建失败: ' + e.message); return; }
+  LIVE_WS = ws;
+  let gotFrame = false, opened = false;
+  ws.onopen = () => { opened = true; liveLog('已连接到云端浏览器'); liveSetStatus('状态：已连接，正在等待画面…'); };
+  ws.onclose = () => { liveLog('连接已关闭'); if (LIVE_OPEN) liveSetStatus('状态：连接已断开（可点「关闭浏览器」后重试）'); };
+  ws.onerror = () => {
+    liveLog('连接错误');
+    if (!opened) liveLog('提示：若通过 Nginx/网关访问，请确认已开启 WebSocket 转发（Upgrade / Connection 头）。');
+  };
+  ws.onmessage = (ev) => {
+    let m; try { m = JSON.parse(ev.data); } catch (e) { return; }
+    if (m.type === 'frame') { gotFrame = true; renderFrame(m.data); }
+    else if (m.type === 'status' || m.type === 'hello') {
+      liveSetStatus(`状态：${m.loggedIn ? '<b style="color:#2e7d32">已登录 1688</b>' : '未登录'} · ${m.url ? esc(m.url) : ''}`);
+    } else if (m.type === 'log') liveLog(m.text);
+    else if (m.type === 'error') { liveLog('错误: ' + m.text); liveSetStatus('<b style="color:#d32f2f">启动失败：' + esc(m.text) + '</b>'); }
+    else if (m.type === 'saved') { liveLog('登录态已保存'); liveSetStatus(`状态：登录态已保存（${m.loggedIn ? '已登录' : '未登录'}）`); }
+    else if (m.type === 'closed') { liveLog('云端浏览器已关闭'); }
+  };
+}
+function renderFrame(data) {
+  _framePending = data;
+  if (_frameRaf) return;
+  _frameRaf = true;
+  requestAnimationFrame(() => {
+    _frameRaf = false;
+    if (!_framePending || !LIVE_IMG) return;
+    LIVE_IMG.src = 'data:image/jpeg;base64,' + _framePending;
+    _framePending = null;
+    if (LIVE_IMG.style.display === 'none') {
+      LIVE_IMG.style.display = '';
+      const ph = document.getElementById('livePlaceholder');
+      if (ph) ph.style.display = 'none';
+    }
+  });
+}
+function liveSend(obj) { if (LIVE_WS && LIVE_WS.readyState === 1) { try { LIVE_WS.send(JSON.stringify(obj)); } catch (e) { } } }
+function relXY(ev) {
+  const r = LIVE_IMG.getBoundingClientRect();
+  return { x: (ev.clientX - r.left) / Math.max(1, r.width), y: (ev.clientY - r.top) / Math.max(1, r.height) };
+}
+function bindLiveInput() {
+  const img = document.getElementById('liveImg');
+  // ── 鼠标（Chrome / Edge / Firefox / Safari 桌面端）──
+  img.addEventListener('mousemove', (ev) => {
+    const now = Date.now();
+    if (now - _lastMove < 30) return;
+    _lastMove = now;
+    liveSend(Object.assign({ type: 'mouse', action: 'move' }, relXY(ev)));
+  });
+  img.addEventListener('mousedown', (ev) => { ev.preventDefault(); liveSend(Object.assign({ type: 'mouse', action: 'down' }, relXY(ev))); });
+  img.addEventListener('mouseup', (ev) => { ev.preventDefault(); liveSend(Object.assign({ type: 'mouse', action: 'up' }, relXY(ev))); });
+  img.addEventListener('contextmenu', (ev) => ev.preventDefault());
+  img.addEventListener('wheel', (ev) => {
+    ev.preventDefault();
+    liveSend(Object.assign({ type: 'mouse', action: 'wheel', deltaY: ev.deltaY }, relXY(ev)));
+  }, { passive: false });
+  // ── 触屏（手机 / 平板：Safari、Chrome、微信内置浏览器等）──
+  // 单指：按下/移动/抬起 映射为鼠标；轻点即一次点击，长按拖动即拖拽
+  img.addEventListener('touchstart', (ev) => {
+    if (ev.touches.length !== 1) return;
+    ev.preventDefault();
+    const t = ev.touches[0];
+    liveSend(Object.assign({ type: 'mouse', action: 'move' }, relXY(t)));
+    liveSend(Object.assign({ type: 'mouse', action: 'down' }, relXY(t)));
+  }, { passive: false });
+  img.addEventListener('touchmove', (ev) => {
+    if (ev.touches.length !== 1) return;
+    ev.preventDefault();
+    const now = Date.now();
+    if (now - _lastMove < 30) return;
+    _lastMove = now;
+    liveSend(Object.assign({ type: 'mouse', action: 'move' }, relXY(ev.touches[0])));
+  }, { passive: false });
+  img.addEventListener('touchend', (ev) => {
+    ev.preventDefault();
+    const t = (ev.changedTouches && ev.changedTouches[0]) || null;
+    liveSend(Object.assign({ type: 'mouse', action: 'up' }, t ? relXY(t) : { x: 0, y: 0 }));
+  }, { passive: false });
+  img.addEventListener('touchcancel', () => { liveSend({ type: 'mouse', action: 'up', x: 0, y: 0 }); });
+  // 键盘输入框：按增量发送文本 / 退格
+  const kb = document.getElementById('liveKb');
+  let prev = '';
+  kb.addEventListener('input', () => {
+    const v = kb.value;
+    if (v.length > prev.length) liveSend({ type: 'key', action: 'text', text: v.slice(prev.length) });
+    else if (v.length < prev.length) { for (let i = 0; i < prev.length - v.length; i++) liveSend({ type: 'key', action: 'key', key: 'Backspace' }); }
+    prev = v;
+  });
+  kb.addEventListener('keydown', (ev) => {
+    if (['Enter', 'Tab', 'Escape'].includes(ev.key)) { ev.preventDefault(); liveSend({ type: 'key', action: 'key', key: ev.key }); }
+  });
+}
+function liveKey(k) { liveSend({ type: 'key', action: 'key', key: k }); }
+function liveNav(url) { liveSend({ type: 'navigate', url }); }
+function liveBack() { liveSend({ type: 'mouse', action: 'click', x: 0.02, y: 0.02 }); }
+function liveReload() { location.reload(); }
+async function saveLiveState() {
+  liveSend({ type: 'save' });
+  liveLog('正在保存登录态…');
+  setTimeout(loadData, 800);
+}
+
+// ══════════════ 事件绑定 & 启动 ══════════════
 document.getElementById('search').addEventListener('input', e => { keyword = e.target.value.trim(); resetPage('dash'); render(); });
 document.getElementById('collectState').addEventListener('change', e => { collectStateFilter = e.target.value; resetPage('dash'); render(); });
 document.getElementById('invoiceState').addEventListener('change', e => { invoiceStateFilter = e.target.value; resetPage('dash'); render(); });
@@ -1066,13 +1500,15 @@ document.getElementById('filterTabs').addEventListener('click', e => {
   tab.classList.add('active'); filter = tab.dataset.filter; resetPage('dash'); render();
 });
 ['cfg-template', 'cfg-orderItem', 'cfg-reminder', 'cfg-companyName', 'cfg-taxNo', 'cfg-email'].forEach(id => {
-  document.getElementById(id).addEventListener('input', updatePreview);
+  const el = document.getElementById(id);
+  if (el) el.addEventListener('input', updatePreview);
 });
-document.addEventListener('keydown', e => { if (e.key === 'Escape') closeHist(); });
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') { closeHist(); closeLiveModal(); closePwdModal(); }
+});
+document.getElementById('liveKb') && bindLiveInput();
 
-loadData();
-pollTask();
-taskTimer = setInterval(pollTask, 2000);
+boot();
 </script>
 </body>
 </html>

@@ -1,32 +1,29 @@
 /**
- * import-to-db.js — 把 data/ 下的 Excel 数据导入 MySQL（看板数据源）
+ * import-to-db.js — 把某个用户 data/users/<id>/ 下的 Excel 数据导入 MySQL（看板数据源）
  *
  * 用法:
- *   node import-to-db.js            全量重建订单表 + 已开票表（保留人工维护的映射表）
- *   node import-to-db.js --orders   只导入「完成订单」
- *   node import-to-db.js --invoices 只导入「已开票订单」
- *   node import-to-db.js --schema   只建库建表
+ *   node import-to-db.js                  默认导入 user 1（超级管理员）的全量数据
+ *   node import-to-db.js --user=3         导入 user 3 的数据
+ *   node import-to-db.js --user=3 --orders 只导入「完成订单」
+ *   node import-to-db.js --invoices       只导入「已开票订单」
+ *   node import-to-db.js --schema         只建库建表
  *
- * 数据流:
- *   data/完成订单/*.xlsx      → invoice_order    （1688 订单，看板订单口径）
- *   data/已开票订单/*.xlsx    → issued_invoice   （税务局全量发票，一行=一个明细行）
- *                                 ↑ 通过 seller_name_mapping 把「销方名称」翻译成「1688商家名称」
- *   data/invoice-status.json  → invoice_order.invoice_state（平台实时开票状态，可选）
+ * 数据流（按用户隔离，目录见 lib/tenancy.js）:
+ *   data/users/<id>/完成订单/*.xlsx      → invoice_order    （1688 订单，看板订单口径）
+ *   data/users/<id>/已开票订单/*.xlsx    → issued_invoice   （税务局全量发票，一行=一个明细行）
+ *   data/users/<id>/invoice-status.json  → invoice_order.invoice_state（平台实时开票状态，可选）
  *
  * 映射表维护:
  *   自动匹配规则（精确 / 规范化 / 包含 / 登录ID / 备注线索），命中即写入 seller_name_mapping；
- *   匹配不上的在 seller_name_mapping 里没有记录，看板「名称映射」页会列出来，人工比对后保存。
- *   再次导入不会覆盖人工维护的结果（只对未映射的名称做自动匹配）。
+ *   匹配不上的看板「名称映射」页会列出来，人工比对后保存。再次导入不会覆盖人工维护的结果。
  */
 const fs = require('fs');
 const path = require('path');
 const XLSX = require('xlsx');
 const db = require('./db');
+const tenancy = require('./lib/tenancy');
 
 const ROOT = __dirname;
-const DATA = path.join(ROOT, 'data');
-const ORDER_DIR = path.join(DATA, '完成订单');
-const INVOICE_DIR = path.join(DATA, '已开票订单');
 
 // ──────────────────────────── 工具函数 ────────────────────────────
 
@@ -175,11 +172,6 @@ const INVOICE_COLS = {
   remark: '备注',
 };
 
-/**
- * 解析单个发票 xlsx → 发票明细行数组
- * 优先取「信息汇总表」（明细行）；只有「发票基础信息」时退化为按发票汇总。
- * 自动跳过「合计行」。
- */
 function parseInvoiceFile(file) {
   const wb = XLSX.readFile(file);
   const sheetName = wb.SheetNames.includes('信息汇总表') ? '信息汇总表' : wb.SheetNames[0];
@@ -195,9 +187,9 @@ function parseInvoiceFile(file) {
     const r = rows[i];
     if (!r) continue;
     const seqRaw = r[idx.seq_no];
-    if (seqRaw !== undefined && String(seqRaw).indexOf('合计') >= 0) continue; // 合计行
+    if (seqRaw !== undefined && String(seqRaw).indexOf('合计') >= 0) continue;
     const sellerName = cut(r[idx.seller_name], 255);
-    if (!sellerName) continue; // 没有销方名称的行无意义
+    if (!sellerName) continue;
     totalRows++;
     const inv = {
       seq_no: num(seqRaw),
@@ -230,7 +222,6 @@ function parseInvoiceFile(file) {
       source_sheet: cut(sheetName, 64),
       source_file: path.basename(file),
     };
-    // 行指纹：同一张发票的同一明细行，重复导入时自动去重
     inv.row_hash = md5([
       inv.e_invoice_no || inv.invoice_no || '', inv.invoice_code || '',
       inv.goods_name || '', inv.spec || '', inv.unit || '',
@@ -244,18 +235,10 @@ function parseInvoiceFile(file) {
 
 // ──────────────────────── 销方名称自动匹配 ────────────────────────
 
-/**
- * 用「税务局销方名称」去匹配 1688 卖家（返回 { seller, rule } 或 null）
- * @param {string} taxName 销方名称
- * @param {string} remark  发票备注（常含 1688 店铺名线索）
- * @param {Array}  sellers [{ seller_login, seller_company }]
- */
-/** 备注里的 1688 店铺名线索（如「1688 谨锐优选;」→「谨锐优选」），没有则 null */
 function remarkShopToken(remark) {
   return (String(remark == null ? '' : remark).match(/1688\s*([^;；,，\s]{2,20})/) || [])[1] || null;
 }
 
-/** 同一家公司有多个会员名时选「主行」：① 备注线索 → ② 订单数最多（保证可复现） */
 function pickAmongSiblings(hits, remark) {
   const rk = normName(remark || '');
   const tk = normName(remarkShopToken(remark) || '');
@@ -275,12 +258,7 @@ function pickAmongSiblings(hits, remark) {
 function matchSeller(taxName, remark, sellers) {
   const t = normName(taxName);
   if (!t) return null;
-  const suffix = taxName.replace(/[\s\u3000]/g, '');
 
-  // 1. 销方名称 与 1688 卖家公司名 完全一致。
-  //    ⚠️ 同一公司可能有多个会员名（多店铺，如「谨锐优选」+「谨锐医疗」都属
-  //    「谨锐医疗科技（上海）有限公司」），不能取遍历到的第一个（结果随机、随导入顺序漂移），
-  //    必须显式消歧：① 发票备注里的店铺名线索 → ② 订单数最多的会员名（结果可复现）。
   const exactHits = sellers.filter((s) => normName(s.seller_company) === t);
   if (exactHits.length === 1) return { seller: exactHits[0], rule: 'exact' };
   if (exactHits.length > 1) {
@@ -288,10 +266,8 @@ function matchSeller(taxName, remark, sellers) {
     return { seller: pick.seller, rule: 'exact', ambiguous: true, via: pick.via };
   }
 
-  // 2. 销方名称 与 卖家会员名 完全一致
   for (const s of sellers) if (s.seller_login && normName(s.seller_login) === t) return { seller: s, rule: 'login' };
 
-  // 3. 包含关系（公司与公司），要求较短一方 ≥4 字且占比 ≥50%，避免误判
   let best = null;
   for (const s of sellers) {
     const c = normName(s.seller_company);
@@ -306,13 +282,11 @@ function matchSeller(taxName, remark, sellers) {
   }
   if (best) return { seller: best.seller, rule: best.rule };
 
-  // 4. 卖家会员名被销方名称包含（如「中山市xxx商行-沐凌制衣厂」）
   for (const s of sellers) {
     const l = normName(s.seller_login);
     if (l && l.length >= 4 && t.includes(l)) return { seller: s, rule: 'login' };
   }
 
-  // 5. 备注线索：备注里出现 1688 店铺名（「1688 谨锐优选;」）
   const rk = normName(remark);
   if (rk) {
     for (const s of sellers) {
@@ -321,7 +295,6 @@ function matchSeller(taxName, remark, sellers) {
       if (c && c.length >= 4 && rk.includes(c)) return { seller: s, rule: 'remark' };
       if (l && l.length >= 4 && rk.includes(l)) return { seller: s, rule: 'remark' };
     }
-    // 备注是短店铺名（去掉 1688 前缀后）→ 与公司名互相包含
     const rkToken = remarkShopToken(remark);
     if (rkToken) {
       const tk = normName(rkToken);
@@ -337,15 +310,10 @@ function matchSeller(taxName, remark, sellers) {
   return null;
 }
 
-/**
- * 对「未映射的销方名称」做自动匹配并写入映射表。
- * 已存在且已填 seller_company 的记录不动（保护人工维护成果）。
- * @returns {{autoMapped:number, unmatched:string[], details:Array}}
- */
-async function autoMapSellers(sellers, taxNames) {
-  const existing = await db.query('SELECT tax_seller_name, seller_company, is_ignored FROM seller_name_mapping');
+/** 对「未映射的销方名称」做自动匹配并写入映射表（按用户） */
+async function autoMapSellers(sellers, taxNames, userId) {
+  const existing = await db.query('SELECT tax_seller_name, seller_company, is_ignored FROM seller_name_mapping WHERE user_id = ?', [userId]);
   const mapped = new Set(existing.filter((r) => r.seller_company).map((r) => r.tax_seller_name));
-  // 人工已忽略的销方名称（确认无对应 1688 商家）不再参与自动匹配，尊重人工判断
   const ignored = new Set(existing.filter((r) => r.is_ignored).map((r) => r.tax_seller_name));
 
   const autoMapped = [];
@@ -355,23 +323,19 @@ async function autoMapSellers(sellers, taxNames) {
     if (ignored.has(t.tax_seller_name)) continue;
     const hit = matchSeller(t.tax_seller_name, t.remark, sellers);
     if (hit) {
-      // 名称唯一命中（exact/login 且无同公司多会员名歧义）→ 已确认；
-      // 歧义时若靠备注线索定的 → 也算已确认；只靠订单数猜的 → 待人工复核
-      const sure =
-        (hit.rule === 'exact' || hit.rule === 'login') &&
-        !(hit.ambiguous && hit.via === 'order');
+      const sure = (hit.rule === 'exact' || hit.rule === 'login') && !(hit.ambiguous && hit.via === 'order');
       const confirmed = sure ? 1 : 0;
       const note = hit.ambiguous
         ? `导入时自动匹配（同公司多会员名，按${hit.via === 'remark' ? '发票备注线索' : '订单数'}选定，请复核）`
         : '导入时自动匹配';
       await db.exec(
         `INSERT INTO seller_name_mapping
-           (tax_seller_name, seller_company, seller_login, match_type, match_rule, is_confirmed, note)
-         VALUES (?, ?, ?, 'auto', ?, ?, ?)
+           (user_id, tax_seller_name, seller_company, seller_login, match_type, match_rule, is_confirmed, note)
+         VALUES (?, ?, ?, ?, 'auto', ?, ?, ?)
          ON DUPLICATE KEY UPDATE
            seller_company = VALUES(seller_company), seller_login = VALUES(seller_login),
            match_type = 'auto', match_rule = VALUES(match_rule), is_confirmed = VALUES(is_confirmed)`,
-        [t.tax_seller_name, hit.seller.seller_company, hit.seller.seller_login, hit.rule, confirmed, note]
+        [userId, t.tax_seller_name, hit.seller.seller_company, hit.seller.seller_login, hit.rule, confirmed, note]
       );
       autoMapped.push({ tax: t.tax_seller_name, company: hit.seller.seller_company, rule: hit.rule, confirmed: !!confirmed });
     } else {
@@ -384,7 +348,7 @@ async function autoMapSellers(sellers, taxNames) {
 // ──────────────────────── 写库 ────────────────────────
 
 const ORDER_FIELDS = [
-  'order_no', 'buyer_company', 'buyer_login', 'seller_company', 'seller_login',
+  'user_id', 'order_no', 'buyer_company', 'buyer_login', 'seller_company', 'seller_login',
   'goods_amount', 'freight_amount', 'discount_amount', 'pay_amount', 'order_status',
   'created_at', 'pay_time', 'goods_title', 'quantity', 'unit', 'logistics_company',
   'tracking_no', 'invoice_title', 'invoice_tax_no', 'source_file',
@@ -392,14 +356,13 @@ const ORDER_FIELDS = [
 ];
 
 const INVOICE_FIELDS = [
-  'row_hash', 'seq_no', 'invoice_code', 'invoice_no', 'e_invoice_no', 'seller_tax_no', 'seller_name',
+  'user_id', 'row_hash', 'seq_no', 'invoice_code', 'invoice_no', 'e_invoice_no', 'seller_tax_no', 'seller_name',
   'seller_company', 'buyer_tax_no', 'buyer_name', 'invoice_date', 'tax_category_code', 'special_biz_type',
   'goods_name', 'spec', 'unit', 'quantity', 'unit_price', 'amount', 'tax_rate', 'tax_amount',
   'total_amount', 'invoice_source', 'invoice_kind', 'invoice_status', 'is_positive', 'risk_level',
   'drawer', 'remark', 'source_sheet', 'source_file',
 ];
 
-/** 分批多值 INSERT */
 async function bulkInsert(table, fields, rows, chunk = 400) {
   let inserted = 0;
   for (let i = 0; i < rows.length; i += chunk) {
@@ -421,10 +384,11 @@ async function bulkInsert(table, fields, rows, chunk = 400) {
   return inserted;
 }
 
-async function logImport(entry) {
-  const fields = ['kind', 'source_file', 'total_rows', 'inserted', 'skipped', 'auto_mapped', 'unmatched', 'status', 'message'];
+async function logImport(userId, entry) {
+  const fields = ['user_id', 'kind', 'source_file', 'total_rows', 'inserted', 'skipped', 'auto_mapped', 'unmatched', 'status', 'message'];
   const numFields = new Set(['total_rows', 'inserted', 'skipped', 'auto_mapped', 'unmatched']);
   const values = fields.map((f) => {
+    if (f === 'user_id') return userId;
     const v = entry[f];
     if (v === undefined || v === null) return numFields.has(f) ? 0 : null;
     return v;
@@ -437,9 +401,9 @@ async function logImport(entry) {
 
 // ──────────────────────── 主流程 ────────────────────────
 
-/** 把 data/invoice-status.json 的平台状态同步进 invoice_order.invoice_state */
-async function applyInvoiceStatus() {
-  const f = path.join(DATA, 'invoice-status.json');
+/** 把该用户 data/users/<id>/invoice-status.json 的平台状态同步进 invoice_order.invoice_state */
+async function applyInvoiceStatus(userId) {
+  const f = tenancy.statusFileFor(userId);
   if (!fs.existsSync(f)) return { applied: 0, skipped: 'invoice-status.json 不存在' };
   const s = JSON.parse(fs.readFileSync(f, 'utf-8'));
   const applying = (s.applying || []).map(String);
@@ -449,11 +413,11 @@ async function applyInvoiceStatus() {
   for (const [ids, state] of [[applying, 'applying'], [issued, 'issued']]) {
     for (let i = 0; i < ids.length; i += 500) {
       const part = ids.slice(i, i + 500);
-      // 人工确认（state_source='manual'）的订单不被平台刷新覆盖
       const r = await db.exec(
         `UPDATE invoice_order SET invoice_state = ?, state_updated_at = ?
-         WHERE order_no IN (${part.map(() => '?').join(',')}) AND invoice_state <> 'issued' AND state_source <> 'manual'`,
-        [state, now, ...part]
+         WHERE user_id = ? AND order_no IN (${part.map(() => '?').join(',')})
+           AND invoice_state <> 'issued' AND state_source <> 'manual'`,
+        [state, now, userId, ...part]
       );
       applied += r.affectedRows || 0;
     }
@@ -461,10 +425,11 @@ async function applyInvoiceStatus() {
   return { applied, applyingCount: applying.length, issuedCount: issued.length };
 }
 
-/** 导入「完成订单」 */
-async function importOrders() {
+/** 导入「完成订单」（仅该用户） */
+async function importOrders(userId) {
+  const ORDER_DIR = tenancy.orderDirFor(userId);
   if (!fs.existsSync(ORDER_DIR)) {
-    await logImport({ kind: 'order', source_file: '-', status: 'error', message: `${ORDER_DIR} 不存在` });
+    await logImport(userId, { kind: 'order', source_file: '-', status: 'error', message: `${ORDER_DIR} 不存在` });
     return { files: 0, inserted: 0, error: `${ORDER_DIR} 不存在` };
   }
   const files = fs.readdirSync(ORDER_DIR).filter((f) => f.toLowerCase().endsWith('.xlsx') && !f.startsWith('~$'));
@@ -476,16 +441,17 @@ async function importOrders() {
     all.push(...orders);
   }
 
-  // 全量重建，但保留开票状态（平台刷新的结果 + 人工确认的「已开票」都不能因重新导入而丢失）
+  // 全量重建该用户的订单，但保留开票状态（平台刷新 + 人工确认都不能丢）
   const stateKeep = new Map();
   try {
-    const old = await db.query('SELECT order_no, invoice_state, state_source, state_updated_at, state_note FROM invoice_order');
+    const old = await db.query('SELECT order_no, invoice_state, state_source, state_updated_at, state_note FROM invoice_order WHERE user_id = ?', [userId]);
     for (const r of old) stateKeep.set(r.order_no, r);
   } catch (e) { /* 首次运行表可能为空 */ }
 
-  await db.exec('DELETE FROM invoice_order');
+  await db.exec('DELETE FROM invoice_order WHERE user_id = ?', [userId]);
   for (const o of all) {
     const k = stateKeep.get(o.order_no);
+    o.user_id = userId;
     o.invoice_state = k ? k.invoice_state : 'none';
     o.state_source = k ? k.state_source : 'platform';
     o.state_updated_at = k ? k.state_updated_at : null;
@@ -494,15 +460,16 @@ async function importOrders() {
   const inserted = await bulkInsert('invoice_order', ORDER_FIELDS, all);
 
   for (const p of perFile) {
-    await logImport({ kind: 'order', source_file: p.file, total_rows: p.raw, inserted: p.kept, skipped: p.raw - p.kept, status: 'ok' });
+    await logImport(userId, { kind: 'order', source_file: p.file, total_rows: p.raw, inserted: p.kept, skipped: p.raw - p.kept, status: 'ok' });
   }
   return { files: files.length, inserted, perFile };
 }
 
-/** 导入「已开票订单」 */
-async function importInvoices() {
+/** 导入「已开票订单」（仅该用户） */
+async function importInvoices(userId) {
+  const INVOICE_DIR = tenancy.invoiceDirFor(userId);
   if (!fs.existsSync(INVOICE_DIR)) {
-    await logImport({ kind: 'invoice', source_file: '-', status: 'error', message: `${INVOICE_DIR} 不存在` });
+    await logImport(userId, { kind: 'invoice', source_file: '-', status: 'error', message: `${INVOICE_DIR} 不存在` });
     return { files: 0, inserted: 0, error: `${INVOICE_DIR} 不存在` };
   }
   const files = fs.readdirSync(INVOICE_DIR).filter((f) => f.toLowerCase().endsWith('.xlsx') && !f.startsWith('~$'));
@@ -511,54 +478,52 @@ async function importInvoices() {
   for (const f of files) {
     const { invoices, totalRows, sheet } = parseInvoiceFile(path.join(INVOICE_DIR, f));
     perFile.push({ file: f, raw: totalRows, kept: invoices.length, sheet });
-    for (const inv of invoices) byHash.set(inv.row_hash, inv); // 同一行重复出现只留一条
+    for (const inv of invoices) byHash.set(inv.row_hash, inv);
   }
   const rows = [...byHash.values()];
 
-  // 1) 先用「销方名称」自动匹配 1688 卖家
+  // 1) 先用「销方名称」自动匹配该用户的 1688 卖家
   const sellers = await db.query(
     `SELECT seller_login, MAX(seller_company) AS seller_company, COUNT(*) AS order_cnt
      FROM invoice_order
-     WHERE seller_company IS NOT NULL
+     WHERE user_id = ? AND seller_company IS NOT NULL
      GROUP BY seller_login
-     ORDER BY seller_login`
+     ORDER BY seller_login`,
+    [userId]
   );
   const taxTotals = new Map();
   for (const inv of rows) {
     if (!taxTotals.has(inv.seller_name)) taxTotals.set(inv.seller_name, { tax_seller_name: inv.seller_name, remark: inv.remark });
   }
-  const mapped = await autoMapSellers(sellers, [...taxTotals.values()]);
+  const mapped = await autoMapSellers(sellers, [...taxTotals.values()], userId);
 
   // 2) 依据映射表（含人工维护）回填 seller_company
   const mapRows = await db.query(
-    'SELECT tax_seller_name, seller_company FROM seller_name_mapping WHERE seller_company IS NOT NULL'
+    'SELECT tax_seller_name, seller_company FROM seller_name_mapping WHERE user_id = ? AND seller_company IS NOT NULL',
+    [userId]
   );
   const nameMap = new Map(mapRows.map((r) => [r.tax_seller_name, r.seller_company]));
-  for (const inv of rows) inv.seller_company = nameMap.get(inv.seller_name) || null;
+  for (const inv of rows) { inv.user_id = userId; inv.seller_company = nameMap.get(inv.seller_name) || null; }
 
-  // 3) 全量重建已开票表
-  await db.exec('DELETE FROM issued_invoice');
+  // 3) 全量重建该用户的已开票表
+  await db.exec('DELETE FROM issued_invoice WHERE user_id = ?', [userId]);
   const inserted = await bulkInsert('issued_invoice', INVOICE_FIELDS, rows);
 
   for (const p of perFile) {
-    const un = mapped.unmatched.length;
-    await logImport({
+    await logImport(userId, {
       kind: 'invoice', source_file: p.file, total_rows: p.raw, inserted: p.kept,
-      skipped: p.raw - p.kept, auto_mapped: mapped.autoMapped.length, unmatched: un, status: 'ok',
+      skipped: p.raw - p.kept, auto_mapped: mapped.autoMapped.length, unmatched: mapped.unmatched.length, status: 'ok',
       message: `sheet=${p.sheet}`,
     });
   }
   return { files: files.length, inserted, autoMapped: mapped.autoMapped, unmatchedNames: mapped.unmatched, perFile };
 }
 
-/**
- * 一次性迁移：把旧版 data/sent-log.json（按天合并的发送记录）导入 send_log 表。
- * 仅在 send_log 为空且文件存在时执行；旧记录没有具体时刻，统一记为当天 12:00:00。
- */
-async function migrateLegacySentLog() {
-  const f = path.join(DATA, 'sent-log.json');
+/** 旧版 data/sent-log.json → send_log（仅该用户表为空时执行一次） */
+async function migrateLegacySentLog(userId) {
+  const f = path.join(tenancy.DATA_ROOT, 'sent-log.json');
   if (!fs.existsSync(f)) return { migrated: 0, skipped: 'sent-log.json 不存在' };
-  const [{ n }] = await db.query('SELECT COUNT(*) AS n FROM send_log');
+  const [{ n }] = await db.query('SELECT COUNT(*) AS n FROM send_log WHERE user_id = ?', [userId]);
   if (n > 0) return { migrated: 0, skipped: 'send_log 已有记录' };
   let log;
   try { log = JSON.parse(fs.readFileSync(f, 'utf-8')); } catch (e) { return { migrated: 0, skipped: 'json 解析失败' }; }
@@ -569,15 +534,15 @@ async function migrateLegacySentLog() {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) continue;
     for (const login of list) {
       if (!login) continue;
-      rows.push([d, String(login), 'ok', 'legacy', `${d} 12:00:00`]);
+      rows.push([userId, d, String(login), 'ok', 'legacy', `${d} 12:00:00`]);
     }
   }
   let migrated = 0;
   for (let i = 0; i < rows.length; i += 200) {
     const part = rows.slice(i, i + 200);
-    const ph = part.map(() => '(?,?,?,?,?)').join(',');
+    const ph = part.map(() => '(?,?,?,?,?,?)').join(',');
     const r = await db.exec(
-      `INSERT INTO send_log (send_date, seller_login, result, channel, sent_at) VALUES ${ph}`,
+      `INSERT INTO send_log (user_id, send_date, seller_login, result, channel, sent_at) VALUES ${ph}`,
       part.flat()
     );
     migrated += r.affectedRows || 0;
@@ -587,39 +552,41 @@ async function migrateLegacySentLog() {
 
 /** 主入口 */
 async function runImport(opts) {
-  const options = opts || ({}); // 相对路径归一化: {orders:true, invoices:true, schemaOnly:true}
+  const options = opts || {};
+  const userId = Number(options.userId) || 1;
   const started = Date.now();
-  const out = { ok: true, steps: [] };
+  const out = { ok: true, userId, steps: [] };
 
   const info = await db.ensureSchema();
   out.database = info;
   out.steps.push(`建库建表完成: ${info.database} @ ${info.host}:${info.port}`);
+  tenancy.ensureUserDirs(userId);
 
   if (options.schemaOnly) { await db.closePool(); return out; }
 
-  // 只指定 --orders 或 --invoices 时做单边导入；都不指定（或都指定）→ 全量导入
   const onlyOrders = !!options.orders && !options.invoices;
   const onlyInvoices = !!options.invoices && !options.orders;
   const doOrders = !onlyInvoices;
   const doInvoices = !onlyOrders;
 
+  out.steps.push(`导入用户: user_id=${userId}（目录 ${tenancy.dataDirFor(userId)}）`);
+
   if (doOrders) {
-    const r = await importOrders();
+    const r = await importOrders(userId);
     out.orders = r;
     out.steps.push(`完成订单：${r.files} 个文件，写入 ${r.inserted} 单`);
-    const st = await applyInvoiceStatus();
+    const st = await applyInvoiceStatus(userId);
     out.invoiceStatus = st;
     if (st.applied) out.steps.push(`平台开票状态同步：更新 ${st.applied} 单`);
   }
   if (doInvoices) {
-    const r = await importInvoices();
+    const r = await importInvoices(userId);
     out.invoices = r;
     out.steps.push(`已开票订单：${r.files} 个文件，写入 ${r.inserted} 行明细`);
     out.steps.push(`销方名称自动匹配 ${r.autoMapped ? r.autoMapped.length : 0} 个，待人工比对 ${r.unmatchedNames ? r.unmatchedNames.length : 0} 个`);
   }
 
-  // 旧版发送记录（data/sent-log.json）迁入 send_log（仅表为空时执行一次）
-  const legacy = await migrateLegacySentLog();
+  const legacy = await migrateLegacySentLog(userId);
   if (legacy.migrated) out.steps.push(`旧版催收记录迁移：${legacy.migrated} 条 → send_log`);
 
   await db.closePool();
@@ -632,7 +599,8 @@ module.exports = { runImport, importOrders, importInvoices, applyInvoiceStatus, 
 // ──────────────────────── CLI ────────────────────────
 if (require.main === module) {
   const argv = process.argv.slice(2);
-  const opts = { schemaOnly: argv.includes('--schema') };
+  const userArg = argv.find((a) => a.startsWith('--user='));
+  const opts = { userId: userArg ? Number(userArg.split('=')[1]) : 1, schemaOnly: argv.includes('--schema') };
   if (argv.includes('--orders')) opts.orders = true;
   if (argv.includes('--invoices')) opts.invoices = true;
   console.log('▶ 开始导入数据到 MySQL ...');

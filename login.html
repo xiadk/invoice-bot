@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>登录 · 1688 发票催收控制台</title>
+<style>
+  :root { --primary: #ff6a00; --bg: #f5f6f8; --card: #fff; --border: #e8e9eb; --text: #26282c; --sub: #8a8f99; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: "Microsoft YaHei", "PingFang SC", sans-serif; color: var(--text);
+    min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    background: linear-gradient(135deg, #fff4ec 0%, #f5f6f8 55%, #eef2f7 100%);
+    padding: 24px;
+  }
+  .login-card {
+    width: 100%; max-width: 400px; background: var(--card); border: 1px solid var(--border);
+    border-radius: 14px; padding: 34px 30px 28px; box-shadow: 0 18px 48px rgba(31,41,55,.10);
+  }
+  .brand { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+  .brand .logo {
+    width: 34px; height: 34px; border-radius: 9px; background: var(--primary); color: #fff;
+    display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 15px;
+  }
+  .brand h1 { font-size: 17px; }
+  .subtitle { color: var(--sub); font-size: 12px; margin: 8px 0 22px; line-height: 1.7; }
+  .form-row { margin-bottom: 14px; }
+  .form-row label { display: block; font-size: 12px; color: var(--sub); margin-bottom: 6px; }
+  .form-row input {
+    width: 100%; padding: 11px 12px; border: 1px solid var(--border); border-radius: 8px;
+    font-size: 14px; font-family: inherit; background: #fff; color: var(--text);
+  }
+  .form-row input:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px rgba(255,106,0,.10); }
+  .btn-login {
+    width: 100%; padding: 12px; border: none; border-radius: 8px; background: var(--primary);
+    color: #fff; font-size: 15px; cursor: pointer; margin-top: 6px; font-family: inherit;
+  }
+  .btn-login:hover { filter: brightness(1.04); }
+  .btn-login:disabled { opacity: .6; cursor: not-allowed; }
+  .err { display: none; background: #fdecea; color: #d32f2f; border-radius: 8px; padding: 9px 12px; font-size: 13px; margin-bottom: 14px; line-height: 1.6; }
+  .err.show { display: block; }
+  .foot { margin-top: 20px; padding-top: 16px; border-top: 1px dashed var(--border); font-size: 12px; color: var(--sub); line-height: 1.8; }
+  .foot b { color: var(--text); }
+</style>
+</head>
+<body>
+<div class="login-card">
+  <div class="brand">
+    <div class="logo">票</div>
+    <h1>1688 发票催收控制台</h1>
+  </div>
+  <div class="subtitle">请使用管理员分配的账号登录。本系统不开放自助注册，账号由超级管理员在「系统管理」中创建。</div>
+
+  <div class="err" id="err"></div>
+
+  <form id="loginForm" autocomplete="on">
+    <div class="form-row">
+      <label for="username">账号</label>
+      <input id="username" name="username" type="text" autocomplete="username" placeholder="请输入账号" required>
+    </div>
+    <div class="form-row">
+      <label for="password">密码</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" placeholder="请输入密码" required>
+    </div>
+    <button class="btn-login" id="btnLogin" type="submit">登 录</button>
+  </form>
+
+  <div class="foot">
+    首次部署的超级管理员账号为 <b>admin</b>，默认密码 <b>admin</b>，登录后请立即在「系统管理」中修改密码。
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+function showErr(msg) { const e = $('err'); e.textContent = msg; e.classList.add('show'); }
+function hideErr() { $('err').classList.remove('show'); }
+
+// 已登录则直接进入看板
+fetch('/api/auth/me', { credentials: 'same-origin' }).then(r => {
+  if (r.ok) location.href = '/';
+}).catch(() => {});
+
+$('loginForm').addEventListener('submit', async (ev) => {
+  ev.preventDefault();
+  hideErr();
+  const username = $('username').value.trim();
+  const password = $('password').value;
+  if (!username || !password) { showErr('请输入账号与密码'); return; }
+  const btn = $('btnLogin');
+  btn.disabled = true; const old = btn.textContent; btn.textContent = '登录中…';
+  try {
+    const r = await fetch('/api/auth/login', {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (r.ok) { location.href = '/'; return; }
+    showErr(d.error || ('登录失败（HTTP ' + r.status + '）'));
+  } catch (e) {
+    showErr('网络异常：' + e.message);
+  }
+  btn.disabled = false; btn.textContent = old;
+});
+</script>
+</body>
+</html>

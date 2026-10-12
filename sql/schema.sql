@@ -6,6 +6,11 @@
 --
 -- 全部表名、字段均带中文注释，便于直接在看板/客户端中理解含义。
 -- 本文件使用 CREATE TABLE IF NOT EXISTS，重复执行不会删除已有数据。
+--
+-- ── 多租户（多用户）说明 ────────────────────────────────────────────────
+--   本库采用「共享库 + user_id 列」的多租户方案：所有业务表都带 `user_id`，
+--   看板/接口一律按当前登录用户过滤，实现用户之间的数据隔离。
+--   账号体系见 app_user 表（role=admin 为超级管理员，可管理所有用户并查看全部数据）。
 -- ============================================================================
 
 CREATE DATABASE IF NOT EXISTS `invoice_bot`
@@ -14,12 +19,43 @@ CREATE DATABASE IF NOT EXISTS `invoice_bot`
 USE `invoice_bot`;
 
 -- ----------------------------------------------------------------------------
+-- 表 0: app_user —— 账号表（多用户登录 + 超级管理员）
+--   role   = admin：超级管理员，可新增/禁用用户、重置密码、查看所有人的看板与映射数据
+--   role   = user ：普通用户，只能看自己的看板与名称映射
+--   company_name / tax_no / email：该用户的开票抬头（催收话术里的 {companyName}/{taxNo}/{email}）
+--   token_version：改密/禁用时 +1，使此前签发的所有登录态立即失效
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `app_user` (
+  `id`                   INT           NOT NULL AUTO_INCREMENT COMMENT '用户ID（同时也是数据归属的 user_id）',
+  `username`             VARCHAR(64)   NOT NULL                COMMENT '登录账号（唯一）',
+  `password_hash`        VARCHAR(255)  NOT NULL                COMMENT '密码哈希（scrypt，格式 scrypt:盐:哈希）',
+  `role`                 ENUM('admin','user') NOT NULL DEFAULT 'user' COMMENT '角色：admin=超级管理员，user=普通用户',
+  `status`               ENUM('active','disabled') NOT NULL DEFAULT 'active' COMMENT '账号状态：active=正常，disabled=已禁用（禁用后无法登录，已登录会话立即失效）',
+  `company_name`         VARCHAR(255)  DEFAULT NULL            COMMENT '开票抬头：公司名称（催收消息 {companyName}）',
+  `tax_no`               VARCHAR(64)   DEFAULT NULL            COMMENT '开票抬头：纳税人识别号（催收消息 {taxNo}）',
+  `email`                VARCHAR(160)  DEFAULT NULL            COMMENT '开票抬头：收票邮箱（催收消息 {email}）',
+  `display_name`         VARCHAR(64)   DEFAULT NULL            COMMENT '显示名（可选，看板右上角展示）',
+  `note`                 VARCHAR(255)  DEFAULT NULL            COMMENT '备注（管理员填写，如所属业务线）',
+  `token_version`        INT           NOT NULL DEFAULT 1      COMMENT '会话版本：改密/禁用时 +1，旧登录态立即失效',
+  `must_change_password` TINYINT(1)    NOT NULL DEFAULT 0      COMMENT '是否强制下次登录修改密码',
+  `created_by`           INT           DEFAULT NULL            COMMENT '创建者（管理员ID）',
+  `last_login_at`        DATETIME      DEFAULT NULL            COMMENT '最近登录时间',
+  `created_at`           DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  `updated_at`           DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_app_user_username` (`username`),
+  KEY `idx_app_user_role` (`role`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  COMMENT='账号表（多用户登录；role=admin 为超级管理员）';
+
+-- ----------------------------------------------------------------------------
 -- 表 1: invoice_order —— 1688 完成订单表
---   数据来源: data/完成订单/*.xlsx（1688「已买到的货品」后台导出）
+--   数据来源: data/users/<user_id>/完成订单/*.xlsx（1688「已买到的货品」后台导出）
 --   看板口径: 订单数 / 订单金额 / 待开票金额 / 催收名单
 -- ----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS `invoice_order` (
   `order_no`          VARCHAR(32)   NOT NULL                COMMENT '订单编号（1688订单号，主键；多SKU续行已按主行去重）',
+  `user_id`           INT           NOT NULL DEFAULT 1      COMMENT '数据归属用户ID（多租户隔离键，见 app_user.id）',
   `buyer_company`     VARCHAR(255)  DEFAULT NULL            COMMENT '买家公司名（本方，即抬头公司）',
   `buyer_login`       VARCHAR(128)  DEFAULT NULL            COMMENT '买家会员名（本方1688登录ID）',
   `seller_company`    VARCHAR(255)  DEFAULT NULL            COMMENT '卖家公司名（订单里的商家名称，看板与映射统计的主维度）',
@@ -38,32 +74,39 @@ CREATE TABLE IF NOT EXISTS `invoice_order` (
   `tracking_no`       VARCHAR(64)   DEFAULT NULL            COMMENT '运单号',
   `invoice_title`     VARCHAR(255)  DEFAULT NULL            COMMENT '发票：购货单位名称（1688后台填写的抬头）',
   `invoice_tax_no`    VARCHAR(64)   DEFAULT NULL            COMMENT '发票：纳税人识别号',
-  `source_file`       VARCHAR(160)  DEFAULT NULL            COMMENT '数据来源文件名（data/完成订单/xxx.xlsx）',
+  `source_file`       VARCHAR(160)  DEFAULT NULL            COMMENT '数据来源文件名',
   `invoice_state`     ENUM('none','applying','issued') NOT NULL DEFAULT 'none'
                                                             COMMENT '订单级开票状态（有效状态）：none=未申请，applying=已申请，issued=已开票',
   `state_source`      ENUM('platform','manual') NOT NULL DEFAULT 'platform'
-                                                            COMMENT '开票状态来源：platform=平台刷新（refresh-status.js），manual=人工确认（商家线下已开票）',
+                                                            COMMENT '开票状态来源：platform=平台刷新，manual=人工确认（商家线下已开票）',
   `state_updated_at`  DATETIME      DEFAULT NULL            COMMENT '开票状态最后更新时间',
   `state_note`        VARCHAR(255)  DEFAULT NULL            COMMENT '开票状态备注（人工确认时的说明）',
   `imported_at`       DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '入库时间',
   PRIMARY KEY (`order_no`),
+  KEY `idx_user_id`        (`user_id`),
+  KEY `idx_user_seller_login`   (`user_id`, `seller_login`),
   KEY `idx_seller_login`   (`seller_login`),
   KEY `idx_seller_company` (`seller_company`),
   KEY `idx_invoice_state`  (`invoice_state`),
   KEY `idx_pay_time`       (`pay_time`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-  COMMENT='1688完成订单表（源：data/完成订单/*.xlsx）';
+  COMMENT='1688完成订单表（源：data/users/<id>/完成订单/*.xlsx）';
+
+-- 老库增量补列（新装库上面的 CREATE TABLE 已含该列）
+ALTER TABLE `invoice_order`
+  ADD COLUMN IF NOT EXISTS `user_id` INT NOT NULL DEFAULT 1
+  COMMENT '数据归属用户ID（多租户隔离键，见 app_user.id）' AFTER `order_no`;
+ALTER TABLE `invoice_order` ADD KEY IF NOT EXISTS `idx_user_id` (`user_id`);
+ALTER TABLE `invoice_order` ADD KEY IF NOT EXISTS `idx_user_seller_login` (`user_id`, `seller_login`);
 
 -- ----------------------------------------------------------------------------
 -- 表 2: issued_invoice —— 历史已开票数据表（税务局全量发票导出）
---   数据来源: data/已开票订单/*.xlsx（电子税务局「全量发票查询」导出）
---   说明: 一行 = 一张发票的一个明细行；数电票以 e_invoice_no 标识发票。
---         seller_name 是税务局口径的销方名称，与订单里的商家名称不一致，
---         需通过 seller_name_mapping 映射后写入 seller_company 供统计使用。
+--   数据来源: data/users/<user_id>/已开票订单/*.xlsx（电子税务局「全量发票查询」导出）
 -- ----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS `issued_invoice` (
   `id`                BIGINT        NOT NULL AUTO_INCREMENT COMMENT '自增主键',
-  `row_hash`          CHAR(40)      NOT NULL                COMMENT '行指纹（md5，用于重复导入自动去重）',
+  `user_id`           INT           NOT NULL DEFAULT 1      COMMENT '数据归属用户ID（多租户隔离键，见 app_user.id）',
+  `row_hash`          CHAR(40)      NOT NULL                COMMENT '行指纹（md5，用于重复导入自动去重；与 user_id 组成唯一键）',
   `seq_no`            INT           DEFAULT NULL            COMMENT '税务局导出文件中的序号',
   `invoice_code`      VARCHAR(32)   DEFAULT NULL            COMMENT '发票代码（数电票为空）',
   `invoice_no`        VARCHAR(32)   DEFAULT NULL            COMMENT '发票号码',
@@ -93,57 +136,70 @@ CREATE TABLE IF NOT EXISTS `issued_invoice` (
   `drawer`            VARCHAR(64)   DEFAULT NULL            COMMENT '开票人',
   `remark`            VARCHAR(512)  DEFAULT NULL            COMMENT '备注（常含1688店铺名线索，如「1688 谨锐优选」）',
   `source_sheet`      VARCHAR(64)   DEFAULT NULL            COMMENT '来源工作表（信息汇总表 / 发票基础信息）',
-  `source_file`       VARCHAR(160)  DEFAULT NULL            COMMENT '来源文件名（data/已开票订单/xxx.xlsx）',
+  `source_file`       VARCHAR(160)  DEFAULT NULL            COMMENT '来源文件名',
   `imported_at`       DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '入库时间',
   PRIMARY KEY (`id`),
-  UNIQUE KEY `uk_row_hash`         (`row_hash`),
+  UNIQUE KEY `uk_user_row_hash`    (`user_id`, `row_hash`),
+  KEY `idx_user_id`                (`user_id`),
   KEY `idx_e_invoice_no`           (`e_invoice_no`),
   KEY `idx_seller_name`            (`seller_name`),
   KEY `idx_seller_company`         (`seller_company`),
   KEY `idx_invoice_date`           (`invoice_date`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-  COMMENT='历史已开票数据表（源：data/已开票订单/*.xlsx，税务局全量发票导出）';
+  COMMENT='历史已开票数据表（源：data/users/<id>/已开票订单/*.xlsx）';
+
+-- 老库增量升级：补 user_id 列；唯一键由「全局 row_hash」改为「(user_id,row_hash)」
+ALTER TABLE `issued_invoice`
+  ADD COLUMN IF NOT EXISTS `user_id` INT NOT NULL DEFAULT 1
+  COMMENT '数据归属用户ID（多租户隔离键，见 app_user.id）' AFTER `id`;
+ALTER TABLE `issued_invoice` DROP INDEX IF EXISTS `uk_row_hash`;
+ALTER TABLE `issued_invoice` ADD UNIQUE KEY IF NOT EXISTS `uk_user_row_hash` (`user_id`, `row_hash`);
+ALTER TABLE `issued_invoice` ADD KEY IF NOT EXISTS `idx_user_id` (`user_id`);
 
 -- ----------------------------------------------------------------------------
--- 表 3: seller_name_mapping —— 销方名称 ↔ 1688 商家名称 映射表
---   税务局销方名称与订单里的商家名称不一致，自动匹配不上的由人工在
---   看板「名称映射」页维护；后续统计一律通过本表建立名称关系。
+-- 表 3: seller_name_mapping —— 销方名称 ↔ 1688 商家名称 映射表（按用户隔离）
 -- ----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS `seller_name_mapping` (
   `id`              INT          NOT NULL AUTO_INCREMENT COMMENT '自增主键',
-  `tax_seller_name` VARCHAR(255) NOT NULL                COMMENT '税务局销方名称（唯一键，被映射的一方）',
+  `user_id`         INT          NOT NULL DEFAULT 1      COMMENT '数据归属用户ID（多租户隔离键，见 app_user.id）',
+  `tax_seller_name` VARCHAR(255) NOT NULL                COMMENT '税务局销方名称（与 user_id 组成唯一键）',
   `seller_company`  VARCHAR(255) NULL                    COMMENT '对应的1688卖家公司名',
   `seller_login`    VARCHAR(128) NULL                    COMMENT '对应的1688卖家会员名（登录ID）',
   `match_type`      VARCHAR(16)  NOT NULL DEFAULT 'manual' COMMENT '匹配方式：auto=系统自动匹配，manual=人工维护',
   `match_rule`      VARCHAR(64)  DEFAULT NULL            COMMENT '自动匹配命中的规则（exact / normalized / contains / login / remark）',
   `is_confirmed`    TINYINT(1)   NOT NULL DEFAULT 0      COMMENT '是否人工确认：0=自动匹配待人工复核，1=已确认',
-  `is_ignored`      TINYINT(1)   NOT NULL DEFAULT 0      COMMENT '是否忽略：1=该销方名称确认无对应1688商家，从待比对列表与统计中剔除（可在名称映射页恢复）',
+  `is_ignored`      TINYINT(1)   NOT NULL DEFAULT 0      COMMENT '是否忽略：1=该销方名称确认无对应1688商家，从待比对列表与统计中剔除（可恢复）',
   `note`            VARCHAR(255) DEFAULT NULL            COMMENT '备注',
   `created_at`      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
   `updated_at`      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
   PRIMARY KEY (`id`),
-  UNIQUE KEY `uk_tax_seller_name` (`tax_seller_name`),
-  KEY `idx_seller_login`          (`seller_login`),
-  KEY `idx_seller_company`        (`seller_company`),
-  KEY `idx_is_ignored`            (`is_ignored`)
+  UNIQUE KEY `uk_user_tax_name` (`user_id`, `tax_seller_name`),
+  KEY `idx_user_id`             (`user_id`),
+  KEY `idx_seller_login`        (`seller_login`),
+  KEY `idx_seller_company`      (`seller_company`),
+  KEY `idx_is_ignored`          (`is_ignored`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-  COMMENT='税务局销方名称与1688商家名称的映射表（人工可比对维护；is_ignored=1 表示确认无对应商家）';
+  COMMENT='税务局销方名称与1688商家名称的映射表（按用户隔离；is_ignored=1 表示确认无对应商家）';
 
--- 老库增量补列（新装库上面的 CREATE TABLE 已含该列；MariaDB 支持 IF NOT EXISTS）
---   is_ignored = 1：人工确认该税务局销方名称没有对应的 1688 商家，从待比对列表与统计中剔除
+-- 老库增量升级
+ALTER TABLE `seller_name_mapping`
+  ADD COLUMN IF NOT EXISTS `user_id` INT NOT NULL DEFAULT 1
+  COMMENT '数据归属用户ID（多租户隔离键，见 app_user.id）' AFTER `id`;
 ALTER TABLE `seller_name_mapping`
   ADD COLUMN IF NOT EXISTS `is_ignored` TINYINT(1) NOT NULL DEFAULT 0
-  COMMENT '是否忽略：1=该销方名称确认无对应1688商家，从待比对列表与统计中剔除（可在名称映射页恢复）'
-  AFTER `is_confirmed`;
+  COMMENT '是否忽略：1=该销方名称确认无对应1688商家，从待比对列表与统计中剔除（可恢复）' AFTER `is_confirmed`;
+ALTER TABLE `seller_name_mapping` DROP INDEX IF EXISTS `uk_tax_seller_name`;
+ALTER TABLE `seller_name_mapping` ADD UNIQUE KEY IF NOT EXISTS `uk_user_tax_name` (`user_id`, `tax_seller_name`);
+ALTER TABLE `seller_name_mapping` ADD KEY IF NOT EXISTS `idx_user_id` (`user_id`);
+ALTER TABLE `seller_name_mapping` ADD KEY IF NOT EXISTS `idx_is_ignored` (`is_ignored`);
 
 -- ----------------------------------------------------------------------------
--- 表 4: send_log —— 催收消息发送记录（替代原 data/sent-log.json）
---   一行 = 一次催收发送（不再按天合并），看板由此表统计
+-- 表 4: send_log —— 催收消息发送记录（一行 = 一次发送尝试）
 --   「催收次数」= SUM(result='ok')、「最近催收时间」= MAX(sent_at)。
---   amount / order_nos 记录本次催收「当时」的待开票金额与订单号，供看板点「催收次数」查看历史。
 -- ----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS `send_log` (
   `id`             INT          NOT NULL AUTO_INCREMENT COMMENT '自增主键',
+  `user_id`        INT          NOT NULL DEFAULT 1      COMMENT '数据归属用户ID（多租户隔离键，见 app_user.id）',
   `send_date`      DATE         NOT NULL                COMMENT '发送日期（用于按天统计/每日限额）',
   `seller_login`   VARCHAR(128) NOT NULL                COMMENT '卖家会员名（1688登录ID）',
   `seller_company` VARCHAR(255) DEFAULT NULL            COMMENT '卖家公司名（冗余，便于直接查看）',
@@ -154,13 +210,18 @@ CREATE TABLE IF NOT EXISTS `send_log` (
   `error`          VARCHAR(255) DEFAULT NULL            COMMENT '失败原因摘要（result=fail 时记录，便于排查）',
   `sent_at`        DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '发送时间（最近催收时间取 MAX）',
   PRIMARY KEY (`id`),
+  KEY `idx_user_id`      (`user_id`),
+  KEY `idx_user_login`   (`user_id`, `seller_login`),
   KEY `idx_seller_login` (`seller_login`),
   KEY `idx_sent_at`      (`sent_at`),
   KEY `idx_send_date`    (`send_date`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   COMMENT='催收消息发送记录（一行=一次发送，看板统计催收次数与最近催收时间）';
 
--- 老库增量补列（新装库上面的 CREATE TABLE 已含；MariaDB 支持 IF NOT EXISTS）
+-- 老库增量补列
+ALTER TABLE `send_log`
+  ADD COLUMN IF NOT EXISTS `user_id` INT NOT NULL DEFAULT 1
+  COMMENT '数据归属用户ID（多租户隔离键，见 app_user.id）' AFTER `id`;
 ALTER TABLE `send_log`
   ADD COLUMN IF NOT EXISTS `amount` DECIMAL(14,2) DEFAULT NULL
   COMMENT '本次催收的待开票总金额（发送当时的快照；老记录可能为空）' AFTER `channel`;
@@ -170,13 +231,15 @@ ALTER TABLE `send_log`
 ALTER TABLE `send_log`
   ADD COLUMN IF NOT EXISTS `error` VARCHAR(255) DEFAULT NULL
   COMMENT '失败原因摘要（result=fail 时记录，便于排查）' AFTER `order_nos`;
+ALTER TABLE `send_log` ADD KEY IF NOT EXISTS `idx_user_id` (`user_id`);
+ALTER TABLE `send_log` ADD KEY IF NOT EXISTS `idx_user_login` (`user_id`, `seller_login`);
 
 -- ----------------------------------------------------------------------------
 -- 表 5: import_log —— 数据导入日志
---   每次执行导入都会记录一行，方便排查「数据为什么没更新」。
 -- ----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS `import_log` (
   `id`          INT          NOT NULL AUTO_INCREMENT COMMENT '自增主键',
+  `user_id`     INT          NOT NULL DEFAULT 1      COMMENT '数据归属用户ID（多租户隔离键，见 app_user.id）',
   `kind`        VARCHAR(16)  NOT NULL                COMMENT '导入类型：order=完成订单，invoice=已开票订单',
   `source_file` VARCHAR(160) NOT NULL                COMMENT '来源文件名',
   `total_rows`  INT          DEFAULT NULL            COMMENT '文件数据总行数',
@@ -188,19 +251,25 @@ CREATE TABLE IF NOT EXISTS `import_log` (
   `message`     VARCHAR(512) DEFAULT NULL            COMMENT '错误或提示信息',
   `imported_at` DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '导入时间',
   PRIMARY KEY (`id`),
+  KEY `idx_user_id`     (`user_id`),
   KEY `idx_kind`        (`kind`),
   KEY `idx_imported_at` (`imported_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   COMMENT='数据导入日志';
 
+ALTER TABLE `import_log`
+  ADD COLUMN IF NOT EXISTS `user_id` INT NOT NULL DEFAULT 1
+  COMMENT '数据归属用户ID（多租户隔离键，见 app_user.id）' AFTER `id`;
+ALTER TABLE `import_log` ADD KEY IF NOT EXISTS `idx_user_id` (`user_id`);
+
 -- ----------------------------------------------------------------------------
--- 视图: v_unmatched_seller_name —— 待人工比对的销方名称清单
---   看板「名称映射」页直接读这个视图。
---   排除两类销方名称：① 已建立映射（seller_company 非空）
---                     ② 人工已忽略（is_ignored = 1，确认没有对应的 1688 商家）
+-- 视图: v_unmatched_seller_name —— 待人工比对的销方名称清单（按用户分组）
+--   看板「名称映射」页用：SELECT * FROM v_unmatched_seller_name WHERE user_id = ?
+--   排除两类销方名称：① 已建立映射（seller_company 非空）② 人工已忽略（is_ignored=1）
 -- ----------------------------------------------------------------------------
 CREATE OR REPLACE VIEW `v_unmatched_seller_name` AS
 SELECT
+  i.`user_id`                           AS `user_id`,
   i.`seller_name`                       AS `tax_seller_name`,
   COUNT(*)                              AS `invoice_rows`,
   SUM(i.`total_amount`)                 AS `invoice_amount`,
@@ -210,7 +279,8 @@ SELECT
   MAX(i.`remark`)                       AS `remark`
 FROM `issued_invoice` i
 LEFT JOIN `seller_name_mapping` m
-       ON m.`tax_seller_name` = i.`seller_name`
+       ON m.`user_id` = i.`user_id`
+      AND m.`tax_seller_name` = i.`seller_name`
       AND (m.`is_ignored` = 1 OR m.`seller_company` IS NOT NULL)
 WHERE m.`id` IS NULL
-GROUP BY i.`seller_name`;
+GROUP BY i.`user_id`, i.`seller_name`;

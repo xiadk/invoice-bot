@@ -1,65 +1,151 @@
 /**
- * server.js — 发票催收控制台（本地服务器）
+ * server.js — 发票催收控制台（多用户 / 可云端部署）
  *
- * 启动: node server.js   →  浏览器打开 http://localhost:8787
+ * 启动: node server.js   →  浏览器打开 http://localhost:8787 （生产建议放在 HTTPS 反代后面）
  *
- * 功能:
- *   GET  /                    控制台页面
- *   GET  /api/data            看板聚合数据：**按公司一行**，会员名在 companies[].members 子树
- *                             （订单+发票+催收全部来自 MySQL）
- *   GET  /api/seller-detail   单个会员名的订单明细 + 已开票明细（展开订单时按需加载）
- *   GET  /api/collect-history 历史催收记录（点「催收次数」查看）：?loginId= 或 ?company=
- *   POST /api/send            {loginIds: [...]} 批量发送催收消息（loginId = 会员名）
- *   POST /api/import          重新扫描 data/ 下的 Excel 并全量导入 MySQL
- *   GET  /api/mapping         销方名称映射表（有效 + 已忽略）+ 待人工比对的销方名称 + 可选卖家列表
- *   POST /api/mapping         新增/修改一条名称映射（人工比对结果；会自动取消该名称的忽略标记）
- *   POST /api/mapping/delete  删除一条名称映射
- *   POST /api/mapping/ignore  忽略/恢复一个销方名称 {taxSellerName, ignored}（确认无对应 1688 商家，
- *                             忽略后不再出现在待比对列表、不参与自动匹配与统计，可在「已忽略」区恢复）
- *   POST /api/order-state     人工确认已开票：{orderNo, action:'confirm'|'cancel'} 单订单，
- *                             或 {loginId, action:'confirm-all'|'cancel-all'} 整会员名批量（商家线下开票）
+ * ── 账号与权限 ────────────────────────────────────────────────────────────
+ *   登录页 /login（只能登录，不能注册）；账号由超级管理员在「系统管理」里创建。
+ *   超级管理员 admin（首次建库自动创建，默认密码 admin，请立即修改）：
+ *     · 新增用户（账号/密码/公司名称/纳税人识别号/收票邮箱）、重置密码、启用/禁用
+ *     · 按用户名查看任意用户的看板与名称映射数据（只读）
+ *   普通用户：只能看自己的「看板」与「名称映射」，看不到「系统管理」。
+ *   所有业务数据按 user_id 隔离（见 sql/schema.sql 与 lib/tenancy.js）。
  *
- * 统计口径:
+ * ── 1688 登录态（Playwright） ─────────────────────────────────────────────
+ *   每个用户一份登录态 data/users/<id>/state-1688.json。
+ *   看板检测到该用户还没登录（或登录态失效）时，会自动弹出「云端登录」窗口：
+ *   服务器上的 Chromium 画面用 CDP 截屏实时推到网页（WebSocket /ws/browser），
+ *   用户直接扫码/输账号即可，登录完保存登录态，之后发催收消息复用。
+ *
+ * ── 接口 ──────────────────────────────────────────────────────────────────
+ *   认证:   POST /api/auth/login | POST /api/auth/logout | GET /api/auth/me | POST /api/auth/password
+ *   看板:   GET  /api/data | GET /api/seller-detail | GET /api/collect-history
+ *   发送:   POST /api/send | GET /api/task | POST /api/task/stop
+ *   数据:   POST /api/import | GET /api/import-log
+ *   映射:   GET  /api/mapping | POST /api/mapping | POST /api/mapping/delete | POST /api/mapping/ignore
+ *           POST /api/order-state
+ *   配置:   GET  /api/config | POST /api/config（仅管理员）
+ *   登录态: GET  /api/browser/status | POST /api/browser/open | POST /api/browser/close
+ *           POST /api/browser/save | POST /api/browser/navigate | WS /ws/browser
+ *   管理:   GET  /api/admin/users | POST /api/admin/users/create | /update | /password | /status | /delete
+ *   运维:   GET  /healthz
+ *
+ *   管理员查看他人数据：任何读接口加 ?tenant=<用户ID>（普通用户会被忽略，强制只看自己）。
+ *
+ * ── 统计口径 ──────────────────────────────────────────────────────────────
  *   已开票金额 = 税务局文件（issued_invoice）中该商家的「价税合计」明细总和
- *   已开票数量 = 税务局文件里该商家的「发票张数」，按数电票号（e_invoice_no）/发票号去重。
- *               注意：税务局导出是「一张发票多个货物明细各占一行」，同一张发票上的
- *               多个货物行共用同一个数电票号，去重后只算 1 张（明细行数另见 invoiceRowCount）
+ *   已开票数量 = 税务局文件里该商家的「发票张数」，按数电票号（e_invoice_no）/发票号去重
  *   待开票金额 = 订单金额 − 已开票金额（不小于 0）
- *   催收次数 = send_log 表里 result='ok' 的**成功**发送次数（失败尝试不计入次数）
- *   最近催收时间 = 最近一次**成功**发送的时间；催收按**会员名**记录
- *
- * 看板层级: 公司（一行）→ 会员名/1688 店铺（members 子树，各自带订单与催收按钮）。
- *   发票额按公司归集，同公司多会员名时只挂在「主行」（映射表登记的会员名，否则订单数最多），
- *   非主行会员名的待开票金额 = 其订单总额（公司发票额不摊到它头上），避免重复计入。
- *   催收消息内容按**会员名**口径：{amount}=该会员名待开票金额，{orderId}=该会员名未开票订单。
- *
- * 数据源: MySQL 数据库 invoice_bot（连接参数见 config.json 的 mysql 段）
- *   invoice_order        1688 完成订单（源 data/完成订单/*.xlsx；含人工确认 state_source='manual'）
- *   issued_invoice       历史已开票数据（源 data/已开票订单/*.xlsx，税务局导出）
- *   seller_name_mapping  税务局销方名称 → 1688 商家名称 映射表（is_ignored=1 表示确认无对应商家，已忽略，
- *                        从待比对列表与未匹配计数中剔除，可在名称映射页恢复）
- *   send_log             催收发送记录（一行=一次发送尝试，result=ok/fail）
- *
- * 注意: 提交开票申请（/api/apply）已在二次开发中移除，看板不再提供该按钮。
+ *   催收次数   = send_log 表里 result='ok' 的成功发送次数（失败尝试不计入次数）
+ *   最近催收时间 = 最近一次成功发送的时间；催收按「会员名」记录
  */
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const { WebSocketServer } = require('ws');
 const db = require('./db');
+const auth = require('./lib/auth');
+const tenancy = require('./lib/tenancy');
 const { runImport } = require('./import-to-db');
-const { launch } = require('./lib/browser');
+const { launch, resolveHeadless, loadConfig } = require('./lib/browser');
+const { LiveBrowser } = require('./lib/live-browser');
 const { buildMessages, sendToSeller } = require('./lib/sender');
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-const PORT = 8787;
+const PORT = Number(process.env.PORT) || 8787;
 const ROOT = __dirname;
 const DATA = path.join(ROOT, 'data');
 
-// ── 数据加载（全部走 MySQL） ──
+// ─────────────────────────────────────────────────────────────────────────
+// HTTP 工具
+// ─────────────────────────────────────────────────────────────────────────
+function sendJson(res, code, obj) {
+  const body = JSON.stringify(obj);
+  res.writeHead(code, { 'content-type': 'application/json; charset=utf-8' });
+  res.end(body);
+}
+function sendHtml(res, file) {
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+  res.end(fs.readFileSync(path.join(ROOT, file), 'utf-8'));
+}
+function redirect(res, to) {
+  res.writeHead(302, { location: to });
+  res.end();
+}
+function readBody(req) {
+  return new Promise((resolve) => {
+    let body = '';
+    let tooBig = false;
+    req.on('data', (c) => { body += c; if (body.length > 2e6) { tooBig = true; req.destroy(); } });
+    req.on('end', () => { if (tooBig) return resolve({}); try { resolve(JSON.parse(body || '{}')); } catch (e) { resolve({}); } });
+  });
+}
 
-/** 卖家聚合列表：订单维度 + 税务局已开票维度（通过 seller_name_mapping 的名称关系统计） */
-async function loadSellers() {
+// ─────────────────────────────────────────────────────────────────────────
+// 认证 / 权限
+// ─────────────────────────────────────────────────────────────────────────
+/** 取当前登录用户（校验会话签名 + token_version + 账号状态） */
+async function currentUser(req) {
+  const sess = auth.sessionFromRequest(req);
+  if (!sess) return null;
+  const rows = await db.query('SELECT * FROM app_user WHERE id = ?', [sess.u]);
+  const u = rows[0];
+  if (!u) return null;
+  if (u.status !== 'active') return null;
+  if ((Number(u.token_version) || 1) !== Number(sess.v)) return null;
+  return u;
+}
+
+/** 公开的用户信息（不下发密码哈希） */
+function publicUser(u) {
+  if (!u) return null;
+  return {
+    id: u.id,
+    username: u.username,
+    role: u.role,
+    status: u.status,
+    companyName: u.company_name || '',
+    taxNo: u.tax_no || '',
+    email: u.email || '',
+    displayName: u.display_name || '',
+    mustChangePassword: !!u.must_change_password,
+    lastLoginAt: u.last_login_at,
+    createdAt: u.created_at,
+  };
+}
+
+/**
+ * 解析本次请求操作的目标租户：
+ *   · 普通用户 → 只能是自己（忽略 tenant 参数）
+ *   · 管理员 → 可用 ?tenant=<id> 或请求头 x-tenant-id 查看他人数据
+ */
+function tenantOf(req, url, user) {
+  if (user.role === 'admin') {
+    const t = url.searchParams.get('tenant') || req.headers['x-tenant-id'];
+    if (t !== undefined && t !== null && String(t) !== '') {
+      const n = Number(t);
+      if (Number.isInteger(n) && n > 0) return n;
+    }
+  }
+  return user.id;
+}
+
+/** 写操作只允许作用于自己的数据（管理员查看他人为只读） */
+function assertWritable(user, tenantId) {
+  if (Number(tenantId) !== Number(user.id)) {
+    const err = new Error('查看他人数据为只读模式，无法修改');
+    err.code = 403;
+    throw err;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// 数据加载（全部按 user_id 隔离）
+// ─────────────────────────────────────────────────────────────────────────
+
+/** 某用户的卖家聚合列表：订单维度 + 税务局已开票维度 */
+async function loadSellers(userId) {
   const orderRows = await db.query(`
     SELECT
       COALESCE(NULLIF(o.seller_login,''), o.seller_company) AS loginId,
@@ -76,21 +162,20 @@ async function loadSellers() {
                      THEN COALESCE(o.pay_amount,0) ELSE 0 END), 2) AS manualIssuedAmount,
       MAX(o.pay_time)                                       AS lastPayTime
     FROM invoice_order o
-    WHERE COALESCE(NULLIF(o.seller_login,''), o.seller_company) IS NOT NULL
+    WHERE o.user_id = ?
+      AND COALESCE(NULLIF(o.seller_login,''), o.seller_company) IS NOT NULL
     GROUP BY loginId
-  `);
+  `, [userId]);
 
-  // 催收记录（send_log 一行 = 一次发送尝试）：
-  //   催收次数 = **只计成功**（result='ok'）；失败尝试单独计数，不计入催收次数
-  //   最近催收时间 = 最近一次**成功**催收的时间
+  // 催收记录：催收次数只计成功（result='ok'），最近催收时间取最近一次成功
   const sendRows = await db.query(`
     SELECT seller_login,
            SUM(result = 'ok')  AS sendCount,
            SUM(result <> 'ok') AS failCount,
            MAX(CASE WHEN result = 'ok' THEN sent_at END) AS lastSentAt
-    FROM send_log
+    FROM send_log WHERE user_id = ?
     GROUP BY seller_login
-  `);
+  `, [userId]);
   const sendByLogin = new Map(sendRows.map((r) => [r.seller_login, r]));
 
   // 已开票数据按「映射后的商家名称」汇总
@@ -102,17 +187,16 @@ async function loadSellers() {
            MIN(invoice_date)                                           AS firstInvoiceDate,
            MAX(invoice_date)                                           AS lastInvoiceDate
     FROM issued_invoice
-    WHERE seller_company IS NOT NULL AND seller_company <> ''
+    WHERE user_id = ? AND seller_company IS NOT NULL AND seller_company <> ''
     GROUP BY seller_company
-  `);
+  `, [userId]);
   const invByCompany = new Map(invRows.map((r) => [r.company, r]));
 
-  // 同一家公司可能有多个卖家会员名（多个1688店铺）。发票是按「公司」维度统计的，
-  // 为避免同一笔发票额被重复计入多行，只把它挂在「主行」上：
-  // 优先取名称映射表登记的会员名，其次取订单数最多的那行；其余行标注发票额归属。
+  // 同一家公司可能对应多个会员名，发票额只挂在「主行」上避免重复计入
   const ownerRows = await db.query(
     `SELECT seller_company, seller_login FROM seller_name_mapping
-     WHERE seller_company IS NOT NULL AND seller_login IS NOT NULL`
+     WHERE user_id = ? AND seller_company IS NOT NULL AND seller_login IS NOT NULL`,
+    [userId]
   );
   const ownerByCompany = new Map(ownerRows.map((r) => [r.seller_company, r.seller_login]));
 
@@ -133,13 +217,11 @@ async function loadSellers() {
       manualIssuedAmount: (Number(r.manualIssuedAmount) || 0).toFixed(2),
       invoicedAmount: (inv ? Number(inv.invoiceAmount) || 0 : 0).toFixed(2),
       invoiceCount: inv ? Number(inv.invoiceCount) || 0 : 0,
-      // 税务局明细「货物行」条数：一张发票上有多个货物明细时，行数会大于发票张数
       invoiceRowCount: inv ? Number(inv.invoiceRowCount) || 0 : 0,
       lastInvoiceDate: inv ? inv.lastInvoiceDate : null,
       firstInvoiceDate: inv ? inv.firstInvoiceDate : null,
-      invoiceOwnerLoginId: null,      // 非空表示该行发票额已计入本公司的另一行
+      invoiceOwnerLoginId: null,
       invoiceOwnerLabel: null,
-      // 催收（send_log）：sendCount = 成功次数（失败不计），sendFailCount = 失败尝试次数
       sendCount: st ? Number(st.sendCount) || 0 : 0,
       sendFailCount: st ? Number(st.failCount) || 0 : 0,
       lastSentAt: st ? st.lastSentAt : null,
@@ -147,7 +229,6 @@ async function loadSellers() {
     };
   });
 
-  // 同公司多行 → 指定一个「主行」持有发票额
   const groupByCompany = new Map();
   for (const row of list) {
     if (!row.company) continue;
@@ -171,29 +252,20 @@ async function loadSellers() {
     }
   }
 
-  // 待开票金额 = max(订单总额 − 已开票金额, 0)
   for (const row of list) {
     const totalAmount = Number(row.totalAmount) || 0;
     const invoicedAmount = Number(row.invoicedAmount) || 0;
-    row.overInvoiced = invoicedAmount > totalAmount; // 发票金额大于订单导出金额（订单导出不全时会出现）
+    row.overInvoiced = invoicedAmount > totalAmount;
     row.pendingAmount = Math.max(totalAmount - invoicedAmount, 0).toFixed(2);
     row.pending = Number(row.pendingAmount) > 0 ? 1 : 0;
   }
-  // 待开票金额降序，无待开票的沉底
   list.sort((a, b) => Number(b.pendingAmount) - Number(a.pendingAmount));
   return list;
 }
 
-/**
- * 公司聚合（看板主视图）：**一家公司只出一行**，会员名（1688 店铺）作为 members 子树。
- * 会员名行由 loadSellers() 产出（含发票额归属去重、催收统计），这里只做向上汇总：
- *   - 金额/单数/状态计数 = 各会员名求和
- *   - 税务局发票额与张数：非归属行本来就是 0，求和后正好等于公司口径，不会重复计入
- *   - 待开票金额 = max(公司订单总额 − 公司税务局已开票额, 0)（按公司总额重算，避免逐会员名 max 截断误差）
- * 催收仍是**会员名级**（聊天 touid 依赖会员名），所以每个会员名带 canSend。
- */
-async function loadCompanies() {
-  const members = await loadSellers();
+/** 公司聚合（看板主视图）：一家公司一行，会员名作为 members 子树 */
+async function loadCompanies(userId) {
+  const members = await loadSellers(userId);
   const byCompany = new Map();
   for (const m of members) {
     const key = m.company || m.loginId;
@@ -209,7 +281,6 @@ async function loadCompanies() {
     const totalAmount = sum(rows, 'totalAmount');
     const invoicedAmount = sum(rows, 'invoicedAmount');
     const pendingAmount = Math.max(totalAmount - invoicedAmount, 0);
-    // 会员名按「待开票金额」降序，方便优先催收待开票多的店铺
     rows.sort((a, b) => Number(b.pendingAmount) - Number(a.pendingAmount));
     companies.push({
       company,
@@ -250,12 +321,11 @@ async function loadCompanies() {
         lastInvoiceDate: m.lastInvoiceDate,
         pendingAmount: m.pendingAmount,
         overInvoiced: m.overInvoiced,
-        invoiceOwnerLoginId: m.invoiceOwnerLoginId,   // 非空=发票额已计入本公司另一会员名
+        invoiceOwnerLoginId: m.invoiceOwnerLoginId,
         invoiceOwnerLabel: m.invoiceOwnerLabel,
         sendCount: m.sendCount,
         sendFailCount: m.sendFailCount,
         lastSentAt: m.lastSentAt,
-        // 催收按钮可用性：有待开票金额 且 还有未开票订单 且 有会员名（touid 需要）
         canSend: Number(m.pendingAmount) > 0 && m.unissuedCount > 0 && !!m.sellerLogin,
       })),
     });
@@ -264,86 +334,77 @@ async function loadCompanies() {
   return companies;
 }
 
-/** 单个卖家的订单明细 + 已开票明细（看板展开行时按需拉取） */
-async function loadSellerDetail(loginId) {
+/** 单个卖家的订单明细 + 已开票明细 + 催收记录 */
+async function loadSellerDetail(userId, loginId) {
   const orders = await db.query(
     `SELECT order_no, pay_amount, pay_time, order_status, invoice_state, state_source, state_note, goods_title
      FROM invoice_order
-     WHERE COALESCE(NULLIF(seller_login,''), seller_company) = ?
+     WHERE user_id = ? AND COALESCE(NULLIF(seller_login,''), seller_company) = ?
      ORDER BY pay_time DESC`,
-    [loginId]
+    [userId, loginId]
   );
   const seller = orders.length
     ? (await db.query(
         `SELECT MAX(seller_company) AS company, MAX(seller_login) AS sellerLogin FROM invoice_order
-         WHERE COALESCE(NULLIF(seller_login,''), seller_company) = ?`, [loginId]
+         WHERE user_id = ? AND COALESCE(NULLIF(seller_login,''), seller_company) = ?`, [userId, loginId]
       ))[0]
     : { company: null, sellerLogin: null };
   const invoices = seller.company
     ? await db.query(
         `SELECT e_invoice_no, invoice_no, row_hash, seller_name, goods_name, total_amount, tax_amount, invoice_date, invoice_kind, invoice_status
-         FROM issued_invoice WHERE seller_company = ? ORDER BY invoice_date DESC, id`,
-        [seller.company]
+         FROM issued_invoice WHERE user_id = ? AND seller_company = ? ORDER BY invoice_date DESC, id`,
+        [userId, seller.company]
       )
     : [];
-  // 明细行数 = 表里货物行条数；发票张数 = 按数电票号/发票号去重（一张票多个货物行只计 1 张）
   const invoiceRowCount = invoices.length;
-  const invoiceCount = new Set(
-    invoices.map((v) => v.e_invoice_no || v.invoice_no || v.row_hash)
-  ).size;
-  // 催收记录明细（最近 50 次），与看板「催收次数/最近催收时间」同源
+  const invoiceCount = new Set(invoices.map((v) => v.e_invoice_no || v.invoice_no || v.row_hash)).size;
   const sendLogs = seller.sellerLogin
     ? await db.query(
         `SELECT send_date, sent_at, result, channel, error FROM send_log
-         WHERE seller_login = ? ORDER BY sent_at DESC, id DESC LIMIT 50`,
-        [seller.sellerLogin]
+         WHERE user_id = ? AND seller_login = ? ORDER BY sent_at DESC, id DESC LIMIT 50`,
+        [userId, seller.sellerLogin]
       )
     : [];
   return { orders, invoices, company: seller.company, sendLogs, invoiceCount, invoiceRowCount };
 }
 
-/** 催收统计 + 已催收卖家登录ID集合（来自 send_log 表；催收次数只计成功） */
-async function loadSendStats() {
-  const rows = await db.query(`
+/** 催收统计（来自 send_log；催收次数只计成功） */
+async function loadSendStats(userId) {
+  return db.query(`
     SELECT seller_login AS login,
            SUM(result = 'ok')  AS sendCount,
            SUM(result <> 'ok') AS failCount,
            MAX(CASE WHEN result = 'ok' THEN sent_at END) AS lastSentAt
-    FROM send_log
+    FROM send_log WHERE user_id = ?
     GROUP BY seller_login
-  `);
-  return rows;
+  `, [userId]);
 }
 
-/**
- * 历史催收记录（看板点「催收次数」查看）：
- *   传 loginId → 该会员名的全部发送记录；传 company → 该公司下所有会员名的发送记录。
- *   每行 = 一次发送尝试，含发送当时的待开票金额与订单号快照（老记录可能为空）。
- */
-async function loadCollectHistory({ loginId, company }) {
+/** 历史催收记录：传 loginId → 该会员名；传 company → 该公司下所有会员名 */
+async function loadCollectHistory(userId, { loginId, company }) {
   let rows = [];
   if (loginId) {
     rows = await db.query(
       `SELECT sent_at, result, channel, amount, order_nos, error, seller_login,
               COALESCE(NULLIF(seller_login,''), seller_company) AS scope_key
-       FROM send_log WHERE seller_login = ? ORDER BY sent_at DESC, id DESC`,
-      [loginId]
+       FROM send_log WHERE user_id = ? AND seller_login = ? ORDER BY sent_at DESC, id DESC`,
+      [userId, loginId]
     );
   } else if (company) {
-    // 该公司所有会员名的登录ID（订单表口径），连同 seller_company 一起匹配，避免漏掉早期记录
     const loginRows = await db.query(
       `SELECT DISTINCT COALESCE(NULLIF(seller_login,''), seller_company) AS login
        FROM invoice_order
-       WHERE seller_company = ? AND COALESCE(NULLIF(seller_login,''), seller_company) IS NOT NULL`,
-      [company]
+       WHERE user_id = ? AND seller_company = ? AND COALESCE(NULLIF(seller_login,''), seller_company) IS NOT NULL`,
+      [userId, company]
     );
     const ids = loginRows.map((r) => r.login).filter(Boolean);
-    const params = [company];
+    const params = [userId, company];
     let sql = `SELECT sent_at, result, channel, amount, order_nos, error, seller_login, seller_company AS scope_key
-               FROM send_log WHERE seller_company = ?`;
+               FROM send_log WHERE user_id = ? AND seller_company = ?`;
     if (ids.length) {
-      sql += ` OR seller_login IN (${ids.map(() => '?').join(',')})`;
-      params.push(...ids);
+      // OR 分支同样限定 user_id，保证跨租户不会串数据
+      sql += ` OR (user_id = ? AND seller_login IN (${ids.map(() => '?').join(',')}))`;
+      params.push(userId, ...ids);
     }
     sql += ' ORDER BY sent_at DESC, id DESC';
     rows = await db.query(sql, params);
@@ -361,35 +422,35 @@ async function loadCollectHistory({ loginId, company }) {
   return { logs, total: logs.length, okCount, failCount: logs.length - okCount };
 }
 
-// ── 浏览器会话（仅发送催收消息时使用） ──
-// 每次任务启动全新浏览器（与 CLI 行为一致）。
-// 共享浏览器会被聊天应用的本地状态（AI询盘模式等）污染，导致 touid 无法自动选中联系人。
-
-// ── 任务状态（发送进度实时可查） ──
-const taskState = {
-  running: false, type: null,           // 'send'
-  total: 0, done: 0, ok: 0, fail: 0,
-  current: null,                        // 当前正在处理的卖家
-  logs: [],                             // {time, text}
-  stopRequested: false,
-  startedAt: null, finishedAt: null,
-};
-function taskLog(text) {
+// ─────────────────────────────────────────────────────────────────────────
+// 每用户任务状态（发送进度）
+// ─────────────────────────────────────────────────────────────────────────
+const TASKS = new Map(); // userId -> taskState
+function taskFor(userId) {
+  let t = TASKS.get(userId);
+  if (!t) {
+    t = {
+      running: false, type: null, total: 0, done: 0, ok: 0, fail: 0,
+      current: null, logs: [], stopRequested: false, startedAt: null, finishedAt: null,
+    };
+    TASKS.set(userId, t);
+  }
+  return t;
+}
+function taskLog(taskState, text) {
   taskState.logs.push({ time: new Date().toLocaleTimeString('zh-CN', { hour12: false }), text });
   if (taskState.logs.length > 500) taskState.logs.splice(0, taskState.logs.length - 500);
   console.log(text);
 }
 
-/** 记录一次催收发送（send_log 一行 = 一次发送，看板据此统计次数与最近时间）
- *  amount / orderNos 为发送「当时」的快照，供看板点「催收次数」查看历史记录。
- *  error 为失败原因摘要（result=fail 时写入），便于事后排查「为什么发失败」。 */
-async function recordSent(loginId, company, result = 'ok', channel = 'web', amount = null, orderNos = null, error = null) {
+/** 记录一次催收发送（send_log 一行 = 一次发送） */
+async function recordSent(userId, loginId, company, result = 'ok', channel = 'web', amount = null, orderNos = null, error = null) {
   const now = new Date();
   const date = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
   await db.exec(
-    `INSERT INTO send_log (send_date, seller_login, seller_company, result, channel, amount, order_nos, error) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO send_log (user_id, send_date, seller_login, seller_company, result, channel, amount, order_nos, error) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
-      date, loginId, company || null, result, channel,
+      userId, date, loginId, company || null, result, channel,
       amount == null ? null : Number(amount),
       orderNos || null,
       result === 'ok' || !error ? null : String(error).split('\n')[0].slice(0, 250),
@@ -397,71 +458,83 @@ async function recordSent(loginId, company, result = 'ok', channel = 'web', amou
   );
 }
 
-// ── 发送催收消息（后台任务化，进度写入 taskState） ──
-async function doSend(loginIds) {
+/** 取用户的开票抬头（催收话术里的 {companyName}/{taxNo}/{email}） */
+async function buyerInfoOf(userId) {
+  const rows = await db.query('SELECT company_name, tax_no, email FROM app_user WHERE id = ?', [userId]);
+  const u = rows[0] || {};
+  return { companyName: u.company_name || '', taxNo: u.tax_no || '', email: u.email || '' };
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// 发送催收消息（后台任务，进度写入该用户的 taskState）
+// ─────────────────────────────────────────────────────────────────────────
+async function doSend(userId, loginIds) {
+  const taskState = taskFor(userId);
   if (taskState.running) throw new Error('已有任务在运行中');
-  const config = JSON.parse(fs.readFileSync(path.join(ROOT, 'config.json'), 'utf-8'));
+  const config = loadConfig();
   const rt = config.runtime || {};
   const gapMin = (rt.sendGapMinSec || 15) * 1000;
   const gapMax = (rt.sendGapMaxSec || 30) * 1000;
-  const data = await loadSellers();
+  const data = await loadSellers(userId);
+  const buyer = await buyerInfoOf(userId);
+  const statePath = tenancy.statePathFor(userId);
+  const runConfig = { ...config, buyerInfo: buyer }; // 话术里的抬头取该用户账号资料
 
-  Object.assign(taskState, { running: true, type: 'send', total: loginIds.length, done: 0, ok: 0, fail: 0, current: null, stopRequested: false, startedAt: new Date().toISOString(), finishedAt: null, logs: [] });
-  taskLog(`▶ 开始发送催收消息：共 ${loginIds.length} 家（启动独立浏览器）`);
+  Object.assign(taskState, {
+    running: true, type: 'send', total: loginIds.length, done: 0, ok: 0, fail: 0,
+    current: null, stopRequested: false, startedAt: new Date().toISOString(), finishedAt: null, logs: [],
+  });
+  taskLog(taskState, `▶ 开始发送催收消息：共 ${loginIds.length} 家（启动独立浏览器）`);
+  if (!fs.existsSync(statePath)) {
+    taskLog(taskState, '⚠ 未检测到 1688 登录态：若浏览器跳转登录页，请到看板右上角「登录 1688」扫码后再重试');
+  }
 
   let browser = null;
-  let loginLost = false; // 登录态失效时置位，用于中止整批
+  let loginLost = false;
   try {
-    const launched = await launch();
+    const launched = await launch({ statePath });
     browser = launched.browser;
     const context = launched.context;
-    taskLog('✓ 浏览器已启动');
+    taskLog(taskState, '✓ 浏览器已启动');
 
     for (const loginId of loginIds) {
-      if (taskState.stopRequested) { taskLog('⏹ 已手动停止'); break; }
+      if (taskState.stopRequested) { taskLog(taskState, '⏹ 已手动停止'); break; }
       const seller = data.find((s) => s.loginId === loginId);
-      if (!seller) { taskState.done++; taskState.fail++; taskLog(`✗ 卖家不存在: ${loginId}`); continue; }
-      // 没有卖家会员名的无法发旺旺（touid 依赖 loginId）
-      if (!seller.sellerLogin) { taskState.done++; taskState.fail++; taskLog(`✗ ${seller.company} 缺少卖家会员名，无法发送`); continue; }
+      if (!seller) { taskState.done++; taskState.fail++; taskLog(taskState, `✗ 卖家不存在: ${loginId}`); continue; }
+      if (!seller.sellerLogin) { taskState.done++; taskState.fail++; taskLog(taskState, `✗ ${seller.company} 缺少卖家会员名，无法发送`); continue; }
       taskState.current = seller.company;
-      const detail = await loadSellerDetail(loginId);
-      // 催收口径 = **会员名级**（聊天 touid 依赖会员名，金额/订单号也按该会员名各自统计）：
-      //   {amount}  = 该会员名的待开票金额（看板「待开票金额」列）
-      //   {orderId} = 该会员名除「已开票」外的全部订单号（平台已开票 + 人工确认的都排除）
+      const detail = await loadSellerDetail(userId, loginId);
       const toRemind = detail.orders.filter((o) => o.invoice_state !== 'issued');
       const msgSeller = {
-        loginId: seller.sellerLogin, // 关键：聊天页 touid 依赖此字段
+        loginId: seller.sellerLogin,
         amount: Number(seller.pendingAmount),
         orders: toRemind.map((o) => ({ orderId: o.order_no, amount: Number(o.pay_amount).toFixed(2) })),
       };
-      if (msgSeller.orders.length === 0) { taskState.done++; taskLog(`- ${seller.company} 无可催收订单，跳过`); continue; }
-      const messages = buildMessages(msgSeller, config);
-      // 本次催收快照（金额 = 该会员名待开票金额；订单号 = 本次催收的订单，用「；」分隔），供看板查看历史
+      if (msgSeller.orders.length === 0) { taskState.done++; taskLog(taskState, `- ${seller.company} 无可催收订单，跳过`); continue; }
+      const messages = buildMessages(msgSeller, runConfig);
       const collectAmount = Number(seller.pendingAmount) || 0;
       const collectOrderNos = msgSeller.orders.map((o) => o.orderId).join('；');
       const tSell = Date.now();
       try {
         await sendToSeller(context, msgSeller, messages);
-        await recordSent(seller.sellerLogin, seller.company, 'ok', 'web', collectAmount, collectOrderNos);
+        await recordSent(userId, seller.sellerLogin, seller.company, 'ok', 'web', collectAmount, collectOrderNos);
         taskState.ok++;
-        taskLog(`✓ ${seller.company} 发送成功 (${messages.length}条消息, ${Math.round((Date.now() - tSell) / 1000)}s) · 催收次数 +1`);
+        taskLog(taskState, `✓ ${seller.company} 发送成功 (${messages.length}条消息, ${Math.round((Date.now() - tSell) / 1000)}s) · 催收次数 +1`);
       } catch (e) {
-        // 登录态失效是环境问题（非卖家问题）：立即中止整批，且不写 send_log，避免污染统计
         if (/登录态失效/.test(e.message)) {
-          taskLog(`⛔ ${e.message}`);
-          taskLog(`■ 批量发送已中止（已完成 ${taskState.ok} 家）：请在该浏览器窗口重新登录 1688 后重试`);
+          taskLog(taskState, `⛔ ${e.message}`);
+          taskLog(taskState, `■ 批量发送已中止（已完成 ${taskState.ok} 家）：请到看板右上角「登录 1688」重新登录后重试`);
           loginLost = true;
           break;
         }
-        await recordSent(seller.sellerLogin, seller.company, 'fail', 'web', collectAmount, collectOrderNos, e.message);
+        await recordSent(userId, seller.sellerLogin, seller.company, 'fail', 'web', collectAmount, collectOrderNos, e.message);
         taskState.fail++;
-        taskLog(`✗ ${seller.company} 失败: ${e.message.split('\n')[0]} · 已记录失败尝试与原因（不计入催收次数）`);
+        taskLog(taskState, `✗ ${seller.company} 失败: ${e.message.split('\n')[0]} · 已记录失败尝试与原因（不计入催收次数）`);
       }
       taskState.done++;
       if (!loginLost && loginIds.indexOf(loginId) < loginIds.length - 1 && !taskState.stopRequested) {
         const gap = gapMin + Math.random() * (gapMax - gapMin);
-        taskLog(`… 等待 ${Math.round(gap / 1000)}s 后发下一家`);
-        // 分段等待：让「停止」在等待期间也能立即生效（否则点了停止还要干等整个间隔）
+        taskLog(taskState, `… 等待 ${Math.round(gap / 1000)}s 后发下一家`);
         const tEnd = Date.now() + gap;
         while (Date.now() < tEnd && !taskState.stopRequested) {
           await sleep(Math.min(500, tEnd - Date.now()));
@@ -469,73 +542,70 @@ async function doSend(loginIds) {
       }
     }
   } catch (e) {
-    taskLog(`✗ 任务异常: ${e.message.split('\n')[0]}`);
+    taskLog(taskState, `✗ 任务异常: ${e.message.split('\n')[0]}`);
   } finally {
     if (browser) await browser.close().catch(() => {});
   }
   taskState.running = false;
   taskState.current = null;
   taskState.finishedAt = new Date().toISOString();
-  taskLog(loginLost
+  taskLog(taskState, loginLost
     ? `■ 发送中止: 成功 ${taskState.ok}, 失败 ${taskState.fail}, 已处理 ${taskState.done}/${taskState.total}（登录态失效）`
     : `■ 发送完成: 成功 ${taskState.ok}, 失败 ${taskState.fail}, 共 ${taskState.done}/${taskState.total}`);
 }
 
-// ── 名称映射维护 ──
-
-/** 映射表（有效映射 / 已忽略分开返回）+ 待人工比对的销方名称 + 可选卖家列表 */
-async function loadMapping() {
+// ─────────────────────────────────────────────────────────────────────────
+// 名称映射维护（按用户隔离）
+// ─────────────────────────────────────────────────────────────────────────
+async function loadMapping(userId) {
   const all = await db.query(`
     SELECT m.id, m.tax_seller_name, m.seller_company, m.seller_login,
            m.match_type, m.match_rule, m.is_confirmed, m.is_ignored, m.note, m.updated_at,
-           (SELECT ROUND(SUM(total_amount),2) FROM issued_invoice i WHERE i.seller_name = m.tax_seller_name) AS invoice_amount,
-           (SELECT COUNT(*) FROM issued_invoice i WHERE i.seller_name = m.tax_seller_name) AS invoice_rows
+           (SELECT ROUND(SUM(total_amount),2) FROM issued_invoice i
+             WHERE i.user_id = m.user_id AND i.seller_name = m.tax_seller_name) AS invoice_amount,
+           (SELECT COUNT(*) FROM issued_invoice i
+             WHERE i.user_id = m.user_id AND i.seller_name = m.tax_seller_name) AS invoice_rows
     FROM seller_name_mapping m
+    WHERE m.user_id = ?
     ORDER BY m.is_ignored ASC, (m.seller_company IS NULL) DESC, invoice_amount DESC
-  `);
+  `, [userId]);
   const mappings = all.filter((m) => !m.is_ignored);
   const ignored = all.filter((m) => m.is_ignored);
-  // 待人工比对：视图已排除「已映射」与「已忽略」两类
-  const unmatched = await db.query('SELECT * FROM v_unmatched_seller_name ORDER BY invoice_amount DESC');
+  const unmatched = await db.query(
+    'SELECT * FROM v_unmatched_seller_name WHERE user_id = ? ORDER BY invoice_amount DESC', [userId]
+  );
   const sellers = await db.query(`
     SELECT COALESCE(NULLIF(seller_login,''), seller_company) AS loginId,
            MAX(seller_company) AS company, MAX(seller_login) AS sellerLogin
     FROM invoice_order
-    WHERE seller_company IS NOT NULL
+    WHERE user_id = ? AND seller_company IS NOT NULL
     GROUP BY loginId ORDER BY company
-  `);
+  `, [userId]);
   return { mappings, ignored, unmatched, sellers, unmatchedCount: unmatched.length, ignoredCount: ignored.length };
 }
 
-/** 保存一条人工映射，并回填 issued_invoice.seller_company（同时取消该名称的忽略标记） */
-async function saveMapping({ taxSellerName, sellerLogin, sellerCompany, note }) {
+async function saveMapping(userId, { taxSellerName, sellerLogin, sellerCompany, note }) {
   if (!taxSellerName) throw new Error('缺少 taxSellerName');
   if (!sellerCompany) throw new Error('请选择对应的1688商家');
   await db.exec(
-    `INSERT INTO seller_name_mapping (tax_seller_name, seller_company, seller_login, match_type, match_rule, is_confirmed, is_ignored, note)
-     VALUES (?, ?, ?, 'manual', 'manual', 1, 0, ?)
+    `INSERT INTO seller_name_mapping (user_id, tax_seller_name, seller_company, seller_login, match_type, match_rule, is_confirmed, is_ignored, note)
+     VALUES (?, ?, ?, ?, 'manual', 'manual', 1, 0, ?)
      ON DUPLICATE KEY UPDATE seller_company = VALUES(seller_company), seller_login = VALUES(seller_login),
        match_type = 'manual', match_rule = 'manual', is_confirmed = 1, is_ignored = 0, note = VALUES(note)`,
-    [taxSellerName, sellerCompany, sellerLogin || null, note || null]
+    [userId, taxSellerName, sellerCompany, sellerLogin || null, note || null]
   );
   const r = await db.exec(
-    'UPDATE issued_invoice SET seller_company = ? WHERE seller_name = ?',
-    [sellerCompany, taxSellerName]
+    'UPDATE issued_invoice SET seller_company = ? WHERE user_id = ? AND seller_name = ?',
+    [sellerCompany, userId, taxSellerName]
   );
   return { ok: true, updatedInvoices: r.affectedRows || 0 };
 }
 
-/**
- * 忽略 / 恢复一个销方名称。
- * 忽略 = 人工确认该税务局销方名称没有对应的 1688 商家，之后不再出现在「待人工比对」列表，
- *        也不再参与自动匹配与统计；可在「已忽略」区随时恢复。
- */
-async function ignoreMapping({ taxSellerName, ignored }) {
+async function ignoreMapping(userId, { taxSellerName, ignored }) {
   if (!taxSellerName || typeof taxSellerName !== 'string' || !taxSellerName.trim()) {
     throw new Error('缺少 taxSellerName（税务局销方名称）');
   }
   taxSellerName = taxSellerName.trim();
-  // ignored 兼容多种传入：缺省=忽略；布尔/数字/字符串都按明确语义解析，避免 "false" 被当成真值
   let on;
   if (ignored === undefined || ignored === null) on = true;
   else if (typeof ignored === 'boolean') on = ignored;
@@ -545,76 +615,66 @@ async function ignoreMapping({ taxSellerName, ignored }) {
   if (on) {
     await db.exec(
       `INSERT INTO seller_name_mapping
-         (tax_seller_name, seller_company, seller_login, match_type, match_rule, is_confirmed, is_ignored, note)
-       VALUES (?, NULL, NULL, 'ignored', 'ignored', 1, 1, '确认无对应1688商家，已忽略')
+         (user_id, tax_seller_name, seller_company, seller_login, match_type, match_rule, is_confirmed, is_ignored, note)
+       VALUES (?, ?, NULL, NULL, 'ignored', 'ignored', 1, 1, '确认无对应1688商家，已忽略')
        ON DUPLICATE KEY UPDATE seller_company = NULL, seller_login = NULL,
          match_type = 'ignored', match_rule = 'ignored', is_confirmed = 1, is_ignored = 1,
          note = '确认无对应1688商家，已忽略'`,
-      [taxSellerName]
+      [userId, taxSellerName]
     );
-    // 忽略的销方名称不再计入任何商家，清空此前可能的回填结果
-    await db.exec('UPDATE issued_invoice SET seller_company = NULL WHERE seller_name = ?', [taxSellerName]);
+    await db.exec('UPDATE issued_invoice SET seller_company = NULL WHERE user_id = ? AND seller_name = ?', [userId, taxSellerName]);
   } else {
-    // 恢复：本就只是「忽略」记录则直接删除；若上面挂着真实映射则只取消忽略标记
     const rows = await db.query(
-      'SELECT id, seller_company FROM seller_name_mapping WHERE tax_seller_name = ?', [taxSellerName]
+      'SELECT id, seller_company FROM seller_name_mapping WHERE user_id = ? AND tax_seller_name = ?', [userId, taxSellerName]
     );
     if (rows[0] && !rows[0].seller_company) {
-      await db.exec('DELETE FROM seller_name_mapping WHERE tax_seller_name = ?', [taxSellerName]);
+      await db.exec('DELETE FROM seller_name_mapping WHERE user_id = ? AND tax_seller_name = ?', [userId, taxSellerName]);
     } else {
-      await db.exec("UPDATE seller_name_mapping SET is_ignored = 0 WHERE tax_seller_name = ?", [taxSellerName]);
+      await db.exec("UPDATE seller_name_mapping SET is_ignored = 0 WHERE user_id = ? AND tax_seller_name = ?", [userId, taxSellerName]);
     }
   }
   return { ok: true, ignored: on };
 }
 
-/** 删除一条映射，并清空 issued_invoice 里回填的结果 */
-async function deleteMapping({ taxSellerName }) {
+async function deleteMapping(userId, { taxSellerName }) {
   if (!taxSellerName) throw new Error('缺少 taxSellerName');
-  await db.exec('DELETE FROM seller_name_mapping WHERE tax_seller_name = ?', [taxSellerName]);
-  await db.exec('UPDATE issued_invoice SET seller_company = NULL WHERE seller_name = ?', [taxSellerName]);
+  await db.exec('DELETE FROM seller_name_mapping WHERE user_id = ? AND tax_seller_name = ?', [userId, taxSellerName]);
+  await db.exec('UPDATE issued_invoice SET seller_company = NULL WHERE user_id = ? AND seller_name = ?', [userId, taxSellerName]);
   return { ok: true };
 }
 
-// ── 订单级开票状态（人工确认已开票） ──
-
-/** data/invoice-status.json 的平台状态集合（按文件 mtime 缓存） */
-let _statusCache = null, _statusCacheAt = 0;
-function invoiceStatusSets() {
-  const f = path.join(DATA, 'invoice-status.json');
+// ─────────────────────────────────────────────────────────────────────────
+// 订单级开票状态（人工确认已开票）
+// ─────────────────────────────────────────────────────────────────────────
+/** 该用户的平台状态集合（按文件 mtime 缓存） */
+const _statusCache = new Map(); // userId -> { mtimeMs, issued, applying }
+function invoiceStatusSets(userId) {
+  const f = tenancy.statusFileFor(userId);
   try {
     const st = fs.statSync(f);
-    if (_statusCache && _statusCacheAt === st.mtimeMs) return _statusCache;
+    const cached = _statusCache.get(userId);
+    if (cached && cached.mtimeMs === st.mtimeMs) return cached;
     const s = JSON.parse(fs.readFileSync(f, 'utf-8'));
-    _statusCache = {
+    const out = {
+      mtimeMs: st.mtimeMs,
       issued: new Set((s.issued || []).map(String)),
       applying: new Set((s.applying || []).map(String)),
     };
-    _statusCacheAt = st.mtimeMs;
-    return _statusCache;
+    _statusCache.set(userId, out);
+    return out;
   } catch (e) { return { issued: new Set(), applying: new Set() }; }
 }
-
 function platformStateOf(orderNo, sets) {
   const no = String(orderNo);
   if (sets.issued.has(no)) return 'issued';
   if (sets.applying.has(no)) return 'applying';
   return 'none';
 }
-
-/** 读取 data/invoice-status.json 的平台开票状态，判断某订单的平台状态 */
-function resolvePlatformState(orderNo) {
-  return platformStateOf(orderNo, invoiceStatusSets());
+function resolvePlatformState(userId, orderNo) {
+  return platformStateOf(orderNo, invoiceStatusSets(userId));
 }
 
-/**
- * 人工修改开票状态（支持订单维度与卖家维度批量）
- *   { orderNo, action:'confirm'|'cancel' }        单个订单
- *   { loginId, action:'confirm-all'|'cancel-all' } 整个卖家
- *     confirm-all → 该卖家所有「未开票」订单标记为人工已开票（商家线下开票）
- *     cancel-all  → 取消该卖家全部人工确认，逐单回退到平台刷新状态
- */
-async function setOrderState({ orderNo, loginId, action }) {
+async function setOrderState(userId, { orderNo, loginId, action }) {
   const note = '人工确认已开票（商家线下开票）';
   const chunk = async (ids, fn) => {
     let n = 0;
@@ -626,24 +686,22 @@ async function setOrderState({ orderNo, loginId, action }) {
     return n;
   };
 
-  // ── 卖家级批量 ──
   if (action === 'confirm-all' || action === 'cancel-all') {
     if (!loginId) throw new Error('缺少 loginId');
     const rows = await db.query(
       `SELECT order_no, invoice_state, state_source FROM invoice_order
-       WHERE COALESCE(NULLIF(seller_login,''), seller_company) = ?`, [loginId]);
+       WHERE user_id = ? AND COALESCE(NULLIF(seller_login,''), seller_company) = ?`, [userId, loginId]);
     if (!rows.length) throw new Error('卖家不存在: ' + loginId);
 
     if (action === 'confirm-all') {
       const targets = rows.filter((r) => r.invoice_state !== 'issued').map((r) => r.order_no);
       const affected = await chunk(targets, (part) => db.exec(
         `UPDATE invoice_order SET invoice_state='issued', state_source='manual', state_note=?, state_updated_at=NOW()
-         WHERE order_no IN (${part.map(() => '?').join(',')})`, [note, ...part]));
+         WHERE user_id = ? AND order_no IN (${part.map(() => '?').join(',')})`, [note, userId, ...part]));
       return { ok: true, action, affected };
     }
 
-    // cancel-all：仅回退 state_source='manual' 的行，按平台真实状态分组回退
-    const sets = invoiceStatusSets();
+    const sets = invoiceStatusSets(userId);
     const byState = { issued: [], applying: [], none: [] };
     for (const r of rows) {
       if (r.state_source === 'manual') byState[platformStateOf(r.order_no, sets)].push(r.order_no);
@@ -652,84 +710,303 @@ async function setOrderState({ orderNo, loginId, action }) {
     for (const [state, ids] of Object.entries(byState)) {
       affected += await chunk(ids, (part) => db.exec(
         `UPDATE invoice_order SET invoice_state=?, state_source='platform', state_note=NULL, state_updated_at=NOW()
-         WHERE order_no IN (${part.map(() => '?').join(',')})`, [state, ...part]));
+         WHERE user_id = ? AND order_no IN (${part.map(() => '?').join(',')})`, [state, userId, ...part]));
     }
     return { ok: true, action, affected };
   }
 
-  // ── 单订单 ──
   if (!orderNo) throw new Error('缺少 orderNo');
-  const exists = await db.query('SELECT order_no FROM invoice_order WHERE order_no = ?', [orderNo]);
+  const exists = await db.query('SELECT order_no FROM invoice_order WHERE user_id = ? AND order_no = ?', [userId, orderNo]);
   if (!exists.length) throw new Error('订单不存在: ' + orderNo);
   if (action === 'confirm') {
     await db.exec(
       `UPDATE invoice_order
          SET invoice_state='issued', state_source='manual', state_note=?, state_updated_at=NOW()
-       WHERE order_no=?`,
-      [note, orderNo]
+       WHERE user_id=? AND order_no=?`,
+      [note, userId, orderNo]
     );
     return { ok: true, orderNo, invoice_state: 'issued', state_source: 'manual', affected: 1 };
   }
   if (action === 'cancel') {
-    const st = resolvePlatformState(orderNo);
+    const st = resolvePlatformState(userId, orderNo);
     await db.exec(
       `UPDATE invoice_order
          SET invoice_state=?, state_source='platform', state_note=NULL, state_updated_at=NOW()
-       WHERE order_no=?`,
-      [st, orderNo]
+       WHERE user_id=? AND order_no=?`,
+      [st, userId, orderNo]
     );
     return { ok: true, orderNo, invoice_state: st, state_source: 'platform', affected: 1 };
   }
   throw new Error('未知操作: ' + action);
 }
 
-// ── HTTP 工具 ──
-function sendJson(res, code, obj) {
-  res.writeHead(code, { 'content-type': 'application/json; charset=utf-8' });
-  res.end(JSON.stringify(obj));
-}
-function readBody(req) {
-  return new Promise((resolve) => {
-    let body = '';
-    req.on('data', (c) => (body += c));
-    req.on('end', () => {
-      try { resolve(JSON.parse(body || '{}')); } catch (e) { resolve({}); }
-    });
-  });
+// ─────────────────────────────────────────────────────────────────────────
+// 用户管理（仅超级管理员）
+// ─────────────────────────────────────────────────────────────────────────
+async function listUsers() {
+  const users = await db.query(`
+    SELECT u.id, u.username, u.role, u.status, u.company_name, u.tax_no, u.email, u.display_name, u.note,
+           u.must_change_password, u.last_login_at, u.created_at, u.updated_at,
+           (SELECT COUNT(*) FROM invoice_order o WHERE o.user_id = u.id)              AS order_count,
+           (SELECT COUNT(DISTINCT o.seller_company) FROM invoice_order o WHERE o.user_id = u.id) AS company_count,
+           (SELECT COUNT(*) FROM issued_invoice i WHERE i.user_id = u.id)             AS invoice_rows,
+           (SELECT COUNT(*) FROM seller_name_mapping m WHERE m.user_id = u.id)        AS mapping_count,
+           (SELECT COUNT(*) FROM send_log s WHERE s.user_id = u.id AND s.result='ok') AS send_ok_count
+    FROM app_user u ORDER BY u.role = 'admin' DESC, u.id ASC
+  `);
+  return users.map((u) => ({
+    id: u.id, username: u.username, role: u.role, status: u.status,
+    companyName: u.company_name || '', taxNo: u.tax_no || '', email: u.email || '',
+    displayName: u.display_name || '', note: u.note || '',
+    mustChangePassword: !!u.must_change_password,
+    lastLoginAt: u.last_login_at, createdAt: u.created_at, updatedAt: u.updated_at,
+    orderCount: Number(u.order_count) || 0,
+    companyCount: Number(u.company_count) || 0,
+    invoiceRows: Number(u.invoice_rows) || 0,
+    mappingCount: Number(u.mapping_count) || 0,
+    sendOkCount: Number(u.send_ok_count) || 0,
+  }));
 }
 
-// ── HTTP 服务器 ──
-const server = http.createServer(async (req, res) => {
-  const url = new URL(req.url, `http://localhost:${PORT}`);
-  const p = url.pathname;
+/** 校验用户名：4~64 位，字母/数字/下划线/中划线/点 */
+function validUsername(name) {
+  return typeof name === 'string' && /^[A-Za-z0-9_.-]{4,64}$/.test(name);
+}
+
+async function createUser({ username, password, companyName, taxNo, email, role, displayName, note }, byUser) {
+  if (!validUsername(username)) throw new Error('账号需 4~64 位，仅限字母、数字、下划线、点、中划线');
+  if (!password || String(password).length < 4) throw new Error('密码至少 4 位');
+  const dup = await db.query('SELECT id FROM app_user WHERE username = ?', [username]);
+  if (dup.length) throw new Error('账号已存在: ' + username);
+  const r = await db.exec(
+    `INSERT INTO app_user (username, password_hash, role, status, company_name, tax_no, email, display_name, note, created_by)
+     VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?, ?)`,
+    [username, auth.hashPassword(password), role === 'admin' ? 'admin' : 'user',
+      companyName || null, taxNo || null, email || null, displayName || null, note || null, byUser.id]
+  );
+  tenancy.ensureUserDirs(r.insertId);
+  return { ok: true, id: r.insertId };
+}
+
+async function updateUser({ id, companyName, taxNo, email, role, displayName, note }) {
+  const rows = await db.query('SELECT * FROM app_user WHERE id = ?', [id]);
+  if (!rows.length) throw new Error('用户不存在');
+  const u = rows[0];
+  if (u.username === 'admin' && role === 'user') throw new Error('内置超级管理员 admin 不能降级为普通用户');
+  await db.exec(
+    `UPDATE app_user SET company_name = ?, tax_no = ?, email = ?, display_name = ?, note = ?, role = ? WHERE id = ?`,
+    [companyName || null, taxNo || null, email || null, displayName || null, note || null,
+      role === 'admin' ? 'admin' : (u.role === 'admin' ? 'admin' : 'user'), id]
+  );
+  return { ok: true };
+}
+
+async function resetUserPassword({ id, password }) {
+  if (!password || String(password).length < 4) throw new Error('密码至少 4 位');
+  const rows = await db.query('SELECT id, username FROM app_user WHERE id = ?', [id]);
+  if (!rows.length) throw new Error('用户不存在');
+  await db.exec(
+    'UPDATE app_user SET password_hash = ?, token_version = token_version + 1, must_change_password = 0 WHERE id = ?',
+    [auth.hashPassword(password), id]
+  );
+  return { ok: true, username: rows[0].username };
+}
+
+async function setUserStatus({ id, status }, byUser) {
+  if (!['active', 'disabled'].includes(status)) throw new Error('状态非法');
+  const rows = await db.query('SELECT id, username, role FROM app_user WHERE id = ?', [id]);
+  if (!rows.length) throw new Error('用户不存在');
+  if (rows[0].username === 'admin') throw new Error('内置超级管理员 admin 不能被禁用');
+  if (Number(id) === Number(byUser.id)) throw new Error('不能禁用自己的账号');
+  await db.exec(
+    'UPDATE app_user SET status = ?, token_version = token_version + 1 WHERE id = ?',
+    [status, id]
+  );
+  return { ok: true, status };
+}
+
+async function deleteUser({ id, username, purge }, byUser) {
+  const rows = await db.query('SELECT id, username, role FROM app_user WHERE id = ?', [id]);
+  if (!rows.length) throw new Error('用户不存在');
+  const u = rows[0];
+  if (u.username === 'admin') throw new Error('内置超级管理员 admin 不能被删除');
+  if (Number(id) === Number(byUser.id)) throw new Error('不能删除自己的账号');
+  if (purge) {
+    if (String(username) !== u.username) throw new Error('请输入要删除的用户名以确认清除其数据');
+  }
+  // 禁用 + 失效会话，避免残留登录态
+  await db.exec('UPDATE app_user SET status = "disabled", token_version = token_version + 1 WHERE id = ?', [id]);
+  let purged = 0;
+  if (purge) {
+    for (const t of ['invoice_order', 'issued_invoice', 'seller_name_mapping', 'send_log', 'import_log']) {
+      const r = await db.exec(`DELETE FROM \`${t}\` WHERE user_id = ?`, [id]);
+      purged += r.affectedRows || 0;
+    }
+    try { fs.rmSync(tenancy.dataDirFor(id), { recursive: true, force: true }); } catch (e) { /* 忽略 */ }
+  }
+  await db.exec('DELETE FROM app_user WHERE id = ?', [id]);
+  return { ok: true, purged };
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// 云端登录：浏览器实时会话（每用户一个）
+// ─────────────────────────────────────────────────────────────────────────
+const LIVE = new Map(); // userId -> { browser, sockets:Set, timer }
+
+function liveStatus(userId) {
+  const entry = LIVE.get(userId);
+  const statePath = tenancy.statePathFor(userId);
+  const hasState = fs.existsSync(statePath);
+  let stateMtime = null;
+  try { if (hasState) stateMtime = fs.statSync(statePath).mtime; } catch (e) { /* 忽略 */ }
+  return {
+    hasState,
+    stateMtime,
+    sessionActive: !!(entry && entry.browser),
+    url: entry && entry.browser ? entry.browser.url : '',
+    loggedIn: entry && entry.browser ? entry.browser.loggedIn : false,
+  };
+}
+
+function broadcastLive(userId, obj) {
+  const entry = LIVE.get(userId);
+  if (!entry) return;
+  const payload = JSON.stringify(obj);
+  for (const ws of entry.sockets) {
+    if (ws.readyState === 1) { try { ws.send(payload); } catch (e) { /* 忽略 */ } }
+  }
+}
+
+async function openLive(userId, startUrl) {
+  let entry = LIVE.get(userId);
+  if (entry && entry.browser) {
+    if (startUrl) await entry.browser.navigate(startUrl);
+    return entry;
+  }
+  const config = loadConfig();
+  const browser = new LiveBrowser({
+    userId,
+    statePath: tenancy.statePathFor(userId),
+    config,
+    headless: resolveHeadless(undefined, config.runtime || {}),
+    onEvent: (evt) => broadcastLive(userId, evt),
+  });
+  entry = { browser, sockets: new Set(), timer: null };
+  LIVE.set(userId, entry);
+  // 空闲 15 分钟自动关闭，释放服务器资源
+  entry.timer = setInterval(async () => {
+    if (Date.now() - browser.lastActiveAt > 15 * 60 * 1000 && entry.sockets.size === 0) {
+      await closeLive(userId);
+    }
+  }, 60 * 1000);
+  if (entry.timer.unref) entry.timer.unref();
   try {
-    // 控制台页面
-    if (req.method === 'GET' && (p === '/' || p === '/index.html')) {
-      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-      res.end(fs.readFileSync(path.join(ROOT, 'dashboard.html'), 'utf-8'));
-      return;
+    await browser.start(startUrl);
+  } catch (e) {
+    await closeLive(userId);
+    throw e;
+  }
+  return entry;
+}
+
+async function closeLive(userId) {
+  const entry = LIVE.get(userId);
+  if (!entry) return;
+  if (entry.timer) clearInterval(entry.timer);
+  LIVE.delete(userId);
+  try { await entry.browser.close(); } catch (e) { /* 忽略 */ }
+  broadcastLive(userId, { type: 'closed' });
+  for (const ws of entry.sockets) { try { ws.close(); } catch (e) { /* 忽略 */ } }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// HTTP 服务器
+// ─────────────────────────────────────────────────────────────────────────
+const server = http.createServer(async (req, res) => {
+  const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+  const p = url.pathname;
+  const method = req.method;
+
+  try {
+    // ── 静态页 / 页面路由 ──
+    if (method === 'GET' && (p === '/login' || p === '/login.html')) return sendHtml(res, 'login.html');
+    if (method === 'GET' && p === '/healthz') return sendJson(res, 200, { ok: true, ts: new Date().toISOString() });
+    if (method === 'GET' && (p === '/' || p === '/index.html')) {
+      const u = await currentUser(req);
+      if (!u) return redirect(res, '/login');
+      return sendHtml(res, 'dashboard.html');
     }
 
-    // 看板数据（按公司聚合，会员名为 members 子树）
-    if (req.method === 'GET' && p === '/api/data') {
-      const companies = await loadCompanies();
-      const sendStats = await loadSendStats();
-      // 「已催收」= 至少成功催收过一次（失败尝试不算）
+    // ── 认证 ──
+    if (method === 'POST' && p === '/api/auth/login') {
+      const { username, password } = await readBody(req);
+      if (!username || !password) return sendJson(res, 400, { error: '请输入账号与密码' });
+      const rows = await db.query('SELECT * FROM app_user WHERE username = ?', [String(username).trim()]);
+      const u = rows[0];
+      // 统一错误提示，避免暴露账号是否存在
+      if (!u || !auth.verifyPassword(password, u.password_hash)) {
+        return sendJson(res, 401, { error: '账号或密码错误' });
+      }
+      if (u.status !== 'active') return sendJson(res, 403, { error: '账号已被禁用，请联系管理员' });
+      auth.setSessionCookie(res, auth.createSessionToken(u), req);
+      await db.exec('UPDATE app_user SET last_login_at = NOW() WHERE id = ?', [u.id]);
+      return sendJson(res, 200, { user: publicUser(u) });
+    }
+
+    if (method === 'POST' && p === '/api/auth/logout') {
+      auth.clearSessionCookie(res, req);
+      return sendJson(res, 200, { ok: true });
+    }
+
+    if (method === 'GET' && p === '/api/auth/me') {
+      const u = await currentUser(req);
+      if (!u) return sendJson(res, 401, { error: '未登录' });
+      const st = liveStatus(u.id);
+      return sendJson(res, 200, {
+        user: publicUser(u),
+        needLogin1688: !st.hasState,
+        login1688: st,
+      });
+    }
+
+    if (method === 'POST' && p === '/api/auth/password') {
+      const u = await currentUser(req);
+      if (!u) return sendJson(res, 401, { error: '未登录' });
+      const { oldPassword, newPassword } = await readBody(req);
+      if (!auth.verifyPassword(oldPassword, u.password_hash)) return sendJson(res, 400, { error: '原密码不正确' });
+      if (!newPassword || String(newPassword).length < 4) return sendJson(res, 400, { error: '新密码至少 4 位' });
+      await db.exec(
+        'UPDATE app_user SET password_hash = ?, token_version = token_version + 1, must_change_password = 0 WHERE id = ?',
+        [auth.hashPassword(newPassword), u.id]
+      );
+      const fresh = (await db.query('SELECT * FROM app_user WHERE id = ?', [u.id]))[0];
+      auth.setSessionCookie(res, auth.createSessionToken(fresh), req);
+      return sendJson(res, 200, { ok: true });
+    }
+
+    // ── 以下接口都需要登录 ──
+    const user = await currentUser(req);
+    if (!user) return sendJson(res, 401, { error: '登录已失效，请重新登录' });
+    const tenantId = tenantOf(req, url, user);
+    const isAdmin = user.role === 'admin';
+    const writeGuard = () => assertWritable(user, tenantId);
+
+    // 看板数据
+    if (method === 'GET' && p === '/api/data') {
+      const companies = await loadCompanies(tenantId);
+      const sendStats = await loadSendStats(tenantId);
       const sentList = sendStats.filter((r) => Number(r.sendCount) > 0).map((r) => r.login);
       const invSummary = await db.query(`
         SELECT COUNT(*) AS rows_count,
                COUNT(DISTINCT COALESCE(NULLIF(e_invoice_no,''), NULLIF(invoice_no,''), row_hash)) AS invoice_count,
                ROUND(SUM(COALESCE(total_amount,0)),2) AS amount,
                SUM(seller_company IS NULL) AS unmapped_rows
-        FROM issued_invoice
-      `);
-      const unmatched = await db.query('SELECT COUNT(*) AS n FROM v_unmatched_seller_name');
-      const ignoredCnt = await db.query(
-        'SELECT COUNT(*) AS n FROM seller_name_mapping WHERE is_ignored = 1'
-      );
-      const manual = await db.query(
-        "SELECT COUNT(*) AS n FROM invoice_order WHERE state_source = 'manual'"
-      );
+        FROM issued_invoice WHERE user_id = ?
+      `, [tenantId]);
+      const unmatched = await db.query('SELECT COUNT(*) AS n FROM v_unmatched_seller_name WHERE user_id = ?', [tenantId]);
+      const ignoredCnt = await db.query('SELECT COUNT(*) AS n FROM seller_name_mapping WHERE user_id = ? AND is_ignored = 1', [tenantId]);
+      const manual = await db.query("SELECT COUNT(*) AS n FROM invoice_order WHERE user_id = ? AND state_source = 'manual'", [tenantId]);
+      const tenant = (await db.query('SELECT id, username, company_name FROM app_user WHERE id = ?', [tenantId]))[0] || null;
       return sendJson(res, 200, {
         companies,
         sentList,
@@ -738,133 +1015,259 @@ const server = http.createServer(async (req, res) => {
         unmatchedNameCount: unmatched[0] ? unmatched[0].n : 0,
         ignoredNameCount: ignoredCnt[0] ? ignoredCnt[0].n : 0,
         manualIssuedCount: manual[0] ? manual[0].n : 0,
+        tenant: tenant ? { id: tenant.id, username: tenant.username, companyName: tenant.company_name || '' } : null,
+        viewer: { id: user.id, role: user.role },
+        isOtherTenant: Number(tenantId) !== Number(user.id),
         generatedAt: new Date().toLocaleString('zh-CN', { hour12: false }),
       });
     }
 
-    // 卖家明细（展开行按需加载）
-    if (req.method === 'GET' && p === '/api/seller-detail') {
+    if (method === 'GET' && p === '/api/seller-detail') {
       const loginId = url.searchParams.get('loginId');
       if (!loginId) return sendJson(res, 400, { error: '缺少 loginId' });
-      return sendJson(res, 200, await loadSellerDetail(loginId));
+      return sendJson(res, 200, await loadSellerDetail(tenantId, loginId));
     }
 
-    // 历史催收记录（点「催收次数」查看）：?loginId=会员名 或 ?company=公司名
-    if (req.method === 'GET' && p === '/api/collect-history') {
+    if (method === 'GET' && p === '/api/collect-history') {
       const loginId = url.searchParams.get('loginId');
       const company = url.searchParams.get('company');
       if (!loginId && !company) return sendJson(res, 400, { error: '缺少 loginId 或 company' });
-      return sendJson(res, 200, await loadCollectHistory({ loginId, company }));
+      return sendJson(res, 200, await loadCollectHistory(tenantId, { loginId, company }));
     }
 
-    // 配置读取
-    if (req.method === 'GET' && p === '/api/config') {
-      const config = JSON.parse(fs.readFileSync(path.join(ROOT, 'config.json'), 'utf-8'));
+    // 配置：本人抬头 + 全局运行参数与话术（话术/参数仅管理员可改）
+    if (method === 'GET' && p === '/api/config') {
+      const config = loadConfig();
       const { DEFAULT_MESSAGES } = require('./lib/sender');
-      // 凭据不下发前端
-      const safe = { ...config };
-      delete safe.platforms;
-      delete safe.mysql;
-      return sendJson(res, 200, { config: safe, defaultMessages: DEFAULT_MESSAGES });
+      const safe = { runtime: config.runtime || {}, messages: config.messages || {} };
+      return sendJson(res, 200, {
+        config: { ...safe, buyerInfo: await buyerInfoOf(user.id) },
+        defaultMessages: DEFAULT_MESSAGES,
+        canEdit: isAdmin,
+      });
     }
-
-    // 配置保存
-    if (req.method === 'POST' && p === '/api/config') {
+    if (method === 'POST' && p === '/api/config') {
+      if (!isAdmin) return sendJson(res, 403, { error: '仅超级管理员可修改系统配置' });
       const { config } = await readBody(req);
       if (!config || typeof config !== 'object') throw new Error('缺少 config');
-      const old = JSON.parse(fs.readFileSync(path.join(ROOT, 'config.json'), 'utf-8'));
+      const filePath = path.join(ROOT, 'config.json');
+      const old = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
       const merged = { ...old };
-      merged.buyerInfo = config.buyerInfo;
       merged.runtime = { ...(old.runtime || {}), ...(config.runtime || {}) };
       merged.messages = { ...(old.messages || {}), ...(config.messages || {}) };
-      fs.writeFileSync(path.join(ROOT, 'config.json'), JSON.stringify(merged, null, 2), 'utf-8');
-      return sendJson(res, 200, { ok: true });
-    }
-
-    // 导入（重新扫描 data/ 下 Excel → MySQL）
-    if (req.method === 'POST' && p === '/api/import') {
-      const body = await readBody(req);
-      const opts = {};
-      if (body.orders) opts.orders = true;
-      if (body.invoices) opts.invoices = true;
-      taskLog('▶ 收到「重新导入数据」请求');
-      const r = await runImport(opts);
-      for (const s of r.steps) taskLog('  ' + s);
-      return sendJson(res, 200, r);
-    }
-
-    // 导入日志
-    if (req.method === 'GET' && p === '/api/import-log') {
-      const rows = await db.query('SELECT * FROM import_log ORDER BY id DESC LIMIT 30');
-      return sendJson(res, 200, { logs: rows });
-    }
-
-    // 名称映射
-    if (req.method === 'GET' && p === '/api/mapping') {
-      return sendJson(res, 200, await loadMapping());
-    }
-    if (req.method === 'POST' && p === '/api/mapping') {
-      return sendJson(res, 200, await saveMapping(await readBody(req)));
-    }
-    if (req.method === 'POST' && p === '/api/mapping/delete') {
-      return sendJson(res, 200, await deleteMapping(await readBody(req)));
-    }
-    // 忽略 / 恢复一个销方名称（确认无对应 1688 商家）
-    if (req.method === 'POST' && p === '/api/mapping/ignore') {
-      return sendJson(res, 200, await ignoreMapping(await readBody(req)));
-    }
-
-    // 订单维度：人工确认已开票 / 取消人工确认
-    if (req.method === 'POST' && p === '/api/order-state') {
-      return sendJson(res, 200, await setOrderState(await readBody(req)));
-    }
-
-    // 任务进度查询
-    if (req.method === 'GET' && p === '/api/task') {
-      return sendJson(res, 200, taskState);
-    }
-    // 停止任务
-    if (req.method === 'POST' && p === '/api/task/stop') {
-      if (taskState.running) {
-        taskState.stopRequested = true;
-        taskLog('⏸ 收到停止请求：当前卖家发完即停（若正在等待间隔，则立即停止）');
+      fs.writeFileSync(filePath, JSON.stringify(merged, null, 2), 'utf-8');
+      if (config.buyerInfo) {
+        await db.exec('UPDATE app_user SET company_name = ?, tax_no = ?, email = ? WHERE id = ?',
+          [config.buyerInfo.companyName || null, config.buyerInfo.taxNo || null, config.buyerInfo.email || null, user.id]);
       }
       return sendJson(res, 200, { ok: true });
     }
 
-    // 发送催收消息（后台任务，立即返回）
-    if (req.method === 'POST' && p === '/api/send') {
+    // 导入（按用户的数据目录）
+    if (method === 'POST' && p === '/api/import') {
+      writeGuard();
+      const body = await readBody(req);
+      const opts = { userId: tenantId };
+      if (body.orders) opts.orders = true;
+      if (body.invoices) opts.invoices = true;
+      const taskState = taskFor(tenantId);
+      taskLog(taskState, '▶ 收到「重新导入数据」请求');
+      const r = await runImport(opts);
+      for (const s of r.steps) taskLog(taskState, '  ' + s);
+      return sendJson(res, 200, r);
+    }
+
+    if (method === 'GET' && p === '/api/import-log') {
+      const rows = await db.query('SELECT * FROM import_log WHERE user_id = ? ORDER BY id DESC LIMIT 30', [tenantId]);
+      return sendJson(res, 200, { logs: rows });
+    }
+
+    // 名称映射
+    if (method === 'GET' && p === '/api/mapping') return sendJson(res, 200, await loadMapping(tenantId));
+    if (method === 'POST' && p === '/api/mapping') { writeGuard(); return sendJson(res, 200, await saveMapping(tenantId, await readBody(req))); }
+    if (method === 'POST' && p === '/api/mapping/delete') { writeGuard(); return sendJson(res, 200, await deleteMapping(tenantId, await readBody(req))); }
+    if (method === 'POST' && p === '/api/mapping/ignore') { writeGuard(); return sendJson(res, 200, await ignoreMapping(tenantId, await readBody(req))); }
+
+    // 订单级开票状态
+    if (method === 'POST' && p === '/api/order-state') { writeGuard(); return sendJson(res, 200, await setOrderState(tenantId, await readBody(req))); }
+
+    // 任务进度 / 停止
+    if (method === 'GET' && p === '/api/task') return sendJson(res, 200, taskFor(tenantId));
+    if (method === 'POST' && p === '/api/task/stop') {
+      writeGuard();
+      const t = taskFor(tenantId);
+      if (t.running) { t.stopRequested = true; taskLog(t, '⏸ 收到停止请求：当前卖家发完即停（若正在等待间隔，则立即停止）'); }
+      return sendJson(res, 200, { ok: true });
+    }
+
+    // 发送催收消息
+    if (method === 'POST' && p === '/api/send') {
+      writeGuard();
       const { loginIds } = await readBody(req);
       if (!Array.isArray(loginIds) || loginIds.length === 0) throw new Error('缺少 loginIds');
-      if (taskState.running) throw new Error('已有任务在运行中');
-      doSend(loginIds).catch((e) => { taskState.running = false; taskLog('✗ 任务异常: ' + e.message); });
+      const t = taskFor(tenantId);
+      if (t.running) throw new Error('已有任务在运行中');
+      doSend(tenantId, loginIds).catch((e) => { t.running = false; taskLog(t, '✗ 任务异常: ' + e.message); });
       return sendJson(res, 200, { started: true });
     }
 
-    // 已移除: POST /api/apply（提交开票申请功能已按需求取消）
+    // ── 云端登录（浏览器实时画面） ──
+    if (method === 'GET' && p === '/api/browser/status') {
+      return sendJson(res, 200, liveStatus(user.id));
+    }
+    if (method === 'POST' && p === '/api/browser/open') {
+      const body = await readBody(req);
+      const startUrl = body.url || undefined;
+      const entry = await openLive(user.id, startUrl);
+      return sendJson(res, 200, { ok: true, status: { ...liveStatus(user.id), sessionActive: !!entry.browser } });
+    }
+    if (method === 'POST' && p === '/api/browser/navigate') {
+      const body = await readBody(req);
+      const entry = LIVE.get(user.id);
+      if (!entry) return sendJson(res, 400, { error: '会话未启动' });
+      await entry.browser.navigate(body.url);
+      return sendJson(res, 200, { ok: true });
+    }
+    if (method === 'POST' && p === '/api/browser/save') {
+      const entry = LIVE.get(user.id);
+      if (!entry) return sendJson(res, 400, { error: '会话未启动' });
+      await entry.browser.saveState();
+      return sendJson(res, 200, { ok: true, loggedIn: entry.browser.loggedIn, url: entry.browser.url });
+    }
+    if (method === 'POST' && p === '/api/browser/close') {
+      await closeLive(user.id);
+      return sendJson(res, 200, { ok: true });
+    }
+
+    // ── 系统管理（仅超级管理员） ──
+    if (p.startsWith('/api/admin/')) {
+      if (!isAdmin) return sendJson(res, 403, { error: '仅超级管理员可访问' });
+
+      if (method === 'GET' && p === '/api/admin/users') {
+        return sendJson(res, 200, { users: await listUsers(), self: publicUser(user) });
+      }
+      if (method === 'POST' && p === '/api/admin/users/create') {
+        return sendJson(res, 200, await createUser(await readBody(req), user));
+      }
+      if (method === 'POST' && p === '/api/admin/users/update') {
+        return sendJson(res, 200, await updateUser(await readBody(req)));
+      }
+      if (method === 'POST' && p === '/api/admin/users/password') {
+        return sendJson(res, 200, await resetUserPassword(await readBody(req)));
+      }
+      if (method === 'POST' && p === '/api/admin/users/status') {
+        return sendJson(res, 200, await setUserStatus(await readBody(req), user));
+      }
+      if (method === 'POST' && p === '/api/admin/users/delete') {
+        return sendJson(res, 200, await deleteUser(await readBody(req), user));
+      }
+      // 按用户名/ID 查用户概况（配合 ?tenant= 查看其看板）
+      if (method === 'GET' && p === '/api/admin/user-lookup') {
+        const kw = (url.searchParams.get('username') || '').trim();
+        if (!kw) return sendJson(res, 400, { error: '缺少 username' });
+        const rows = await db.query(
+          `SELECT id, username, role, status, company_name, tax_no, email FROM app_user
+           WHERE username = ? OR username LIKE ? ORDER BY username LIMIT 20`,
+          [kw, `%${kw}%`]
+        );
+        return sendJson(res, 200, {
+          users: rows.map((u) => ({
+            id: u.id, username: u.username, role: u.role, status: u.status,
+            companyName: u.company_name || '', taxNo: u.tax_no || '', email: u.email || '',
+          })),
+        });
+      }
+      return sendJson(res, 404, { error: '未知管理接口' });
+    }
+
+    // 已移除: POST /api/apply
     if (p === '/api/apply') {
-      return sendJson(res, 410, { error: '提交开票申请功能已移除（二次开发需求：取消看板中的提交申请功能与按钮）' });
+      return sendJson(res, 410, { error: '提交开票申请功能已移除' });
     }
 
     res.writeHead(404);
     res.end('not found');
   } catch (e) {
-    console.error('[接口异常]', e.message);
-    sendJson(res, 500, { error: e.message });
+    const code = e.code === 403 ? 403 : 500;
+    console.error('[接口异常]', req.method, p, e.message);
+    if (!res.headersSent) sendJson(res, code, { error: e.message });
   }
 });
 
+// ─────────────────────────────────────────────────────────────────────────
+// WebSocket：把服务器端浏览器的实时画面推给看板，并回灌鼠标/键盘
+// ─────────────────────────────────────────────────────────────────────────
+const wss = new WebSocketServer({ noServer: true });
+
+server.on('upgrade', async (req, socket, head) => {
+  let url;
+  try { url = new URL(req.url, `http://${req.headers.host || 'localhost'}`); } catch (e) { socket.destroy(); return; }
+  if (url.pathname !== '/ws/browser') { socket.destroy(); return; }
+  let user = null;
+  try { user = await currentUser(req); } catch (e) { /* 忽略 */ }
+  if (!user) {
+    socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+    socket.destroy();
+    return;
+  }
+  wss.handleUpgrade(req, socket, head, (ws) => {
+    ws._userId = user.id;
+    wss.emit('connection', ws, req);
+  });
+});
+
+wss.on('connection', async (ws) => {
+  const userId = ws._userId;
+  try {
+    const entry = await openLive(userId); // 没有会话则顺带启动
+    entry.sockets.add(ws);
+    ws.send(JSON.stringify({ type: 'hello', ...liveStatus(userId) }));
+    // 新连接的客户端先拿一帧（推流是持续事件，这里主动触发一次状态）
+    ws.send(JSON.stringify({ type: 'status', url: entry.browser.url, loggedIn: entry.browser.loggedIn }));
+
+    ws.on('message', async (raw) => {
+      let msg;
+      try { msg = JSON.parse(String(raw)); } catch (e) { return; }
+      const e2 = LIVE.get(userId);
+      if (!e2) return;
+      const b = e2.browser;
+      try {
+        if (msg.type === 'mouse') await b.mouse(msg);
+        else if (msg.type === 'key') await b.key(msg);
+        else if (msg.type === 'navigate') await b.navigate(msg.url);
+        else if (msg.type === 'save') { await b.saveState(); ws.send(JSON.stringify({ type: 'saved', loggedIn: b.loggedIn, url: b.url })); }
+        else if (msg.type === 'ping') ws.send(JSON.stringify({ type: 'pong' }));
+      } catch (e) { /* 忽略单条事件错误 */ }
+    });
+
+    ws.on('close', () => { const e2 = LIVE.get(userId); if (e2) e2.sockets.delete(ws); });
+    ws.on('error', () => { const e2 = LIVE.get(userId); if (e2) e2.sockets.delete(ws); });
+  } catch (e) {
+    try { ws.send(JSON.stringify({ type: 'error', text: '启动云端浏览器失败: ' + e.message })); } catch (err) { /* 忽略 */ }
+    try { ws.close(); } catch (err) { /* 忽略 */ }
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// 启动
+// ─────────────────────────────────────────────────────────────────────────
 server.listen(PORT, async () => {
   console.log(`发票催收控制台已启动: http://localhost:${PORT}`);
+  console.log(`  登录页: http://localhost:${PORT}/login   （超级管理员 admin / admin，首次登录请改密）`);
   try {
+    await db.ensureSchema();
+    const admin = (await db.query("SELECT id FROM app_user WHERE username = 'admin'"))[0];
+    if (admin) {
+      const notes = tenancy.migrateLegacyData(admin.id);
+      for (const n of notes) console.log('  [迁移] ' + n);
+    }
     const v = await db.ping();
     console.log(`✓ 数据库连接正常 (MySQL ${v})`);
-    const [{ n: orderCount }] = await db.query('SELECT COUNT(*) AS n FROM invoice_order');
-    const [{ n: invoiceCount }] = await db.query('SELECT COUNT(*) AS n FROM issued_invoice');
-    console.log(`  订单表 ${orderCount} 行 / 已开票表 ${invoiceCount} 行`);
+    const [{ n: userCount }] = await db.query('SELECT COUNT(*) AS n FROM app_user');
+    console.log(`  账号 ${userCount} 个`);
   } catch (e) {
-    console.error('✗ 数据库连接失败:', e.message);
-    console.error('  请先启动数据库（scripts/mysql-start.bat）并确认 config.json 的 mysql 段');
+    console.error('✗ 数据库初始化失败:', e.message);
+    console.error('  请先启动数据库并确认 config.json 的 mysql 段（或设置 MYSQL_* 环境变量）');
   }
   console.log('Ctrl+C 停止服务器');
 });
