@@ -403,6 +403,7 @@ async function doSend(loginIds) {
   taskLog(`▶ 开始发送催收消息：共 ${loginIds.length} 家（启动独立浏览器）`);
 
   let browser = null;
+  let loginLost = false; // 登录态失效时置位，用于中止整批
   try {
     const launched = await launch();
     browser = launched.browser;
@@ -438,12 +439,19 @@ async function doSend(loginIds) {
         taskState.ok++;
         taskLog(`✓ ${seller.company} 发送成功 (${messages.length}条消息, ${Math.round((Date.now() - tSell) / 1000)}s) · 催收次数 +1`);
       } catch (e) {
+        // 登录态失效是环境问题（非卖家问题）：立即中止整批，且不写 send_log，避免污染统计
+        if (/登录态失效/.test(e.message)) {
+          taskLog(`⛔ ${e.message}`);
+          taskLog(`■ 批量发送已中止（已完成 ${taskState.ok} 家）：请在该浏览器窗口重新登录 1688 后重试`);
+          loginLost = true;
+          break;
+        }
         await recordSent(seller.sellerLogin, seller.company, 'fail', 'web', collectAmount, collectOrderNos);
         taskState.fail++;
         taskLog(`✗ ${seller.company} 失败: ${e.message.split('\n')[0]} · 已记录失败尝试（不计入催收次数）`);
       }
       taskState.done++;
-      if (loginIds.indexOf(loginId) < loginIds.length - 1 && !taskState.stopRequested) {
+      if (!loginLost && loginIds.indexOf(loginId) < loginIds.length - 1 && !taskState.stopRequested) {
         const gap = gapMin + Math.random() * (gapMax - gapMin);
         taskLog(`… 等待 ${Math.round(gap / 1000)}s 后发下一家`);
         await sleep(gap);
@@ -457,7 +465,9 @@ async function doSend(loginIds) {
   taskState.running = false;
   taskState.current = null;
   taskState.finishedAt = new Date().toISOString();
-  taskLog(`■ 发送完成: 成功 ${taskState.ok}, 失败 ${taskState.fail}, 共 ${taskState.done}/${taskState.total}`);
+  taskLog(loginLost
+    ? `■ 发送中止: 成功 ${taskState.ok}, 失败 ${taskState.fail}, 已处理 ${taskState.done}/${taskState.total}（登录态失效）`
+    : `■ 发送完成: 成功 ${taskState.ok}, 失败 ${taskState.fail}, 共 ${taskState.done}/${taskState.total}`);
 }
 
 // ── 名称映射维护 ──

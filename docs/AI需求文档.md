@@ -113,6 +113,8 @@ invoice-bot/
 - seller 对象跨函数传递必须含 `loginId`（曾漏传导致 touid=undefined，排查三天）
 - Playwright 1.64 无 `page.waitForTimeout`，用本地 `sleep(ms)`
 - 动作间保持拟人随机间隔；发送验证「消息出现在聊天记录」而非「编辑器清空」
+- 发送等待一律轮询、不固定盲等；`getFrame/getEditor` 必须容错（iframe 重建会抛 detached）
+- 登录态失效（跳回 login.1688.com）→ 引擎快速抛错、`doSend` 中止整批且**不写 send_log**（环境问题不污染统计）
 - server.js 改完必须重启进程才生效
 - `issued_invoice` 只能导「信息汇总表」sheet，导「发票基础信息」会重复计数
 - `db.js` 必须保持 `dateStrings:true` + `decimalNumbers:true`（否则时区漂移/字符串比较出错）
