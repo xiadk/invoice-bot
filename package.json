@@ -1,0 +1,30 @@
+{
+  "name": "invoice-bot",
+  "version": "0.1.0",
+  "description": "1688/拼多多采购发票催收自动化",
+  "main": "login.js",
+  "directories": {
+    "lib": "lib"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node server.js",
+    "start:all": "scripts\\start-all.bat",
+    "db:start": "scripts\\mysql-start.bat",
+    "db:stop": "scripts\\mysql-stop.bat",
+    "db:backup": "scripts\\backup-db.bat",
+    "db:init": "node import-to-db.js --schema",
+    "db:import": "node import-to-db.js",
+    "msg:preview": "node preview-messages.js",
+    "server": "node server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "mysql2": "^3.24.5",
+    "playwright": "^1.64.0",
+    "xlsx": "^0.18.5"
+  }
+}

@@ -1,0 +1,44 @@
+{
+  "_comment": "复制本文件为 config.json 后填写。config.json 含登录凭据，已在 .gitignore 中排除，绝不上传、不外发、不贴进聊天。",
+  "platforms": {
+    "1688": {
+      "loginUrl": "https://login.1688.com/member/signin.htm",
+      "invoiceCenterUrl": "https://work.1688.com/home/page/index.htm",
+      "orderListUrl": "https://purchase.1688.com/order/list.htm",
+      "username": "",
+      "password": ""
+    }
+  },
+  "buyerInfo": {
+    "_comment2": "购买方开票抬头，催收话术模板中引用",
+    "companyName": "XX超市有限公司",
+    "taxNo": "9144XXXXXXXXXXXXXX",
+    "address": "广东省中山市XX路XX号",
+    "phone": "0760-XXXXXXXX",
+    "bankName": "XX银行XX支行",
+    "bankAccount": "XXXXXXXXXXXXXXXX"
+  },
+  "selectors": {
+    "_comment3": "发票中心页面选择器。默认值仅为占位，必须先运行 node probe.js，根据 data/snapshot-*.html 快照中的真实结构修改",
+    "invoiceRows": "table tbody tr",
+    "cellOrderId": "td:nth-child(1)",
+    "cellSeller": "td:nth-child(2)",
+    "cellAmount": "td:nth-child(3)",
+    "cellStatus": "td:nth-child(4)"
+  },
+  "runtime": {
+    "headless": false,
+    "minActionGapMs": 800,
+    "maxActionGapMs": 2500,
+    "navigationTimeoutMs": 60000
+  },
+  "mysql": {
+    "_comment4": "看板数据源数据库。本机自带的 MariaDB 实例默认即为下列配置（启动: scripts/mysql-start.bat）",
+    "host": "127.0.0.1",
+    "port": 3306,
+    "user": "root",
+    "password": "invoice123",
+    "database": "invoice_bot",
+    "connectionLimit": 8
+  }
+}
