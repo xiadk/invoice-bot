@@ -89,6 +89,8 @@ invoice-bot/
 - 会员名行额外返回 `manualIssuedAmount`（人工确认订单的实付款合计），仅作展示，**不计入**税务局已开票金额
 - **催收消息按会员名级**：`{amount}`=该会员名待开票金额，`{orderId}`=该会员名除已开票外的全部订单号（`doSend` 里 `invoice_state !== 'issued'` 过滤）
 - 注意：**订单级 invoice_state 与发票级已开票金额是两套口径，不要混算**（人工确认只改订单状态计数，不动金额）
+- **分页（前端切片）**：看板公司表与映射页三张表支持 10/20/50/100 条/页（`PAGER` 状态，筛选/搜索后回第 1 页）；统计卡始终按全量计算；`全选筛选结果` 跨所有分页
+- **销方名称忽略**：映射页「忽略」= 确认无对应 1688 商家 → `is_ignored=1`、从待比对列表移除、`autoMapSellers` 跳过、`issued_invoice.seller_company` 清空；「已忽略」区可恢复；`/api/data.ignoredNameCount` 供统计卡展示
 
 **发送流程**（lib/sender.js sendToSeller，勿轻改）：
 1. 开聊天页 `def_cbu_web_im/index.html?touid=cnalichn{loginId}` + bringToFront
