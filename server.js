@@ -459,8 +459,17 @@ async function saveMapping({ taxSellerName, sellerLogin, sellerCompany, note }) 
  *        也不再参与自动匹配与统计；可在「已忽略」区随时恢复。
  */
 async function ignoreMapping({ taxSellerName, ignored }) {
-  if (!taxSellerName) throw new Error('缺少 taxSellerName');
-  const on = ignored === undefined ? true : !!ignored;
+  if (!taxSellerName || typeof taxSellerName !== 'string' || !taxSellerName.trim()) {
+    throw new Error('缺少 taxSellerName（税务局销方名称）');
+  }
+  taxSellerName = taxSellerName.trim();
+  // ignored 兼容多种传入：缺省=忽略；布尔/数字/字符串都按明确语义解析，避免 "false" 被当成真值
+  let on;
+  if (ignored === undefined || ignored === null) on = true;
+  else if (typeof ignored === 'boolean') on = ignored;
+  else if (typeof ignored === 'number') on = ignored !== 0;
+  else if (typeof ignored === 'string') on = !['false', '0', 'off', 'no', ''].includes(ignored.trim().toLowerCase());
+  else on = !!ignored;
   if (on) {
     await db.exec(
       `INSERT INTO seller_name_mapping

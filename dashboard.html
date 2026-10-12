@@ -159,7 +159,7 @@
     <input type="text" id="search" placeholder="搜索卖家公司名 / 登录ID">
     <span style="flex:1"></span>
     <button class="btn btn-plain" id="btnImport" onclick="importData()">重新导入数据</button>
-    <button class="btn btn-outline" onclick="selectAll()">全选当前列表</button>
+    <button class="btn btn-outline" onclick="selectAll()" title="勾选当前筛选下全部公司（跨所有分页，不只当前页）的可催收会员名">全选筛选结果</button>
     <button class="btn btn-outline" onclick="clearSel()">取消选择</button>
     <button class="btn btn-primary" id="btnSend" onclick="batchSend()">发送催收消息 (<span id="selCount">0</span>)</button>
   </div>
@@ -776,7 +776,7 @@ function renderMapping() {
            <td class="loginid">${esc(String(m.updated_at || '').slice(0, 16))}</td>
            <td>
              <button class="btn btn-danger btn-sm" data-tax="${esc(m.tax_seller_name)}" onclick="delMap(this)">删除</button>
-             <button class="btn btn-outline btn-sm" data-tax="${esc(m.tax_seller_name)}" onclick="ignoreMap(this)" title="确认没有对应的 1688 商家，改为忽略">忽略</button>
+             <button class="btn btn-outline btn-sm" data-tax="${esc(m.tax_seller_name)}" data-company="${esc(m.seller_company || '')}" onclick="ignoreMap(this)" title="确认没有对应的 1688 商家，改为忽略">忽略</button>
            </td>
          </tr>`).join('')}
          </tbody>
@@ -841,7 +841,10 @@ async function delMap(btn) {
 /** 忽略：确认该税务局销方名称没有对应的 1688 商家，移出待比对列表、不再参与统计 */
 async function ignoreMap(btn) {
   const taxSellerName = btn.dataset.tax;
-  if (!confirm(`确认「${taxSellerName}」没有对应的 1688 商家？\n\n忽略后该销方名称将从「待人工比对」列表移除，不再参与自动匹配与看板统计；以后可在「已忽略」里恢复。`)) return;
+  // 已维护映射行点忽略会清掉现有映射，确认文案要明确提示
+  const curMap = btn.dataset.company || '';
+  const extra = curMap ? `\n\n注意：该名称当前已映射到「${curMap}」，忽略后将清除这个映射。` : '';
+  if (!confirm(`确认「${taxSellerName}」没有对应的 1688 商家？\n\n忽略后该销方名称将从「待人工比对」列表移除，不再参与自动匹配与看板统计；以后可在「已忽略」里恢复。${extra}`)) return;
   const old = btn.textContent; btn.disabled = true; btn.textContent = '处理中';
   try {
     const r = await fetch('/api/mapping/ignore', {
