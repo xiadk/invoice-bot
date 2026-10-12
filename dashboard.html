@@ -108,6 +108,16 @@
   .map-note { padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; font-size: 12px; width: 160px; }
   .empty-hint { background: #e8f5e9; color: #2e7d32; border-radius: 8px; padding: 14px 16px; font-size: 13px; }
   .warn-box { background: #fff8e1; border: 1px solid #ffe082; color: #8d6e00; border-radius: 8px; padding: 12px 16px; font-size: 12px; line-height: 1.8; margin-bottom: 12px; }
+  /* 分页条 */
+  .pager { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 10px 2px 6px; font-size: 12px; color: var(--sub); }
+  .pager .pager-info { margin-right: auto; }
+  .pager select { padding: 4px 6px; border: 1px solid var(--border); border-radius: 6px; font-size: 12px; background: #fff; color: var(--text); }
+  .pager .btn[disabled] { opacity: .45; cursor: not-allowed; }
+  /* 已忽略区（默认收起） */
+  .ignored-box { margin: 14px 0 4px; border: 1px dashed var(--border); border-radius: 8px; padding: 4px 12px; }
+  .ignored-box > summary { cursor: pointer; font-size: 13px; color: var(--sub); padding: 8px 0; }
+  .ignored-box > summary:hover { color: var(--primary); }
+  .ignored-box table { margin-top: 6px; }
 </style>
 </head>
 <body>
@@ -169,6 +179,7 @@
     </thead>
     <tbody id="tbody"><tr><td colspan="9" style="text-align:center;color:#8a8f99;padding:40px">数据加载中...</td></tr></tbody>
   </table>
+  <div id="dashPager"></div>
 </div>
 
 <!-- ══════════ 名称映射页 ══════════ -->
@@ -178,6 +189,7 @@
     <p>
       「已开票订单」里的<b>销方名称</b>是税务局口径，跟订单里的<b>商家名称</b>不一致，所以要靠这张映射表建立名称关系，看板才能把发票金额统计到对应商家。
       导入时会自动匹配（名称完全一致 / 包含 / 登录ID / 备注线索）；自动匹配不上的会列在下面「待人工比对」，你选好对应的 1688 商家保存即可，之后统计一律按映射表走。
+      若某个销方名称<b>确认没有</b>对应的 1688 商家，点该行的「忽略」把它移出列表，之后不再展示、不再参与自动匹配与统计（可在下方「已忽略」区随时恢复）。
     </p>
   </div>
   <div id="mapBody">加载中...</div>
@@ -239,6 +251,14 @@ let MAP = { mappings: [], unmatched: [], sellers: [] };
 const DETAIL_CACHE = {};      // loginId -> 明细（订单+已开票+催收记录）
 const EXPANDED = new Set();   // 展开了会员名子树的公司
 const ORDER_OPEN = new Set(); // 展开了订单明细的会员名
+// 分页状态：dash=看板公司表；unmatched=映射页「待人工比对」；mapping=映射页「已维护映射」；ignored=映射页「已忽略」
+const PAGER = {
+  dash: { page: 1, size: 20 },
+  unmatched: { page: 1, size: 20 },
+  mapping: { page: 1, size: 20 },
+  ignored: { page: 1, size: 20 },
+};
+const PAGE_SIZES = [10, 20, 50, 100];
 
 const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const yuan = v => '¥' + Number(v || 0).toFixed(2);
@@ -246,6 +266,36 @@ const statusText = st => ({ none: '未申请', applying: '已申请', issued: '�
 /** 选择器转义（公司名可能含括号/引号） */
 const q = s => (window.CSS && CSS.escape ? CSS.escape(String(s)) : String(s).replace(/["\\]/g, '\\$&'));
 const sentKey = m => m.sellerLogin || m.loginId;
+
+// ── 分页（前端切片：数据已在内存，统计卡/筛选/搜索都基于全量） ──
+/** 取某张表的当前分页信息（页码越界自动收敛）；slice(arr) 返回当前页数据 */
+function pageOf(key, total) {
+  const st = PAGER[key];
+  const pages = Math.max(1, Math.ceil(total / st.size));
+  if (st.page > pages) st.page = pages;
+  if (st.page < 1) st.page = 1;
+  return { page: st.page, size: st.size, pages, total, slice: (arr) => arr.slice((st.page - 1) * st.size, st.page * st.size) };
+}
+/** 分页条 HTML（每页条数 10/20/50/100 + 首页/上一页/下一页/末页） */
+function pagerHtml(key, total) {
+  const p = pageOf(key, total);
+  const st = PAGER[key];
+  const opts = PAGE_SIZES.map(n => `<option value="${n}"${n === st.size ? ' selected' : ''}>${n} 条/页</option>`).join('');
+  const dis = (b) => b ? ' disabled' : '';
+  return `<div class="pager">
+    <span class="pager-info">共 ${total} 条 · 第 ${p.page}/${p.pages} 页</span>
+    <select onchange="setPageSize('${key}', this.value)">${opts}</select>
+    <button class="btn btn-outline btn-sm"${dis(p.page <= 1)} onclick="gotoPage('${key}', 1)">首页</button>
+    <button class="btn btn-outline btn-sm"${dis(p.page <= 1)} onclick="gotoPage('${key}', ${p.page - 1})">上一页</button>
+    <button class="btn btn-outline btn-sm"${dis(p.page >= p.pages)} onclick="gotoPage('${key}', ${p.page + 1})">下一页</button>
+    <button class="btn btn-outline btn-sm"${dis(p.page >= p.pages)} onclick="gotoPage('${key}', ${p.pages})">末页</button>
+  </div>`;
+}
+function gotoPage(key, p) { PAGER[key].page = p; rerender(key); }
+function setPageSize(key, size) { PAGER[key].size = Number(size) || 20; PAGER[key].page = 1; rerender(key); }
+function resetPage(key) { PAGER[key].page = 1; }
+/** 按分页所属页面重绘 */
+function rerender(key) { key === 'dash' ? render() : renderMapping(); }
 
 // ── 页面切换 ──
 function switchPage(p) {
@@ -388,10 +438,17 @@ function companyRows(c) {
 
 function render() {
   stats();
-  const list = visibleCompanies();
+  const all = visibleCompanies();
   const tb = document.getElementById('tbody');
-  if (list.length === 0) { tb.innerHTML = '<tr><td colspan="9" style="text-align:center;color:#8a8f99;padding:40px">无匹配公司</td></tr>'; return; }
-  tb.innerHTML = list.map(c => companyRows(c)).join('');
+  const pagerBox = document.getElementById('dashPager');
+  if (all.length === 0) {
+    tb.innerHTML = '<tr><td colspan="9" style="text-align:center;color:#8a8f99;padding:40px">无匹配公司</td></tr>';
+    pagerBox.innerHTML = '';
+    return;
+  }
+  const p = pageOf('dash', all.length);
+  tb.innerHTML = p.slice(all).map(c => companyRows(c)).join('');
+  pagerBox.innerHTML = pagerHtml('dash', all.length);
   restoreExpanded();
 }
 
@@ -668,20 +725,22 @@ function renderMapping() {
     (MAP.sellers || []).map(s => `<option value="${esc(s.company)}">${esc(s.sellerLogin || s.loginId)}</option>`).join('');
 
   const unmatched = MAP.unmatched || [];
-  const mappings = MAP.mappings || [];
+  const mappings = MAP.mappings || [];   // 有效映射
+  const ignored = MAP.ignored || [];     // 已忽略（确认无对应 1688 商家）
 
+  const up = pageOf('unmatched', unmatched.length);
   const unmatchedHtml = unmatched.length === 0
     ? '<div class="empty-hint">✓ 所有销方名称都已匹配到 1688 商家，无需人工比对。</div>'
-    : `<div class="warn-box">以下 ${unmatched.length} 个税务局销方名称没有匹配上 1688 商家，请选择对应的商家后点「保存」。保存后看板会立即按新映射统计。</div>
+    : `<div class="warn-box">以下 ${unmatched.length} 个税务局销方名称没有匹配上 1688 商家：选好对应的商家点「保存」；若<b>确认没有</b>对应的 1688 商家，点「忽略」把它移出列表（之后不再展示，可在下方「已忽略」里恢复）。</div>
        <table>
          <thead><tr>
            <th>税务局销方名称</th><th style="width:150px">销方税号</th>
            <th style="width:100px">发票行数</th><th style="width:110px">开票金额</th>
-           <th style="width:150px">最近开票</th><th style="width:220px">备注线索</th>
-           <th style="width:330px">对应的 1688 商家</th>
+           <th style="width:150px">最近开票</th><th style="width:200px">备注线索</th>
+           <th style="width:390px">对应的 1688 商家</th>
          </tr></thead>
          <tbody>
-         ${unmatched.map(u => `<tr>
+         ${up.slice(unmatched).map(u => `<tr>
            <td class="company">${esc(u.tax_seller_name)}</td>
            <td class="loginid">${esc(u.seller_tax_no || '')}</td>
            <td>${u.invoice_rows}</td>
@@ -690,21 +749,24 @@ function renderMapping() {
            <td class="loginid">${esc(u.remark || '')}</td>
            <td>
              <input class="map-input" list="sellerOptions" placeholder="输入1688公司名搜索" data-tax="${esc(u.tax_seller_name)}">
-             <button class="btn btn-primary btn-sm" onclick="saveMap(this)">保存</button>
+             <button class="btn btn-primary btn-sm" data-tax="${esc(u.tax_seller_name)}" onclick="saveMap(this)">保存</button>
+             <button class="btn btn-outline btn-sm" data-tax="${esc(u.tax_seller_name)}" onclick="ignoreMap(this)" title="确认没有对应的 1688 商家，移出待比对列表">忽略</button>
            </td>
          </tr>`).join('')}
          </tbody>
-       </table>`;
+       </table>
+       ${pagerHtml('unmatched', unmatched.length)}`;
 
+  const mp = pageOf('mapping', mappings.length);
   const mappingHtml = mappings.length === 0 ? '<div class="empty-hint">映射表还是空的，先点看板的「重新导入数据」触发自动匹配。</div>'
     : `<table>
          <thead><tr>
            <th>税务局销方名称</th><th>对应的 1688 商家</th><th style="width:140px">卖家会员名</th>
            <th style="width:80px">匹配方式</th><th style="width:80px">人工确认</th>
-           <th style="width:110px">开票金额</th><th style="width:150px">更新时间</th><th style="width:80px">操作</th>
+           <th style="width:110px">开票金额</th><th style="width:150px">更新时间</th><th style="width:150px">操作</th>
          </tr></thead>
          <tbody>
-         ${mappings.map(m => `<tr>
+         ${mp.slice(mappings).map(m => `<tr>
            <td>${esc(m.tax_seller_name)}</td>
            <td class="company">${m.seller_company ? esc(m.seller_company) : '<span class="badge none">未映射</span>'}</td>
            <td class="loginid">${esc(m.seller_login || '')}</td>
@@ -712,20 +774,47 @@ function renderMapping() {
            <td>${m.is_confirmed ? '<span class="badge issued">已确认</span>' : '<span class="badge applying">待复核</span>'}</td>
            <td><span class="amount ok">${yuan(m.invoice_amount)}</span></td>
            <td class="loginid">${esc(String(m.updated_at || '').slice(0, 16))}</td>
-           <td><button class="btn btn-danger btn-sm" data-tax="${esc(m.tax_seller_name)}" onclick="delMap(this)">删除</button></td>
+           <td>
+             <button class="btn btn-danger btn-sm" data-tax="${esc(m.tax_seller_name)}" onclick="delMap(this)">删除</button>
+             <button class="btn btn-outline btn-sm" data-tax="${esc(m.tax_seller_name)}" onclick="ignoreMap(this)" title="确认没有对应的 1688 商家，改为忽略">忽略</button>
+           </td>
          </tr>`).join('')}
          </tbody>
-       </table>`;
+       </table>
+       ${pagerHtml('mapping', mappings.length)}`;
+
+  const ig = pageOf('ignored', ignored.length);
+  const ignoredHtml = ignored.length === 0 ? ''
+    : `<details class="ignored-box">
+         <summary>已忽略 ${ignored.length} 条（确认无对应 1688 商家，不参与待比对与统计；点击展开可恢复）</summary>
+         <table>
+           <thead><tr>
+             <th>税务局销方名称</th><th style="width:200px">说明</th><th style="width:110px">开票金额</th>
+             <th style="width:150px">更新时间</th><th style="width:100px">操作</th>
+           </tr></thead>
+           <tbody>
+           ${ig.slice(ignored).map(g => `<tr>
+             <td class="company">${esc(g.tax_seller_name)}</td>
+             <td class="loginid">${esc(g.note || '')}</td>
+             <td><span class="amount ok">${yuan(g.invoice_amount)}</span></td>
+             <td class="loginid">${esc(String(g.updated_at || '').slice(0, 16))}</td>
+             <td><button class="btn btn-outline btn-sm" data-tax="${esc(g.tax_seller_name)}" onclick="unignoreMap(this)">恢复</button></td>
+           </tr>`).join('')}
+           </tbody>
+         </table>
+         ${pagerHtml('ignored', ignored.length)}
+       </details>`;
 
   box.innerHTML = `<div class="section-title">待人工比对 <span class="cnt">（${unmatched.length} 个销方名称未匹配）</span></div>
     ${unmatchedHtml}
     <div class="section-title">已维护映射 <span class="cnt">（${mappings.length} 条）</span></div>
-    ${mappingHtml}`;
+    ${mappingHtml}
+    ${ignoredHtml}`;
 }
 async function saveMap(btn) {
-  const input = btn.previousElementSibling;
-  const taxSellerName = input.dataset.tax;
-  const company = (input.value || '').trim();
+  const taxSellerName = btn.dataset.tax;
+  const input = btn.closest('td').querySelector('.map-input');
+  const company = ((input && input.value) || '').trim();
   if (!company) { alert('请先输入或选择对应的 1688 商家'); return; }
   const hit = (MAP.sellers || []).find(s => s.company === company);
   if (!hit) { alert('没找到这个商家，请从下拉候选里选（输入关键字会自动提示）'); return; }
@@ -748,6 +837,38 @@ async function delMap(btn) {
   await fetch('/api/mapping/delete', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ taxSellerName }) });
   DETAIL_CACHE_RESET();
   await loadMapping(); await loadData();
+}
+/** 忽略：确认该税务局销方名称没有对应的 1688 商家，移出待比对列表、不再参与统计 */
+async function ignoreMap(btn) {
+  const taxSellerName = btn.dataset.tax;
+  if (!confirm(`确认「${taxSellerName}」没有对应的 1688 商家？\n\n忽略后该销方名称将从「待人工比对」列表移除，不再参与自动匹配与看板统计；以后可在「已忽略」里恢复。`)) return;
+  const old = btn.textContent; btn.disabled = true; btn.textContent = '处理中';
+  try {
+    const r = await fetch('/api/mapping/ignore', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ taxSellerName, ignored: true }),
+    });
+    const d = await r.json();
+    if (d.error) { alert('操作失败: ' + d.error); btn.disabled = false; btn.textContent = old; return; }
+    DETAIL_CACHE_RESET();
+    await loadMapping(); await loadData();
+  } catch (e) { alert('操作失败: ' + e.message); btn.disabled = false; btn.textContent = old; }
+}
+/** 恢复：把已忽略的销方名称放回「待人工比对」列表 */
+async function unignoreMap(btn) {
+  const taxSellerName = btn.dataset.tax;
+  if (!confirm(`把「${taxSellerName}」恢复为待人工比对？`)) return;
+  const old = btn.textContent; btn.disabled = true; btn.textContent = '处理中';
+  try {
+    const r = await fetch('/api/mapping/ignore', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ taxSellerName, ignored: false }),
+    });
+    const d = await r.json();
+    if (d.error) { alert('操作失败: ' + d.error); btn.disabled = false; btn.textContent = old; return; }
+    DETAIL_CACHE_RESET();
+    await loadMapping(); await loadData();
+  } catch (e) { alert('操作失败: ' + e.message); btn.disabled = false; btn.textContent = old; }
 }
 
 // ── 设置页 ──
@@ -808,11 +929,11 @@ async function saveConfig() {
   } catch (e) { alert('保存失败: ' + e.message); }
 }
 
-document.getElementById('search').addEventListener('input', e => { keyword = e.target.value.trim(); render(); });
+document.getElementById('search').addEventListener('input', e => { keyword = e.target.value.trim(); resetPage('dash'); render(); });
 document.getElementById('filterTabs').addEventListener('click', e => {
   const tab = e.target.closest('.filter-tab'); if (!tab) return;
   document.querySelectorAll('.filter-tab').forEach(t => t.classList.remove('active'));
-  tab.classList.add('active'); filter = tab.dataset.filter; render();
+  tab.classList.add('active'); filter = tab.dataset.filter; resetPage('dash'); render();
 });
 ['cfg-template', 'cfg-orderItem', 'cfg-reminder', 'cfg-companyName', 'cfg-taxNo', 'cfg-email'].forEach(id => {
   document.getElementById(id).addEventListener('input', updatePreview);

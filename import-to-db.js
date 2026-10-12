@@ -343,13 +343,16 @@ function matchSeller(taxName, remark, sellers) {
  * @returns {{autoMapped:number, unmatched:string[], details:Array}}
  */
 async function autoMapSellers(sellers, taxNames) {
-  const existing = await db.query('SELECT tax_seller_name, seller_company FROM seller_name_mapping');
+  const existing = await db.query('SELECT tax_seller_name, seller_company, is_ignored FROM seller_name_mapping');
   const mapped = new Set(existing.filter((r) => r.seller_company).map((r) => r.tax_seller_name));
+  // 人工已忽略的销方名称（确认无对应 1688 商家）不再参与自动匹配，尊重人工判断
+  const ignored = new Set(existing.filter((r) => r.is_ignored).map((r) => r.tax_seller_name));
 
   const autoMapped = [];
   const unmatched = [];
   for (const t of taxNames) {
     if (mapped.has(t.tax_seller_name)) continue;
+    if (ignored.has(t.tax_seller_name)) continue;
     const hit = matchSeller(t.tax_seller_name, t.remark, sellers);
     if (hit) {
       // 名称唯一命中（exact/login 且无同公司多会员名歧义）→ 已确认；
@@ -624,7 +627,7 @@ async function runImport(opts) {
   return out;
 }
 
-module.exports = { runImport, importOrders, importInvoices, applyInvoiceStatus, migrateLegacySentLog, matchSeller, normName, toDateTime };
+module.exports = { runImport, importOrders, importInvoices, applyInvoiceStatus, migrateLegacySentLog, matchSeller, autoMapSellers, normName, toDateTime };
 
 // ──────────────────────── CLI ────────────────────────
 if (require.main === module) {

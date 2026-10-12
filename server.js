@@ -10,9 +10,11 @@
  *   GET  /api/seller-detail   单个会员名的订单明细 + 已开票明细（展开订单时按需加载）
  *   POST /api/send            {loginIds: [...]} 批量发送催收消息（loginId = 会员名）
  *   POST /api/import          重新扫描 data/ 下的 Excel 并全量导入 MySQL
- *   GET  /api/mapping         销方名称映射表 + 待人工比对的销方名称 + 可选卖家列表
- *   POST /api/mapping         新增/修改一条名称映射（人工比对结果）
+ *   GET  /api/mapping         销方名称映射表（有效 + 已忽略）+ 待人工比对的销方名称 + 可选卖家列表
+ *   POST /api/mapping         新增/修改一条名称映射（人工比对结果；会自动取消该名称的忽略标记）
  *   POST /api/mapping/delete  删除一条名称映射
+ *   POST /api/mapping/ignore  忽略/恢复一个销方名称 {taxSellerName, ignored}（确认无对应 1688 商家，
+ *                             忽略后不再出现在待比对列表、不参与自动匹配与统计，可在「已忽略」区恢复）
  *   POST /api/order-state     人工确认已开票：{orderNo, action:'confirm'|'cancel'} 单订单，
  *                             或 {loginId, action:'confirm-all'|'cancel-all'} 整会员名批量（商家线下开票）
  *
@@ -33,7 +35,8 @@
  * 数据源: MySQL 数据库 invoice_bot（连接参数见 config.json 的 mysql 段）
  *   invoice_order        1688 完成订单（源 data/完成订单/*.xlsx；含人工确认 state_source='manual'）
  *   issued_invoice       历史已开票数据（源 data/已开票订单/*.xlsx，税务局导出）
- *   seller_name_mapping  税务局销方名称 → 1688 商家名称 映射表
+ *   seller_name_mapping  税务局销方名称 → 1688 商家名称 映射表（is_ignored=1 表示确认无对应商家，已忽略，
+ *                        从待比对列表与未匹配计数中剔除，可在名称映射页恢复）
  *   send_log             催收发送记录（一行=一次发送尝试，result=ok/fail）
  *
  * 注意: 提交开票申请（/api/apply）已在二次开发中移除，看板不再提供该按钮。
@@ -408,16 +411,19 @@ async function doSend(loginIds) {
 
 // ── 名称映射维护 ──
 
-/** 映射表全量 + 待人工比对的销方名称 + 可选卖家列表 */
+/** 映射表（有效映射 / 已忽略分开返回）+ 待人工比对的销方名称 + 可选卖家列表 */
 async function loadMapping() {
-  const mappings = await db.query(`
+  const all = await db.query(`
     SELECT m.id, m.tax_seller_name, m.seller_company, m.seller_login,
-           m.match_type, m.match_rule, m.is_confirmed, m.note, m.updated_at,
+           m.match_type, m.match_rule, m.is_confirmed, m.is_ignored, m.note, m.updated_at,
            (SELECT ROUND(SUM(total_amount),2) FROM issued_invoice i WHERE i.seller_name = m.tax_seller_name) AS invoice_amount,
            (SELECT COUNT(*) FROM issued_invoice i WHERE i.seller_name = m.tax_seller_name) AS invoice_rows
     FROM seller_name_mapping m
-    ORDER BY (m.seller_company IS NULL) DESC, invoice_amount DESC
+    ORDER BY m.is_ignored ASC, (m.seller_company IS NULL) DESC, invoice_amount DESC
   `);
+  const mappings = all.filter((m) => !m.is_ignored);
+  const ignored = all.filter((m) => m.is_ignored);
+  // 待人工比对：视图已排除「已映射」与「已忽略」两类
   const unmatched = await db.query('SELECT * FROM v_unmatched_seller_name ORDER BY invoice_amount DESC');
   const sellers = await db.query(`
     SELECT COALESCE(NULLIF(seller_login,''), seller_company) AS loginId,
@@ -426,18 +432,18 @@ async function loadMapping() {
     WHERE seller_company IS NOT NULL
     GROUP BY loginId ORDER BY company
   `);
-  return { mappings, unmatched, sellers, unmatchedCount: unmatched.length };
+  return { mappings, ignored, unmatched, sellers, unmatchedCount: unmatched.length, ignoredCount: ignored.length };
 }
 
-/** 保存一条人工映射，并回填 issued_invoice.seller_company */
+/** 保存一条人工映射，并回填 issued_invoice.seller_company（同时取消该名称的忽略标记） */
 async function saveMapping({ taxSellerName, sellerLogin, sellerCompany, note }) {
   if (!taxSellerName) throw new Error('缺少 taxSellerName');
   if (!sellerCompany) throw new Error('请选择对应的1688商家');
   await db.exec(
-    `INSERT INTO seller_name_mapping (tax_seller_name, seller_company, seller_login, match_type, match_rule, is_confirmed, note)
-     VALUES (?, ?, ?, 'manual', 'manual', 1, ?)
+    `INSERT INTO seller_name_mapping (tax_seller_name, seller_company, seller_login, match_type, match_rule, is_confirmed, is_ignored, note)
+     VALUES (?, ?, ?, 'manual', 'manual', 1, 0, ?)
      ON DUPLICATE KEY UPDATE seller_company = VALUES(seller_company), seller_login = VALUES(seller_login),
-       match_type = 'manual', match_rule = 'manual', is_confirmed = 1, note = VALUES(note)`,
+       match_type = 'manual', match_rule = 'manual', is_confirmed = 1, is_ignored = 0, note = VALUES(note)`,
     [taxSellerName, sellerCompany, sellerLogin || null, note || null]
   );
   const r = await db.exec(
@@ -445,6 +451,40 @@ async function saveMapping({ taxSellerName, sellerLogin, sellerCompany, note }) 
     [sellerCompany, taxSellerName]
   );
   return { ok: true, updatedInvoices: r.affectedRows || 0 };
+}
+
+/**
+ * 忽略 / 恢复一个销方名称。
+ * 忽略 = 人工确认该税务局销方名称没有对应的 1688 商家，之后不再出现在「待人工比对」列表，
+ *        也不再参与自动匹配与统计；可在「已忽略」区随时恢复。
+ */
+async function ignoreMapping({ taxSellerName, ignored }) {
+  if (!taxSellerName) throw new Error('缺少 taxSellerName');
+  const on = ignored === undefined ? true : !!ignored;
+  if (on) {
+    await db.exec(
+      `INSERT INTO seller_name_mapping
+         (tax_seller_name, seller_company, seller_login, match_type, match_rule, is_confirmed, is_ignored, note)
+       VALUES (?, NULL, NULL, 'ignored', 'ignored', 1, 1, '确认无对应1688商家，已忽略')
+       ON DUPLICATE KEY UPDATE seller_company = NULL, seller_login = NULL,
+         match_type = 'ignored', match_rule = 'ignored', is_confirmed = 1, is_ignored = 1,
+         note = '确认无对应1688商家，已忽略'`,
+      [taxSellerName]
+    );
+    // 忽略的销方名称不再计入任何商家，清空此前可能的回填结果
+    await db.exec('UPDATE issued_invoice SET seller_company = NULL WHERE seller_name = ?', [taxSellerName]);
+  } else {
+    // 恢复：本就只是「忽略」记录则直接删除；若上面挂着真实映射则只取消忽略标记
+    const rows = await db.query(
+      'SELECT id, seller_company FROM seller_name_mapping WHERE tax_seller_name = ?', [taxSellerName]
+    );
+    if (rows[0] && !rows[0].seller_company) {
+      await db.exec('DELETE FROM seller_name_mapping WHERE tax_seller_name = ?', [taxSellerName]);
+    } else {
+      await db.exec("UPDATE seller_name_mapping SET is_ignored = 0 WHERE tax_seller_name = ?", [taxSellerName]);
+    }
+  }
+  return { ok: true, ignored: on };
 }
 
 /** 删除一条映射，并清空 issued_invoice 里回填的结果 */
@@ -675,6 +715,10 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === 'POST' && p === '/api/mapping/delete') {
       return sendJson(res, 200, await deleteMapping(await readBody(req)));
+    }
+    // 忽略 / 恢复一个销方名称（确认无对应 1688 商家）
+    if (req.method === 'POST' && p === '/api/mapping/ignore') {
+      return sendJson(res, 200, await ignoreMapping(await readBody(req)));
     }
 
     // 订单维度：人工确认已开票 / 取消人工确认

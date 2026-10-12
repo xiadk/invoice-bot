@@ -152,6 +152,29 @@ async function migrate(conn, dbName) {
   if (tc[0] && tc[0].c !== SEND_LOG_COMMENT) {
     await conn.query(`ALTER TABLE \`send_log\` COMMENT='${SEND_LOG_COMMENT}'`);
   }
+
+  // seller_name_mapping：新增「忽略」标记（人工确认该销方名称没有对应的 1688 商家）
+  if (!(await colExists('seller_name_mapping', 'is_ignored'))) {
+    await conn.query(
+      "ALTER TABLE `seller_name_mapping` ADD COLUMN `is_ignored` TINYINT(1) NOT NULL DEFAULT 0 " +
+      "COMMENT '是否忽略：1=该销方名称确认无对应1688商家，从待比对列表与统计中剔除（可在名称映射页恢复）' AFTER `is_confirmed`"
+    );
+  }
+  if (!(await idxExists('seller_name_mapping', 'idx_is_ignored'))) {
+    await conn.query('ALTER TABLE `seller_name_mapping` ADD KEY `idx_is_ignored` (`is_ignored`)');
+  }
+  // 视图重建：待比对清单需同时排除「已映射」与「已忽略」两类（老库视图定义同步）
+  await conn.query(
+    'CREATE OR REPLACE VIEW `v_unmatched_seller_name` AS ' +
+    'SELECT i.`seller_name` AS `tax_seller_name`, COUNT(*) AS `invoice_rows`, ' +
+    'SUM(i.`total_amount`) AS `invoice_amount`, MIN(i.`invoice_date`) AS `first_invoice_date`, ' +
+    'MAX(i.`invoice_date`) AS `last_invoice_date`, MAX(i.`seller_tax_no`) AS `seller_tax_no`, ' +
+    'MAX(i.`remark`) AS `remark` ' +
+    'FROM `issued_invoice` i ' +
+    'LEFT JOIN `seller_name_mapping` m ON m.`tax_seller_name` = i.`seller_name` ' +
+    'AND (m.`is_ignored` = 1 OR m.`seller_company` IS NOT NULL) ' +
+    'WHERE m.`id` IS NULL GROUP BY i.`seller_name`'
+  );
 }
 
 /**

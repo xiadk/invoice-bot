@@ -117,15 +117,24 @@ CREATE TABLE IF NOT EXISTS `seller_name_mapping` (
   `match_type`      VARCHAR(16)  NOT NULL DEFAULT 'manual' COMMENT '匹配方式：auto=系统自动匹配，manual=人工维护',
   `match_rule`      VARCHAR(64)  DEFAULT NULL            COMMENT '自动匹配命中的规则（exact / normalized / contains / login / remark）',
   `is_confirmed`    TINYINT(1)   NOT NULL DEFAULT 0      COMMENT '是否人工确认：0=自动匹配待人工复核，1=已确认',
+  `is_ignored`      TINYINT(1)   NOT NULL DEFAULT 0      COMMENT '是否忽略：1=该销方名称确认无对应1688商家，从待比对列表与统计中剔除（可在名称映射页恢复）',
   `note`            VARCHAR(255) DEFAULT NULL            COMMENT '备注',
   `created_at`      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
   `updated_at`      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
   PRIMARY KEY (`id`),
   UNIQUE KEY `uk_tax_seller_name` (`tax_seller_name`),
   KEY `idx_seller_login`          (`seller_login`),
-  KEY `idx_seller_company`        (`seller_company`)
+  KEY `idx_seller_company`        (`seller_company`),
+  KEY `idx_is_ignored`            (`is_ignored`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-  COMMENT='税务局销方名称与1688商家名称的映射表（人工可比对维护）';
+  COMMENT='税务局销方名称与1688商家名称的映射表（人工可比对维护；is_ignored=1 表示确认无对应商家）';
+
+-- 老库增量补列（新装库上面的 CREATE TABLE 已含该列；MariaDB 支持 IF NOT EXISTS）
+--   is_ignored = 1：人工确认该税务局销方名称没有对应的 1688 商家，从待比对列表与统计中剔除
+ALTER TABLE `seller_name_mapping`
+  ADD COLUMN IF NOT EXISTS `is_ignored` TINYINT(1) NOT NULL DEFAULT 0
+  COMMENT '是否忽略：1=该销方名称确认无对应1688商家，从待比对列表与统计中剔除（可在名称映射页恢复）'
+  AFTER `is_confirmed`;
 
 -- ----------------------------------------------------------------------------
 -- 表 4: send_log —— 催收消息发送记录（替代原 data/sent-log.json）
@@ -172,6 +181,8 @@ CREATE TABLE IF NOT EXISTS `import_log` (
 -- ----------------------------------------------------------------------------
 -- 视图: v_unmatched_seller_name —— 待人工比对的销方名称清单
 --   看板「名称映射」页直接读这个视图。
+--   排除两类销方名称：① 已建立映射（seller_company 非空）
+--                     ② 人工已忽略（is_ignored = 1，确认没有对应的 1688 商家）
 -- ----------------------------------------------------------------------------
 CREATE OR REPLACE VIEW `v_unmatched_seller_name` AS
 SELECT
@@ -185,6 +196,6 @@ SELECT
 FROM `issued_invoice` i
 LEFT JOIN `seller_name_mapping` m
        ON m.`tax_seller_name` = i.`seller_name`
-      AND m.`seller_company` IS NOT NULL
+      AND (m.`is_ignored` = 1 OR m.`seller_company` IS NOT NULL)
 WHERE m.`id` IS NULL
 GROUP BY i.`seller_name`;

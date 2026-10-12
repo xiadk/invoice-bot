@@ -70,10 +70,10 @@ invoice-bot/
 |---|---|
 | `invoice_order` | 1688 订单，主键 order_no，含 `invoice_state(none/applying/issued)` |
 | `issued_invoice` | 税务局发票**明细行**，`seller_name`→`seller_company` 靠映射，`row_hash` 去重 |
-| `seller_name_mapping` | 销方名称↔1688商家 映射（auto/manual），人工维护成果，导入不覆盖 |
+| `seller_name_mapping` | 销方名称↔1688商家 映射（auto/manual/ignored；`is_ignored=1`=确认无对应商家已忽略，可在名称映射页恢复），人工维护成果，导入不覆盖、也不复活已忽略项 |
 | `send_log` | 催收发送记录，**一行=一次发送尝试**（`result` 区分 ok/fail）。催收次数=`SUM(result='ok')`（失败不计）；最近催收时间=`MAX(CASE WHEN result='ok' THEN sent_at END)` |
 | `import_log` | 导入日志 |
-| `v_unmatched_seller_name` | 待人工比对的销方名称（LEFT JOIN 派生） |
+| `v_unmatched_seller_name` | 待人工比对的销方名称（LEFT JOIN 派生，已排除「已映射」与「已忽略」） |
 
 **导入策略：全量重建**。两张明细表 `DELETE` 后重插（文件夹里的 Excel 是唯一真相）；`invoice_order.invoice_state` 先读内存再回填；`seller_name_mapping` 不删。
 
