@@ -272,6 +272,28 @@ async function migrate(conn, dbName) {
     'WHERE m.`id` IS NULL GROUP BY i.`user_id`, i.`seller_name`'
   );
 
+  // agent_task（方案C 本机浏览器通道）：老库补建表
+  const [atRows] = await q(
+    `SELECT COUNT(*) AS n FROM information_schema.TABLES
+     WHERE TABLE_SCHEMA=? AND TABLE_NAME='agent_task'`, [dbName]
+  );
+  if (!atRows[0] || atRows[0].n === 0) {
+    await q(
+      'CREATE TABLE IF NOT EXISTS `agent_task` (' +
+      '`id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,' +
+      '`user_id` INT UNSIGNED NOT NULL,' +
+      "`status` ENUM('queued','running','done','aborted','failed') NOT NULL DEFAULT 'queued'," +
+      '`total` INT NOT NULL DEFAULT 0, `done` INT NOT NULL DEFAULT 0,' +
+      '`ok` INT NOT NULL DEFAULT 0, `fail` INT NOT NULL DEFAULT 0,' +
+      '`items` JSON DEFAULT NULL, `error` VARCHAR(255) DEFAULT NULL,' +
+      '`started_at` DATETIME DEFAULT NULL, `finished_at` DATETIME DEFAULT NULL,' +
+      '`created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,' +
+      '`updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,' +
+      'PRIMARY KEY (`id`), KEY `idx_user_status` (`user_id`,`status`), KEY `idx_user_created` (`user_id`,`created_at`)) ' +
+      "ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='本机浏览器通道的发送任务（方案C）'"
+    );
+  }
+
   // ── 种子化超级管理员 + 存量数据归属 ──
   await seedAdmin(conn, dbName);
 }

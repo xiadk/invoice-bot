@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>本机发送助手</title>
+<style>
+  :root { --primary:#ff6a00; --border:#e8e9eb; --text:#26282c; --sub:#8a8f99; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { width:320px; font-family:"Microsoft YaHei","PingFang SC",sans-serif; color:var(--text); padding:14px; }
+  h1 { font-size:14px; margin-bottom:4px; }
+  .sub { font-size:11px; color:var(--sub); line-height:1.6; margin-bottom:12px; }
+  label { display:block; font-size:11px; color:var(--sub); margin:10px 0 4px; }
+  input { width:100%; padding:8px 10px; border:1px solid var(--border); border-radius:6px; font-size:13px; font-family:inherit; }
+  input:focus { outline:none; border-color:var(--primary); }
+  .btn { width:100%; padding:9px; border:none; border-radius:6px; background:var(--primary); color:#fff; font-size:13px; cursor:pointer; font-family:inherit; margin-top:10px; }
+  .btn.plain { background:#f1f2f4; color:var(--text); }
+  .row { display:flex; gap:8px; }
+  .row .btn { margin-top:8px; }
+  .status { margin-top:12px; padding:9px 10px; border-radius:6px; background:#f7f8fa; font-size:12px; line-height:1.9; }
+  .dot { display:inline-block; width:8px; height:8px; border-radius:50%; background:#c9ccd1; margin-right:6px; }
+  .dot.on { background:#2e7d32; }
+  .code { font-weight:700; letter-spacing:2px; color:var(--primary); }
+</style>
+</head>
+<body>
+  <h1>1688 发票催收 · 本机发送助手</h1>
+  <div class="sub">发送在您本机浏览器执行，1688 登录态与密码不会离开本机。</div>
+
+  <label>服务器地址</label>
+  <input id="serverUrl" placeholder="http://你的服务器:8787" autocomplete="off">
+
+  <label>配对码（在看板「本机浏览器通道」里生成）</label>
+  <input id="code" placeholder="6 位数字" autocomplete="off" inputmode="numeric">
+
+  <button class="btn" id="btnConnect">连接</button>
+  <div class="row">
+    <button class="btn plain" id="btnDisconnect">断开</button>
+    <button class="btn plain" id="btnOpen">打开登录页</button>
+  </div>
+
+  <div class="status" id="status">读取中…</div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

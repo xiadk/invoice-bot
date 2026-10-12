@@ -284,3 +284,30 @@ LEFT JOIN `seller_name_mapping` m
       AND (m.`is_ignored` = 1 OR m.`seller_company` IS NOT NULL)
 WHERE m.`id` IS NULL
 GROUP BY i.`user_id`, i.`seller_name`;
+
+-- ----------------------------------------------------------------------------
+-- agent_task —— 本机浏览器通道（方案C）的发送任务
+--   一行 = 一次由「用户本机浏览器」执行的发送任务；服务器只做编排与结果入库。
+--   逐条发送结果仍写入 send_log；本表用于进度展示与断线续跑。
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `agent_task` (
+  `id`           BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `user_id`      INT UNSIGNED NOT NULL,
+  `status`       ENUM('queued','running','done','aborted','failed') NOT NULL DEFAULT 'queued'
+                 COMMENT 'queued=已创建待下发, running=执行中, done=完成, aborted=被中断, failed=失败',
+  `total`        INT NOT NULL DEFAULT 0  COMMENT '本批卖家数',
+  `done`         INT NOT NULL DEFAULT 0  COMMENT '已处理卖家数',
+  `ok`           INT NOT NULL DEFAULT 0  COMMENT '成功数',
+  `fail`         INT NOT NULL DEFAULT 0  COMMENT '失败数',
+  `items`        JSON DEFAULT NULL
+                 COMMENT '清单 [{loginId,company,amount,orderNos,status}]，status=pending|ok|fail，用于断线续跑',
+  `error`        VARCHAR(255) DEFAULT NULL COMMENT '中断/失败原因摘要',
+  `started_at`   DATETIME DEFAULT NULL,
+  `finished_at`  DATETIME DEFAULT NULL,
+  `created_at`   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at`   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_user_status`  (`user_id`, `status`),
+  KEY `idx_user_created` (`user_id`, `created_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  COMMENT='本机浏览器通道的发送任务（方案C）';

@@ -49,6 +49,7 @@ const tenancy = require('./lib/tenancy');
 const { runImport } = require('./import-to-db');
 const { launch, resolveHeadless, loadConfig } = require('./lib/browser');
 const { LiveBrowser } = require('./lib/live-browser');
+const { AgentHub } = require('./lib/agent-hub');
 const { buildMessages, sendToSeller } = require('./lib/sender');
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -430,7 +431,7 @@ function taskFor(userId) {
   let t = TASKS.get(userId);
   if (!t) {
     t = {
-      running: false, type: null, total: 0, done: 0, ok: 0, fail: 0,
+      running: false, channel: null, type: null, total: 0, done: 0, ok: 0, fail: 0,
       current: null, logs: [], stopRequested: false, startedAt: null, finishedAt: null,
     };
     TASKS.set(userId, t);
@@ -466,6 +467,173 @@ async function buyerInfoOf(userId) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
+// 本机浏览器通道（方案C）：连接中枢 + 任务下发 + 结果回收
+//   发送动作在用户本机浏览器里完成；服务器只负责下发任务、记录结果、展示进度。
+// ─────────────────────────────────────────────────────────────────────────
+const agentHub = new AgentHub({
+  onMessage: (uid, msg) => handleAgentMessage(uid, msg),
+  onStatus: (uid) => maybeAbortClientTask(uid),
+});
+
+/** 正在等待本机回执的任务：taskId -> ctx */
+const CLIENT_TASKS = new Map();
+
+function handleAgentMessage(uid, msg) {
+  if (msg.type === 'login_state') { agentHub.setLoggedIn(uid, msg.loggedIn); return; }
+  if (msg.type === 'sent') { onAgentSent(uid, msg); return; }
+  if (msg.type === 'log') {
+    const t = taskFor(uid);
+    if (t.running && t.channel === 'client') taskLog(t, '· ' + String(msg.text || '').slice(0, 200));
+    return;
+  }
+}
+
+function onAgentSent(uid, msg) {
+  const ctx = CLIENT_TASKS.get(Number(msg.taskId));
+  if (!ctx || ctx.userId !== Number(uid)) return;
+  const s = ctx.sellers.find((x) => x.loginId === msg.loginId);
+  const t = ctx.taskState;
+  const sellerLogin = s ? s.sellerLogin : msg.loginId;
+  const company = s ? s.company : '';
+  if (msg.ok) {
+    t.ok++;
+    recordSent(uid, sellerLogin, company, 'ok', 'client', s ? s.amount : null, s ? s.orderNos : null).catch(() => {});
+    taskLog(t, `✓ ${company || sellerLogin} 发送成功 · 催收次数 +1`);
+  } else {
+    t.fail++;
+    recordSent(uid, sellerLogin, company, 'fail', 'client', s ? s.amount : null, s ? s.orderNos : null,
+      msg.error || '本机发送失败').catch(() => {});
+    taskLog(t, `✗ ${company || sellerLogin} 失败: ${String(msg.error || '本机发送失败').split('\n')[0]} · 已记录失败原因`);
+  }
+  if (s) s._result = msg.ok ? 'ok' : 'fail';
+  t.done++;
+  t.current = null;
+  db.exec('UPDATE agent_task SET done=?, ok=?, fail=? WHERE id=?', [t.done, t.ok, t.fail, ctx.taskId]).catch(() => {});
+  ctx.pending--;
+  if (ctx.pending <= 0) finishClientTask(ctx, ctx.stopRequested ? 'aborted' : 'done');
+}
+
+async function finishClientTask(ctx, status) {
+  if (ctx.finished) return;
+  ctx.finished = true;
+  clearTimeout(ctx.timer);
+  CLIENT_TASKS.delete(ctx.taskId);
+  const t = ctx.taskState;
+  t.running = false;
+  t.current = null;
+  t.finishedAt = new Date().toISOString();
+  const items = ctx.sellers.map((s) => ({
+    loginId: s.loginId, company: s.company, amount: s.amount, orderNos: s.orderNos, status: s._result || 'pending',
+  }));
+  const reason = status === 'aborted' ? (ctx.abortReason || '被中断') : (status === 'failed' ? (ctx.abortReason || '异常结束') : null);
+  await db.exec(
+    'UPDATE agent_task SET status=?, done=?, ok=?, fail=?, items=?, error=?, finished_at=NOW() WHERE id=?',
+    [status, t.done, t.ok, t.fail, JSON.stringify(items), reason, ctx.taskId]
+  ).catch(() => {});
+  taskLog(t, `■ 本机通道任务 #${ctx.taskId} 结束：成功 ${t.ok} · 失败 ${t.fail}${status === 'aborted' ? ' · 已中断' : ''}`);
+  taskLog(t, `任务完成 ${t.ok}/${t.total}`);
+  try { ctx.resolve && ctx.resolve(); } catch (e) { /* 忽略 */ }
+}
+
+/** 本机通道掉线时，中断其正在跑的任务 */
+function maybeAbortClientTask(uid) {
+  if (agentHub.isOnline(uid)) return;
+  for (const ctx of CLIENT_TASKS.values()) {
+    if (ctx.userId === Number(uid) && !ctx.finished) {
+      taskLog(ctx.taskState, '⛔ 本机浏览器通道已断开，任务中断（重新连接后可重发）');
+      ctx.abortReason = '本机浏览器通道断开';
+      finishClientTask(ctx, 'aborted');
+    }
+  }
+}
+
+function estimateClientTimeout(n, gapMaxMs) {
+  return Math.max(120000, n * (Math.ceil(gapMaxMs / 1000) + 60) * 1000);
+}
+
+/** 组装并下发一次「本机浏览器」发送任务 */
+async function doClientSend(userId, loginIds) {
+  const taskState = taskFor(userId);
+  if (taskState.running) throw new Error('已有任务在运行中');
+  if (!agentHub.isOnline(userId)) throw new Error('本机浏览器通道未连接：请先在本机浏览器安装扩展并完成配对');
+
+  const config = loadConfig();
+  const rt = config.runtime || {};
+  const gapMin = (rt.sendGapMinSec || 15) * 1000;
+  const gapMax = (rt.sendGapMaxSec || 30) * 1000;
+  const buyer = await buyerInfoOf(userId);
+  const runConfig = { ...config, buyerInfo: buyer };
+  const data = await loadSellers(userId);
+
+  const sellers = [];
+  for (const loginId of loginIds) {
+    const s = data.find((x) => x.loginId === loginId);
+    if (!s || !s.sellerLogin) continue;
+    const detail = await loadSellerDetail(userId, loginId);
+    const toRemind = detail.orders.filter((o) => o.invoice_state !== 'issued');
+    if (!toRemind.length) continue;
+    const msgSeller = {
+      loginId: s.sellerLogin,
+      amount: Number(s.pendingAmount),
+      orders: toRemind.map((o) => ({ orderId: o.order_no, amount: Number(o.pay_amount).toFixed(2) })),
+    };
+    sellers.push({
+      loginId,
+      sellerLogin: s.sellerLogin,
+      company: s.company,
+      amount: Number(s.pendingAmount) || 0,
+      orderNos: msgSeller.orders.map((o) => o.orderId).join('；'),
+      messages: buildMessages(msgSeller, runConfig),
+    });
+  }
+  if (!sellers.length) throw new Error('没有可发送的卖家（可能都已开票或缺少卖家会员名）');
+
+  const created = await db.exec(
+    "INSERT INTO agent_task (user_id, status, total, items, started_at) VALUES (?, 'running', ?, ?, NOW())",
+    [userId, sellers.length, JSON.stringify(sellers.map((s) => ({
+      loginId: s.loginId, company: s.company, amount: s.amount, orderNos: s.orderNos, status: 'pending',
+    })))]
+  );
+  const taskId = created.insertId;
+
+  Object.assign(taskState, {
+    running: true, channel: 'client', type: 'send', total: sellers.length, done: 0, ok: 0, fail: 0,
+    current: null, stopRequested: false, startedAt: new Date().toISOString(), finishedAt: null, logs: [],
+  });
+  taskLog(taskState, `▶ 通过「本机浏览器」发送催收消息：共 ${sellers.length} 家（任务 #${taskId}）`);
+  taskLog(taskState, '· 发送在您本机浏览器执行，服务器只下发任务并记录结果');
+  if (!agentHub.status(userId).loggedIn) {
+    taskLog(taskState, '⚠ 本机浏览器尚未登录 1688：若发送失败，请在该浏览器登录 1688 后重试');
+  }
+
+  await new Promise((resolve) => {
+    const ctx = {
+      taskId, userId: Number(userId), sellers, taskState, pending: sellers.length,
+      stopRequested: false, finished: false, abortReason: null, resolve,
+      timer: setTimeout(() => {
+        taskLog(taskState, '⏱ 任务超时（长时间未收到本机浏览器回执），已结束');
+        ctx.abortReason = '等待本机回执超时';
+        finishClientTask(ctx, 'failed');
+      }, estimateClientTimeout(sellers.length, gapMax)),
+    };
+    CLIENT_TASKS.set(taskId, ctx);
+    const ok = agentHub.send(userId, {
+      type: 'send_batch',
+      taskId,
+      gapMs: { min: gapMin, max: gapMax },
+      sellers: sellers.map((s) => ({
+        loginId: s.loginId, sellerLogin: s.sellerLogin, company: s.company, messages: s.messages,
+      })),
+    });
+    if (!ok) {
+      ctx.abortReason = '下发时通道已断开';
+      taskLog(taskState, '✗ 下发失败：本机浏览器通道已断开');
+      finishClientTask(ctx, 'failed');
+    }
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 // 发送催收消息（后台任务，进度写入该用户的 taskState）
 // ─────────────────────────────────────────────────────────────────────────
 async function doSend(userId, loginIds) {
@@ -481,7 +649,7 @@ async function doSend(userId, loginIds) {
   const runConfig = { ...config, buyerInfo: buyer }; // 话术里的抬头取该用户账号资料
 
   Object.assign(taskState, {
-    running: true, type: 'send', total: loginIds.length, done: 0, ok: 0, fail: 0,
+    running: true, channel: 'server', type: 'send', total: loginIds.length, done: 0, ok: 0, fail: 0,
     current: null, stopRequested: false, startedAt: new Date().toISOString(), finishedAt: null, logs: [],
   });
   taskLog(taskState, `▶ 开始发送催收消息：共 ${loginIds.length} 家（启动独立浏览器）`);
@@ -1096,19 +1264,65 @@ const server = http.createServer(async (req, res) => {
     if (method === 'POST' && p === '/api/task/stop') {
       writeGuard();
       const t = taskFor(tenantId);
-      if (t.running) { t.stopRequested = true; taskLog(t, '⏸ 收到停止请求：当前卖家发完即停（若正在等待间隔，则立即停止）'); }
+      if (t.running) {
+        t.stopRequested = true;
+        taskLog(t, '⏸ 收到停止请求：当前卖家发完即停（若正在等待间隔，则立即停止）');
+        if (t.channel === 'client') {
+          for (const ctx of CLIENT_TASKS.values()) {
+            if (ctx.userId === Number(tenantId) && !ctx.finished) {
+              ctx.stopRequested = true;
+              agentHub.send(tenantId, { type: 'stop', taskId: ctx.taskId });
+            }
+          }
+        }
+      }
       return sendJson(res, 200, { ok: true });
     }
 
-    // 发送催收消息
+    // ── 本机浏览器通道（方案C）：始终作用于「当前登录者本人」的本机浏览器 ──
+    if (method === 'GET' && p === '/api/agent/status') {
+      return sendJson(res, 200, { ...agentHub.status(user.id), userId: user.id });
+    }
+    if (method === 'POST' && p === '/api/agent/pair-code') {
+      if (Number(tenantId) !== Number(user.id)) throw Object.assign(new Error('查看他人数据为只读模式，无法操作本机通道'), { code: 403 });
+      const info = agentHub.createPairCode(user.id);
+      const host = req.headers.host || ('localhost:' + (process.env.PORT || 8787));
+      const proto = String((req.headers['x-forwarded-proto'] || 'http')).split(',')[0].trim();
+      return sendJson(res, 200, { ...info, serverUrl: `${proto}://${host}` });
+    }
+    if (method === 'POST' && p === '/api/agent/disconnect') {
+      writeGuard();
+      const closed = agentHub.disconnect(user.id, '用户主动断开');
+      const revoked = agentHub.revokePairs(user.id);
+      return sendJson(res, 200, { ok: true, closed, revoked });
+    }
+    if (method === 'GET' && p === '/api/agent/tasks') {
+      const rows = await db.query(
+        'SELECT id, status, total, done, ok, fail, error, started_at, finished_at, created_at FROM agent_task WHERE user_id = ? ORDER BY id DESC LIMIT 20',
+        [user.id]
+      );
+      return sendJson(res, 200, { tasks: rows });
+    }
+
+    // 发送催收消息（channel 缺省=server，即服务器浏览器；client=本机浏览器通道）
     if (method === 'POST' && p === '/api/send') {
       writeGuard();
-      const { loginIds } = await readBody(req);
+      const body = await readBody(req);
+      const { loginIds } = body || {};
+      const channel = body && body.channel === 'client' ? 'client' : 'server';
       if (!Array.isArray(loginIds) || loginIds.length === 0) throw new Error('缺少 loginIds');
       const t = taskFor(tenantId);
       if (t.running) throw new Error('已有任务在运行中');
-      doSend(tenantId, loginIds).catch((e) => { t.running = false; taskLog(t, '✗ 任务异常: ' + e.message); });
-      return sendJson(res, 200, { started: true });
+      if (channel === 'client') {
+        doClientSend(tenantId, loginIds).catch((e) => {
+          const ts = taskFor(tenantId);
+          ts.running = false;
+          taskLog(ts, '✗ 任务异常: ' + e.message);
+        });
+      } else {
+        doSend(tenantId, loginIds).catch((e) => { t.running = false; taskLog(t, '✗ 任务异常: ' + e.message); });
+      }
+      return sendJson(res, 200, { started: true, channel });
     }
 
     // ── 云端登录（浏览器实时画面） ──
@@ -1198,10 +1412,57 @@ const server = http.createServer(async (req, res) => {
 // WebSocket：把服务器端浏览器的实时画面推给看板，并回灌鼠标/键盘
 // ─────────────────────────────────────────────────────────────────────────
 const wss = new WebSocketServer({ noServer: true });
+const wsAgent = new WebSocketServer({ noServer: true });
+
+// 本机浏览器通道：扩展用配对码鉴权（扩展侧没有看板登录 Cookie）
+wsAgent.on('connection', (ws) => {
+  const uid = ws._agentUid;
+  let bound = false;
+  const bind = (hello) => {
+    if (bound) return;
+    bound = true;
+    agentHub.attach(uid, ws, {
+      loggedIn: !!(hello && hello.loggedIn),
+      ua: (hello && hello.ua) || '',
+      extVer: (hello && hello.extVer) || '',
+      platform: (hello && hello.platform) || '',
+    });
+    try { ws.send(JSON.stringify({ type: 'ready', uid, serverTime: Date.now() })); } catch (e) { /* 忽略 */ }
+    console.log(`[agent] uid=${uid} 已配对本机浏览器${hello && hello.extVer ? ' (扩展 v' + hello.extVer + ')' : ''}`);
+  };
+  const helloTimer = setTimeout(() => { if (!bound) { try { ws.close(4003, 'hello timeout'); } catch (e) { /* 忽略 */ } } }, 15000);
+  ws.on('message', (raw) => {
+    const text = raw.toString();
+    if (!bound) {
+      let msg = null;
+      try { msg = JSON.parse(text); } catch (e) { return; }
+      if (msg && msg.type === 'hello') bind(msg);
+      return;
+    }
+    agentHub.handle(uid, text);
+  });
+  ws.on('close', () => { clearTimeout(helloTimer); if (bound) agentHub.detach(uid, ws); });
+  ws.on('error', () => { /* 忽略 */ });
+});
 
 server.on('upgrade', async (req, socket, head) => {
   let url;
   try { url = new URL(req.url, `http://${req.headers.host || 'localhost'}`); } catch (e) { socket.destroy(); return; }
+
+  if (url.pathname === '/ws/agent') {
+    const uid = agentHub.redeem(url.searchParams.get('code'));
+    if (!uid) {
+      socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+      socket.destroy();
+      return;
+    }
+    wsAgent.handleUpgrade(req, socket, head, (ws) => {
+      ws._agentUid = uid;
+      wsAgent.emit('connection', ws, req);
+    });
+    return;
+  }
+
   if (url.pathname !== '/ws/browser') { socket.destroy(); return; }
   let user = null;
   try { user = await currentUser(req); } catch (e) { /* 忽略 */ }

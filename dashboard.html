@@ -154,6 +154,12 @@
   .live-log { background: #26282c; color: #b9f6ca; font-family: Consolas, monospace; font-size: 11px; border-radius: 6px; padding: 8px; height: 140px; overflow-y: auto; margin-top: 10px; }
   .live-side .btn { width: 100%; margin-bottom: 8px; }
   .live-kb { width: 100%; min-height: 62px; border: 1px solid var(--border); border-radius: 6px; padding: 8px; font-size: 12px; font-family: inherit; resize: vertical; }
+  /* 本机浏览器通道状态条（方案C） */
+  .agent-bar { display: flex; align-items: center; gap: 8px; margin: 10px 0 12px; padding: 8px 12px; background: #f7f8fa; border: 1px solid var(--border); border-radius: 8px; font-size: 12px; color: var(--sub); }
+  .agent-dot { width: 8px; height: 8px; border-radius: 50%; background: #c9ccd1; flex: none; }
+  .agent-dot.on { background: #2e7d32; }
+  .agent-dot.warn { background: #ef9f27; }
+  .agent-bar .btn-sm { padding: 5px 10px; font-size: 12px; }
   /* 手机 / 平板：直播面板改为上下堆叠，画面自适应宽度，保证任意浏览器都能登录 */
   @media (max-width: 860px) {
     .modal.wide { max-width: 96vw; }
@@ -242,8 +248,21 @@
     <button class="btn btn-plain" id="btnImport" onclick="importData()">重新导入数据</button>
     <button class="btn btn-outline" onclick="selectAll()" title="只勾选当前页公司的可催收会员名（不含其他分页）">全选当前页</button>
     <button class="btn btn-outline" onclick="clearSel()">取消选择</button>
+    <select id="sendChannel" title="选择由谁来发送：服务器浏览器 / 本机浏览器（方案C）" style="padding:8px 10px;border:1px solid var(--border);border-radius:8px;font-size:13px;font-family:inherit;color:var(--text);background:#fff">
+      <option value="server">通道：服务器浏览器</option>
+      <option value="client">通道：本机浏览器</option>
+    </select>
     <button class="btn btn-primary" id="btnSend" onclick="batchSend()">发送催收消息 (<span id="selCount">0</span>)</button>
   </div>
+
+  <div class="agent-bar" id="agentBar">
+    <span class="agent-dot" id="agentDot"></span>
+    <span id="agentText">本机浏览器通道：检测中…</span>
+    <span style="flex:1"></span>
+    <button class="btn btn-plain btn-sm" id="btnPair" onclick="genPairCode()">生成配对码</button>
+    <button class="btn btn-plain btn-sm" onclick="agentDisconnect()">断开本机通道</button>
+  </div>
+
   <table id="tbl">
     <thead>
       <tr>
@@ -484,6 +503,8 @@ async function boot() {
   await loadData();
   pollTask();
   taskTimer = setInterval(pollTask, 2000);
+  refreshAgent();
+  setInterval(refreshAgent, 5000);
 }
 
 // ══════════════ 租户查看（超级管理员） ══════════════
@@ -965,11 +986,54 @@ async function getGapHint() {
   } catch (e) { return '15~30秒'; }
 }
 async function doSend(ids) {
+  const chEl = document.getElementById('sendChannel');
+  const channel = chEl && chEl.value === 'client' ? 'client' : 'server';
+  if (channel === 'client' && !AGENT_STATUS.online) {
+    if (!confirm('本机浏览器通道当前【未连接】。\n\n请先在本机浏览器安装扩展，并点「生成配对码」完成配对。\n仍要以本机通道下发？（会立即失败）')) return;
+  }
   try {
-    const d = await api('/api/send', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ loginIds: ids }) });
+    const d = await api('/api/send', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ loginIds: ids, channel }) });
     if (d.error) { alert('启动失败: ' + d.error); return; }
     pollTask();
   } catch (e) { alert('请求失败: ' + e.message); }
+}
+
+// ══════════════ 本机浏览器通道（方案C） ══════════════
+let AGENT_STATUS = { online: false, connected: false, loggedIn: false };
+function renderAgentBar() {
+  const dot = document.getElementById('agentDot');
+  const txt = document.getElementById('agentText');
+  if (!dot || !txt) return;
+  const s = AGENT_STATUS;
+  if (s.online) {
+    dot.className = 'agent-dot ' + (s.loggedIn ? 'on' : 'warn');
+    txt.innerHTML = '本机浏览器通道：<b style="color:' + (s.loggedIn ? '#2e7d32' : '#b26a00') + '">已连接</b>'
+      + '（1688 ' + (s.loggedIn ? '已登录' : '未登录') + '）' + (s.extVer ? ' · 扩展 v' + esc(s.extVer) : '');
+  } else {
+    dot.className = 'agent-dot';
+    txt.textContent = '本机浏览器通道：未连接（点右侧「生成配对码」，在本机浏览器扩展里配对）';
+  }
+}
+async function refreshAgent() {
+  try {
+    const d = await api('/api/agent/status');
+    if (d && !d.error) { AGENT_STATUS = d; renderAgentBar(); }
+  } catch (e) { /* 忽略 */ }
+}
+async function genPairCode() {
+  if (READONLY) { alert('只读模式下不能操作本机通道'); return; }
+  try {
+    const d = await api('/api/agent/pair-code', { method: 'POST' });
+    if (!d || d.error) { alert('生成失败：' + ((d && d.error) || '未知错误')); return; }
+    const ttlMin = Math.round((d.ttlSec || 300) / 60);
+    prompt('本机浏览器通道配对\n\n1) 在本机浏览器安装扩展（extension/ 目录）\n2) 打开扩展，填入下面两项后点「连接」\n\n服务器地址：' + d.serverUrl + '\n配对码：' + d.code + '\n\n有效期约 ' + ttlMin + ' 分钟。', d.code);
+    refreshAgent();
+  } catch (e) { alert('请求失败：' + e.message); }
+}
+async function agentDisconnect() {
+  if (READONLY) return;
+  if (!confirm('断开本机浏览器通道？\n断开后配对码作废，需重新「生成配对码」才能再次连接。')) return;
+  try { await api('/api/agent/disconnect', { method: 'POST' }); AGENT_STATUS = { online: false }; renderAgentBar(); } catch (e) { /* 忽略 */ }
 }
 async function importData() {
   if (READONLY) { alert('只读模式下不能导入'); return; }
