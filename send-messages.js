@@ -51,11 +51,11 @@ async function loadSentLog() {
   }
   return log;
 }
-/** 记录一次发送（send_log 一行 = 一次发送） */
-async function recordSent(loginId, company, result = 'ok') {
+/** 记录一次发送（send_log 一行 = 一次发送；amount/orderNos 为发送当时快照，供看板查看催收历史） */
+async function recordSent(loginId, company, result = 'ok', amount = null, orderNos = null) {
   await db.exec(
-    `INSERT INTO send_log (send_date, seller_login, seller_company, result, channel) VALUES (?, ?, ?, ?, 'cli')`,
-    [todayStr(), loginId, company || null, result]
+    `INSERT INTO send_log (send_date, seller_login, seller_company, result, channel, amount, order_nos) VALUES (?, ?, ?, ?, 'cli', ?, ?)`,
+    [todayStr(), loginId, company || null, result, amount == null ? null : Number(amount), orderNos || null]
   );
 }
 
@@ -179,18 +179,21 @@ async function main() {
     const s = todo[i];
     const msgs = buildMessages(s, config); // 每家单独生成（含各自的订单清单与总金额）
     console.log(`\n[${i + 1}/${todo.length}] ${s.company} (${s.orders.length}单 ¥${s.amount.toFixed(2)}, ${msgs.length}条消息)`);
+    const orderNos = s.orders.map((o) => o.orderId).join('；');
     try {
       const result = await sendToSeller(context, s, msgs);
       if (result) {
         ok++;
-        await recordSent(s.loginId, s.company);
+        await recordSent(s.loginId, s.company, 'ok', s.amount, orderNos);
         console.log('  [发送成功]');
       } else {
         fail++;
+        await recordSent(s.loginId, s.company, 'fail', s.amount, orderNos);
         console.log('  [消息发送失败] 记录跳过，下轮重试');
       }
     } catch (e) {
       fail++;
+      await recordSent(s.loginId, s.company, 'fail', s.amount, orderNos).catch(() => {});
       console.log('  [失败]', e.message.split('\n')[0]);
     }
     if (i < todo.length - 1) {

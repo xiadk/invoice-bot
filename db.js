@@ -138,6 +138,19 @@ async function migrate(conn, dbName) {
       "COMMENT '发送入口：web=看板，cli=命令行' AFTER `result`"
     );
   }
+  // send_log：记录每次催收「当时」的待开票金额与订单号（看板点「催收次数」查看历史）
+  if (!(await colExists('send_log', 'amount'))) {
+    await conn.query(
+      "ALTER TABLE `send_log` ADD COLUMN `amount` DECIMAL(14,2) DEFAULT NULL " +
+      "COMMENT '本次催收的待开票总金额（发送当时的快照；老记录可能为空）' AFTER `channel`"
+    );
+  }
+  if (!(await colExists('send_log', 'order_nos'))) {
+    await conn.query(
+      "ALTER TABLE `send_log` ADD COLUMN `order_nos` TEXT DEFAULT NULL " +
+      "COMMENT '本次催收包含的订单号（多个用「；」分隔，发送当时快照）' AFTER `amount`"
+    );
+  }
   if (!(await idxExists('send_log', 'idx_sent_at'))) {
     await conn.query('ALTER TABLE `send_log` ADD KEY `idx_sent_at` (`sent_at`)');
   }

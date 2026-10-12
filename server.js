@@ -8,6 +8,7 @@
  *   GET  /api/data            看板聚合数据：**按公司一行**，会员名在 companies[].members 子树
  *                             （订单+发票+催收全部来自 MySQL）
  *   GET  /api/seller-detail   单个会员名的订单明细 + 已开票明细（展开订单时按需加载）
+ *   GET  /api/collect-history 历史催收记录（点「催收次数」查看）：?loginId= 或 ?company=
  *   POST /api/send            {loginIds: [...]} 批量发送催收消息（loginId = 会员名）
  *   POST /api/import          重新扫描 data/ 下的 Excel 并全量导入 MySQL
  *   GET  /api/mapping         销方名称映射表（有效 + 已忽略）+ 待人工比对的销方名称 + 可选卖家列表
@@ -314,6 +315,51 @@ async function loadSendStats() {
   return rows;
 }
 
+/**
+ * 历史催收记录（看板点「催收次数」查看）：
+ *   传 loginId → 该会员名的全部发送记录；传 company → 该公司下所有会员名的发送记录。
+ *   每行 = 一次发送尝试，含发送当时的待开票金额与订单号快照（老记录可能为空）。
+ */
+async function loadCollectHistory({ loginId, company }) {
+  let rows = [];
+  if (loginId) {
+    rows = await db.query(
+      `SELECT sent_at, result, channel, amount, order_nos, seller_login,
+              COALESCE(NULLIF(seller_login,''), seller_company) AS scope_key
+       FROM send_log WHERE seller_login = ? ORDER BY sent_at DESC, id DESC`,
+      [loginId]
+    );
+  } else if (company) {
+    // 该公司所有会员名的登录ID（订单表口径），连同 seller_company 一起匹配，避免漏掉早期记录
+    const loginRows = await db.query(
+      `SELECT DISTINCT COALESCE(NULLIF(seller_login,''), seller_company) AS login
+       FROM invoice_order
+       WHERE seller_company = ? AND COALESCE(NULLIF(seller_login,''), seller_company) IS NOT NULL`,
+      [company]
+    );
+    const ids = loginRows.map((r) => r.login).filter(Boolean);
+    const params = [company];
+    let sql = `SELECT sent_at, result, channel, amount, order_nos, seller_login, seller_company AS scope_key
+               FROM send_log WHERE seller_company = ?`;
+    if (ids.length) {
+      sql += ` OR seller_login IN (${ids.map(() => '?').join(',')})`;
+      params.push(...ids);
+    }
+    sql += ' ORDER BY sent_at DESC, id DESC';
+    rows = await db.query(sql, params);
+  }
+  const logs = rows.map((r) => ({
+    sentAt: r.sent_at,
+    result: r.result,
+    channel: r.channel,
+    amount: r.amount == null ? null : Number(r.amount),
+    orderNos: r.order_nos || null,
+    scope: r.scope_key || '',
+  }));
+  const okCount = logs.filter((l) => l.result === 'ok').length;
+  return { logs, total: logs.length, okCount, failCount: logs.length - okCount };
+}
+
 // ── 浏览器会话（仅发送催收消息时使用） ──
 // 每次任务启动全新浏览器（与 CLI 行为一致）。
 // 共享浏览器会被聊天应用的本地状态（AI询盘模式等）污染，导致 touid 无法自动选中联系人。
@@ -333,13 +379,14 @@ function taskLog(text) {
   console.log(text);
 }
 
-/** 记录一次催收发送（send_log 一行 = 一次发送，看板据此统计次数与最近时间） */
-async function recordSent(loginId, company, result = 'ok', channel = 'web') {
+/** 记录一次催收发送（send_log 一行 = 一次发送，看板据此统计次数与最近时间）
+ *  amount / orderNos 为发送「当时」的快照，供看板点「催收次数」查看历史记录。 */
+async function recordSent(loginId, company, result = 'ok', channel = 'web', amount = null, orderNos = null) {
   const now = new Date();
   const date = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
   await db.exec(
-    `INSERT INTO send_log (send_date, seller_login, seller_company, result, channel) VALUES (?, ?, ?, ?, ?)`,
-    [date, loginId, company || null, result, channel]
+    `INSERT INTO send_log (send_date, seller_login, seller_company, result, channel, amount, order_nos) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    [date, loginId, company || null, result, channel, amount == null ? null : Number(amount), orderNos || null]
   );
 }
 
@@ -381,13 +428,16 @@ async function doSend(loginIds) {
       };
       if (msgSeller.orders.length === 0) { taskState.done++; taskLog(`- ${seller.company} 无可催收订单，跳过`); continue; }
       const messages = buildMessages(msgSeller, config);
+      // 本次催收快照（金额 = 该会员名待开票金额；订单号 = 本次催收的订单，用「；」分隔），供看板查看历史
+      const collectAmount = Number(seller.pendingAmount) || 0;
+      const collectOrderNos = msgSeller.orders.map((o) => o.orderId).join('；');
       try {
         await sendToSeller(context, msgSeller, messages);
-        await recordSent(seller.sellerLogin, seller.company, 'ok', 'web');
+        await recordSent(seller.sellerLogin, seller.company, 'ok', 'web', collectAmount, collectOrderNos);
         taskState.ok++;
         taskLog(`✓ ${seller.company} 发送成功 (${messages.length}条消息) · 催收次数 +1`);
       } catch (e) {
-        await recordSent(seller.sellerLogin, seller.company, 'fail', 'web');
+        await recordSent(seller.sellerLogin, seller.company, 'fail', 'web', collectAmount, collectOrderNos);
         taskState.fail++;
         taskLog(`✗ ${seller.company} 失败: ${e.message.split('\n')[0]} · 已记录失败尝试（不计入催收次数）`);
       }
@@ -675,6 +725,14 @@ const server = http.createServer(async (req, res) => {
       const loginId = url.searchParams.get('loginId');
       if (!loginId) return sendJson(res, 400, { error: '缺少 loginId' });
       return sendJson(res, 200, await loadSellerDetail(loginId));
+    }
+
+    // 历史催收记录（点「催收次数」查看）：?loginId=会员名 或 ?company=公司名
+    if (req.method === 'GET' && p === '/api/collect-history') {
+      const loginId = url.searchParams.get('loginId');
+      const company = url.searchParams.get('company');
+      if (!loginId && !company) return sendJson(res, 400, { error: '缺少 loginId 或 company' });
+      return sendJson(res, 200, await loadCollectHistory({ loginId, company }));
     }
 
     // 配置读取

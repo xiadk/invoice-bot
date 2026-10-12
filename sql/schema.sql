@@ -139,7 +139,8 @@ ALTER TABLE `seller_name_mapping`
 -- ----------------------------------------------------------------------------
 -- 表 4: send_log —— 催收消息发送记录（替代原 data/sent-log.json）
 --   一行 = 一次催收发送（不再按天合并），看板由此表统计
---   「催收次数」= COUNT(*)、「最近催收时间」= MAX(sent_at)。
+--   「催收次数」= SUM(result='ok')、「最近催收时间」= MAX(sent_at)。
+--   amount / order_nos 记录本次催收「当时」的待开票金额与订单号，供看板点「催收次数」查看历史。
 -- ----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS `send_log` (
   `id`             INT          NOT NULL AUTO_INCREMENT COMMENT '自增主键',
@@ -148,6 +149,8 @@ CREATE TABLE IF NOT EXISTS `send_log` (
   `seller_company` VARCHAR(255) DEFAULT NULL            COMMENT '卖家公司名（冗余，便于直接查看）',
   `result`         VARCHAR(16)  NOT NULL DEFAULT 'ok'   COMMENT '发送结果：ok=成功，fail=失败',
   `channel`        VARCHAR(16)  NOT NULL DEFAULT 'web'  COMMENT '发送入口：web=看板，cli=命令行',
+  `amount`         DECIMAL(14,2) DEFAULT NULL           COMMENT '本次催收的待开票总金额（发送当时的快照；老记录可能为空）',
+  `order_nos`      TEXT         DEFAULT NULL            COMMENT '本次催收包含的订单号（多个用「；」分隔，发送当时快照）',
   `sent_at`        DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '发送时间（最近催收时间取 MAX）',
   PRIMARY KEY (`id`),
   KEY `idx_seller_login` (`seller_login`),
@@ -155,6 +158,14 @@ CREATE TABLE IF NOT EXISTS `send_log` (
   KEY `idx_send_date`    (`send_date`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   COMMENT='催收消息发送记录（一行=一次发送，看板统计催收次数与最近催收时间）';
+
+-- 老库增量补列（新装库上面的 CREATE TABLE 已含；MariaDB 支持 IF NOT EXISTS）
+ALTER TABLE `send_log`
+  ADD COLUMN IF NOT EXISTS `amount` DECIMAL(14,2) DEFAULT NULL
+  COMMENT '本次催收的待开票总金额（发送当时的快照；老记录可能为空）' AFTER `channel`;
+ALTER TABLE `send_log`
+  ADD COLUMN IF NOT EXISTS `order_nos` TEXT DEFAULT NULL
+  COMMENT '本次催收包含的订单号（多个用「；」分隔，发送当时快照）' AFTER `amount`;
 
 -- ----------------------------------------------------------------------------
 -- 表 5: import_log —— 数据导入日志

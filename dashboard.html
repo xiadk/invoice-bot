@@ -118,6 +118,26 @@
   .ignored-box > summary { cursor: pointer; font-size: 13px; color: var(--sub); padding: 8px 0; }
   .ignored-box > summary:hover { color: var(--primary); }
   .ignored-box table { margin-top: 6px; }
+  /* 工具栏条件框 */
+  .tb-field { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--sub); }
+  .tb-field select { padding: 7px 8px; border: 1px solid var(--border); border-radius: 6px; font-size: 13px; background: #fff; color: var(--text); }
+  /* 催收次数可点击 */
+  .hist-link { cursor: pointer; text-decoration: underline dotted; text-underline-offset: 2px; }
+  .hist-link:hover { color: var(--primary); }
+  /* 历史催收记录弹窗 */
+  .modal-mask { position: fixed; inset: 0; background: rgba(0,0,0,.35); display: none; align-items: center; justify-content: center; z-index: 100; padding: 24px; }
+  .modal-mask.show { display: flex; }
+  .modal { background: #fff; border-radius: 10px; width: 100%; max-width: 900px; max-height: 84vh; display: flex; flex-direction: column; box-shadow: 0 12px 40px rgba(0,0,0,.2); }
+  .modal-head { display: flex; align-items: center; padding: 14px 18px; border-bottom: 1px solid var(--border); }
+  .modal-head b { font-size: 15px; }
+  .modal-close { margin-left: auto; cursor: pointer; font-size: 22px; line-height: 1; color: var(--sub); }
+  .modal-close:hover { color: var(--text); }
+  .modal-body { padding: 14px 18px; overflow: auto; }
+  .hist-sum { font-size: 12px; color: var(--sub); margin-bottom: 10px; }
+  .hist-table { background: #fff; }
+  .hist-table td, .hist-table th { font-size: 12px; }
+  .hist-table .order-nos { word-break: break-all; line-height: 1.7; font-family: Consolas, monospace; }
+  .muted { color: var(--sub); }
 </style>
 </head>
 <body>
@@ -139,6 +159,7 @@
     <br><b>统计口径：</b>「已开票金额（税务局）」= 税务局导出文件的<b>价税合计</b>逐行相加（含税，与订单实付款同口径）；「N 张发票」= 按<b>数电发票号码去重</b>后的发票张数。
     税务局导出是<b>一张发票上的每个货物各占一行</b>，多行共用同一个数电发票号码，所以<b>张数常小于明细行数</b>。
     <br><b>催收口径（按会员名）：</b>点某个店铺的「催收消息」，<b>{amount}</b> 取<b>该会员名的待开票金额</b>，<b>{orderId}</b> 为<b>该会员名除已开票外的全部订单号</b>（平台已开票 + 人工确认的都排除）。
+    <br><b>筛选：</b>标签「未催收（从未）」= 还有从未催收过的店铺；<b>未催收时间</b> = 最近 N 天没有成功催收记录（含从未催收）；<b>开票状态</b> = 待开票金额为 0（已开票）/ 大于 0（未开票）。以上条件与搜索框可<b>任意组合</b>；点「催收次数」可查看历史催收记录。
   </div>
   <div class="progress-wrap" id="progressWrap">
     <div class="progress-head">
@@ -151,15 +172,28 @@
   <div class="toolbar">
     <div class="filter-tabs" id="filterTabs">
       <div class="filter-tab active" data-filter="all">全部</div>
-      <div class="filter-tab" data-filter="pending">有待开票</div>
-      <div class="filter-tab" data-filter="invoiced">有开票记录</div>
-      <div class="filter-tab" data-filter="manual">人工确认</div>
-      <div class="filter-tab" data-filter="unsent">未催收</div>
+      <div class="filter-tab" data-filter="unsent">未催收（从未）</div>
     </div>
+    <label class="tb-field" title="只看「最近 N 天没有成功催收记录」的公司（含从未催收）">未催收时间
+      <select id="collectTime">
+        <option value="">不限</option>
+        <option value="7">最近一周未催收</option>
+        <option value="15">最近半个月未催收</option>
+        <option value="30">最近一个月未催收</option>
+        <option value="90">最近三个月未催收</option>
+      </select>
+    </label>
+    <label class="tb-field" title="已开票 = 待开票金额为 0；未开票 = 待开票金额大于 0">开票状态
+      <select id="invoiceState">
+        <option value="">全部</option>
+        <option value="invoiced">已开票（待开票金额=0）</option>
+        <option value="pending">未开票（待开票金额&gt;0）</option>
+      </select>
+    </label>
     <input type="text" id="search" placeholder="搜索卖家公司名 / 登录ID">
     <span style="flex:1"></span>
     <button class="btn btn-plain" id="btnImport" onclick="importData()">重新导入数据</button>
-    <button class="btn btn-outline" onclick="selectAll()" title="勾选当前筛选下全部公司（跨所有分页，不只当前页）的可催收会员名">全选筛选结果</button>
+    <button class="btn btn-outline" onclick="selectAll()" title="只勾选当前页公司的可催收会员名（不含其他分页）">全选当前页</button>
     <button class="btn btn-outline" onclick="clearSel()">取消选择</button>
     <button class="btn btn-primary" id="btnSend" onclick="batchSend()">发送催收消息 (<span id="selCount">0</span>)</button>
   </div>
@@ -243,8 +277,21 @@
 
 <datalist id="sellerOptions"></datalist>
 
+<!-- ══════════ 历史催收记录弹窗 ══════════ -->
+<div class="modal-mask" id="histModal" onclick="if (event.target === this) closeHist()">
+  <div class="modal">
+    <div class="modal-head">
+      <b id="histTitle">历史催收记录</b>
+      <span class="modal-close" onclick="closeHist()" title="关闭">×</span>
+    </div>
+    <div class="modal-body" id="histBody">加载中...</div>
+  </div>
+</div>
+
 <script>
 let COMPANIES = [], SENT = new Set(), selected = new Set(), filter = 'all', keyword = '';
+// 组合筛选：未催收时间（天，空=不限）、开票状态（空=全部 / invoiced=待开票金额0 / pending=待开票金额>0）
+let collectTimeFilter = '', invoiceStateFilter = '';
 let INV_SUMMARY = null, UNMATCHED_CNT = 0, IGNORED_CNT = 0, MANUAL_CNT = 0;
 let taskTimer = null;
 let MAP = { mappings: [], unmatched: [], sellers: [] };
@@ -340,13 +387,19 @@ function stats() {
     <div class="stat-card ${UNMATCHED_CNT > 0 ? 'warn' : 'done'}"><div class="num">${UNMATCHED_CNT}</div><div class="label">未匹配销方名称</div><div class="sub">${UNMATCHED_CNT > 0 ? '需人工比对' : (IGNORED_CNT > 0 ? `已匹配或已忽略（忽略 ${IGNORED_CNT} 个）` : '全部已匹配')}</div></div>`;
 }
 function visibleCompanies() {
+  const now = Date.now();
   return COMPANIES.filter(c => {
-    // 「有待开票」= 金额待开 且 还有未开票订单（全部人工确认过的不再出现在催收视角）
-    if (filter === 'pending' && !(Number(c.pendingAmount) > 0 && c.unissuedCount > 0)) return false;
-    if (filter === 'invoiced' && c.invoiceCount === 0 && !c.manualIssuedCount) return false;
-    if (filter === 'manual' && !(c.manualIssuedCount > 0)) return false;
-    // 「未催收」= 该公司还有「可催收但从未催收」的会员名
+    // 标签「未催收（从未）」= 该公司还有「可催收但从未催收」的会员名
     if (filter === 'unsent' && !c.members.some(m => m.canSend && !SENT.has(sentKey(m)))) return false;
+    // 未催收时间：只看「最近 N 天没有成功催收记录」的公司（含从未催收）
+    if (collectTimeFilter) {
+      const days = Number(collectTimeFilter);
+      const last = c.lastSentAt ? new Date(String(c.lastSentAt).replace(' ', 'T')).getTime() : 0;
+      if (last && now - last < days * 86400000) return false;
+    }
+    // 开票状态：待开票金额 = 0 视为已开票；> 0 视为未开票
+    if (invoiceStateFilter === 'invoiced' && Number(c.pendingAmount) !== 0) return false;
+    if (invoiceStateFilter === 'pending' && !(Number(c.pendingAmount) > 0)) return false;
     if (keyword) {
       const hit = (c.company || '').includes(keyword) ||
         c.members.some(m => (m.sellerLogin || '').includes(keyword) || (m.loginId || '').includes(keyword));
@@ -380,7 +433,7 @@ function memberHtml(m, c) {
         <span class="badge none">未申请 ${m.noneCount}</span><span class="badge applying">已申请 ${m.applyingCount}</span><span class="badge issued">已开票 ${m.issuedStateCount}</span>
         ${m.manualIssuedCount ? `<span class="badge manual" title="商家线下开票的人工确认">人工 ${m.manualIssuedCount}</span>` : ''}
       </div>
-      <div class="m-kv"><span class="kv-label">最近催收</span>${m.lastSentAt ? esc(String(m.lastSentAt).slice(0, 16)) : '<span class="loginid">—</span>'} <span class="loginid">· ${sc} 次</span></div>
+      <div class="m-kv"><span class="kv-label">最近催收</span>${m.lastSentAt ? esc(String(m.lastSentAt).slice(0, 16)) : '<span class="loginid">—</span>'} <span class="loginid hist-link" data-id="${esc(m.loginId)}" onclick="openMemberHistory(this)" title="点此查看该会员名的历史催收记录">· ${sc} 次</span></div>
       <div class="row-actions">
         <button class="btn btn-primary btn-sm" ${m.canSend ? '' : 'disabled'}
                 title="${m.canSend ? '给该店铺发催收消息（{amount}=本店待开票金额，{orderId}=本店未开票订单号）' : (m.unissuedCount > 0 ? '无待开票金额' : '本店订单已全部开票（含人工确认）')}"
@@ -425,7 +478,8 @@ function companyRows(c) {
       </td>
       <td>${c.lastSentAt ? esc(String(c.lastSentAt).slice(0, 16)) : '<span class="loginid">—</span>'}</td>
       <td>${sc
-        ? `<span class="badge issued" title="成功催收 ${sc} 次${Number(c.sendFailCount) ? ` · 失败尝试 ${c.sendFailCount} 次（不计入次数）` : ''}">${sc}</span>`
+        ? `<span class="badge issued hist-link" data-company="${esc(key)}" onclick="openCompanyHistory(this)"
+                 title="点此查看历史催收记录（成功 ${sc} 次${Number(c.sendFailCount) ? ` · 失败尝试 ${c.sendFailCount} 次` : ''}）">${sc}</span>`
         : '<span class="loginid">0</span>'}</td>
       <td><button class="btn btn-outline btn-sm" data-company="${esc(key)}" data-cnt="${c.memberCount}" onclick="toggleMembers(this)">${subOpen ? '收起会员名' : `展开会员名(${c.memberCount})`}</button></td>
     </tr>
@@ -494,11 +548,54 @@ function syncCompanyChecks() {
     cb.indeterminate = n > 0 && n < sendable.length;
   }
 }
+/** 全选「当前页」：只勾选当前分页里公司的可催收会员名（不含其他分页） */
 function selectAll() {
-  visibleCompanies().forEach(c => c.members.forEach(m => { if (m.canSend) selected.add(m.loginId); }));
+  const all = visibleCompanies();
+  const p = pageOf('dash', all.length);
+  p.slice(all).forEach(c => c.members.forEach(m => { if (m.canSend) selected.add(m.loginId); }));
   render(); document.getElementById('selCount').textContent = selected.size;
 }
 function clearSel() { selected.clear(); render(); document.getElementById('selCount').textContent = 0; }
+
+// ── 历史催收记录（点「催收次数」查看） ──
+function openCompanyHistory(el) { showCollectHistory({ company: el.dataset.company }, el.dataset.company); }
+function openMemberHistory(el) { showCollectHistory({ loginId: el.dataset.id }, el.dataset.id); }
+function closeHist() { document.getElementById('histModal').classList.remove('show'); }
+async function showCollectHistory(params, label) {
+  const modal = document.getElementById('histModal');
+  const body = document.getElementById('histBody');
+  document.getElementById('histTitle').textContent = `${label} — 历史催收记录`;
+  modal.classList.add('show');
+  body.innerHTML = '<div class="muted">加载中...</div>';
+  try {
+    const r = await fetch('/api/collect-history?' + new URLSearchParams(params).toString());
+    const d = await r.json();
+    if (d.error) { body.innerHTML = '<div style="color:#d32f2f">' + esc(d.error) + '</div>'; return; }
+    const logs = d.logs || [];
+    if (!logs.length) { body.innerHTML = '<div class="muted">暂无催收记录</div>'; return; }
+    body.innerHTML =
+      `<div class="hist-sum">共 ${d.total} 条记录 · 成功 ${d.okCount} 次${d.failCount ? ` · 失败 ${d.failCount} 次` : ''}
+        （「催收次数」只计成功，失败尝试不计入）</div>
+       <table class="hist-table">
+         <thead><tr>
+           <th style="width:160px">催收时间</th>
+           <th style="width:90px">结果</th>
+           <th style="width:130px">催收的总金额</th>
+           <th>催收的订单号</th>
+         </tr></thead>
+         <tbody>
+         ${logs.map(l => `<tr>
+           <td>${esc(String(l.sentAt || '').slice(0, 19))}</td>
+           <td><span class="badge ${l.result === 'ok' ? 'issued' : 'none'}">${l.result === 'ok' ? '成功' : '失败'}</span></td>
+           <td>${l.amount == null ? '<span class="muted">—</span>' : `<span class="amount ok">${yuan(l.amount)}</span>`}</td>
+           <td class="order-nos">${l.orderNos ? esc(l.orderNos) : '<span class="muted">—（早期记录未留存）</span>'}</td>
+         </tr>`).join('')}
+         </tbody>
+       </table>`;
+  } catch (e) {
+    body.innerHTML = '<div style="color:#d32f2f">加载失败: ' + esc(e.message) + '</div>';
+  }
+}
 
 /** 公司子树：展开/收起会员名 */
 function toggleMembers(btn) {
@@ -934,6 +1031,8 @@ async function saveConfig() {
 }
 
 document.getElementById('search').addEventListener('input', e => { keyword = e.target.value.trim(); resetPage('dash'); render(); });
+document.getElementById('collectTime').addEventListener('change', e => { collectTimeFilter = e.target.value; resetPage('dash'); render(); });
+document.getElementById('invoiceState').addEventListener('change', e => { invoiceStateFilter = e.target.value; resetPage('dash'); render(); });
 document.getElementById('filterTabs').addEventListener('click', e => {
   const tab = e.target.closest('.filter-tab'); if (!tab) return;
   document.querySelectorAll('.filter-tab').forEach(t => t.classList.remove('active'));
@@ -942,6 +1041,7 @@ document.getElementById('filterTabs').addEventListener('click', e => {
 ['cfg-template', 'cfg-orderItem', 'cfg-reminder', 'cfg-companyName', 'cfg-taxNo', 'cfg-email'].forEach(id => {
   document.getElementById(id).addEventListener('input', updatePreview);
 });
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeHist(); });
 
 loadData();
 pollTask();
