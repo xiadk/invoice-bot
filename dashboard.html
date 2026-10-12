@@ -590,10 +590,11 @@ async function showCollectHistory(params, label) {
         （「催收次数」只计成功，失败尝试不计入）</div>
        <table class="hist-table">
          <thead><tr>
-           <th style="width:160px">催收时间</th>
-           <th style="width:90px">结果</th>
-           <th style="width:130px">催收的总金额</th>
+           <th style="width:150px">催收时间</th>
+           <th style="width:80px">结果</th>
+           <th style="width:120px">催收的总金额</th>
            <th>催收的订单号</th>
+           <th style="width:210px">失败原因</th>
          </tr></thead>
          <tbody>
          ${logs.map(l => `<tr>
@@ -601,6 +602,7 @@ async function showCollectHistory(params, label) {
            <td><span class="badge ${l.result === 'ok' ? 'issued' : 'none'}">${l.result === 'ok' ? '成功' : '失败'}</span></td>
            <td>${l.amount == null ? '<span class="muted">—</span>' : `<span class="amount ok">${yuan(l.amount)}</span>`}</td>
            <td class="order-nos">${l.orderNos ? esc(l.orderNos) : '<span class="muted">—（早期记录未留存）</span>'}</td>
+           <td class="order-nos">${l.result === 'ok' ? '<span class="muted">—</span>' : (l.error ? esc(l.error) : '<span class="muted">—（早期记录未留存）</span>')}</td>
          </tr>`).join('')}
          </tbody>
        </table>`;
@@ -704,7 +706,7 @@ function renderDetail(ul, id, d) {
         return `<li>
           <span>${esc(String(l.sent_at || '').slice(0, 16))}</span>
           <span class="badge ${ok ? 'issued' : 'none'}">${ok ? '成功' : '失败'}</span>
-          <span>${esc(chText[l.channel] || l.channel || '')}</span>
+          <span>${esc(chText[l.channel] || l.channel || '')}</span>${!ok && l.error ? `<span class="muted" title="失败原因">${esc(l.error)}</span>` : ''}
         </li>`;
       }).join('')
     : '<li>从未催收</li>';

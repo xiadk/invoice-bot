@@ -151,6 +151,7 @@ CREATE TABLE IF NOT EXISTS `send_log` (
   `channel`        VARCHAR(16)  NOT NULL DEFAULT 'web'  COMMENT '发送入口：web=看板，cli=命令行',
   `amount`         DECIMAL(14,2) DEFAULT NULL           COMMENT '本次催收的待开票总金额（发送当时的快照；老记录可能为空）',
   `order_nos`      TEXT         DEFAULT NULL            COMMENT '本次催收包含的订单号（多个用「；」分隔，发送当时快照）',
+  `error`          VARCHAR(255) DEFAULT NULL            COMMENT '失败原因摘要（result=fail 时记录，便于排查）',
   `sent_at`        DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '发送时间（最近催收时间取 MAX）',
   PRIMARY KEY (`id`),
   KEY `idx_seller_login` (`seller_login`),
@@ -166,6 +167,9 @@ ALTER TABLE `send_log`
 ALTER TABLE `send_log`
   ADD COLUMN IF NOT EXISTS `order_nos` TEXT DEFAULT NULL
   COMMENT '本次催收包含的订单号（多个用「；」分隔，发送当时快照）' AFTER `amount`;
+ALTER TABLE `send_log`
+  ADD COLUMN IF NOT EXISTS `error` VARCHAR(255) DEFAULT NULL
+  COMMENT '失败原因摘要（result=fail 时记录，便于排查）' AFTER `order_nos`;
 
 -- ----------------------------------------------------------------------------
 -- 表 5: import_log —— 数据导入日志

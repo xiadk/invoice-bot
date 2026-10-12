@@ -51,11 +51,16 @@ async function loadSentLog() {
   }
   return log;
 }
-/** 记录一次发送（send_log 一行 = 一次发送；amount/orderNos 为发送当时快照，供看板查看催收历史） */
-async function recordSent(loginId, company, result = 'ok', amount = null, orderNos = null) {
+/** 记录一次发送（send_log 一行 = 一次发送；amount/orderNos 为发送当时快照，error 为失败原因摘要） */
+async function recordSent(loginId, company, result = 'ok', amount = null, orderNos = null, error = null) {
   await db.exec(
-    `INSERT INTO send_log (send_date, seller_login, seller_company, result, channel, amount, order_nos) VALUES (?, ?, ?, ?, 'cli', ?, ?)`,
-    [todayStr(), loginId, company || null, result, amount == null ? null : Number(amount), orderNos || null]
+    `INSERT INTO send_log (send_date, seller_login, seller_company, result, channel, amount, order_nos, error) VALUES (?, ?, ?, ?, 'cli', ?, ?, ?)`,
+    [
+      todayStr(), loginId, company || null, result,
+      amount == null ? null : Number(amount),
+      orderNos || null,
+      result === 'ok' || !error ? null : String(error).split('\n')[0].slice(0, 250),
+    ]
   );
 }
 
@@ -188,12 +193,12 @@ async function main() {
         console.log('  [发送成功]');
       } else {
         fail++;
-        await recordSent(s.loginId, s.company, 'fail', s.amount, orderNos);
+        await recordSent(s.loginId, s.company, 'fail', s.amount, orderNos, '消息发送未确认（未出现在聊天记录）');
         console.log('  [消息发送失败] 记录跳过，下轮重试');
       }
     } catch (e) {
       fail++;
-      await recordSent(s.loginId, s.company, 'fail', s.amount, orderNos).catch(() => {});
+      await recordSent(s.loginId, s.company, 'fail', s.amount, orderNos, e.message).catch(() => {});
       console.log('  [失败]', e.message.split('\n')[0]);
     }
     if (i < todo.length - 1) {

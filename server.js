@@ -294,7 +294,7 @@ async function loadSellerDetail(loginId) {
   // 催收记录明细（最近 50 次），与看板「催收次数/最近催收时间」同源
   const sendLogs = seller.sellerLogin
     ? await db.query(
-        `SELECT send_date, sent_at, result, channel FROM send_log
+        `SELECT send_date, sent_at, result, channel, error FROM send_log
          WHERE seller_login = ? ORDER BY sent_at DESC, id DESC LIMIT 50`,
         [seller.sellerLogin]
       )
@@ -324,7 +324,7 @@ async function loadCollectHistory({ loginId, company }) {
   let rows = [];
   if (loginId) {
     rows = await db.query(
-      `SELECT sent_at, result, channel, amount, order_nos, seller_login,
+      `SELECT sent_at, result, channel, amount, order_nos, error, seller_login,
               COALESCE(NULLIF(seller_login,''), seller_company) AS scope_key
        FROM send_log WHERE seller_login = ? ORDER BY sent_at DESC, id DESC`,
       [loginId]
@@ -339,7 +339,7 @@ async function loadCollectHistory({ loginId, company }) {
     );
     const ids = loginRows.map((r) => r.login).filter(Boolean);
     const params = [company];
-    let sql = `SELECT sent_at, result, channel, amount, order_nos, seller_login, seller_company AS scope_key
+    let sql = `SELECT sent_at, result, channel, amount, order_nos, error, seller_login, seller_company AS scope_key
                FROM send_log WHERE seller_company = ?`;
     if (ids.length) {
       sql += ` OR seller_login IN (${ids.map(() => '?').join(',')})`;
@@ -354,6 +354,7 @@ async function loadCollectHistory({ loginId, company }) {
     channel: r.channel,
     amount: r.amount == null ? null : Number(r.amount),
     orderNos: r.order_nos || null,
+    error: r.error || null,
     scope: r.scope_key || '',
   }));
   const okCount = logs.filter((l) => l.result === 'ok').length;
@@ -380,13 +381,19 @@ function taskLog(text) {
 }
 
 /** 记录一次催收发送（send_log 一行 = 一次发送，看板据此统计次数与最近时间）
- *  amount / orderNos 为发送「当时」的快照，供看板点「催收次数」查看历史记录。 */
-async function recordSent(loginId, company, result = 'ok', channel = 'web', amount = null, orderNos = null) {
+ *  amount / orderNos 为发送「当时」的快照，供看板点「催收次数」查看历史记录。
+ *  error 为失败原因摘要（result=fail 时写入），便于事后排查「为什么发失败」。 */
+async function recordSent(loginId, company, result = 'ok', channel = 'web', amount = null, orderNos = null, error = null) {
   const now = new Date();
   const date = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
   await db.exec(
-    `INSERT INTO send_log (send_date, seller_login, seller_company, result, channel, amount, order_nos) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    [date, loginId, company || null, result, channel, amount == null ? null : Number(amount), orderNos || null]
+    `INSERT INTO send_log (send_date, seller_login, seller_company, result, channel, amount, order_nos, error) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      date, loginId, company || null, result, channel,
+      amount == null ? null : Number(amount),
+      orderNos || null,
+      result === 'ok' || !error ? null : String(error).split('\n')[0].slice(0, 250),
+    ]
   );
 }
 
@@ -446,9 +453,9 @@ async function doSend(loginIds) {
           loginLost = true;
           break;
         }
-        await recordSent(seller.sellerLogin, seller.company, 'fail', 'web', collectAmount, collectOrderNos);
+        await recordSent(seller.sellerLogin, seller.company, 'fail', 'web', collectAmount, collectOrderNos, e.message);
         taskState.fail++;
-        taskLog(`✗ ${seller.company} 失败: ${e.message.split('\n')[0]} · 已记录失败尝试（不计入催收次数）`);
+        taskLog(`✗ ${seller.company} 失败: ${e.message.split('\n')[0]} · 已记录失败尝试与原因（不计入催收次数）`);
       }
       taskState.done++;
       if (!loginLost && loginIds.indexOf(loginId) < loginIds.length - 1 && !taskState.stopRequested) {

@@ -151,6 +151,13 @@ async function migrate(conn, dbName) {
       "COMMENT '本次催收包含的订单号（多个用「；」分隔，发送当时快照）' AFTER `amount`"
     );
   }
+  // send_log：失败原因摘要（result=fail 时记录，便于排查「为什么发失败」）
+  if (!(await colExists('send_log', 'error'))) {
+    await conn.query(
+      "ALTER TABLE `send_log` ADD COLUMN `error` VARCHAR(255) DEFAULT NULL " +
+      "COMMENT '失败原因摘要（result=fail 时记录，便于排查）' AFTER `order_nos`"
+    );
+  }
   if (!(await idxExists('send_log', 'idx_sent_at'))) {
     await conn.query('ALTER TABLE `send_log` ADD KEY `idx_sent_at` (`sent_at`)');
   }
