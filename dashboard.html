@@ -159,7 +159,8 @@
     <br><b>统计口径：</b>「已开票金额（税务局）」= 税务局导出文件的<b>价税合计</b>逐行相加（含税，与订单实付款同口径）；「N 张发票」= 按<b>数电发票号码去重</b>后的发票张数。
     税务局导出是<b>一张发票上的每个货物各占一行</b>，多行共用同一个数电发票号码，所以<b>张数常小于明细行数</b>。
     <br><b>催收口径（按会员名）：</b>点某个店铺的「催收消息」，<b>{amount}</b> 取<b>该会员名的待开票金额</b>，<b>{orderId}</b> 为<b>该会员名除已开票外的全部订单号</b>（平台已开票 + 人工确认的都排除）。
-    <br><b>筛选：</b>标签「未催收（从未）」= 还有从未催收过的店铺；<b>未催收时间</b> = 最近 N 天没有成功催收记录（含从未催收）；<b>开票状态</b> = 待开票金额为 0（已开票）/ 大于 0（未开票）。以上条件与搜索框可<b>任意组合</b>；点「催收次数」可查看历史催收记录。
+    <br><b>筛选：</b><b>催收状态</b> = 已催收（有成功催收记录的公司）/ 最近一周、半个月、一个月、三个月未催收（最近 N 天没有成功催收记录，含从未催收）；<b>开票状态</b> = 待开票金额为 0（已开票）/ 大于 0（未开票）。以上条件与搜索框可<b>任意组合</b>；点「催收次数」可查看历史催收记录。
+    <br><b>排序：</b>按<b>最近催收时间倒序</b>排列（从没催收过的沉底），催收时间相同则按<b>待开票金额倒序</b>。
   </div>
   <div class="progress-wrap" id="progressWrap">
     <div class="progress-head">
@@ -172,11 +173,10 @@
   <div class="toolbar">
     <div class="filter-tabs" id="filterTabs">
       <div class="filter-tab active" data-filter="all">全部</div>
-      <div class="filter-tab" data-filter="unsent">未催收（从未）</div>
     </div>
-    <label class="tb-field" title="只看「最近 N 天没有成功催收记录」的公司（含从未催收）">未催收时间
-      <select id="collectTime">
-        <option value="">不限</option>
+    <label class="tb-field" title="已催收 = 有成功催收记录的公司；未催收 = 最近 N 天没有成功催收记录（含从未催收）">催收状态
+      <select id="collectState">
+        <option value="collected">已催收</option>
         <option value="7">最近一周未催收</option>
         <option value="15">最近半个月未催收</option>
         <option value="30">最近一个月未催收</option>
@@ -290,8 +290,8 @@
 
 <script>
 let COMPANIES = [], SENT = new Set(), selected = new Set(), filter = 'all', keyword = '';
-// 组合筛选：未催收时间（天，空=不限）、开票状态（空=全部 / invoiced=待开票金额0 / pending=待开票金额>0）
-let collectTimeFilter = '', invoiceStateFilter = '';
+// 组合筛选：催收状态（默认 collected=已催收；7/15/30/90=最近 N 天未催收）、开票状态（空=全部 / invoiced / pending）
+let collectStateFilter = 'collected', invoiceStateFilter = '';
 let INV_SUMMARY = null, UNMATCHED_CNT = 0, IGNORED_CNT = 0, MANUAL_CNT = 0;
 let taskTimer = null;
 let MAP = { mappings: [], unmatched: [], sellers: [] };
@@ -386,15 +386,19 @@ function stats() {
     <div class="stat-card"><div class="num">${sentCnt}</div><div class="label">已催收会员名</div><div class="sub">累计成功 ${members.reduce((a, m) => a + (m.sendCount || 0), 0)} 次（失败不计）</div></div>
     <div class="stat-card ${UNMATCHED_CNT > 0 ? 'warn' : 'done'}"><div class="num">${UNMATCHED_CNT}</div><div class="label">未匹配销方名称</div><div class="sub">${UNMATCHED_CNT > 0 ? '需人工比对' : (IGNORED_CNT > 0 ? `已匹配或已忽略（忽略 ${IGNORED_CNT} 个）` : '全部已匹配')}</div></div>`;
 }
+/** 公司级「最近催收时间」转毫秒（无催收=0，便于排序沉底） */
+function lastSentTs(c) {
+  return c.lastSentAt ? new Date(String(c.lastSentAt).replace(' ', 'T')).getTime() : 0;
+}
 function visibleCompanies() {
   const now = Date.now();
-  return COMPANIES.filter(c => {
-    // 标签「未催收（从未）」= 该公司还有「可催收但从未催收」的会员名
-    if (filter === 'unsent' && !c.members.some(m => m.canSend && !SENT.has(sentKey(m)))) return false;
-    // 未催收时间：只看「最近 N 天没有成功催收记录」的公司（含从未催收）
-    if (collectTimeFilter) {
-      const days = Number(collectTimeFilter);
-      const last = c.lastSentAt ? new Date(String(c.lastSentAt).replace(' ', 'T')).getTime() : 0;
+  const list = COMPANIES.filter(c => {
+    // 催收状态：已催收 = 有成功催收记录；7/15/30/90 = 最近 N 天没有成功催收记录（含从未催收）
+    if (collectStateFilter === 'collected') {
+      if (!(Number(c.sendCount) > 0)) return false;
+    } else if (collectStateFilter) {
+      const days = Number(collectStateFilter);
+      const last = lastSentTs(c);
       if (last && now - last < days * 86400000) return false;
     }
     // 开票状态：待开票金额 = 0 视为已开票；> 0 视为未开票
@@ -407,6 +411,13 @@ function visibleCompanies() {
     }
     return true;
   });
+  // 排序：最近催收时间倒序（从没催收过的沉底）；催收时间相同则按待开票金额倒序
+  list.sort((a, b) => {
+    const ta = lastSentTs(a), tb = lastSentTs(b);
+    if (tb !== ta) return tb - ta;
+    return Number(b.pendingAmount) - Number(a.pendingAmount);
+  });
+  return list;
 }
 /** 会员名一行（公司子树里的一项）：各自带订单/金额、待开票金额、状态、催收按钮、订单明细 */
 function memberHtml(m, c) {
@@ -1031,7 +1042,7 @@ async function saveConfig() {
 }
 
 document.getElementById('search').addEventListener('input', e => { keyword = e.target.value.trim(); resetPage('dash'); render(); });
-document.getElementById('collectTime').addEventListener('change', e => { collectTimeFilter = e.target.value; resetPage('dash'); render(); });
+document.getElementById('collectState').addEventListener('change', e => { collectStateFilter = e.target.value; resetPage('dash'); render(); });
 document.getElementById('invoiceState').addEventListener('change', e => { invoiceStateFilter = e.target.value; resetPage('dash'); render(); });
 document.getElementById('filterTabs').addEventListener('click', e => {
   const tab = e.target.closest('.filter-tab'); if (!tab) return;
