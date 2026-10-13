@@ -160,6 +160,11 @@
   .agent-dot.on { background: #2e7d32; }
   .agent-dot.warn { background: #ef9f27; }
   .agent-bar .btn-sm { padding: 5px 10px; font-size: 12px; }
+  /* 断线续跑提示条（方案C） */
+  .resume-bar { display: none; align-items: center; gap: 10px; flex-wrap: wrap; margin: -6px 0 12px; padding: 9px 12px; background: #fff8e6; border: 1px solid #f0d79a; border-radius: 8px; font-size: 12px; color: #8a6100; }
+  .resume-bar.show { display: flex; }
+  .resume-bar b { color: #ad5f00; }
+  .resume-bar .btn-sm { padding: 5px 10px; font-size: 12px; }
   /* 手机 / 平板：直播面板改为上下堆叠，画面自适应宽度，保证任意浏览器都能登录 */
   @media (max-width: 860px) {
     .modal.wide { max-width: 96vw; }
@@ -261,6 +266,14 @@
     <span style="flex:1"></span>
     <button class="btn btn-plain btn-sm" id="btnPair" onclick="genPairCode()">生成配对码</button>
     <button class="btn btn-plain btn-sm" onclick="agentDisconnect()">断开本机通道</button>
+  </div>
+
+  <div class="resume-bar" id="resumeBar">
+    <span id="resumeText"></span>
+    <span style="flex:1"></span>
+    <button class="btn btn-primary btn-sm" id="btnResumePending" onclick="resumeSend('pending')">继续发送未完成</button>
+    <button class="btn btn-outline btn-sm" id="btnResumeFailed" onclick="resumeSend('failed')" style="display:none">重试失败项</button>
+    <button class="btn btn-plain btn-sm" onclick="dismissResume()">忽略</button>
   </div>
 
   <table id="tbl">
@@ -957,6 +970,11 @@ async function pollTask() {
       document.getElementById('logPanel').scrollTop = 99999;
       document.getElementById('btnSend').disabled = t.running || READONLY;
       if (!t.running && t.finishedAt) { DETAIL_CACHE_RESET(); loadData(); }
+      // 本机通道任务刚结束 → 立刻检查是否有可续跑项（每个任务只查一次）
+      if (!t.running && t.channel === 'client' && t.agentTaskId && t.agentTaskId !== RESUMABLE_CHECKED) {
+        RESUMABLE_CHECKED = t.agentTaskId;
+        refreshResume();
+      }
     } else {
       wrap.classList.remove('show');
       document.getElementById('btnSend').disabled = READONLY;
@@ -1015,10 +1033,68 @@ function renderAgentBar() {
   }
 }
 async function refreshAgent() {
+  const wasOnline = !!(AGENT_STATUS && AGENT_STATUS.online);
   try {
     const d = await api('/api/agent/status');
     if (d && !d.error) { AGENT_STATUS = d; renderAgentBar(); }
   } catch (e) { /* 忽略 */ }
+  const nowOnline = !!(AGENT_STATUS && AGENT_STATUS.online);
+  // 在线状态一变（配对成功 / 掉线）立刻重算续跑横幅，别让用户干等轮询
+  RESUME_TICK++;
+  if (nowOnline !== wasOnline || RESUME_TICK % 3 === 0) refreshResume();
+}
+
+// ── 断线续跑（方案C）──────────────────────────────
+let RESUMABLE = null;
+let RESUMABLE_CHECKED = null;
+let RESUME_TICK = 0;
+const RESUME_KEY = 'resumeDismissedTask';
+function renderResume() {
+  const bar = document.getElementById('resumeBar');
+  const txt = document.getElementById('resumeText');
+  if (!bar || !txt) return;
+  const t = RESUMABLE;
+  const dismissed = Number(sessionStorage.getItem(RESUME_KEY) || 0);
+  if (!t || Number(t.id) === dismissed) { bar.classList.remove('show'); return; }
+  const online = !!(AGENT_STATUS && AGENT_STATUS.online);
+  const parts = [];
+  if (t.pending > 0) parts.push(`还有 <b>${t.pending}</b> 家未发送`);
+  if (t.failed > 0) parts.push(`<b>${t.failed}</b> 家发送失败`);
+  const reason = t.status === 'aborted' ? '已中断' : (t.status === 'failed' ? '异常结束' : '已完成，但有失败项');
+  txt.innerHTML = `↻ 上次任务 #${t.id} ${reason}${t.error ? '（' + esc(t.error) + '）' : ''}：${parts.join('，')}。`
+    + (online ? ' 可选择续跑，已成功的不会重发。' : ' <b>本机通道未连接</b>：请先在上方完成配对，再续跑。');
+  const btnP = document.getElementById('btnResumePending');
+  const btnF = document.getElementById('btnResumeFailed');
+  if (btnP) { btnP.style.display = t.pending > 0 ? '' : 'none'; btnP.disabled = !online || READONLY; }
+  if (btnF) { btnF.style.display = t.failed > 0 ? '' : 'none'; btnF.disabled = !online || READONLY; }
+  bar.classList.add('show');
+}
+async function refreshResume() {
+  try {
+    const d = await api('/api/agent/resumable');
+    RESUMABLE = d && d.task ? d.task : null;
+  } catch (e) { RESUMABLE = null; }
+  renderResume();
+}
+async function resumeSend(scope) {
+  if (READONLY) { alert('只读模式下不能操作本机通道续跑'); return; }
+  if (!RESUMABLE) return;
+  const n = scope === 'failed' ? RESUMABLE.failed : RESUMABLE.pending;
+  const label = scope === 'failed' ? '重试失败项' : '补发未完成项';
+  if (!confirm(`续跑任务 #${RESUMABLE.id}：${label} ${n} 家？\n（已成功发送的不会重发）`)) return;
+  try {
+    const d = await api('/api/agent/resume', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ taskId: RESUMABLE.id, scope }),
+    });
+    if (d && d.error) { alert('续跑失败：' + d.error); return; }
+    RESUMABLE = null; renderResume();
+    pollTask();
+  } catch (e) { alert('请求失败：' + e.message); }
+}
+function dismissResume() {
+  if (RESUMABLE) sessionStorage.setItem(RESUME_KEY, String(RESUMABLE.id));
+  renderResume();
 }
 async function genPairCode() {
   if (READONLY) { alert('只读模式下不能操作本机通道'); return; }

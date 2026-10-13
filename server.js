@@ -532,6 +532,12 @@ async function finishClientTask(ctx, status) {
   ).catch(() => {});
   taskLog(t, `■ 本机通道任务 #${ctx.taskId} 结束：成功 ${t.ok} · 失败 ${t.fail}${status === 'aborted' ? ' · 已中断' : ''}`);
   taskLog(t, `任务完成 ${t.ok}/${t.total}`);
+  const left = items.filter((i) => i.status === 'pending').length;
+  if (left > 0) {
+    taskLog(t, `↻ 还有 ${left} 家未发送：本机通道重新连接后，点看板「继续发送未完成」即可续跑（不会重发已成功的）`);
+  } else if (t.fail > 0) {
+    taskLog(t, `↻ 有 ${t.fail} 家发送失败：可在看板「重试失败项」按原清单重发`);
+  }
   try { ctx.resolve && ctx.resolve(); } catch (e) { /* 忽略 */ }
 }
 
@@ -540,7 +546,7 @@ function maybeAbortClientTask(uid) {
   if (agentHub.isOnline(uid)) return;
   for (const ctx of CLIENT_TASKS.values()) {
     if (ctx.userId === Number(uid) && !ctx.finished) {
-      taskLog(ctx.taskState, '⛔ 本机浏览器通道已断开，任务中断（重新连接后可重发）');
+      taskLog(ctx.taskState, '⛔ 本机浏览器通道已断开，任务中断（重新配对连接后可点看板「继续发送未完成」续跑）');
       ctx.abortReason = '本机浏览器通道断开';
       finishClientTask(ctx, 'aborted');
     }
@@ -551,8 +557,101 @@ function estimateClientTimeout(n, gapMaxMs) {
   return Math.max(120000, n * (Math.ceil(gapMaxMs / 1000) + 60) * 1000);
 }
 
-/** 组装并下发一次「本机浏览器」发送任务 */
-async function doClientSend(userId, loginIds) {
+// ── 断线续跑（方案C） ──────────────────────────────────────────────────────
+/**
+ * 对账：把「库里仍在 running、但内存里已无对应执行上下文」的任务置为 aborted。
+ * 覆盖服务进程重启/崩溃后遗留的 running 任务。
+ * @returns {Promise<number>} 被纠正的任务数
+ */
+async function reconcileStaleAgentTasks(userId) {
+  const rows = await db.query("SELECT id FROM agent_task WHERE user_id = ? AND status = 'running'", [userId]);
+  const stale = rows.filter((r) => !CLIENT_TASKS.has(Number(r.id)));
+  for (const r of stale) {
+    await db.exec(
+      "UPDATE agent_task SET status = 'aborted', error = ?, finished_at = NOW() WHERE id = ? AND status = 'running'",
+      ['服务重启或任务上下文丢失，已中断（可续跑）', r.id]
+    ).catch(() => {});
+  }
+  return stale.length;
+}
+
+/** 解析 agent_task.items，统计 pending / failed */
+function summarizeItems(raw) {
+  let items = [];
+  try { items = typeof raw === 'string' ? JSON.parse(raw) : (raw || []); } catch (e) { items = []; }
+  if (!Array.isArray(items)) items = [];
+  return {
+    pending: items.filter((i) => i && i.status === 'pending'),
+    failed: items.filter((i) => i && i.status === 'fail'),
+  };
+}
+
+/**
+ * 取「最近一次可续跑的任务」：优先还有 pending 的，其次有失败项的（只看最近 10 条任务）。
+ * 只回传未完成项（不含 ok），供看板展示与一键续发。
+ * 已被后续续跑任务接续过的旧任务视为「已作废」，不再重复提示（避免把已补发的项再发一遍）。
+ */
+async function resumableTask(userId) {
+  await reconcileStaleAgentTasks(userId);
+  const rows = await db.query(
+    'SELECT id, status, total, ok, fail, error, items, resume_of, finished_at, created_at FROM agent_task ' +
+    'WHERE user_id = ? ORDER BY id DESC LIMIT 10', [userId]
+  );
+  const superseded = new Set();
+  for (const r of rows) if (r.resume_of) superseded.add(Number(r.resume_of));
+
+  for (const r of rows) {
+    if (r.status === 'running') continue;
+    if (superseded.has(Number(r.id))) continue;
+    const sum = summarizeItems(r.items);
+    if (!sum.pending.length && !sum.failed.length) continue;
+    return {
+      task: {
+        id: Number(r.id), status: r.status, error: r.error || null,
+        total: Number(r.total), ok: Number(r.ok), fail: Number(r.fail),
+        pending: sum.pending.length, failed: sum.failed.length,
+        finishedAt: r.finished_at, createdAt: r.created_at,
+        remaining: [...sum.pending, ...sum.failed].map((i) => ({
+          loginId: i.loginId, company: i.company || '',
+          amount: i.amount == null ? null : Number(i.amount),
+          orderNos: i.orderNos || '', status: i.status,
+        })),
+      },
+    };
+  }
+  return { task: null };
+}
+
+/**
+ * 取某任务的未完成项 loginId 清单（按 loginId 去重）
+ * @param {'pending'|'failed'|'both'} scope
+ */
+async function resumeLoginIds(userId, taskId, scope) {
+  const rows = await db.query('SELECT id, items FROM agent_task WHERE id = ? AND user_id = ?', [taskId, userId]);
+  const r = rows[0];
+  if (!r) throw new Error('找不到该任务（可能不属于当前账号）');
+  const sum = summarizeItems(r.items);
+  const pick = scope === 'failed' ? sum.failed
+    : scope === 'both' ? [...sum.pending, ...sum.failed]
+      : sum.pending;
+  const seen = new Set();
+  const loginIds = [];
+  for (const it of pick) {
+    if (!it || !it.loginId || seen.has(it.loginId)) continue;
+    seen.add(it.loginId);
+    loginIds.push(it.loginId);
+  }
+  return { taskId: Number(r.id), loginIds, pending: sum.pending.length, failed: sum.failed.length };
+}
+
+/**
+ * 组装并下发一次「本机浏览器」发送任务
+ * @param {number} userId
+ * @param {string[]} loginIds 要发送的卖家内部 loginId
+ * @param {{resumeOf?:number}} [opts] resumeOf=断线续跑时被接续的任务 id（仅用于审计与日志）
+ */
+async function doClientSend(userId, loginIds, opts = {}) {
+  const resumeOf = Number(opts.resumeOf) || null;
   const taskState = taskFor(userId);
   if (taskState.running) throw new Error('已有任务在运行中');
   if (!agentHub.isOnline(userId)) throw new Error('本机浏览器通道未连接：请先在本机浏览器安装扩展并完成配对');
@@ -589,18 +688,21 @@ async function doClientSend(userId, loginIds) {
   if (!sellers.length) throw new Error('没有可发送的卖家（可能都已开票或缺少卖家会员名）');
 
   const created = await db.exec(
-    "INSERT INTO agent_task (user_id, status, total, items, started_at) VALUES (?, 'running', ?, ?, NOW())",
+    "INSERT INTO agent_task (user_id, status, total, items, resume_of, started_at) VALUES (?, 'running', ?, ?, ?, NOW())",
     [userId, sellers.length, JSON.stringify(sellers.map((s) => ({
       loginId: s.loginId, company: s.company, amount: s.amount, orderNos: s.orderNos, status: 'pending',
-    })))]
+    }))), resumeOf]
   );
   const taskId = created.insertId;
 
   Object.assign(taskState, {
     running: true, channel: 'client', type: 'send', total: sellers.length, done: 0, ok: 0, fail: 0,
     current: null, stopRequested: false, startedAt: new Date().toISOString(), finishedAt: null, logs: [],
+    agentTaskId: taskId, pendingLeft: sellers.length, resumeOf,
   });
-  taskLog(taskState, `▶ 通过「本机浏览器」发送催收消息：共 ${sellers.length} 家（任务 #${taskId}）`);
+  taskLog(taskState, resumeOf
+    ? `↻ 断线续跑：接续任务 #${resumeOf}，补发剩余 ${sellers.length} 家（新任务 #${taskId}）`
+    : `▶ 通过「本机浏览器」发送催收消息：共 ${sellers.length} 家（任务 #${taskId}）`);
   taskLog(taskState, '· 发送在您本机浏览器执行，服务器只下发任务并记录结果');
   if (!agentHub.status(userId).loggedIn) {
     taskLog(taskState, '⚠ 本机浏览器尚未登录 1688：若发送失败，请在该浏览器登录 1688 后重试');
@@ -1298,10 +1400,56 @@ const server = http.createServer(async (req, res) => {
     }
     if (method === 'GET' && p === '/api/agent/tasks') {
       const rows = await db.query(
-        'SELECT id, status, total, done, ok, fail, error, started_at, finished_at, created_at FROM agent_task WHERE user_id = ? ORDER BY id DESC LIMIT 20',
+        'SELECT id, status, total, done, ok, fail, error, resume_of, items, started_at, finished_at, created_at ' +
+        'FROM agent_task WHERE user_id = ? ORDER BY id DESC LIMIT 20',
         [user.id]
       );
-      return sendJson(res, 200, { tasks: rows });
+      const tasks = rows.map((r) => {
+        const sum = summarizeItems(r.items);
+        return {
+          id: Number(r.id), status: r.status, total: Number(r.total), done: Number(r.done),
+          ok: Number(r.ok), fail: Number(r.fail), pending: sum.pending.length,
+          resumeOf: r.resume_of ? Number(r.resume_of) : null,
+          error: r.error || null,
+          startedAt: r.started_at, finishedAt: r.finished_at, createdAt: r.created_at,
+        };
+      });
+      return sendJson(res, 200, { tasks });
+    }
+
+    // 断线续跑：查询最近一次「还有未完成项」的任务（服务重启遗留的 running 任务会先对账纠正）
+    if (method === 'GET' && p === '/api/agent/resumable') {
+      return sendJson(res, 200, await resumableTask(user.id));
+    }
+    // 断线续跑：只补发未完成项（scope=pending|failed|both），不重发已成功的
+    if (method === 'POST' && p === '/api/agent/resume') {
+      writeGuard();
+      const body = await readBody(req);
+      const scope = ['pending', 'failed', 'both'].includes(body && body.scope) ? body.scope : 'pending';
+      const t = taskFor(tenantId);
+      if (t.running) throw new Error('已有任务在运行中');
+      let taskId = Number(body && body.taskId) || null;
+      if (!taskId) {
+        const r = await resumableTask(user.id);
+        if (!r.task) throw new Error('没有可续跑的任务');
+        taskId = r.task.id;
+      }
+      const picked = await resumeLoginIds(user.id, taskId, scope);
+      if (!picked.loginIds.length) {
+        throw new Error(scope === 'failed' ? '该任务没有失败项需要重试' : '该任务没有未完成的卖家');
+      }
+      if (!agentHub.isOnline(user.id)) {
+        throw new Error('本机浏览器通道未连接：请先在本机浏览器扩展里重新配对连接，再点「续跑」');
+      }
+      doClientSend(tenantId, picked.loginIds, { resumeOf: picked.taskId }).catch((e) => {
+        const ts = taskFor(tenantId);
+        ts.running = false;
+        taskLog(ts, '✗ 续跑异常: ' + e.message);
+      });
+      return sendJson(res, 200, {
+        started: true, channel: 'client', scope,
+        resumeOf: picked.taskId, count: picked.loginIds.length,
+      });
     }
 
     // 发送催收消息（channel 缺省=server，即服务器浏览器；client=本机浏览器通道）

@@ -302,6 +302,8 @@ CREATE TABLE IF NOT EXISTS `agent_task` (
   `items`        JSON DEFAULT NULL
                  COMMENT '清单 [{loginId,company,amount,orderNos,status}]，status=pending|ok|fail，用于断线续跑',
   `error`        VARCHAR(255) DEFAULT NULL COMMENT '中断/失败原因摘要',
+  `resume_of`    BIGINT UNSIGNED DEFAULT NULL
+                 COMMENT '断线续跑来源：被接续的任务 id（NULL=全新任务）',
   `started_at`   DATETIME DEFAULT NULL,
   `finished_at`  DATETIME DEFAULT NULL,
   `created_at`   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,

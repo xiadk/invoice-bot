@@ -272,12 +272,11 @@ async function migrate(conn, dbName) {
     'WHERE m.`id` IS NULL GROUP BY i.`user_id`, i.`seller_name`'
   );
 
-  // agent_task（方案C 本机浏览器通道）：老库补建表
-  const [atRows] = await q(
-    `SELECT COUNT(*) AS n FROM information_schema.TABLES
-     WHERE TABLE_SCHEMA=? AND TABLE_NAME='agent_task'`, [dbName]
-  );
-  if (!atRows[0] || atRows[0].n === 0) {
+  // agent_task（方案C 本机浏览器通道）：老库补建表 / 补列
+  // 注意：这里用 tableExists/colExists 助手；早前写成 `const [atRows] = await q(...)`，
+  // 而 q 已返回行数组，再解构会让 atRows[0] 恒为 undefined，导致永远只走建表分支、
+  // 补列分支形同虚设（老库因此拿不到 resume_of）。
+  if (!(await tableExists('agent_task'))) {
     await q(
       'CREATE TABLE IF NOT EXISTS `agent_task` (' +
       '`id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,' +
@@ -286,12 +285,17 @@ async function migrate(conn, dbName) {
       '`total` INT NOT NULL DEFAULT 0, `done` INT NOT NULL DEFAULT 0,' +
       '`ok` INT NOT NULL DEFAULT 0, `fail` INT NOT NULL DEFAULT 0,' +
       '`items` JSON DEFAULT NULL, `error` VARCHAR(255) DEFAULT NULL,' +
+      '`resume_of` BIGINT UNSIGNED DEFAULT NULL,' +
       '`started_at` DATETIME DEFAULT NULL, `finished_at` DATETIME DEFAULT NULL,' +
       '`created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,' +
       '`updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,' +
       'PRIMARY KEY (`id`), KEY `idx_user_status` (`user_id`,`status`), KEY `idx_user_created` (`user_id`,`created_at`)) ' +
       "ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='本机浏览器通道的发送任务（方案C）'"
     );
+  } else if (!(await colExists('agent_task', 'resume_of'))) {
+    // 老库已有 agent_task 但缺 resume_of（断线续跑来源）
+    await q('ALTER TABLE `agent_task` ADD COLUMN `resume_of` BIGINT UNSIGNED DEFAULT NULL ' +
+      "COMMENT '断线续跑来源：被接续的任务 id（NULL=全新任务）'");
   }
 
   // ── 种子化超级管理员 + 存量数据归属 ──
@@ -352,8 +356,11 @@ async function ensureSchema() {
   try {
     await root.query(`CREATE DATABASE IF NOT EXISTS \`${db}\` DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci`);
     await root.query(`USE \`${db}\``);
-    const sqlText = fs.readFileSync(path.join(ROOT, 'sql', 'schema.sql'), 'utf-8');
-    // schema.sql 自带 CREATE DATABASE / USE，整体执行即可
+    // schema.sql 顶部自带 CREATE DATABASE / USE，库名默认 invoice_bot；
+    // 这里按实际目标库名改写，使 MYSQL_DATABASE（或 config.json 的 database）真正生效
+    // （同时也保证克隆/换库/测试库场景不会误写进 invoice_bot）。
+    const sqlText = fs.readFileSync(path.join(ROOT, 'sql', 'schema.sql'), 'utf-8')
+      .replace(/`invoice_bot`/g, '`' + db + '`');
     await root.query(sqlText);
     // 2) 老库增量升级
     await migrate(root, db);
