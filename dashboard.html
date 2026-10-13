@@ -312,17 +312,10 @@
 <div class="page" id="page-admin">
   <div class="page-head">
     <h2>系统管理</h2>
-    <p>仅超级管理员可见。可在此维护账号（新增 / 重置密码 / 禁用 / 删除）、查看任意用户的看板与映射数据，以及调整全局发送参数与话术模板。</p>
+    <p>仅超级管理员可见。可在此维护账号（新增 / 重置密码 / 禁用 / 删除）与<b>每个账号的开票抬头</b>、查看任意用户的看板与映射数据，以及调整全局发送参数与话术模板。</p>
   </div>
 
   <div class="settings-grid">
-    <div class="setting-card">
-      <h3>我的开票抬头（催收话术中的抬头信息）</h3>
-      <div class="form-row"><label>公司名称</label><input id="cfg-companyName"></div>
-      <div class="form-row"><label>纳税人识别号</label><input id="cfg-taxNo"></div>
-      <div class="form-row"><label>收票邮箱</label><input id="cfg-email" placeholder="发票接收邮箱"></div>
-      <div class="hint">这是<b>当前登录账号</b>的抬头。其他用户的抬头在下方「用户管理」里逐个维护。</div>
-    </div>
     <div class="setting-card">
       <h3>全局发送参数</h3>
       <div class="form-inline">
@@ -363,13 +356,16 @@
   <div class="section-title">用户管理 <span class="cnt" id="userCount"></span>
     <button class="btn btn-outline btn-sm" style="margin-left:10px" onclick="loadUsers()">刷新</button>
   </div>
+  <div class="hint" style="margin:0 0 12px">
+    开票抬头属于<b>用户信息</b>，在这里按账号逐个维护：<b>登录账号 = 公司全称</b>，点某行的「编辑」即可改公司全称 / 纳税人识别号 / 收票邮箱。
+    催收话术里的 {companyName} / {taxNo} / {email} 会按<b>该账号自己的抬头</b>取值。
+  </div>
   <div class="setting-card full" style="margin-bottom:14px">
     <h3>新增用户</h3>
     <div class="admin-form-grid">
-      <div class="form-row"><label>登录账号 *</label><input id="nu-username" placeholder="4~64 位字母/数字/_ . -"></div>
+      <div class="form-row" style="grid-column:1/-1"><label>公司全称（= 登录账号）*</label><input id="nu-company" placeholder="如：中山仕赫贸易有限公司"></div>
       <div class="form-row"><label>初始密码 *</label><input id="nu-password" placeholder="至少 4 位"></div>
       <div class="form-row"><label>角色</label><select id="nu-role"><option value="user">普通用户</option><option value="admin">超级管理员</option></select></div>
-      <div class="form-row"><label>公司名称（开票抬头）</label><input id="nu-company" placeholder="如：中山仕赫贸易有限公司"></div>
       <div class="form-row"><label>纳税人识别号</label><input id="nu-taxNo"></div>
       <div class="form-row"><label>收票邮箱</label><input id="nu-email"></div>
       <div class="form-row" style="grid-column:1/-1"><label>备注</label><input id="nu-note" placeholder="可选"></div>
@@ -392,6 +388,27 @@
       <span class="modal-close" onclick="closeHist()" title="关闭">×</span>
     </div>
     <div class="modal-body" id="histBody">加载中...</div>
+  </div>
+</div>
+
+<!-- ══════════ 编辑用户（账号 + 开票抬头）══════════ -->
+<div class="modal-mask" id="userEditModal" onclick="if (event.target === this) closeUserEdit()">
+  <div class="modal">
+    <div class="modal-head">
+      <b id="ueTitle">编辑用户</b>
+      <span class="modal-close" onclick="closeUserEdit()" title="关闭">×</span>
+    </div>
+    <div class="modal-body">
+      <div class="form-row"><label>公司全称（= 登录账号）</label><input id="ue-company" placeholder="如：中山仕赫贸易有限公司"></div>
+      <div class="form-row"><label>纳税人识别号</label><input id="ue-taxNo"></div>
+      <div class="form-row"><label>收票邮箱</label><input id="ue-email" placeholder="发票接收邮箱"></div>
+      <div class="form-row"><label>备注</label><input id="ue-note" placeholder="可选"></div>
+      <div class="hint" id="ue-hint"></div>
+      <div class="settings-actions" style="margin-top:12px">
+        <button class="btn btn-primary" id="ue-save" onclick="saveUserEdit()">保存</button>
+        <button class="btn btn-outline" onclick="closeUserEdit()">取消</button>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -1296,10 +1313,7 @@ async function loadConfigUI() {
   try {
     const d = await api('/api/config');
     const c = d.config || {};
-    const b = c.buyerInfo || {}, rt = c.runtime || {}, m = c.messages || d.defaultMessages || {};
-    document.getElementById('cfg-companyName').value = b.companyName || '';
-    document.getElementById('cfg-taxNo').value = b.taxNo || '';
-    document.getElementById('cfg-email').value = b.email || '';
+    const rt = c.runtime || {}, m = c.messages || d.defaultMessages || {};
     document.getElementById('cfg-gapMin').value = rt.sendGapMinSec || 15;
     document.getElementById('cfg-gapMax').value = rt.sendGapMaxSec || 30;
     document.getElementById('cfg-chunkMax').value = m.orderChunkMax || 450;
@@ -1310,13 +1324,9 @@ async function loadConfigUI() {
     updatePreview();
   } catch (e) { alert('加载配置失败: ' + e.message); }
 }
+// 注意：开票抬头不在这里（它是「用户信息」，按账号在「用户管理」里维护，见 ue-* 弹窗）
 function collectConfig() {
   return {
-    buyerInfo: {
-      companyName: document.getElementById('cfg-companyName').value.trim(),
-      taxNo: document.getElementById('cfg-taxNo').value.trim(),
-      email: document.getElementById('cfg-email').value.trim(),
-    },
     runtime: {
       sendGapMinSec: Number(document.getElementById('cfg-gapMin').value) || 15,
       sendGapMaxSec: Number(document.getElementById('cfg-gapMax').value) || 30,
@@ -1332,7 +1342,8 @@ function collectConfig() {
 function fillTpl(tpl, vars) { return String(tpl || '').replace(/\{(\w+)\}/g, (m, k) => vars[k] !== undefined ? String(vars[k]) : m); }
 function updatePreview() {
   const c = collectConfig();
-  const vars = { amount: '1242.50', companyName: c.buyerInfo.companyName || '—', taxNo: c.buyerInfo.taxNo || '—', email: c.buyerInfo.email || '—' };
+  // 抬头是每个账号自己的，预览里用占位符示意（真实取值看该账号在「用户管理」里维护的抬头）
+  const vars = { amount: '1242.50', companyName: '（本账号抬头）', taxNo: '（本账号税号）', email: '（本账号邮箱）' };
   const orders = [{ orderId: '3316436906029083271', amount: '65.00' }, { orderId: '3316428087093083271', amount: '15.00' }];
   const m1 = fillTpl(c.messages.template, vars);
   const m2 = orders.map(o => fillTpl(c.messages.orderItem, o)).join('；');
@@ -1346,7 +1357,6 @@ async function saveConfig() {
     if (d.ok) {
       document.getElementById('saveOk').classList.add('show');
       setTimeout(() => document.getElementById('saveOk').classList.remove('show'), 2500);
-      ME.companyName = collectConfig().buyerInfo.companyName;
     } else alert('保存失败: ' + d.error);
   } catch (e) { alert('保存失败: ' + e.message); }
 }
@@ -1378,7 +1388,7 @@ async function loadUsers() {
         <td class="loginid">${esc(String(u.lastLoginAt || '').slice(0, 16) || '—')}</td>
         <td><div class="admin-actions">
           <button class="btn btn-outline btn-sm" onclick="viewUserData(${u.id}, '${esc(u.username)}')">查看数据</button>
-          <button class="btn btn-plain btn-sm" onclick="editUser(${u.id})">编辑</button>
+          <button class="btn btn-plain btn-sm" onclick="openUserEdit(${u.id})">编辑</button>
           <button class="btn btn-plain btn-sm" onclick="resetPwd(${u.id}, '${esc(u.username)}')">重置密码</button>
           ${u.username === 'admin' ? '' : (u.status === 'active'
         ? `<button class="btn btn-danger btn-sm" onclick="toggleStatus(${u.id}, 'disabled', '${esc(u.username)}')">禁用</button>`
@@ -1391,22 +1401,23 @@ async function loadUsers() {
   } catch (e) { box.innerHTML = '<div class="warn-box">加载失败: ' + esc(e.message) + '</div>'; }
 }
 async function createUser() {
+  const company = document.getElementById('nu-company').value.trim();
   const payload = {
-    username: document.getElementById('nu-username').value.trim(),
+    companyName: company,
+    username: company,             // 口径：登录账号 = 公司全称
     password: document.getElementById('nu-password').value,
     role: document.getElementById('nu-role').value,
-    companyName: document.getElementById('nu-company').value.trim(),
     taxNo: document.getElementById('nu-taxNo').value.trim(),
     email: document.getElementById('nu-email').value.trim(),
     note: document.getElementById('nu-note').value.trim(),
   };
-  if (!payload.username || !payload.password) { alert('请填写账号与初始密码'); return; }
+  if (!payload.username || !payload.password) { alert('请填写「公司全称（= 登录账号）」与初始密码'); return; }
   const btn = document.getElementById('btnCreateUser');
   btn.disabled = true; const old = btn.textContent; btn.textContent = '创建中…';
   try {
     const d = await api('/api/admin/users/create', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) });
     if (d.error) { alert('创建失败: ' + d.error); btn.disabled = false; btn.textContent = old; return; }
-    ['nu-username', 'nu-password', 'nu-company', 'nu-taxNo', 'nu-email', 'nu-note'].forEach(id => document.getElementById(id).value = '');
+    ['nu-company', 'nu-password', 'nu-taxNo', 'nu-email', 'nu-note'].forEach(id => document.getElementById(id).value = '');
     document.getElementById('createOk').classList.add('show');
     setTimeout(() => document.getElementById('createOk').classList.remove('show'), 2500);
     await loadUsers();
@@ -1414,21 +1425,48 @@ async function createUser() {
   btn.disabled = false; btn.textContent = old;
 }
 function viewUserData(id, username) { setTenantView(id, username); }
-function editUser(id) {
+
+// ══════════════ 系统管理：编辑用户（账号 = 公司全称，抬头在这里维护）══════════════
+let UE_ID = null;
+function openUserEdit(id) {
   const u = (window._USERS || []).find(x => x.id === id);
   if (!u) return;
-  const companyName = prompt('公司名称（开票抬头）：', u.companyName || '');
-  if (companyName === null) return;
-  const taxNo = prompt('纳税人识别号：', u.taxNo || '');
-  if (taxNo === null) return;
-  const email = prompt('收票邮箱：', u.email || '');
-  if (email === null) return;
-  const note = prompt('备注：', u.note || '');
-  if (note === null) return;
-  api('/api/admin/users/update', {
-    method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ id, companyName, taxNo, email, note, role: u.role }),
-  }).then(d => { if (d.error) alert('保存失败: ' + d.error); else loadUsers(); });
+  UE_ID = id;
+  document.getElementById('ueTitle').textContent = `编辑用户 #${u.id}（${u.username}）`;
+  const cu = document.getElementById('ue-company');
+  cu.value = u.companyName || u.username || '';
+  cu.disabled = (u.username === 'admin');   // 内置 admin 的账号名固定
+  document.getElementById('ue-taxNo').value = u.taxNo || '';
+  document.getElementById('ue-email').value = u.email || '';
+  document.getElementById('ue-note').value = u.note || '';
+  document.getElementById('ue-hint').innerHTML = u.username === 'admin'
+    ? '内置超级管理员 <b>admin</b> 的登录账号名固定，这里只改它的开票抬头。'
+    : '公司全称即<b>登录账号</b>，改这里会同时改掉该账号的登录名（当前：<b>' + esc(u.username) + '</b>）。';
+  document.getElementById('userEditModal').classList.add('show');
+}
+function closeUserEdit() { document.getElementById('userEditModal').classList.remove('show'); UE_ID = null; }
+async function saveUserEdit() {
+  if (UE_ID == null) return;
+  const id = UE_ID;
+  const u = (window._USERS || []).find(x => x.id === id) || {};
+  const company = document.getElementById('ue-company').value.trim();
+  const payload = {
+    id, companyName: company,
+    taxNo: document.getElementById('ue-taxNo').value.trim(),
+    email: document.getElementById('ue-email').value.trim(),
+    note: document.getElementById('ue-note').value.trim(),
+    role: u.role,
+  };
+  if (u.username !== 'admin') payload.username = company;   // 非内置账号：账号跟随公司全称
+  if (!company) { alert('公司全称不能为空'); return; }
+  const btn = document.getElementById('ue-save');
+  btn.disabled = true; const old = btn.textContent; btn.textContent = '保存中…';
+  try {
+    const d = await api('/api/admin/users/update', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) });
+    if (d.error) alert('保存失败: ' + d.error);
+    else { closeUserEdit(); await loadUsers(); }
+  } catch (e) { alert('保存失败: ' + e.message); }
+  btn.disabled = false; btn.textContent = old;
 }
 async function resetPwd(id, username) {
   const pw = prompt(`为「${username}」设置新密码（至少 4 位）：`);
@@ -1566,12 +1604,12 @@ document.getElementById('filterTabs').addEventListener('click', e => {
   document.querySelectorAll('.filter-tab').forEach(t => t.classList.remove('active'));
   tab.classList.add('active'); filter = tab.dataset.filter; resetPage('dash'); render();
 });
-['cfg-template', 'cfg-orderItem', 'cfg-reminder', 'cfg-companyName', 'cfg-taxNo', 'cfg-email'].forEach(id => {
+['cfg-template', 'cfg-orderItem', 'cfg-reminder'].forEach(id => {
   const el = document.getElementById(id);
   if (el) el.addEventListener('input', updatePreview);
 });
 document.addEventListener('keydown', e => {
-  if (e.key === 'Escape') { closeHist(); closeLoginModal(); closePwdModal(); }
+  if (e.key === 'Escape') { closeHist(); closeLoginModal(); closePwdModal(); closeUserEdit(); }
 });
 
 boot();

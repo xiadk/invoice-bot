@@ -1055,37 +1055,67 @@ async function listUsers() {
   }));
 }
 
-/** 校验用户名：4~64 位，字母/数字/下划线/中划线/点 */
+/**
+ * 登录账号规则。
+ * 口径：**账号即公司全称**（开票抬头），所以必须允许中文；同时保留字母/数字/下划线/点/中划线/括号。
+ * admin 是内置账号，不受"账号=公司全称"约束（其抬头会被清空，见下方 updateUser 的说明）。
+ */
+const USERNAME_RULE = '登录账号（公司全称）需 2~64 位，可用中文、字母、数字、下划线、点、中划线、括号';
 function validUsername(name) {
-  return typeof name === 'string' && /^[A-Za-z0-9_.-]{4,64}$/.test(name);
+  return typeof name === 'string' && /^[\u4e00-\u9fa5A-Za-z0-9_.·()（）-]{2,64}$/.test(name);
 }
 
 async function createUser({ username, password, companyName, taxNo, email, role, displayName, note }, byUser) {
-  if (!validUsername(username)) throw new Error('账号需 4~64 位，仅限字母、数字、下划线、点、中划线');
+  // 账号 = 公司全称：前端只填一个「公司全称」字段，这里做兜底（未传 username 时直接取 companyName）
+  const uname = String(username || companyName || '').trim();
+  const cname = String(companyName || uname || '').trim();
+  if (!validUsername(uname)) throw new Error(USERNAME_RULE);
   if (!password || String(password).length < 4) throw new Error('密码至少 4 位');
-  const dup = await db.query('SELECT id FROM app_user WHERE username = ?', [username]);
-  if (dup.length) throw new Error('账号已存在: ' + username);
+  const dup = await db.query('SELECT id FROM app_user WHERE username = ?', [uname]);
+  if (dup.length) throw new Error('账号已存在: ' + uname);
   const r = await db.exec(
     `INSERT INTO app_user (username, password_hash, role, status, company_name, tax_no, email, display_name, note, created_by)
      VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?, ?)`,
-    [username, auth.hashPassword(password), role === 'admin' ? 'admin' : 'user',
-      companyName || null, taxNo || null, email || null, displayName || null, note || null, byUser.id]
+    [uname, auth.hashPassword(password), role === 'admin' ? 'admin' : 'user',
+      cname || null, taxNo || null, email || null, displayName || null, note || null, byUser.id]
   );
   tenancy.ensureUserDirs(r.insertId);
-  return { ok: true, id: r.insertId };
+  return { ok: true, id: r.insertId, username: uname };
 }
 
-async function updateUser({ id, companyName, taxNo, email, role, displayName, note }) {
+async function updateUser({ id, username, companyName, taxNo, email, role, displayName, note }) {
   const rows = await db.query('SELECT * FROM app_user WHERE id = ?', [id]);
   if (!rows.length) throw new Error('用户不存在');
   const u = rows[0];
   if (u.username === 'admin' && role === 'user') throw new Error('内置超级管理员 admin 不能降级为普通用户');
+
+  // 改「公司全称」= 改登录账号（两者同源）。admin 的内置账号名固定，不参与改名。
+  let nextUsername = u.username;
+  const wantUsername = String(username === undefined ? '' : username).trim();
+  if (wantUsername && wantUsername !== u.username) {
+    if (u.username === 'admin') throw new Error('内置超级管理员 admin 的登录账号不能改名');
+    if (!validUsername(wantUsername)) throw new Error(USERNAME_RULE);
+    const dup = await db.query('SELECT id FROM app_user WHERE username = ? AND id <> ?', [wantUsername, id]);
+    if (dup.length) throw new Error('账号已存在: ' + wantUsername);
+    nextUsername = wantUsername;
+  }
+
+  // 开票抬头：传了就按传的写（允许清空）；没传但账号改了 → 跟随账号；否则保持原值
+  let nextCompany;
+  if (companyName !== undefined) nextCompany = String(companyName).trim();
+  else if (nextUsername !== u.username) nextCompany = nextUsername;
+  else nextCompany = u.company_name || '';
+
   await db.exec(
-    `UPDATE app_user SET company_name = ?, tax_no = ?, email = ?, display_name = ?, note = ?, role = ? WHERE id = ?`,
-    [companyName || null, taxNo || null, email || null, displayName || null, note || null,
+    `UPDATE app_user SET username = ?, company_name = ?, tax_no = ?, email = ?, display_name = ?, note = ?, role = ? WHERE id = ?`,
+    [nextUsername, nextCompany || null,
+      taxNo === undefined ? u.tax_no : (String(taxNo).trim() || null),
+      email === undefined ? u.email : (String(email).trim() || null),
+      displayName === undefined ? u.display_name : (String(displayName).trim() || null),
+      note === undefined ? u.note : (String(note).trim() || null),
       role === 'admin' ? 'admin' : (u.role === 'admin' ? 'admin' : 'user'), id]
   );
-  return { ok: true };
+  return { ok: true, username: nextUsername, companyName: nextCompany };
 }
 
 async function resetUserPassword({ id, password }) {
@@ -1355,6 +1385,8 @@ const server = http.createServer(async (req, res) => {
       merged.runtime = { ...(old.runtime || {}), ...(config.runtime || {}) };
       merged.messages = { ...(old.messages || {}), ...(config.messages || {}) };
       fs.writeFileSync(filePath, JSON.stringify(merged, null, 2), 'utf-8');
+      // 兼容旧调用：允许随配置一起提交本人抬头。看板已不再走这条路
+      // （抬头属于用户信息，统一在「系统管理 → 用户管理」里按账号维护）
       if (config.buyerInfo) {
         await db.exec('UPDATE app_user SET company_name = ?, tax_no = ?, email = ? WHERE id = ?',
           [config.buyerInfo.companyName || null, config.buyerInfo.taxNo || null, config.buyerInfo.email || null, user.id]);
