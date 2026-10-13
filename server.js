@@ -1073,11 +1073,16 @@ async function createUser({ username, password, companyName, taxNo, email, role,
   if (!password || String(password).length < 4) throw new Error('密码至少 4 位');
   const dup = await db.query('SELECT id FROM app_user WHERE username = ?', [uname]);
   if (dup.length) throw new Error('账号已存在: ' + uname);
+  // 超级管理员是纯系统账号，不承载业务数据 → 不落开票抬头
+  const isAdminRole = role === 'admin';
   const r = await db.exec(
     `INSERT INTO app_user (username, password_hash, role, status, company_name, tax_no, email, display_name, note, created_by)
      VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?, ?)`,
-    [uname, auth.hashPassword(password), role === 'admin' ? 'admin' : 'user',
-      cname || null, taxNo || null, email || null, displayName || null, note || null, byUser.id]
+    [uname, auth.hashPassword(password), isAdminRole ? 'admin' : 'user',
+      isAdminRole ? null : (cname || null),
+      isAdminRole ? null : (taxNo || null),
+      isAdminRole ? null : (email || null),
+      displayName || null, note || null, byUser.id]
   );
   tenancy.ensureUserDirs(r.insertId);
   return { ok: true, id: r.insertId, username: uname };
@@ -1106,16 +1111,21 @@ async function updateUser({ id, username, companyName, taxNo, email, role, displ
   else if (nextUsername !== u.username) nextCompany = nextUsername;
   else nextCompany = u.company_name || '';
 
+  const nextRole = role === 'admin' ? 'admin' : (u.role === 'admin' ? 'admin' : 'user');
+  // 超级管理员是纯系统账号，不承载业务数据 → 不维护开票抬头（用户列表中只保留「重置密码」）。
+  // 这里对 admin 账号强制清空抬头，避免通过接口绕过界面停住一个与设计相悖的状态。
+  const isAdminAccount = nextRole === 'admin';
   await db.exec(
     `UPDATE app_user SET username = ?, company_name = ?, tax_no = ?, email = ?, display_name = ?, note = ?, role = ? WHERE id = ?`,
-    [nextUsername, nextCompany || null,
-      taxNo === undefined ? u.tax_no : (String(taxNo).trim() || null),
-      email === undefined ? u.email : (String(email).trim() || null),
+    [nextUsername,
+      isAdminAccount ? null : (nextCompany || null),
+      isAdminAccount ? null : (taxNo === undefined ? u.tax_no : (String(taxNo).trim() || null)),
+      isAdminAccount ? null : (email === undefined ? u.email : (String(email).trim() || null)),
       displayName === undefined ? u.display_name : (String(displayName).trim() || null),
       note === undefined ? u.note : (String(note).trim() || null),
-      role === 'admin' ? 'admin' : (u.role === 'admin' ? 'admin' : 'user'), id]
+      nextRole, id]
   );
-  return { ok: true, username: nextUsername, companyName: nextCompany };
+  return { ok: true, username: nextUsername, companyName: isAdminAccount ? '' : nextCompany };
 }
 
 async function resetUserPassword({ id, password }) {

@@ -312,7 +312,7 @@
 <div class="page" id="page-admin">
   <div class="page-head">
     <h2>系统管理</h2>
-    <p>仅超级管理员可见。可在此维护账号（新增 / 重置密码 / 禁用 / 删除）与<b>每个账号的开票抬头</b>、查看任意用户的看板与映射数据，以及调整全局发送参数与话术模板。</p>
+    <p>仅超级管理员可见。可在此维护账号（新增 / 重置密码 / 禁用 / 删除）与<b>每个账号的开票抬头</b>、查看业务账号的看板与映射数据，以及调整全局发送参数与话术模板。<br>超级管理员（<b>admin</b>）是<b>纯系统账号</b>，不承载业务数据，因此在列表中只提供「重置密码」。</p>
   </div>
 
   <div class="settings-grid">
@@ -359,6 +359,7 @@
   <div class="hint" style="margin:0 0 12px">
     开票抬头属于<b>用户信息</b>，在这里按账号逐个维护：<b>登录账号 = 公司全称</b>，点某行的「编辑」即可改公司全称 / 纳税人识别号 / 收票邮箱。
     催收话术里的 {companyName} / {taxNo} / {email} 会按<b>该账号自己的抬头</b>取值。
+    <br>超级管理员是纯系统账号（不承载看板数据、无需抬头），因此其所在行<b>只有「重置密码」</b>，没有「查看数据」与「编辑」。
   </div>
   <div class="setting-card full" style="margin-bottom:14px">
     <h3>新增用户</h3>
@@ -374,6 +375,7 @@
       <button class="btn btn-primary" id="btnCreateUser" onclick="createUser()">创建用户</button>
       <span class="save-ok" id="createOk">✓ 已创建</span>
     </div>
+    <div class="hint">账号 = 公司全称（业务账号才需要抬头）。若「角色」选<b>超级管理员</b>，只需填「公司全称」与初始密码，税号 / 邮箱会被忽略——超级管理员是纯系统账号，不承载业务数据、不维护抬头。</div>
   </div>
   <div id="userTable">加载中...</div>
 </div>
@@ -1384,11 +1386,11 @@ async function loadUsers() {
         <td>${esc(u.companyName || '—')}${u.note ? `<br><span class="loginid">${esc(u.note)}</span>` : ''}</td>
         <td class="loginid">${esc(u.taxNo || '—')}</td>
         <td class="loginid">${esc(u.email || '—')}</td>
-        <td class="loginid">${u.orderCount} 单 / ${u.mappingCount} 映射</td>
+        <td class="loginid">${u.role === 'admin' ? '<span style="color:#8a8f99">系统账号 · 不承载业务数据</span>' : u.orderCount + ' 单 / ' + u.mappingCount + ' 映射'}</td>
         <td class="loginid">${esc(String(u.lastLoginAt || '').slice(0, 16) || '—')}</td>
         <td><div class="admin-actions">
-          <button class="btn btn-outline btn-sm" onclick="viewUserData(${u.id}, '${esc(u.username)}')">查看数据</button>
-          <button class="btn btn-plain btn-sm" onclick="openUserEdit(${u.id})">编辑</button>
+          ${u.role === 'admin' ? '' : `<button class="btn btn-outline btn-sm" onclick="viewUserData(${u.id}, '${esc(u.username)}')">查看数据</button>`}
+          ${u.role === 'admin' ? '' : `<button class="btn btn-plain btn-sm" onclick="openUserEdit(${u.id})">编辑</button>`}
           <button class="btn btn-plain btn-sm" onclick="resetPwd(${u.id}, '${esc(u.username)}')">重置密码</button>
           ${u.username === 'admin' ? '' : (u.status === 'active'
         ? `<button class="btn btn-danger btn-sm" onclick="toggleStatus(${u.id}, 'disabled', '${esc(u.username)}')">禁用</button>`
