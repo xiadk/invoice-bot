@@ -298,6 +298,32 @@ async function migrate(conn, dbName) {
       "COMMENT '断线续跑来源：被接续的任务 id（NULL=全新任务）'");
   }
 
+  // login_state（1688 登录态入库）：老库补建表
+  // 说明：登录态原先是文件（data/users/<id>/state-1688.json），现改为加密入库；
+  //       文件→库的一次性迁移在服务启动时由 lib/state-store.js#migrateFromFiles 执行。
+  if (!(await tableExists('login_state'))) {
+    await q(
+      'CREATE TABLE IF NOT EXISTS `login_state` (' +
+      '`id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,' +
+      '`user_id` INT UNSIGNED NOT NULL,' +
+      "`platform` VARCHAR(16) NOT NULL DEFAULT '1688'," +
+      '`state_enc` MEDIUMTEXT DEFAULT NULL,' +
+      '`key_id` VARCHAR(16) DEFAULT NULL,' +
+      '`cookie_count` INT NOT NULL DEFAULT 0,' +
+      '`origin_count` INT NOT NULL DEFAULT 0,' +
+      "`status` ENUM('active','expired','invalid') NOT NULL DEFAULT 'active'," +
+      "`source` ENUM('cloud_login','extension','migrated','manual') DEFAULT NULL," +
+      '`saved_at` DATETIME DEFAULT NULL,' +
+      '`last_used_at` DATETIME DEFAULT NULL,' +
+      '`last_checked_at` DATETIME DEFAULT NULL,' +
+      '`created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,' +
+      '`updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,' +
+      'PRIMARY KEY (`id`), UNIQUE KEY `uk_login_state_user_platform` (`user_id`,`platform`), ' +
+      'KEY `idx_login_state_status` (`status`)) ' +
+      "ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='1688 登录态（加密入库）'"
+    );
+  }
+
   // ── 种子化超级管理员 + 存量数据归属 ──
   await seedAdmin(conn, dbName);
 }

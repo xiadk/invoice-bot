@@ -29,7 +29,7 @@ related: [plan-c]
 
 - U 用「账号+密码」登录系统；看板/映射数据按 U 隔离。
 - U 在任意现代浏览器触发发送；实际发送由服务器 B 执行。
-- U 无 1688 登录态时，网页内直播登录并保存 SS，后续复用。
+- U 无 1688 登录态时，在**本机浏览器登录后由扩展上传**登录态（加密入库），后续复用。
 - 超管可管理账号、并只读查看任一 U 的看板与映射。
 
 ## 2 拓扑
@@ -44,15 +44,15 @@ U浏览器(任意) ──HTTPS/WSS──▶ LB(Nginx) ──▶ Web API ──�
 
 | 组件 | 职责 | 技术/文件 |
 |---|---|---|
-| Web API | 认证、看板/映射/管理接口、派发 T、直播转发 | `server.js` |
+| Web API | 认证、看板/映射/管理接口、派发 T、登录态接口 | `server.js` |
 | 认证会话 | 密码哈希 + 签名 Cookie 会话 + 失效 | `lib/auth.js` |
 | 多租户 | 解析租户、每 U 数据目录与 SS 路径 | `lib/tenancy.js` |
 | B 启动 | 启动浏览器、恢复 SS、拟人间隔 | `lib/browser.js` |
 | 发送引擎 | 打开聊天、发消息、检测登录失效 | `lib/sender.js` |
-| 直播登录 | CDP 截屏推帧 + 输入回灌 | `lib/live-browser.js` |
+| 登录态 | 加密入库（本地登录上传）/ 服务端发送时取用 | `lib/state-store.js`、`login_state` 表 |
 | 队列/Worker | 排队、限流、执行 T | `worker.js`（新增）|
 | 数据层 | 连接池 + 幂等迁移 | `db.js`、`sql/schema.sql` |
-| 前端 | 登录页、看板、映射、系统管理、直播 | `login.html`、`dashboard.html`、`compat.html`（新增）|
+| 前端 | 登录页、看板、映射、系统管理 | `login.html`、`dashboard.html`、`compat.html`（新增）|
 
 ## 4 关键流程
 
@@ -61,11 +61,11 @@ U浏览器(任意) ──HTTPS/WSS──▶ LB(Nginx) ──▶ Web API ──�
 2. 未登录/失效访问受保护接口 → 401；前端跳登录页。
 3. 会话失效：`token_version` 变更（改密/禁用/删除）即时作废。
 
-### 4.2 1688 云端登录（无 SS 时）
-1. U 点「登录 1688」→ `POST /api/browser/open` 启动 B。
-2. 前端 WS `/ws/browser` 收帧(`<img>` 渲染) + 回传鼠标/键盘/触屏。
-3. U 扫码或输账号 → 点「保存登录态」→ 写 `data/users/<uid>/state-1688.json`。
-4. 无操作超时(默认 10min)自动关 B。
+### 4.2 1688 登录态（无 SS 时）
+1. U 点「登录 1688」→ `POST /api/state/upload-token` 取一次性上传码。
+2. U 在**自己电脑的浏览器**登录 1688（扩展「上传登录态」）。
+3. `POST /api/state/upload` → AES-256-GCM 加密 → UPSERT `login_state`（**服务器不承载登录画面**）。
+4. 若 U 也可装扩展，则 U 点「登录 1688」不需要任何投屏。
 
 ### 4.3 发送 T
 1. U 勾选卖家 → `POST /api/send` → 建 T(单 U 仅 1 个在跑) → 入 Q。
@@ -81,7 +81,7 @@ U浏览器(任意) ──HTTPS/WSS──▶ LB(Nginx) ──▶ Web API ──�
 | 单 U 并发 T | 1 | 复用 `taskState.running` |
 | 卖家间隔 | 15~30s | 拟人，防限流 |
 | B 单账号上限 | 1 | 同账号不并行 |
-| 直播登录超时 | 10min | 无操作自动关 |
+| 登录态失效 | 发送即知 | 发送时被跳登录页 → 标记 `expired` 并提示重新上传 |
 | SS 复用 | 长期 | 失效自动提示重登 |
 
 ## 6 数据隔离
@@ -126,11 +126,11 @@ U浏览器(任意) ──HTTPS/WSS──▶ LB(Nginx) ──▶ Web API ──�
 
 | 文件 | 作用 |
 |---|---|
-| `server.js` | API/认证/管理/直播转发 |
+| `server.js` | API/认证/管理/登录态接口 |
 | `worker.js`(新增) | 队列消费 + 发送 |
 | `lib/browser.js` | B 启动 + 无头自动判定 |
 | `lib/sender.js` | 发送引擎 |
-| `lib/live-browser.js` | 直播登录 |
+| `lib/state-store.js` | 登录态加密入库（取代原投屏登录） |
 | `lib/auth.js` / `lib/tenancy.js` | 会话 / 租户 |
 | `db.js` / `sql/schema.sql` | 数据层 |
 | `login.html` / `dashboard.html` / `compat.html` | 前端 |
@@ -149,7 +149,7 @@ U浏览器(任意) ──HTTPS/WSS──▶ LB(Nginx) ──▶ Web API ──�
 
 - [ ] U 登录/隔离：他人数据不可见、不可写。
 - [ ] 超管：建号/重置/禁用/删除 + 按用户名查数据。
-- [ ] 无 SS 时直播登录并保存成功。
+- [ ] 无登录态时，用一次性上传码从本机浏览器上传成功（入库为密文）。
 - [ ] 发送成功写 `send_log`（金额/订单号/失败原因）。
 - [ ] 登录失效中止整批并提示。
 - [ ] 不支持浏览器访问 → 显示 `compat.html` 提示页。

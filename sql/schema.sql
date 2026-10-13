@@ -49,6 +49,39 @@ CREATE TABLE IF NOT EXISTS `app_user` (
   COMMENT='账号表（多用户登录；role=admin 为超级管理员）';
 
 -- ----------------------------------------------------------------------------
+-- 表: login_state —— 1688 登录态（进数据库，加密码存储）
+--   形态: Playwright storageState = { cookies:[...], origins:[{origin,localStorage}] }
+--   来源: 用户在自己浏览器登录 1688 后，由浏览器扩展「上传登录态」（source=extension）；
+--         历史遗留的 state-1688.json 首次启动会迁移入库（source=migrated）。
+--   安全: state_enc 为 AES-256-GCM 密文（v1:<keyId>:<iv>:<tag>:<cipher>，base64url），
+--         密钥取环境变量 STATE_SECRET（见 lib/state-store.js）。密文只对本人可用，
+--         管理员只看得到「是否有效 / 何时存」这类元信息，接口绝不下发密文。
+--   用途: 服务端发送催收消息时，从本表取态喂给本机 Chromium（launch({storageState})）。
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `login_state` (
+  `id`               BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `user_id`          INT UNSIGNED    NOT NULL                COMMENT '归属用户（见 app_user.id）',
+  `platform`         VARCHAR(16)     NOT NULL DEFAULT '1688' COMMENT '平台标识（当前仅 1688，预留多平台）',
+  `state_enc`        MEDIUMTEXT      DEFAULT NULL            COMMENT '登录态密文（AES-256-GCM，格式 v1:<keyId>:<iv>:<tag>:<cipher>，各段 base64url）',
+  `key_id`           VARCHAR(16)     DEFAULT NULL            COMMENT '加密密钥版本号（支持密钥轮换）',
+  `cookie_count`     INT             NOT NULL DEFAULT 0      COMMENT 'cookie 条数（完整性自检，不泄露内容）',
+  `origin_count`     INT             NOT NULL DEFAULT 0      COMMENT 'localStorage 源数量（完整性自检）',
+  `status`           ENUM('active','expired','invalid') NOT NULL DEFAULT 'active'
+                                                             COMMENT '状态：active=可用，expired=已失效（发送时被跳登录页），invalid=结构异常',
+  `source`           ENUM('cloud_login','extension','migrated','manual') DEFAULT NULL
+                                                             COMMENT '来源：extension=扩展上传，migrated=历史文件迁入，manual=人工导入',
+  `saved_at`         DATETIME        DEFAULT NULL            COMMENT '最近保存时间（替代原文件的 mtime）',
+  `last_used_at`     DATETIME        DEFAULT NULL            COMMENT '最近一次发送使用时间',
+  `last_checked_at`  DATETIME        DEFAULT NULL            COMMENT '最近一次状态校验时间',
+  `created_at`       DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at`       DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_login_state_user_platform` (`user_id`,`platform`),
+  KEY `idx_login_state_status` (`status`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  COMMENT='1688 登录态（加密入库；服务端发送时取用）';
+
+-- ----------------------------------------------------------------------------
 -- 表 1: invoice_order —— 1688 完成订单表
 --   数据来源: data/users/<user_id>/完成订单/*.xlsx（1688「已买到的货品」后台导出）
 --   看板口径: 订单数 / 订单金额 / 待开票金额 / 催收名单

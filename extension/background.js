@@ -5,7 +5,11 @@
  * 保活：Chrome 116+ 下 WebSocket 活动会延长 SW 生命周期；再叠加 1 分钟 alarms 兜底重连
  * 发送：每次任务使用同一个「工作标签页」，逐个卖家导航到聊天页 → 让 content.js 发消息 → 回执
  *
- * 安全：不读取任何 Cookie / 密码；只上报「是否已登录」布尔值。
+ * 上传登录态：用户在看板「登录 1688」里生成一次性上传码后，这里把本机 1688 的
+ *   cookie（含 httpOnly）+ 页面 localStorage 组装成 Playwright storageState，
+ *   凭上传码 POST 给服务器（服务端加密入库，供「服务器浏览器」通道发送时取用）。
+ *
+ * 安全：不上报 1688 密码；登录态仅在用户主动点「上传登录态」时发送一次，且走用户填写的服务器地址。
  */
 const VERSION = '1.0.0';
 const CHAT_URL = (sellerLoginId) =>
@@ -170,9 +174,114 @@ async function runBatch(m) {
   state.stopFlag = false;
 }
 
+// ── 上传登录态（供服务器浏览器通道发送时取用） ──
+const COOKIE_DOMAIN_RE = /(^|\.)1688\.com$/i;
+
+/** chrome.cookies 的 sameSite → Playwright 的写法 */
+function mapSameSite(v) {
+  const s = String(v || '').toLowerCase();
+  if (s === 'no_restriction' || s === 'none') return 'None';
+  if (s === 'strict') return 'Strict';
+  return 'Lax'; // lax / unspecified 都按默认 Lax
+}
+
+/** 收集 1688 相关 cookie，转成 Playwright storageState.cookies 的格式 */
+async function collectCookies() {
+  let raw = [];
+  try {
+    raw = await chrome.cookies.getAll({ domain: '1688.com' });
+  } catch (e) { raw = []; }
+  if (!raw.length) {
+    try { raw = await chrome.cookies.getAll({}); } catch (e) { raw = []; }
+    raw = raw.filter((c) => COOKIE_DOMAIN_RE.test(String(c.domain || '')));
+  }
+  return raw.map((c) => ({
+    name: c.name,
+    value: c.value,
+    domain: c.domain,
+    path: c.path || '/',
+    expires: typeof c.expirationDate === 'number' ? Math.floor(c.expirationDate) : -1,
+    httpOnly: !!c.httpOnly,
+    secure: !!c.secure,
+    sameSite: mapSameSite(c.sameSite),
+  }));
+}
+
+/** 从一个已打开的 1688 标签页里取 localStorage（best-effort，取不到就返回空） */
+async function collectOrigins() {
+  const origins = [];
+  try {
+    const tabs = await chrome.tabs.query({ url: '*://*.1688.com/*' });
+    const seen = new Set();
+    for (const t of tabs.slice(0, 5)) {
+      try {
+        const results = await chrome.scripting.executeScript({
+          target: { tabId: t.id, allFrames: false },
+          func: () => {
+            const out = [];
+            try {
+              for (let i = 0; i < localStorage.length; i++) {
+                const k = localStorage.key(i);
+                out.push({ name: k, value: localStorage.getItem(k) });
+              }
+            } catch (e) { /* 忽略 */ }
+            return { origin: location.origin, localStorage: out };
+          },
+        });
+        const r = results && results[0] && results[0].result;
+        if (r && r.origin && !seen.has(r.origin) && r.localStorage.length) {
+          seen.add(r.origin);
+          origins.push({ origin: r.origin, localStorage: r.localStorage });
+        }
+      } catch (e) { /* 单个标签页失败不影响整体 */ }
+    }
+  } catch (e) { /* 忽略 */ }
+  return origins;
+}
+
+/** 组装 storageState 并上传给服务器（凭一次性上传码） */
+async function uploadLoginState(serverUrl, token) {
+  const base = String(serverUrl || '').trim().replace(/\/+$/, '');
+  if (!base) throw new Error('请填写服务器地址');
+  if (!String(token || '').trim()) throw new Error('请填写上传码（在看板「登录 1688」里生成）');
+  const cookies = await collectCookies();
+  const origins = await collectOrigins();
+  if (!cookies.length && !origins.length) {
+    throw new Error('本机没有找到 1688 登录态：请先在浏览器打开 1688 并确认已登录');
+  }
+  const res = await fetch(base + '/api/state/upload', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ token: String(token).trim(), state: { cookies, origins }, ua: navigator.userAgent }),
+  });
+  let data = {};
+  try { data = await res.json(); } catch (e) { /* 忽略 */ }
+  if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+  const out = {
+    ok: true, cookieCount: data.cookieCount || cookies.length,
+    originCount: data.originCount || origins.length, savedAt: data.savedAt || new Date().toISOString(),
+  };
+  await chrome.storage.local.set({ lastUpload: out });
+  return out;
+}
+
 // ── 来自 content.js / popup 的消息 ──
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg || typeof msg !== 'object') return;
+
+  if (msg.type === 'UPLOAD_STATE') {
+    (async () => {
+      try {
+        const r = await uploadLoginState(msg.serverUrl, msg.token);
+        sendResponse(r);
+      } catch (e) {
+        const err = e.message || String(e);
+        try { await chrome.storage.local.set({ lastUpload: { ok: false, error: err } }); } catch (e2) { /* 忽略 */ }
+        sendResponse({ ok: false, error: err });
+      }
+    })();
+    return true; // 异步回执
+  }
 
   if (msg.type === 'LOGIN_STATE') {
     if (state.loggedIn !== !!msg.loggedIn) {
@@ -184,9 +293,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === 'GET_STATE') {
-    sendResponse({
-      connected: state.connected, loggedIn: state.loggedIn, sending: state.sending,
-      serverUrl: state.serverUrl, code: state.code, extVer: VERSION,
+    chrome.storage.local.get(['lastUpload']).then((s) => {
+      sendResponse({
+        connected: state.connected, loggedIn: state.loggedIn, sending: state.sending,
+        serverUrl: state.serverUrl, code: state.code, extVer: VERSION,
+        lastUpload: s.lastUpload || null,
+      });
+    }).catch(() => {
+      sendResponse({
+        connected: state.connected, loggedIn: state.loggedIn, sending: state.sending,
+        serverUrl: state.serverUrl, code: state.code, extVer: VERSION, lastUpload: null,
+      });
     });
     return true;
   }

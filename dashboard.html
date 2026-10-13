@@ -144,16 +144,18 @@
   .banner.view { background: #e3f2fd; color: #0d47a1; border-bottom: 1px solid #bbdefb; }
   .banner.warn { background: #fff8e1; color: #8d6e00; border-bottom: 1px solid #ffe082; }
   .banner .btn { padding: 4px 12px; font-size: 12px; }
-  /* 云端登录直播 */
-  .live-grid { display: flex; gap: 14px; align-items: flex-start; }
-  .live-screen { flex: 1; background: #111; border-radius: 8px; overflow: hidden; position: relative; min-height: 420px; display: flex; align-items: center; justify-content: center; }
-  .live-screen img { width: 100%; display: block; cursor: crosshair; user-select: none; -webkit-user-drag: none; -webkit-user-select: none; touch-action: none; }
-  .live-side { width: 260px; flex: none; }
-  .live-status { font-size: 12px; color: var(--sub); line-height: 1.8; margin-bottom: 10px; word-break: break-all; }
-  .live-status b { color: var(--text); }
-  .live-log { background: #26282c; color: #b9f6ca; font-family: Consolas, monospace; font-size: 11px; border-radius: 6px; padding: 8px; height: 140px; overflow-y: auto; margin-top: 10px; }
-  .live-side .btn { width: 100%; margin-bottom: 8px; }
-  .live-kb { width: 100%; min-height: 62px; border: 1px solid var(--border); border-radius: 6px; padding: 8px; font-size: 12px; font-family: inherit; resize: vertical; }
+  /* 登录 1688（在本机浏览器登录 → 扩展上传登录态） */
+  .steps { margin: 0 0 12px; padding-left: 20px; font-size: 13px; line-height: 1.95; }
+  .steps li { margin-bottom: 2px; }
+  .upload-box { background: #f7f8fa; border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; margin-bottom: 12px; }
+  .upload-row { display: flex; align-items: center; gap: 10px; font-size: 13px; padding: 4px 0; }
+  .upload-row .k { width: 76px; flex: none; color: var(--sub); }
+  .upload-row code { background: #fff; border: 1px solid var(--border); border-radius: 5px; padding: 3px 8px; font-size: 13px; }
+  .upload-row code.code { font-weight: 700; letter-spacing: 3px; color: #ff6a00; font-size: 16px; }
+  .state-pill { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 12px; }
+  .state-pill.ok { background: #e8f5e9; color: #2e7d32; }
+  .state-pill.warn { background: #fff3e0; color: #b26a00; }
+  .small { font-size: 12px; }
   /* 本机浏览器通道状态条（方案C） */
   .agent-bar { display: flex; align-items: center; gap: 8px; margin: 10px 0 12px; padding: 8px 12px; background: #f7f8fa; border: 1px solid var(--border); border-radius: 8px; font-size: 12px; color: var(--sub); }
   .agent-dot { width: 8px; height: 8px; border-radius: 50%; background: #c9ccd1; flex: none; }
@@ -165,13 +167,10 @@
   .resume-bar.show { display: flex; }
   .resume-bar b { color: #ad5f00; }
   .resume-bar .btn-sm { padding: 5px 10px; font-size: 12px; }
-  /* 手机 / 平板：直播面板改为上下堆叠，画面自适应宽度，保证任意浏览器都能登录 */
+  /* 手机 / 平板：弹窗自适应宽度，登录说明的行自动换行 */
   @media (max-width: 860px) {
     .modal.wide { max-width: 96vw; }
-    .live-grid { flex-direction: column; }
-    .live-screen { width: 100%; min-height: 0; }
-    .live-side { width: 100%; }
-    .live-log { height: 90px; }
+    .upload-row { flex-wrap: wrap; }
   }
   /* 系统管理 */
   .admin-form-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
@@ -188,7 +187,7 @@
     <div class="nav-tab" data-page="admin" id="tabAdmin" style="display:none" onclick="switchPage('admin')">系统管理</div>
   </div>
   <div class="nav-right">
-    <button class="btn btn-outline btn-sm" id="btnLogin1688" onclick="openLiveModal()" title="在网页里直接操作服务器上的浏览器完成 1688 登录，登录态按账号独立保存">登录 1688</button>
+    <button class="btn btn-outline btn-sm" id="btnLogin1688" onclick="openLoginModal()" title="在你自己的浏览器登录 1688，用扩展把登录态上传给服务器（服务器全程接触不到你的密码）">登录 1688</button>
     <div class="user-chip">
       <div class="avatar" id="userAvatar">-</div>
       <div>
@@ -396,42 +395,44 @@
   </div>
 </div>
 
-<!-- ══════════ 云端 1688 登录直播弹窗 ══════════ -->
-<div class="modal-mask" id="liveModal" onclick="if (event.target === this) closeLiveModal()">
-  <div class="modal wide">
+<!-- ══════════ 登录 1688（本机浏览器登录 → 扩展上传登录态） ══════════ -->
+<div class="modal-mask" id="loginModal" onclick="if (event.target === this) closeLoginModal()">
+  <div class="modal">
     <div class="modal-head">
-      <b>登录 1688（云端浏览器实时画面）</b>
-      <span class="modal-close" onclick="closeLiveModal()" title="关闭">×</span>
+      <b>登录 1688（在你自己电脑的浏览器登录）</b>
+      <span class="modal-close" onclick="closeLoginModal()" title="关闭">×</span>
     </div>
     <div class="modal-body">
-      <div class="warn-box" style="margin-bottom:12px">
-        下面的画面是<b>服务器上的浏览器</b>实时投屏。直接在这里<b>扫码</b>或输入账号密码即可登录，登录态只保存到<b>当前账号</b>的名下，其他用户看不到。
-        登录成功后点右侧「保存登录态」即可，之后发催收消息会自动复用。
+      <div class="warn-box" style="margin-bottom:12px" id="loginStateBox">登录态状态读取中…</div>
+
+      <ol class="steps">
+        <li>在<b>你自己电脑的浏览器</b>里打开 <b>1688</b> 并登录（通常你本来就登录着，无需重复登录）。</li>
+        <li>安装「<b>1688 发票催收 · 本机发送助手</b>」浏览器扩展（Chrome / Edge：扩展管理 → 打开「开发者模式」→「加载已解压的扩展程序」→ 选项目里的 <code>extension/</code> 目录）。</li>
+        <li>点下面「<b>生成上传码</b>」，把 <b>服务器地址</b> 与 <b>上传码</b> 填进扩展，点扩展里的「<b>上传登录态</b>」。</li>
+        <li>回到这里点「刷新状态」，显示<b>已上传 / 可用</b>即完成，之后发催收消息会自动复用。</li>
+      </ol>
+
+      <div class="upload-box">
+        <div class="upload-row">
+          <span class="k">服务器地址</span>
+          <code id="upServer">—</code>
+        </div>
+        <div class="upload-row">
+          <span class="k">上传码</span>
+          <code class="code" id="upCode">—</code>
+          <span class="muted small" id="upTtl"></span>
+        </div>
       </div>
-      <div class="live-grid">
-        <div class="live-screen" id="liveScreen">
-          <div class="muted" id="livePlaceholder" style="color:#9aa0a6;font-size:13px">正在启动云端浏览器…</div>
-          <img id="liveImg" alt="" style="display:none">
-        </div>
-        <div class="live-side">
-          <div class="live-status" id="liveStatus">状态：连接中…</div>
-          <button class="btn btn-primary" onclick="saveLiveState()">保存登录态</button>
-          <button class="btn btn-plain" onclick="liveNav('https://login.1688.com/member/signin.htm')">回到登录页</button>
-          <button class="btn btn-plain" onclick="liveNav('https://work.1688.com/home/page/index.htm')">打开工作台</button>
-          <button class="btn btn-plain" onclick="liveBack()">后退</button>
-          <button class="btn btn-plain" onclick="liveReload()">刷新画面</button>
-          <button class="btn btn-danger" onclick="closeLiveModal()">关闭浏览器</button>
-          <div class="form-row" style="margin-top:10px">
-            <label>键盘输入（点击此框后直接打字 / 粘贴，会同步到左侧画面）</label>
-            <textarea class="live-kb" id="liveKb" placeholder="在这里输入文字、账号、密码或验证码…"></textarea>
-          </div>
-          <div style="display:flex;gap:6px">
-            <button class="btn btn-plain btn-sm" style="flex:1" onclick="liveKey('Enter')">回车</button>
-            <button class="btn btn-plain btn-sm" style="flex:1" onclick="liveKey('Tab')">Tab</button>
-            <button class="btn btn-plain btn-sm" style="flex:1" onclick="liveKey('Backspace')">退格</button>
-          </div>
-          <div class="live-log" id="liveLog"></div>
-        </div>
+
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn btn-primary" id="btnGenUpload" onclick="genUploadToken()">生成上传码</button>
+        <button class="btn btn-outline" onclick="refreshLoginState()">刷新状态</button>
+        <button class="btn btn-danger" id="btnClearState" onclick="clearLoginState()">清除登录态</button>
+      </div>
+
+      <div class="muted small" style="margin-top:10px;line-height:1.8">
+        安全说明：服务器只接收<b>加密后的登录态</b>，全程接触不到你的 1688 密码；登录发生在本机浏览器、用的是你本机的真实 IP（风控更友好）。
+        上传码 10 分钟内有效、<b>用一次即作废</b>。登录态加密存储在数据库，只对你本人可用。
       </div>
     </div>
   </div>
@@ -508,10 +509,10 @@ async function boot() {
     + (ME.companyName ? ' · ' + esc(ME.companyName) : '');
   if (ME.role === 'admin') document.getElementById('tabAdmin').style.display = '';
   if (ME.mustChangePassword) document.getElementById('pwdBanner').classList.add('show');
-  // 无 1688 登录态 → 自动弹出登录直播（每次会话只自动弹一次，其余靠顶部按钮/横幅提示）
+  // 无 1688 登录态（或已失效）→ 自动弹出「登录 1688」引导（每次会话只自动弹一次，其余靠顶部按钮）
   if (d.needLogin1688 && !sessionStorage.getItem('autoLoginPrompted')) {
     sessionStorage.setItem('autoLoginPrompted', '1');
-    setTimeout(() => openLiveModal(true), 600);
+    setTimeout(() => openLoginModal(), 600);
   }
   await loadData();
   pollTask();
@@ -1486,148 +1487,74 @@ async function submitPwd() {
   } catch (e) { alert('修改失败: ' + e.message); btn.disabled = false; btn.textContent = t; }
 }
 
-// ══════════════ 云端 1688 登录（WebSocket 直播） ══════════════
-let LIVE_WS = null, LIVE_IMG = null, LIVE_OPEN = false;
-let _framePending = null, _frameRaf = false, _lastMove = 0;
+// ══════════════ 登录 1688（本机浏览器登录 → 扩展上传登录态） ══════════════
+// 服务器不再承载登录画面：登录在用户自己电脑的浏览器完成，扩展凭一次性上传码把
+// storageState 交给服务器，加密后写入数据库（login_state）。发送时服务端从库取用。
+let LOGIN_STATE = null;
 
-function liveLog(text) {
-  const box = document.getElementById('liveLog');
+function openLoginModal() {
+  document.getElementById('loginModal').classList.add('show');
+  refreshLoginState();
+}
+function closeLoginModal() {
+  document.getElementById('loginModal').classList.remove('show');
+}
+
+function renderLoginState() {
+  const box = document.getElementById('loginStateBox');
+  const s = LOGIN_STATE || {};
+  const btnClear = document.getElementById('btnClearState');
   if (!box) return;
-  const div = document.createElement('div');
-  div.textContent = new Date().toLocaleTimeString('zh-CN', { hour12: false }) + ' ' + text;
-  box.appendChild(div);
-  box.scrollTop = 99999;
-  while (box.childNodes.length > 200) box.removeChild(box.firstChild);
+  if (!s.hasState) {
+    box.innerHTML = '<b>当前账号还没有 1688 登录态。</b>按下面四步上传一次即可（之后会自动复用）。';
+    if (btnClear) btnClear.disabled = true;
+    return;
+  }
+  const fmt = (t) => (t ? new Date(t).toLocaleString('zh-CN', { hour12: false }) : '');
+  const srcMap = { extension: '本机浏览器扩展上传', migrated: '历史文件自动迁入', manual: '人工导入', cloud_login: '旧版投屏登录' };
+  const src = srcMap[s.source] || (s.source || '未知来源');
+  const pill = s.usable
+    ? '<span class="state-pill ok">可用</span>'
+    : '<span class="state-pill warn">已失效，需要重新上传</span>';
+  box.innerHTML =
+    '当前账号 1688 登录态：' + pill +
+    '<br>来源：' + esc(src) + ' · 保存于：' + esc(fmt(s.savedAt) || '未知') +
+    '<br>内容：' + (s.cookieCount || 0) + ' 个 cookie' +
+    ((s.originCount || 0) ? ' · ' + s.originCount + ' 个 localStorage 源' : '') +
+    (s.lastUsedAt ? ' · 最近使用：' + esc(fmt(s.lastUsedAt)) : '') +
+    '<br><span class="muted">登录态以密文存储在数据库，接口不下发明文；服务器全程接触不到你的 1688 密码。</span>';
+  if (btnClear) btnClear.disabled = false;
 }
-function liveSetStatus(t) { document.getElementById('liveStatus').innerHTML = t; }
 
-function openLiveModal(auto) {
-  document.getElementById('liveModal').classList.add('show');
-  LIVE_OPEN = true;
-  const img = document.getElementById('liveImg');
-  LIVE_IMG = img;
-  img.style.display = 'none';
-  document.getElementById('livePlaceholder').style.display = '';
-  document.getElementById('liveLog').innerHTML = '';
-  liveSetStatus('状态：正在连接云端浏览器…');
-  connectLive(auto);
+async function refreshLoginState() {
+  try {
+    const d = await api('/api/state/status');
+    if (d && !d.error) { LOGIN_STATE = d; renderLoginState(); }
+  } catch (e) { /* 忽略 */ }
 }
-function closeLiveModal() {
-  document.getElementById('liveModal').classList.remove('show');
-  LIVE_OPEN = false;
-  // 关闭窗口不销毁远端会话（用户可能只是切去看板），用「关闭浏览器」按钮才真正销毁
-  closeLiveRemote().catch(() => {});
-  if (LIVE_WS) { try { LIVE_WS.close(); } catch (e) { } LIVE_WS = null; }
+
+async function genUploadToken() {
+  if (READONLY) { alert('只读模式下不能操作登录态'); return; }
+  const btn = document.getElementById('btnGenUpload');
+  if (btn) { btn.disabled = true; btn.textContent = '生成中…'; }
+  try {
+    const d = await api('/api/state/upload-token', { method: 'POST' });
+    if (!d || d.error) { alert('生成失败：' + ((d && d.error) || '未知错误')); return; }
+    document.getElementById('upServer').textContent = d.serverUrl || '—';
+    document.getElementById('upCode').textContent = d.code || '—';
+    const min = Math.max(1, Math.round((d.ttlSec || 600) / 60));
+    document.getElementById('upTtl').textContent = '（' + min + ' 分钟内有效，用一次即作废）';
+  } catch (e) { alert('请求失败：' + e.message); }
+  finally { if (btn) { btn.disabled = false; btn.textContent = '生成上传码'; } }
 }
-async function closeLiveRemote() {
-  try { await api('/api/browser/close', { method: 'POST' }); } catch (e) { }
-}
-function connectLive() {
-  if (LIVE_WS) { try { LIVE_WS.close(); } catch (e) { } }
-  if (typeof WebSocket === 'undefined') { liveLog('当前浏览器不支持 WebSocket，请换用 Chrome / Edge / Firefox / Safari 等主流浏览器'); liveSetStatus('<b style="color:#d32f2f">浏览器不支持实时画面</b>'); return; }
-  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  let ws;
-  try { ws = new WebSocket(`${proto}//${location.host}/ws/browser`); } catch (e) { liveLog('WebSocket 创建失败: ' + e.message); return; }
-  LIVE_WS = ws;
-  let gotFrame = false, opened = false;
-  ws.onopen = () => { opened = true; liveLog('已连接到云端浏览器'); liveSetStatus('状态：已连接，正在等待画面…'); };
-  ws.onclose = () => { liveLog('连接已关闭'); if (LIVE_OPEN) liveSetStatus('状态：连接已断开（可点「关闭浏览器」后重试）'); };
-  ws.onerror = () => {
-    liveLog('连接错误');
-    if (!opened) liveLog('提示：若通过 Nginx/网关访问，请确认已开启 WebSocket 转发（Upgrade / Connection 头）。');
-  };
-  ws.onmessage = (ev) => {
-    let m; try { m = JSON.parse(ev.data); } catch (e) { return; }
-    if (m.type === 'frame') { gotFrame = true; renderFrame(m.data); }
-    else if (m.type === 'status' || m.type === 'hello') {
-      liveSetStatus(`状态：${m.loggedIn ? '<b style="color:#2e7d32">已登录 1688</b>' : '未登录'} · ${m.url ? esc(m.url) : ''}`);
-    } else if (m.type === 'log') liveLog(m.text);
-    else if (m.type === 'error') { liveLog('错误: ' + m.text); liveSetStatus('<b style="color:#d32f2f">启动失败：' + esc(m.text) + '</b>'); }
-    else if (m.type === 'saved') { liveLog('登录态已保存'); liveSetStatus(`状态：登录态已保存（${m.loggedIn ? '已登录' : '未登录'}）`); }
-    else if (m.type === 'closed') { liveLog('云端浏览器已关闭'); }
-  };
-}
-function renderFrame(data) {
-  _framePending = data;
-  if (_frameRaf) return;
-  _frameRaf = true;
-  requestAnimationFrame(() => {
-    _frameRaf = false;
-    if (!_framePending || !LIVE_IMG) return;
-    LIVE_IMG.src = 'data:image/jpeg;base64,' + _framePending;
-    _framePending = null;
-    if (LIVE_IMG.style.display === 'none') {
-      LIVE_IMG.style.display = '';
-      const ph = document.getElementById('livePlaceholder');
-      if (ph) ph.style.display = 'none';
-    }
-  });
-}
-function liveSend(obj) { if (LIVE_WS && LIVE_WS.readyState === 1) { try { LIVE_WS.send(JSON.stringify(obj)); } catch (e) { } } }
-function relXY(ev) {
-  const r = LIVE_IMG.getBoundingClientRect();
-  return { x: (ev.clientX - r.left) / Math.max(1, r.width), y: (ev.clientY - r.top) / Math.max(1, r.height) };
-}
-function bindLiveInput() {
-  const img = document.getElementById('liveImg');
-  // ── 鼠标（Chrome / Edge / Firefox / Safari 桌面端）──
-  img.addEventListener('mousemove', (ev) => {
-    const now = Date.now();
-    if (now - _lastMove < 30) return;
-    _lastMove = now;
-    liveSend(Object.assign({ type: 'mouse', action: 'move' }, relXY(ev)));
-  });
-  img.addEventListener('mousedown', (ev) => { ev.preventDefault(); liveSend(Object.assign({ type: 'mouse', action: 'down' }, relXY(ev))); });
-  img.addEventListener('mouseup', (ev) => { ev.preventDefault(); liveSend(Object.assign({ type: 'mouse', action: 'up' }, relXY(ev))); });
-  img.addEventListener('contextmenu', (ev) => ev.preventDefault());
-  img.addEventListener('wheel', (ev) => {
-    ev.preventDefault();
-    liveSend(Object.assign({ type: 'mouse', action: 'wheel', deltaY: ev.deltaY }, relXY(ev)));
-  }, { passive: false });
-  // ── 触屏（手机 / 平板：Safari、Chrome、微信内置浏览器等）──
-  // 单指：按下/移动/抬起 映射为鼠标；轻点即一次点击，长按拖动即拖拽
-  img.addEventListener('touchstart', (ev) => {
-    if (ev.touches.length !== 1) return;
-    ev.preventDefault();
-    const t = ev.touches[0];
-    liveSend(Object.assign({ type: 'mouse', action: 'move' }, relXY(t)));
-    liveSend(Object.assign({ type: 'mouse', action: 'down' }, relXY(t)));
-  }, { passive: false });
-  img.addEventListener('touchmove', (ev) => {
-    if (ev.touches.length !== 1) return;
-    ev.preventDefault();
-    const now = Date.now();
-    if (now - _lastMove < 30) return;
-    _lastMove = now;
-    liveSend(Object.assign({ type: 'mouse', action: 'move' }, relXY(ev.touches[0])));
-  }, { passive: false });
-  img.addEventListener('touchend', (ev) => {
-    ev.preventDefault();
-    const t = (ev.changedTouches && ev.changedTouches[0]) || null;
-    liveSend(Object.assign({ type: 'mouse', action: 'up' }, t ? relXY(t) : { x: 0, y: 0 }));
-  }, { passive: false });
-  img.addEventListener('touchcancel', () => { liveSend({ type: 'mouse', action: 'up', x: 0, y: 0 }); });
-  // 键盘输入框：按增量发送文本 / 退格
-  const kb = document.getElementById('liveKb');
-  let prev = '';
-  kb.addEventListener('input', () => {
-    const v = kb.value;
-    if (v.length > prev.length) liveSend({ type: 'key', action: 'text', text: v.slice(prev.length) });
-    else if (v.length < prev.length) { for (let i = 0; i < prev.length - v.length; i++) liveSend({ type: 'key', action: 'key', key: 'Backspace' }); }
-    prev = v;
-  });
-  kb.addEventListener('keydown', (ev) => {
-    if (['Enter', 'Tab', 'Escape'].includes(ev.key)) { ev.preventDefault(); liveSend({ type: 'key', action: 'key', key: ev.key }); }
-  });
-}
-function liveKey(k) { liveSend({ type: 'key', action: 'key', key: k }); }
-function liveNav(url) { liveSend({ type: 'navigate', url }); }
-function liveBack() { liveSend({ type: 'mouse', action: 'click', x: 0.02, y: 0.02 }); }
-function liveReload() { location.reload(); }
-async function saveLiveState() {
-  liveSend({ type: 'save' });
-  liveLog('正在保存登录态…');
-  setTimeout(loadData, 800);
+
+async function clearLoginState() {
+  if (READONLY) return;
+  if (!confirm('清除当前账号的 1688 登录态？\n清除后需要重新在浏览器登录并用扩展上传，之后才能发送催收消息。')) return;
+  try {
+    await api('/api/state/clear', { method: 'POST' });
+    await refreshLoginState();
+  } catch (e) { alert('清除失败：' + e.message); }
 }
 
 // ══════════════ 事件绑定 & 启动 ══════════════
@@ -1644,9 +1571,8 @@ document.getElementById('filterTabs').addEventListener('click', e => {
   if (el) el.addEventListener('input', updatePreview);
 });
 document.addEventListener('keydown', e => {
-  if (e.key === 'Escape') { closeHist(); closeLiveModal(); closePwdModal(); }
+  if (e.key === 'Escape') { closeHist(); closeLoginModal(); closePwdModal(); }
 });
-document.getElementById('liveKb') && bindLiveInput();
 
 boot();
 </script>

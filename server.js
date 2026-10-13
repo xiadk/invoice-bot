@@ -11,11 +11,13 @@
  *   普通用户：只能看自己的「看板」与「名称映射」，看不到「系统管理」。
  *   所有业务数据按 user_id 隔离（见 sql/schema.sql 与 lib/tenancy.js）。
  *
- * ── 1688 登录态（Playwright） ─────────────────────────────────────────────
- *   每个用户一份登录态 data/users/<id>/state-1688.json。
- *   看板检测到该用户还没登录（或登录态失效）时，会自动弹出「云端登录」窗口：
- *   服务器上的 Chromium 画面用 CDP 截屏实时推到网页（WebSocket /ws/browser），
- *   用户直接扫码/输账号即可，登录完保存登录态，之后发催收消息复用。
+ * ── 1688 登录态（入库，服务端发送时取用） ─────────────────────────────────
+ *   登录态 = Playwright storageState，加密后存在数据库 login_state 表（见 lib/state-store.js）。
+ *   获取方式：用户在**自己电脑的浏览器**登录 1688 后，用浏览器扩展（extension/）把登录态
+ *   上传给服务器（看板「登录 1688」弹窗 → 生成一次性上传码 → 扩展填写并上传）。
+ *   ⚠ 服务器不再承载登录画面（无投屏登录）：服务器全程不接触 1688 密码。
+ *   发送催收消息时从库里取态喂给本机 Chromium；失效自动标记 expired 并提示重新上传。
+ *   兼容：历史遗留的 data/users/<id>/state-1688.json 首次启动会迁入数据库（原文件保留）。
  *
  * ── 接口 ──────────────────────────────────────────────────────────────────
  *   认证:   POST /api/auth/login | POST /api/auth/logout | GET /api/auth/me | POST /api/auth/password
@@ -25,8 +27,10 @@
  *   映射:   GET  /api/mapping | POST /api/mapping | POST /api/mapping/delete | POST /api/mapping/ignore
  *           POST /api/order-state
  *   配置:   GET  /api/config | POST /api/config（仅管理员）
- *   登录态: GET  /api/browser/status | POST /api/browser/open | POST /api/browser/close
- *           POST /api/browser/save | POST /api/browser/navigate | WS /ws/browser
+ *   登录态: GET  /api/state/status | POST /api/state/upload-token（生成一次性上传码）
+ *           POST /api/state/upload（扩展上传，凭上传码，无需登录 Cookie） | POST /api/state/clear
+ *   本机通道: GET /api/agent/status | POST /api/agent/pair-code | POST /api/agent/disconnect
+ *           GET  /api/agent/tasks | GET /api/agent/resumable | POST /api/agent/resume | WS /ws/agent
  *   管理:   GET  /api/admin/users | POST /api/admin/users/create | /update | /password | /status | /delete
  *   运维:   GET  /healthz
  *
@@ -42,13 +46,14 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { WebSocketServer } = require('ws');
 const db = require('./db');
 const auth = require('./lib/auth');
 const tenancy = require('./lib/tenancy');
 const { runImport } = require('./import-to-db');
-const { launch, resolveHeadless, loadConfig } = require('./lib/browser');
-const { LiveBrowser } = require('./lib/live-browser');
+const { launch, loadConfig } = require('./lib/browser');
+const stateStore = require('./lib/state-store');
 const { AgentHub } = require('./lib/agent-hub');
 const { buildMessages, sendToSeller } = require('./lib/sender');
 
@@ -749,20 +754,25 @@ async function doSend(userId, loginIds) {
   const buyer = await buyerInfoOf(userId);
   const statePath = tenancy.statePathFor(userId);
   const runConfig = { ...config, buyerInfo: buyer }; // 话术里的抬头取该用户账号资料
+  // 登录态：优先数据库（login_state），库为空时回退历史文件
+  const dbState = await stateStore.loadState(userId);
 
   Object.assign(taskState, {
     running: true, channel: 'server', type: 'send', total: loginIds.length, done: 0, ok: 0, fail: 0,
     current: null, stopRequested: false, startedAt: new Date().toISOString(), finishedAt: null, logs: [],
   });
   taskLog(taskState, `▶ 开始发送催收消息：共 ${loginIds.length} 家（启动独立浏览器）`);
-  if (!fs.existsSync(statePath)) {
-    taskLog(taskState, '⚠ 未检测到 1688 登录态：若浏览器跳转登录页，请到看板右上角「登录 1688」扫码后再重试');
+  if (!dbState && !fs.existsSync(statePath)) {
+    taskLog(taskState, '⚠ 未找到 1688 登录态：请点右上角「登录 1688」，在你自己电脑的浏览器登录后，用扩展把登录态上传给服务器');
+  } else if (dbState) {
+    taskLog(taskState, `✓ 已从账号（数据库）取到 1688 登录态：${dbState.cookies.length} 个 cookie`);
   }
 
   let browser = null;
   let loginLost = false;
   try {
-    const launched = await launch({ statePath });
+    // storageState 对象优先（来自数据库）；没取到则 launch 自己回退到 statePath 文件
+    const launched = await launch({ statePath, storageState: dbState || undefined });
     browser = launched.browser;
     const context = launched.context;
     taskLog(taskState, '✓ 浏览器已启动');
@@ -793,7 +803,7 @@ async function doSend(userId, loginIds) {
       } catch (e) {
         if (/登录态失效/.test(e.message)) {
           taskLog(taskState, `⛔ ${e.message}`);
-          taskLog(taskState, `■ 批量发送已中止（已完成 ${taskState.ok} 家）：请到看板右上角「登录 1688」重新登录后重试`);
+          taskLog(taskState, `■ 批量发送已中止（已完成 ${taskState.ok} 家）：请在你自己电脑的浏览器重新登录 1688，再用扩展上传登录态后重试`);
           loginLost = true;
           break;
         }
@@ -819,6 +829,13 @@ async function doSend(userId, loginIds) {
   taskState.running = false;
   taskState.current = null;
   taskState.finishedAt = new Date().toISOString();
+  // 登录态维护：这次确实发出去过 → 记「最近使用」并自愈为有效；被跳登录页 → 标记失效
+  if (loginLost) {
+    await stateStore.markExpired(userId);
+    taskLog(taskState, '登录态已标记为「失效」，重新上传后即可继续发送');
+  } else if (taskState.ok > 0) {
+    await stateStore.touch(userId);
+  }
   taskLog(taskState, loginLost
     ? `■ 发送中止: 成功 ${taskState.ok}, 失败 ${taskState.fail}, 已处理 ${taskState.done}/${taskState.total}（登录态失效）`
     : `■ 发送完成: 成功 ${taskState.ok}, 失败 ${taskState.fail}, 共 ${taskState.done}/${taskState.total}`);
@@ -1119,74 +1136,55 @@ async function deleteUser({ id, username, purge }, byUser) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// 云端登录：浏览器实时会话（每用户一个）
+// 1688 登录态（入库）：状态查询 + 扩展上传的一次性令牌
+//   服务器不再承载登录画面（无投屏登录）：登录在用户本机浏览器完成，
+//   扩展凭一次性上传码把 storageState 交给服务器，加密后写入 login_state。
 // ─────────────────────────────────────────────────────────────────────────
-const LIVE = new Map(); // userId -> { browser, sockets:Set, timer }
+const UPLOAD_TTL_MS = 10 * 60 * 1000; // 上传码有效期 10 分钟
+const UPLOAD_TOKEN_MAX = 5;           // 每个用户同时最多保留几个未用上传码
+const uploadTokens = new Map();       // token -> { uid, expireAt }
 
-function liveStatus(userId) {
-  const entry = LIVE.get(userId);
-  const statePath = tenancy.statePathFor(userId);
-  const hasState = fs.existsSync(statePath);
-  let stateMtime = null;
-  try { if (hasState) stateMtime = fs.statSync(statePath).mtime; } catch (e) { /* 忽略 */ }
+function sweepUploadTokens() {
+  const now = Date.now();
+  for (const [k, v] of uploadTokens) if (v.expireAt <= now) uploadTokens.delete(k);
+}
+
+/** 为某用户生成一次性上传码（同用户旧码全部作废，避免堆积） */
+function createUploadToken(uid) {
+  const id = Number(uid);
+  sweepUploadTokens();
+  const mine = [...uploadTokens.entries()].filter(([, v]) => v.uid === id);
+  for (const [k] of mine) uploadTokens.delete(k);
+  const token = String(crypto.randomInt(0, 1000000)).padStart(6, '0');
+  const expireAt = Date.now() + UPLOAD_TTL_MS;
+  uploadTokens.set(token, { uid: id, expireAt });
+  return { code: token, ttlSec: Math.round(UPLOAD_TTL_MS / 1000), expiresAt: new Date(expireAt).toISOString() };
+}
+
+/** 校验上传码 → 返回 uid 或 null（校验成功即作废，一次性） */
+function redeemUploadToken(token) {
+  sweepUploadTokens();
+  const key = String(token || '').trim();
+  if (!key) return null;
+  const hit = uploadTokens.get(key);
+  if (!hit) return null;
+  uploadTokens.delete(key);
+  return hit.uid;
+}
+
+/** 该用户的登录态状态（读库，不含密文） */
+async function stateStatus(userId) {
+  const meta = await stateStore.getMeta(userId);
   return {
-    hasState,
-    stateMtime,
-    sessionActive: !!(entry && entry.browser),
-    url: entry && entry.browser ? entry.browser.url : '',
-    loggedIn: entry && entry.browser ? entry.browser.loggedIn : false,
+    hasState: meta.hasState,
+    usable: !!(meta.hasState && meta.status === 'active'),
+    status: meta.status,
+    source: meta.source,
+    savedAt: meta.savedAt,
+    lastUsedAt: meta.lastUsedAt,
+    cookieCount: meta.cookieCount,
+    originCount: meta.originCount,
   };
-}
-
-function broadcastLive(userId, obj) {
-  const entry = LIVE.get(userId);
-  if (!entry) return;
-  const payload = JSON.stringify(obj);
-  for (const ws of entry.sockets) {
-    if (ws.readyState === 1) { try { ws.send(payload); } catch (e) { /* 忽略 */ } }
-  }
-}
-
-async function openLive(userId, startUrl) {
-  let entry = LIVE.get(userId);
-  if (entry && entry.browser) {
-    if (startUrl) await entry.browser.navigate(startUrl);
-    return entry;
-  }
-  const config = loadConfig();
-  const browser = new LiveBrowser({
-    userId,
-    statePath: tenancy.statePathFor(userId),
-    config,
-    headless: resolveHeadless(undefined, config.runtime || {}),
-    onEvent: (evt) => broadcastLive(userId, evt),
-  });
-  entry = { browser, sockets: new Set(), timer: null };
-  LIVE.set(userId, entry);
-  // 空闲 15 分钟自动关闭，释放服务器资源
-  entry.timer = setInterval(async () => {
-    if (Date.now() - browser.lastActiveAt > 15 * 60 * 1000 && entry.sockets.size === 0) {
-      await closeLive(userId);
-    }
-  }, 60 * 1000);
-  if (entry.timer.unref) entry.timer.unref();
-  try {
-    await browser.start(startUrl);
-  } catch (e) {
-    await closeLive(userId);
-    throw e;
-  }
-  return entry;
-}
-
-async function closeLive(userId) {
-  const entry = LIVE.get(userId);
-  if (!entry) return;
-  if (entry.timer) clearInterval(entry.timer);
-  LIVE.delete(userId);
-  try { await entry.browser.close(); } catch (e) { /* 忽略 */ }
-  broadcastLive(userId, { type: 'closed' });
-  for (const ws of entry.sockets) { try { ws.close(); } catch (e) { /* 忽略 */ } }
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -1231,10 +1229,10 @@ const server = http.createServer(async (req, res) => {
     if (method === 'GET' && p === '/api/auth/me') {
       const u = await currentUser(req);
       if (!u) return sendJson(res, 401, { error: '未登录' });
-      const st = liveStatus(u.id);
+      const st = await stateStatus(u.id);
       return sendJson(res, 200, {
         user: publicUser(u),
-        needLogin1688: !st.hasState,
+        needLogin1688: !st.usable,
         login1688: st,
       });
     }
@@ -1252,6 +1250,37 @@ const server = http.createServer(async (req, res) => {
       const fresh = (await db.query('SELECT * FROM app_user WHERE id = ?', [u.id]))[0];
       auth.setSessionCookie(res, auth.createSessionToken(fresh), req);
       return sendJson(res, 200, { ok: true });
+    }
+
+    // ── 扩展上传登录态（公开：凭一次性上传码鉴权，不需要看板会话 Cookie）──
+    // 注意：必须放在「以下接口都需要登录」之前——扩展侧没有登录 Cookie，只有上传码。
+    if (method === 'OPTIONS' && p === '/api/state/upload') {
+      res.writeHead(204, {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'POST, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type',
+        'Access-Control-Max-Age': '600',
+      });
+      return res.end();
+    }
+    if (method === 'POST' && p === '/api/state/upload') {
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      const body = await readBody(req);
+      const state = body.state || ((body.cookies || body.origins) ? body : null);
+      // 先做形状校验：空登录态直接拒绝，不消耗上传码（避免用户白跑一趟、白生成一次码）
+      const sum = stateStore.summarize(state);
+      if (!sum.cookieCount && !sum.originCount) {
+        return sendJson(res, 400, { error: '登录态为空（没有 cookie 也没有 localStorage），拒绝保存' });
+      }
+      const uid = redeemUploadToken(body.token || body.code);
+      if (!uid) return sendJson(res, 401, { error: '上传码无效或已过期，请在看板重新生成' });
+      try {
+        const r = await stateStore.saveState(uid, state, { source: 'extension' });
+        console.log(`[state] 用户 #${uid} 上传了 1688 登录态（${r.cookieCount} cookie / ${r.originCount} 源）`);
+        return sendJson(res, 200, Object.assign({ ok: true }, r));
+      } catch (e) {
+        return sendJson(res, 400, { error: e.message });
+      }
     }
 
     // ── 以下接口都需要登录 ──
@@ -1473,31 +1502,23 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { started: true, channel });
     }
 
-    // ── 云端登录（浏览器实时画面） ──
-    if (method === 'GET' && p === '/api/browser/status') {
-      return sendJson(res, 200, liveStatus(user.id));
+    // ── 1688 登录态（入库）：状态查询 / 生成上传码 / 清除（需登录，按 tenant 隔离）──
+    // 说明：扩展上传接口 /api/state/upload 在登录闸门之前（凭上传码鉴权），见上方。
+    if (method === 'GET' && p === '/api/state/status') {
+      return sendJson(res, 200, await stateStatus(tenantId));
     }
-    if (method === 'POST' && p === '/api/browser/open') {
-      const body = await readBody(req);
-      const startUrl = body.url || undefined;
-      const entry = await openLive(user.id, startUrl);
-      return sendJson(res, 200, { ok: true, status: { ...liveStatus(user.id), sessionActive: !!entry.browser } });
+    if (method === 'POST' && p === '/api/state/upload-token') {
+      writeGuard();
+      const t = createUploadToken(tenantId);
+      // 反代后面用 x-forwarded-proto，直连则看连接是否 TLS
+      const proto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim()
+        || ((req.socket && req.socket.encrypted) ? 'https' : 'http');
+      const serverUrl = proto + '://' + (req.headers.host || ('localhost:' + PORT));
+      return sendJson(res, 200, Object.assign({ ok: true, serverUrl }, t));
     }
-    if (method === 'POST' && p === '/api/browser/navigate') {
-      const body = await readBody(req);
-      const entry = LIVE.get(user.id);
-      if (!entry) return sendJson(res, 400, { error: '会话未启动' });
-      await entry.browser.navigate(body.url);
-      return sendJson(res, 200, { ok: true });
-    }
-    if (method === 'POST' && p === '/api/browser/save') {
-      const entry = LIVE.get(user.id);
-      if (!entry) return sendJson(res, 400, { error: '会话未启动' });
-      await entry.browser.saveState();
-      return sendJson(res, 200, { ok: true, loggedIn: entry.browser.loggedIn, url: entry.browser.url });
-    }
-    if (method === 'POST' && p === '/api/browser/close') {
-      await closeLive(user.id);
+    if (method === 'POST' && p === '/api/state/clear') {
+      writeGuard();
+      await stateStore.clearState(tenantId);
       return sendJson(res, 200, { ok: true });
     }
 
@@ -1559,7 +1580,6 @@ const server = http.createServer(async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────
 // WebSocket：把服务器端浏览器的实时画面推给看板，并回灌鼠标/键盘
 // ─────────────────────────────────────────────────────────────────────────
-const wss = new WebSocketServer({ noServer: true });
 const wsAgent = new WebSocketServer({ noServer: true });
 
 // 本机浏览器通道：扩展用配对码鉴权（扩展侧没有看板登录 Cookie）
@@ -1611,50 +1631,8 @@ server.on('upgrade', async (req, socket, head) => {
     return;
   }
 
-  if (url.pathname !== '/ws/browser') { socket.destroy(); return; }
-  let user = null;
-  try { user = await currentUser(req); } catch (e) { /* 忽略 */ }
-  if (!user) {
-    socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
-    socket.destroy();
-    return;
-  }
-  wss.handleUpgrade(req, socket, head, (ws) => {
-    ws._userId = user.id;
-    wss.emit('connection', ws, req);
-  });
-});
-
-wss.on('connection', async (ws) => {
-  const userId = ws._userId;
-  try {
-    const entry = await openLive(userId); // 没有会话则顺带启动
-    entry.sockets.add(ws);
-    ws.send(JSON.stringify({ type: 'hello', ...liveStatus(userId) }));
-    // 新连接的客户端先拿一帧（推流是持续事件，这里主动触发一次状态）
-    ws.send(JSON.stringify({ type: 'status', url: entry.browser.url, loggedIn: entry.browser.loggedIn }));
-
-    ws.on('message', async (raw) => {
-      let msg;
-      try { msg = JSON.parse(String(raw)); } catch (e) { return; }
-      const e2 = LIVE.get(userId);
-      if (!e2) return;
-      const b = e2.browser;
-      try {
-        if (msg.type === 'mouse') await b.mouse(msg);
-        else if (msg.type === 'key') await b.key(msg);
-        else if (msg.type === 'navigate') await b.navigate(msg.url);
-        else if (msg.type === 'save') { await b.saveState(); ws.send(JSON.stringify({ type: 'saved', loggedIn: b.loggedIn, url: b.url })); }
-        else if (msg.type === 'ping') ws.send(JSON.stringify({ type: 'pong' }));
-      } catch (e) { /* 忽略单条事件错误 */ }
-    });
-
-    ws.on('close', () => { const e2 = LIVE.get(userId); if (e2) e2.sockets.delete(ws); });
-    ws.on('error', () => { const e2 = LIVE.get(userId); if (e2) e2.sockets.delete(ws); });
-  } catch (e) {
-    try { ws.send(JSON.stringify({ type: 'error', text: '启动云端浏览器失败: ' + e.message })); } catch (err) { /* 忽略 */ }
-    try { ws.close(); } catch (err) { /* 忽略 */ }
-  }
+  // 已无 /ws/browser（投屏登录已移除）：其它 WS 路径一律拒绝
+  socket.destroy();
 });
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -1670,6 +1648,11 @@ server.listen(PORT, async () => {
       const notes = tenancy.migrateLegacyData(admin.id);
       for (const n of notes) console.log('  [迁移] ' + n);
     }
+    // 登录态加密密钥自检（未用环境变量时给出告警，不阻断启动）
+    for (const n of stateStore.startupNotices()) console.log('  [提示] ' + n);
+    // 历史登录态文件 → 数据库（幂等：库里已有则跳过，原文件保留）
+    const snotes = await stateStore.migrateFromFiles();
+    for (const n of snotes) console.log('  [迁移] ' + n);
     const v = await db.ping();
     console.log(`✓ 数据库连接正常 (MySQL ${v})`);
     const [{ n: userCount }] = await db.query('SELECT COUNT(*) AS n FROM app_user');

@@ -2,8 +2,8 @@
   "manifest_version": 3,
   "name": "1688 发票催收 · 本机发送助手",
   "version": "1.0.0",
-  "description": "在您自己的浏览器里完成 1688 催收消息发送；登录态与密码不离开本机。",
-  "permissions": ["storage", "tabs", "alarms"],
+  "description": "在您自己的浏览器里发送 1688 催收消息；也可把登录态加密上传给服务器，由服务器代发。密码始终不离开本机。",
+  "permissions": ["storage", "tabs", "alarms", "cookies", "scripting"],
   "host_permissions": ["*://*.1688.com/*", "*://*/*"],
   "background": { "service_worker": "background.js" },
   "action": {

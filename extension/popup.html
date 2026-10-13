@@ -6,17 +6,22 @@
 <style>
   :root { --primary:#ff6a00; --border:#e8e9eb; --text:#26282c; --sub:#8a8f99; }
   * { margin:0; padding:0; box-sizing:border-box; }
-  body { width:320px; font-family:"Microsoft YaHei","PingFang SC",sans-serif; color:var(--text); padding:14px; }
+  body { width:330px; font-family:"Microsoft YaHei","PingFang SC",sans-serif; color:var(--text); padding:14px; }
   h1 { font-size:14px; margin-bottom:4px; }
+  h2 { font-size:13px; margin:0 0 4px; }
   .sub { font-size:11px; color:var(--sub); line-height:1.6; margin-bottom:12px; }
+  .sep { height:1px; background:var(--border); margin:14px 0 12px; }
   label { display:block; font-size:11px; color:var(--sub); margin:10px 0 4px; }
   input { width:100%; padding:8px 10px; border:1px solid var(--border); border-radius:6px; font-size:13px; font-family:inherit; }
   input:focus { outline:none; border-color:var(--primary); }
   .btn { width:100%; padding:9px; border:none; border-radius:6px; background:var(--primary); color:#fff; font-size:13px; cursor:pointer; font-family:inherit; margin-top:10px; }
   .btn.plain { background:#f1f2f4; color:var(--text); }
+  .btn:disabled { opacity:.6; cursor:default; }
   .row { display:flex; gap:8px; }
   .row .btn { margin-top:8px; }
   .status { margin-top:12px; padding:9px 10px; border-radius:6px; background:#f7f8fa; font-size:12px; line-height:1.9; }
+  .status.ok { background:#e8f5e9; color:#2e7d32; }
+  .status.err { background:#fdecea; color:#c62828; }
   .dot { display:inline-block; width:8px; height:8px; border-radius:50%; background:#c9ccd1; margin-right:6px; }
   .dot.on { background:#2e7d32; }
   .code { font-weight:700; letter-spacing:2px; color:var(--primary); }
@@ -24,8 +29,9 @@
 </head>
 <body>
   <h1>1688 发票催收 · 本机发送助手</h1>
-  <div class="sub">发送在您本机浏览器执行，1688 登录态与密码不会离开本机。</div>
+  <div class="sub">发送在您本机浏览器执行；也可把登录态加密上传给服务器，由服务器通道代发。密码始终不离开本机。</div>
 
+  <h2>方式一：本机浏览器直接发送</h2>
   <label>服务器地址</label>
   <input id="serverUrl" placeholder="http://你的服务器:8787" autocomplete="off">
 
@@ -39,6 +45,17 @@
   </div>
 
   <div class="status" id="status">读取中…</div>
+
+  <div class="sep"></div>
+
+  <h2>方式二：上传登录态给服务器（服务器通道代发）</h2>
+  <div class="sub">在您本机浏览器登录 1688 后点下面按钮即可。服务器只收到<b>加密后的登录态</b>，看不到您的账号密码；上传码一次有效。</div>
+  <label>服务器地址</label>
+  <input id="upServer" placeholder="http://你的服务器:8787" autocomplete="off">
+  <label>上传码（在看板「登录 1688」里生成）</label>
+  <input id="upToken" placeholder="6 位数字" autocomplete="off" inputmode="numeric">
+  <button class="btn" id="btnUpload">上传登录态</button>
+  <div class="status" id="upStatus">尚未上传</div>
 
   <script src="popup.js"></script>
 </body>

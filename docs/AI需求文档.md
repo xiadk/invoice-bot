@@ -4,6 +4,8 @@
 >
 > 当前版本已二次开发：取消提交开票申请；数据源改为 MySQL；新增税务局已开票数据与销方名称映射。
 >
+> **2026-10-13 二次开发（多租户 + 登录态入库，方案B）**：① 多用户账号登录，业务数据按 `user_id` 隔离，超管 `admin`；② 1688 登录态**加密入库**（`login_state`，AES-256-GCM，见 `lib/state-store.js`），由**用户本机浏览器扩展上传**；③ **服务器不再承载登录画面** —— 原 CDP 投屏登录（`lib/live-browser.js` + `/api/browser/*` + `WS /ws/browser`）**已整块删除**。登录相关改看 `docs/方案调整_登录态入库.md` 与本文档 §5.7。
+>
 > **代码仓库**：https://github.com/xiadk/invoice-bot.git （远程 `origin`，分支 `main`；`data/` 下真实业务数据与 `config.json` 不入库）
 
 ---
@@ -31,25 +33,33 @@ invoice-bot/
 ├── server.js            # 控制台服务器（HTTP API + DB 聚合 + 发送任务状态机）~430行
 ├── db.js                # mysql2 连接池 + ensureSchema(建库建表) + 事务封装
 ├── import-to-db.js      # Excel → MySQL 导入器（解析/去重/自动名称匹配/导入日志）
-├── sql/schema.sql       # 建库建表 DDL：5 表 + 1 视图，全中文注释，幂等
+├── sql/schema.sql       # 建库建表 DDL：业务表 + app_user/login_state/agent_task + 1 视图，全中文注释，幂等
 ├── scripts/
 │   ├── mysql-start.bat  # 启动便携版 MySQL（硬编码 MYSQL_HOME=C:\Users\hspcadmin\WorkBuddy\mysql）
 │   └── mysql-stop.bat   # 停止 MySQL
-├── lib/browser.js       # Playwright封装：launch(storageState复用)/humanPause/waitHuman
+├── lib/browser.js       # Playwright封装：launch({storageState对象优先/文件兜底})/humanPause/waitHuman
+├── lib/state-store.js   # 1688 登录态 AES-256-GCM 加密入库（login_state 表）★新增
+├── lib/auth.js          # scrypt口令 + HMAC签名Cookie会话 + token_version 即时失效
+├── lib/tenancy.js       # 多租户目录 data/users/<id>/…；statePathFor(历史文件兼容)
+├── lib/agent-hub.js     # 方案C 本机浏览器通道：配对码/WS注册表/心跳/收发
 ├── lib/sender.js        # 唯一发送实现：buildMessages(模板) + sendToSeller(聊天操作) ~210行
-├── dashboard.html       # 前端单页：看板+名称映射页+设置页（纯原生JS，2s轮询/api/task）
-├── login.js             # 扫码登录 → data/state-1688.json
+├── extension/           # Chrome/Edge MV3 扩展：上传登录态 + 本机发送（content.js 驱动 1688 页面）
+├── dashboard.html       # 前端单页：看板+名称映射页+系统管理页（纯原生JS，2s轮询/api/task）
+├── login.html           # 登录页（只登录不注册）★新增
+├── login.js             # 【CLI/管理员兜底】扫码登录 → data/state-1688.json（上线后自动迁入库）
 ├── refresh-status.js    # mtop → data/invoice-status.json + 直接同步 invoice_order.invoice_state
 ├── send-messages.js     # CLI发送入口（复用lib/sender，发送记录写 send_log 表）
 ├── fetch-invoices.js    # 发票全量 → CSV
 ├── parse-orders.js      # 【遗留】xlsx → orders-parsed.json，看板已不读
-├── config.json          # buyerInfo + runtime + messages + mysql(连接参数)
+├── config.json          # buyerInfo + runtime + messages + mysql(连接参数)（env 可覆盖）
 └── data/
     ├── 完成订单/*.xlsx      # 1688 订单导出（数据源 → invoice_order）
     ├── 已开票订单/*.xlsx    # 税务局全量发票导出（数据源 → issued_invoice）
     ├── invoice-status.json # 平台侧已申请/已开票订单号（可选，导入时写 invoice_state）
     ├── sent-log.json       # 【遗留】已被 send_log 表替代
-    └── state-1688.json     # 登录态（勿读勿输出）
+    ├── .state-secret       # 登录态加密密钥（0600，容器重建会丢 → 生产用 STATE_SECRET）
+    ├── state-1688.json     # 【遗留】单用户/CLI 登录态文件，启动时迁入库（保留可回滚）
+    └── users/<id>/state-1688.json  # 【历史】各用户旧登录态文件，启动时迁入库
 ```
 
 **阅读策略**：改哪读哪，不要全量读文件。常见任务入口：
