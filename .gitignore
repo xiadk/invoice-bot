@@ -24,3 +24,8 @@ node_modules/
 # ── 本机助手安装包构建产物（electron-builder 输出，体积大、不入库）──
 dist/
 release/
+
+# ── 根目录杂散日志（本机运行/调试产物，不入库）──
+/build.log
+/npm-install.log
+/server.log

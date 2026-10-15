@@ -21,6 +21,10 @@ const { createStore } = require('./store');
 const { AgentClient } = require('./agent/ws-client');
 const sender = require('./agent/sender');
 
+// 隐藏自动化特征（navigator.webdriver=false），降低 1688 风控识别 Electron 的概率。
+// 必须在 app ready 前调用，渲染进程启动后即失效。
+try { app.commandLine.appendSwitch('disable-blink-features', 'AutomationControlled'); } catch (e) { /* 忽略 */ }
+
 const PROTOCOL = 'xsh';
 const VERSION = (() => { try { return require('../package.json').version; } catch (e) { return '0.1.0'; } })();
 
@@ -99,7 +103,7 @@ function refreshTray() {
     { label: s.sending ? '正在发送…' : '空闲', enabled: false },
     { type: 'separator' },
     { label: '打开状态面板', click: () => showStatusWin() },
-    { label: '打开 1688 登录窗口', click: () => sender.openLoginWindow() },
+    { label: '打开 1688 登录窗口', click: () => openLogin() },
     { type: 'separator' },
     { label: '开机自启', type: 'checkbox', checked: !!store.get('autoStart'), click: (mi) => setAutoStart(mi.checked) },
     { label: '退出', click: () => { quitting = true; app.quit(); } },
@@ -126,6 +130,21 @@ function setAutoStart(on) {
   try {
     app.setLoginItemSettings({ openAtLogin: !!on, path: process.execPath, args: [] });
   } catch (e) { log('设置开机自启失败: ' + e.message); }
+}
+
+/** 统一入口：打开 1688 登录窗口，并启动「登录看门狗」实时反映登录态 */
+let _loginWatch = null;
+function openLogin() {
+  sender.openLoginWindow();
+  if (_loginWatch) return;
+  _loginWatch = setInterval(() => {
+    const win = sender.getSendWindow ? sender.getSendWindow() : null;
+    if (!win || win.isDestroyed()) { clearInterval(_loginWatch); _loginWatch = null; return; }
+    const url = win.webContents.getURL();
+    const onLoginPage = /login\.1688\.com|signin/i.test(url);
+    if (client) client.reportLoginState(!onLoginPage, url);
+    if (!onLoginPage) { clearInterval(_loginWatch); _loginWatch = null; } // 已离开登录页 → 视为已登录，停止轮询
+  }, 2000);
 }
 
 // ── 助手主体 ──
@@ -222,7 +241,9 @@ app.whenReady().then(() => {
   if (coldLink) handleDeepLink(coldLink).catch((e) => log('深链处理失败: ' + e.message));
   else startAgent();
 
-  if (!store.isBound()) showStatusWin();
+  // 启动即展示主窗口（无论是否已绑定）：用户点 exe 应直接看到界面，
+  // 而不是只呆在托盘里、要手动点托盘图标才弹出来。
+  showStatusWin();
 });
 
 // ── IPC（状态窗 → 主进程）──
@@ -230,7 +251,7 @@ ipcMain.handle('agent:getState', () => {
   const s = client ? client.state() : { connected: false, ready: false, sending: false, loggedIn: false };
   return { ...s, version: VERSION, deviceName: store.get('deviceName') || os.hostname(), serverUrl: store.get('serverUrl') || '', bound: store.isBound(), dataDir: app.getPath('userData') };
 });
-ipcMain.handle('agent:openLoginWindow', () => { sender.openLoginWindow(); return true; });
+ipcMain.handle('agent:openLoginWindow', () => { openLogin(); return true; });
 ipcMain.handle('agent:stopTask', () => {
   if (client) { client.stopFlag = true; if (client.currentTaskId != null) client.send({ type: 'client_stop', taskId: client.currentTaskId }); }
   return true;

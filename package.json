@@ -3,9 +3,6 @@
   "version": "0.1.0",
   "description": "1688/拼多多采购发票催收自动化",
   "main": "server.js",
-  "directories": {
-    "lib": "lib"
-  },
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "start": "node server.js",
