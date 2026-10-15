@@ -16,6 +16,12 @@
  * 映射表维护:
  *   自动匹配规则（精确 / 规范化 / 包含 / 登录ID / 备注线索），命中即写入 seller_name_mapping；
  *   匹配不上的看板「名称映射」页会列出来，人工比对后保存。再次导入不会覆盖人工维护的结果。
+ *
+ * 导入语义（增量去重，2026-10-13 起）:
+ *   按「订单号 / 行哈希」判断——数据库里已有的行直接跳过，只插入新行；不删表、不更新已有行。
+ *   · invoice_order   ：订单号已存在 → 跳过（该行的开票状态、人工确认原样保留）
+ *   · issued_invoice  ：row_hash 已存在 → 跳过；另外把「后来新建的名称映射」回填到已有发票行
+ *   · 注意：已导入过的订单即使从 Excel 里删掉，也不会从看板消失（只进不出）
  */
 const fs = require('fs');
 const path = require('path');
@@ -437,32 +443,47 @@ async function importOrders(userId) {
   const perFile = [];
   for (const f of files) {
     const { orders, totalRows } = parseOrderFile(path.join(ORDER_DIR, f));
+    for (const o of orders) o.__file = f; // 记账用：同订单号被后文件覆盖时，写入记在最终取胜的文件上
     perFile.push({ file: f, raw: totalRows, kept: orders.length });
     all.push(...orders);
   }
 
-  // 全量重建该用户的订单，但保留开票状态（平台刷新 + 人工确认都不能丢）
-  const stateKeep = new Map();
+  // 增量导入：按订单号去重——库里已有的订单跳过（开票状态/人工确认原样保留），只插入新订单
+  // 1) 批内去重（同一订单号出现在多个文件时，后出现的文件覆盖先出现的）
+  const byOrderNo = new Map();
+  for (const o of all) byOrderNo.set(o.order_no, o);
+  const rows = [...byOrderNo.values()];
+
+  // 2) 查库里已有的订单号
+  const existing = new Set();
   try {
-    const old = await db.query('SELECT order_no, invoice_state, state_source, state_updated_at, state_note FROM invoice_order WHERE user_id = ?', [userId]);
-    for (const r of old) stateKeep.set(r.order_no, r);
+    const old = await db.query('SELECT order_no FROM invoice_order WHERE user_id = ?', [userId]);
+    for (const r of old) existing.add(r.order_no);
   } catch (e) { /* 首次运行表可能为空 */ }
 
-  await db.exec('DELETE FROM invoice_order WHERE user_id = ?', [userId]);
-  for (const o of all) {
-    const k = stateKeep.get(o.order_no);
+  // 3) 拆分：新行插入，已有行跳过（新行的开票状态由随后的 applyInvoiceStatus / 人工确认来维护）
+  const fresh = [];
+  let skippedExisting = 0;
+  for (const o of rows) {
+    if (existing.has(o.order_no)) { skippedExisting++; continue; }
     o.user_id = userId;
-    o.invoice_state = k ? k.invoice_state : 'none';
-    o.state_source = k ? k.state_source : 'platform';
-    o.state_updated_at = k ? k.state_updated_at : null;
-    o.state_note = k ? k.state_note : null;
+    o.invoice_state = 'none';
+    o.state_source = 'platform';
+    o.state_updated_at = null;
+    o.state_note = null;
+    fresh.push(o);
   }
-  const inserted = await bulkInsert('invoice_order', ORDER_FIELDS, all);
+  const inserted = await bulkInsert('invoice_order', ORDER_FIELDS, fresh);
 
+  // 4) 按文件记账：inserted = 该文件**实际新写入**的行数；skipped = 总行数 − 新写入
+  //    （含文件内续行/重复行 + 数据库已有行；排查「数据为什么没更新」时看 inserted 即可）
+  const winCount = new Map();
+  for (const o of fresh) winCount.set(o.__file, (winCount.get(o.__file) || 0) + 1);
   for (const p of perFile) {
-    await logImport(userId, { kind: 'order', source_file: p.file, total_rows: p.raw, inserted: p.kept, skipped: p.raw - p.kept, status: 'ok' });
+    const ins = winCount.get(p.file) || 0;
+    await logImport(userId, { kind: 'order', source_file: p.file, total_rows: p.raw, inserted: ins, skipped: p.raw - ins, status: 'ok' });
   }
-  return { files: files.length, inserted, perFile };
+  return { files: files.length, inserted, skippedExisting, perFile };
 }
 
 /** 导入「已开票订单」（仅该用户） */
@@ -505,9 +526,30 @@ async function importInvoices(userId) {
   const nameMap = new Map(mapRows.map((r) => [r.tax_seller_name, r.seller_company]));
   for (const inv of rows) { inv.user_id = userId; inv.seller_company = nameMap.get(inv.seller_name) || null; }
 
-  // 3) 全量重建该用户的已开票表
-  await db.exec('DELETE FROM issued_invoice WHERE user_id = ?', [userId]);
-  const inserted = await bulkInsert('issued_invoice', INVOICE_FIELDS, rows);
+  // 3) 增量导入：按 row_hash 去重——库里已有的行跳过，只插入新行
+  const existingHash = new Set();
+  try {
+    const old = await db.query('SELECT row_hash FROM issued_invoice WHERE user_id = ?', [userId]);
+    for (const r of old) existingHash.add(r.row_hash);
+  } catch (e) { /* 首次运行表可能为空 */ }
+  const fresh = [];
+  let skippedExisting = 0;
+  for (const inv of rows) {
+    if (existingHash.has(inv.row_hash)) { skippedExisting++; continue; }
+    fresh.push(inv);
+  }
+  const inserted = await bulkInsert('issued_invoice', INVOICE_FIELDS, fresh);
+
+  // 4) 映射回填：后来新建/自动匹配上的名称映射，同步回填到已有发票行。
+  //    （增量为不删表，旧行不会像全量重建那样自动带上新映射，这里显式补上；
+  //      人工维护映射时 saveMapping/ignoreMapping 也会各自回填，两路保持一致。）
+  const backfilled = await db.exec(
+    `UPDATE issued_invoice i JOIN seller_name_mapping m
+       ON m.user_id = i.user_id AND m.tax_seller_name = i.seller_name AND m.seller_company IS NOT NULL
+     SET i.seller_company = m.seller_company
+     WHERE i.user_id = ? AND (i.seller_company IS NULL OR i.seller_company <> m.seller_company)`,
+    [userId]
+  ).catch(() => ({ affectedRows: 0 }));
 
   for (const p of perFile) {
     await logImport(userId, {
@@ -516,7 +558,11 @@ async function importInvoices(userId) {
       message: `sheet=${p.sheet}`,
     });
   }
-  return { files: files.length, inserted, autoMapped: mapped.autoMapped, unmatchedNames: mapped.unmatched, perFile };
+  return {
+    files: files.length, inserted, skippedExisting,
+    backfilled: backfilled.affectedRows || 0,
+    autoMapped: mapped.autoMapped, unmatchedNames: mapped.unmatched, perFile,
+  };
 }
 
 /** 旧版 data/sent-log.json → send_log（仅该用户表为空时执行一次） */
@@ -574,7 +620,8 @@ async function runImport(opts) {
   if (doOrders) {
     const r = await importOrders(userId);
     out.orders = r;
-    out.steps.push(`完成订单：${r.files} 个文件，写入 ${r.inserted} 单`);
+    out.steps.push(`完成订单：${r.files} 个文件，新写入 ${r.inserted} 单`
+      + (r.skippedExisting ? `，跳过 ${r.skippedExisting} 单（数据库已有，按订单号去重）` : ''));
     const st = await applyInvoiceStatus(userId);
     out.invoiceStatus = st;
     if (st.applied) out.steps.push(`平台开票状态同步：更新 ${st.applied} 单`);
@@ -582,8 +629,10 @@ async function runImport(opts) {
   if (doInvoices) {
     const r = await importInvoices(userId);
     out.invoices = r;
-    out.steps.push(`已开票订单：${r.files} 个文件，写入 ${r.inserted} 行明细`);
+    out.steps.push(`已开票订单：${r.files} 个文件，新写入 ${r.inserted} 行明细`
+      + (r.skippedExisting ? `，跳过 ${r.skippedExisting} 行（数据库已有，按行去重）` : ''));
     out.steps.push(`销方名称自动匹配 ${r.autoMapped ? r.autoMapped.length : 0} 个，待人工比对 ${r.unmatchedNames ? r.unmatchedNames.length : 0} 个`);
+    if (r.backfilled) out.steps.push(`名称映射回填：更新 ${r.backfilled} 行已有发票的商家关联`);
   }
 
   const legacy = await migrateLegacySentLog(userId);

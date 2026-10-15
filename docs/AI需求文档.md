@@ -2,9 +2,9 @@
 
 > 本文档供 AI 编程助手以最小 token 消耗理解本项目并执行二次开发。**修改任何代码前，先读完本文档。**
 >
-> 当前版本已二次开发：取消提交开票申请；数据源改为 MySQL；新增税务局已开票数据与销方名称映射。
+> 当前版本已二次开发：取消提交开票申请；数据源改为 MySQL；新增税务局已开票数据与销方名称映射；多用户账号登录（数据按 `user_id` 隔离，超管 `admin`）。
 >
-> **2026-10-13 二次开发（多租户 + 登录态入库，方案B）**：① 多用户账号登录，业务数据按 `user_id` 隔离，超管 `admin`；② 1688 登录态**加密入库**（`login_state`，AES-256-GCM，见 `lib/state-store.js`），由**用户本机浏览器扩展上传**；③ **服务器不再承载登录画面** —— 原 CDP 投屏登录（`lib/live-browser.js` + `/api/browser/*` + `WS /ws/browser`）**已整块删除**。登录相关改看 `docs/方案调整_登录态入库.md` 与本文档 §5.7。
+> **2026-10-13 架构重大调整（必读）**：① **服务器不再保存 1688 登录态、不再启动服务端浏览器** —— 发送只剩「本机浏览器通道」（方案C）：用户本机 Chrome/Edge 装 `extension/` 扩展，配对码连 `/ws/agent`，服务器只编排任务、扩展在本机浏览器逐家发送并回执；`lib/state-store.js`、`/api/state/*`、`login.js`、`refresh-status.js`、`send-messages.js`、`fetch-invoices.js`、`login_state` 表**已全部删除/废弃**。② 「重新导入数据」由**全量重建**改为**增量去重导入**（按订单号/行哈希，已有跳过、只插新行 + 映射回填 JOIN UPDATE）。历史方案见 `docs/方案B_服务端浏览器池.md`（已废弃）与 `docs/方案调整_登录态入库.md`（已废弃）。
 >
 > **代码仓库**：https://github.com/xiadk/invoice-bot.git （远程 `origin`，分支 `main`；`data/` 下真实业务数据与 `config.json` 不入库）
 
@@ -13,54 +13,57 @@
 ## 强制规则（每次任务都适用）
 
 1. **文档同步**：修改代码后必须同步更新 `docs/使用说明.md`（用户可见的行为/命令/参数变化）和 `docs/开发者需求文档.md`（架构/接口/数据结构/新坑，对应第 5/6/9/10 节）。只改代码不改文档视为任务未完成。
-2. **不引入新依赖/新文件**，除非任务明确要求。（当前已引入：`mysql2` 驱动、`db.js`、`import-to-db.js`、`sql/schema.sql`、`scripts/*.bat` —— 属"数据库化"这次任务的明确产出。）
-3. **绝不**把 `config.json`、`data/state-1688.json` 内容输出到对话/日志/文档（含账号凭据、数据库密码）。
+2. **不引入新依赖/新文件**，除非任务明确要求。（当前已引入：`mysql2` 驱动、`db.js`、`import-to-db.js`、`sql/schema.sql`、`scripts/*.bat`、`extension/`、`lib/agent-hub.js` —— 属"数据库化/本机通道"这些任务的明确产出。）
+3. **绝不**把 `config.json` 内容输出到对话/日志/文档（含账号凭据、数据库密码）。
 4. **测试纪律**：
-   - 涉及发送的改动：先 `--limit=1` 或选 1 家测试，确认聊天记录真实送达（看 `pre.edit` 气泡），再交付
+   - 涉及发送的改动：先选 1 家测试，确认聊天记录真实送达（看 `pre.edit` 气泡），再交付
    - 涉及 server.js 的改动：必须重启 server 验证（改代码不重启 = 没生效，这是历史踩过的坑）
    - 验证消息发送结果用「消息尾部文本出现在聊天记录」，不要用「编辑器清空」判断（曾误判）
    - 涉及数据库的改动：必须实际连库跑一遍（`node import-to-db.js` + curl `/api/data`），不能只看代码
+   - **改测试/导入逻辑必须用隔离库**（`MYSQL_DATABASE=invoice_bot_test` + 端口 8788），**测试公司名绝不能用真实业务公司名**（`purge` 删号会连根拔数据，见开发者文档 §10-25）
 5. 删除文件用可恢复方式（回收站），不用 rm。
+6. **同一文件的多处修改不要放在一条消息里并行 Edit**（会静默丢失编辑）——逐条串行，或整文件 Write，改完 grep 锚点复核。
 
 ## 项目一句话
 
-1688 买家发票催收：1688 订单导出 + 税务局发票导出 → 统一入 MySQL → 看板按「销方名称映射」统计待开票/已开票 → 一键批量发旺旺催收消息（Playwright 操作聊天页）。**提交开票申请功能已移除。**
+1688 买家发票催收：1688 订单导出 + 税务局发票导出 → 统一入 MySQL → 看板按「销方名称映射」统计待开票/已开票 → 一键批量发旺旺催收消息。**提交开票申请功能已移除；发送只走用户本机浏览器通道（服务器不保存登录态、不启动浏览器）。**
 
 ## 文件地图（全部内容，按需读）
 
 ```
 invoice-bot/
-├── server.js            # 控制台服务器（HTTP API + DB 聚合 + 发送任务状态机）~430行
+├── server.js            # 控制台服务器（HTTP API + DB 聚合 + 本机通道发送任务状态机）
 ├── db.js                # mysql2 连接池 + ensureSchema(建库建表) + 事务封装
-├── import-to-db.js      # Excel → MySQL 导入器（解析/去重/自动名称匹配/导入日志）
-├── sql/schema.sql       # 建库建表 DDL：业务表 + app_user/login_state/agent_task + 1 视图，全中文注释，幂等
+├── import-to-db.js      # Excel → MySQL 导入器（解析/增量去重/自动名称匹配/映射回填/导入日志）
+├── sql/schema.sql       # 建库建表 DDL：业务表 + app_user/agent_task + 1 视图，全中文注释，幂等
 ├── scripts/
 │   ├── mysql-start.bat  # 启动便携版 MySQL（硬编码 MYSQL_HOME=C:\Users\hspcadmin\WorkBuddy\mysql）
 │   └── mysql-stop.bat   # 停止 MySQL
-├── lib/browser.js       # Playwright封装：launch({storageState对象优先/文件兜底})/humanPause/waitHuman
-├── lib/state-store.js   # 1688 登录态 AES-256-GCM 加密入库（login_state 表）★新增
+├── lib/browser.js       # Playwright 封装（★服务端已不启动浏览器，launch 仅作 sender 选择器参考保留）
 ├── lib/auth.js          # scrypt口令 + HMAC签名Cookie会话 + token_version 即时失效
-├── lib/tenancy.js       # 多租户目录 data/users/<id>/…；statePathFor(历史文件兼容)
-├── lib/agent-hub.js     # 方案C 本机浏览器通道：配对码/WS注册表/心跳/收发
-├── lib/sender.js        # 唯一发送实现：buildMessages(模板) + sendToSeller(聊天操作) ~210行
-├── extension/           # Chrome/Edge MV3 扩展：上传登录态 + 本机发送（content.js 驱动 1688 页面）
-├── dashboard.html       # 前端单页：看板+名称映射页+系统管理页（纯原生JS，2s轮询/api/task）
-├── login.html           # 登录页（只登录不注册）★新增
-├── login.js             # 【CLI/管理员兜底】扫码登录 → data/state-1688.json（上线后自动迁入库）
-├── refresh-status.js    # mtop → data/invoice-status.json + 直接同步 invoice_order.invoice_state
-├── send-messages.js     # CLI发送入口（复用lib/sender，发送记录写 send_log 表）
-├── fetch-invoices.js    # 发票全量 → CSV
+├── lib/tenancy.js       # 多租户目录 data/users/<id>/…；statusFileFor(invoice-status.json 快照路径)
+├── lib/agent-hub.js     # ★唯一发送通道：配对码/WS注册表/心跳/收发（isOnline/send）
+├── lib/sender.js        # buildMessages(模板渲染，服务器与扩展共用)；sendToSeller 已退役(选择器参考)
+├── extension/           # Chrome/Edge MV3 扩展：配对 + 本机发送 + 弹窗监控面板
+│   ├── manifest.json    # MV3 清单（无 cookies 权限，v1.1.0）
+│   ├── background.js    # WS 客户端/任务执行/STOP_TASK/task_progress 存储
+│   ├── content.js       # 在 1688 聊天页逐家发送（键盘模拟）
+│   ├── popup.html/js    # 连接面板 + 实时监控面板（进度条/状态点/停止按钮）
+│   └── icons/
+├── dashboard.html       # 前端单页：看板+名称映射页+系统管理页+配对指引弹窗（纯原生JS，2s轮询/api/task）
+├── login.html           # 登录页（只登录不注册）
 ├── parse-orders.js      # 【遗留】xlsx → orders-parsed.json，看板已不读
-├── config.json          # buyerInfo + runtime + messages + mysql(连接参数)（env 可覆盖）
+├── preview-messages.js  # npm run msg:preview：离线渲染消息（不联网不发送）
+├── config.json          # runtime + messages + mysql(连接参数)（env 可覆盖）；buyerInfo 已遗留
 └── data/
     ├── 完成订单/*.xlsx      # 1688 订单导出（数据源 → invoice_order）
     ├── 已开票订单/*.xlsx    # 税务局全量发票导出（数据源 → issued_invoice）
-    ├── invoice-status.json # 平台侧已申请/已开票订单号（可选，导入时写 invoice_state）
+    ├── users/<id>/invoice-status.json  # 平台开票状态快照（可选，导入时同步 invoice_state）
     ├── sent-log.json       # 【遗留】已被 send_log 表替代
-    ├── .state-secret       # 登录态加密密钥（0600，容器重建会丢 → 生产用 STATE_SECRET）
-    ├── state-1688.json     # 【遗留】单用户/CLI 登录态文件，启动时迁入库（保留可回滚）
-    └── users/<id>/state-1688.json  # 【历史】各用户旧登录态文件，启动时迁入库
+    └── users/<id>/…        # 各用户数据目录（完成订单/已开票订单/快照）
 ```
+
+**已删除（2026-10-13）**：`lib/state-store.js`、`login.js`、`refresh-status.js`、`send-messages.js`、`fetch-invoices.js`（需要时从 git 历史恢复）。
 
 **阅读策略**：改哪读哪，不要全量读文件。常见任务入口：
 - 改消息内容/格式 → `lib/sender.js` 的 `DEFAULT_MESSAGES` + `config.json` messages 段
@@ -68,11 +71,11 @@ invoice-bot/
 - 改接口/聚合查询/任务逻辑 → `server.js`
 - 改表结构/注释 → `sql/schema.sql`（改完必须同步 `db.js`/`import-to-db.js` 的字段列表）
 - 改导入解析/匹配规则 → `import-to-db.js`
-- 改发送流程 → `lib/sender.js` 的 `sendToSeller`
+- 改本机发送行为 → `extension/content.js` + `extension/background.js`（聊天页操作与 WS 协议）
 
 ## 核心机制速查
 
-**数据流**：`data/完成订单/*.xlsx` + `data/已开票订单/*.xlsx` +（可选）`invoice-status.json` →（`import-to-db.js`）→ MySQL `invoice_bot` →（`server.js` SQL 聚合）→ `dashboard.html`。
+**数据流**：`data/完成订单/*.xlsx` + `data/已开票订单/*.xlsx` +（可选）`data/users/<id>/invoice-status.json` →（`import-to-db.js`）→ MySQL `invoice_bot` →（`server.js` SQL 聚合）→ `dashboard.html`。
 
 **数据库（MariaDB 11.4，库 invoice_bot，见 sql/schema.sql）**：
 
@@ -82,10 +85,13 @@ invoice-bot/
 | `issued_invoice` | 税务局发票**明细行**，`seller_name`→`seller_company` 靠映射，`row_hash` 去重 |
 | `seller_name_mapping` | 销方名称↔1688商家 映射（auto/manual/ignored；`is_ignored=1`=确认无对应商家已忽略，可在名称映射页恢复），人工维护成果，导入不覆盖、也不复活已忽略项 |
 | `send_log` | 催收发送记录，**一行=一次发送尝试**（`result` 区分 ok/fail）。催收次数=`SUM(result='ok')`（失败不计）；最近催收时间=`MAX(CASE WHEN result='ok' THEN sent_at END)` |
-| `import_log` | 导入日志 |
+| `import_log` | 导入日志（`skipped` = 去重跳过的已有行数） |
+| `app_user` | 账号表（username=公司全称/role/抬头三列/token_version/status） |
+| `agent_task` | 本机通道发送任务：`items` JSON 逐条 `pending\|ok\|fail` + `resume_of`，断线续跑靠它 |
 | `v_unmatched_seller_name` | 待人工比对的销方名称（LEFT JOIN 派生，已排除「已映射」与「已忽略」） |
+| ~~`login_state`~~ | **已废弃（2026-10-13）**：服务器不再保存登录态，DDL 已注释、不再建表 |
 
-**导入策略：全量重建**。两张明细表 `DELETE` 后重插（文件夹里的 Excel 是唯一真相）；`invoice_order.invoice_state` 先读内存再回填；`seller_name_mapping` 不删。
+**导入策略：增量去重（2026-10-13 起）**。不再 DELETE 重插：订单按 `order_no` 查库去重、发票按 `row_hash` 去重，**只插新行**（`inserted` vs `skippedExisting` 分别计数）；导完做**映射回填** `UPDATE issued_invoice i JOIN seller_name_mapping m ...`（后建的映射要作用到老行）。**删文件不会删数据**（只增不删）；`seller_name_mapping` 不删、`state_source='manual'` 不覆盖。
 
 **自动匹配**（`import-to-db.js matchSeller`，按序）：exact → login → contains（较短方≥4字且占比≥50%，标记待复核）→ login包含 → remark线索。匹配不上的不写占位行，由视图暴露给「名称映射」页。
 
@@ -95,46 +101,53 @@ invoice-bot/
 - 已开票额：`issued_invoice` 按映射后 `seller_company` 汇总（张数 = COUNT(DISTINCT e_invoice_no/invoice_no/row_hash)）；同公司多会员名时发票额只挂「主行」（映射表登记的会员名，否则订单最多），公司级求和不会重复
 - **待开票额 = max(订单额 − 已开票额, 0)**，公司级按公司总额重算，倒序排列
 - 催收次数 / 最近催收时间：`send_log` 按 `seller_login` 聚合，**只计成功**（`result='ok'`；失败尝试不计入次数、也不作最近时间）；公司行 = 求和 / MAX
-- 订单级人工确认：`invoice_order.state_source='manual'` 表示商家线下已开票；`/api/order-state` 支持单订单 confirm/cancel 与整会员名 confirm-all/cancel-all，**平台刷新与重新导入都不得覆盖 manual**
+- 订单级人工确认：`invoice_order.state_source='manual'` 表示商家线下已开票；`/api/order-state` 支持单订单 confirm/cancel 与整会员名 confirm-all/cancel-all，**快照同步与重新导入都不得覆盖 manual**
 - 会员名行额外返回 `manualIssuedAmount`（人工确认订单的实付款合计），仅作展示，**不计入**税务局已开票金额
-- **催收消息按会员名级**：`{amount}`=该会员名待开票金额，`{orderId}`=该会员名除已开票外的全部订单号（`doSend` 里 `invoice_state !== 'issued'` 过滤）
+- **催收消息按会员名级**：`{amount}`=该会员名待开票金额，`{orderId}`=该会员名除已开票外的全部订单号（`doClientSend` 里 `invoice_state !== 'issued'` 过滤）
 - 注意：**订单级 invoice_state 与发票级已开票金额是两套口径，不要混算**（人工确认只改订单状态计数，不动金额）
 - **分页（前端切片）**：看板公司表与映射页三张表支持 10/20/50/100 条/页（`PAGER` 状态，筛选/搜索后回第 1 页）；统计卡始终按全量计算；「**全选当前页**」只勾选当前分页公司的可催收会员名（2026-10-12 起不再跨页全选）
 - **看板筛选（2026-10-12 二次改版，全部可组合）**：下拉「催收状态」= **已催收**（默认，有成功催收记录 `sendCount>0`）/ 最近 7/15/30/90 天**无成功催收记录**（`lastSentAt` 为空或距今 ≥ N 天）；下拉「开票状态」= 已开票（待开票金额=0）/ 未开票（>0）；搜索匹配公司名 ∪ 登录ID。「未催收（从未）」标签与「不限」选项已按需求移除
 - **看板排序（2026-10-12 改版）**：最近催收时间倒序（无催收沉底）→ 催收时间相同按待开票金额倒序（前端 `visibleCompanies()` 重排）
-- **历史催收记录**：`send_log` 新增 `amount`/`order_nos`/`error`（发送当时的待开票金额、订单号快照，「；」分隔；`error`=失败原因摘要，仅 fail 行、取首行截断 250 字，web/cli 均写入）；点「催收次数」调 `GET /api/collect-history?loginId=|company=` 弹窗查看（催收时间/结果/催收的总金额/催收的订单号/失败原因）；2026-10-12 前的老记录无快照、显示「—」
+- **历史催收记录**：`send_log` 的 `amount`/`order_nos`/`error`（发送当时的待开票金额、订单号快照，「；」分隔；`error`=失败原因摘要，仅 fail 行、取首行截断 250 字）；点「催收次数」调 `GET /api/collect-history?loginId=|company=` 弹窗查看；2026-10-12 前的老记录无快照、显示「—」
 - **销方名称忽略**：映射页「忽略」= 确认无对应 1688 商家 → `is_ignored=1`、从待比对列表移除、`autoMapSellers` 跳过、`issued_invoice.seller_company` 清空；「已忽略」区可恢复；`/api/data.ignoredNameCount` 供统计卡展示
 
-**发送流程**（lib/sender.js sendToSeller，勿轻改）：
-1. `openChatReady`：开聊天页 `def_cbu_web_im/index.html?touid=cnalichn{loginId}` + bringToFront → **轮询**等 iframe `def_cbu_web_im_core` 内 `pre.edit[contenteditable=true]`（找到后 1.6s 复确认，**每次操作重新 getFrame，iframe 会重建**）
+**发送流程（只走本机浏览器通道，2026-10-13 起）**：
+1. 看板 `doSend(ids)` → `POST /api/send {loginIds}`；服务器校验 `agentHub.isOnline(tenantId)`（扩展没连上直接报错）+ 无任务在跑
+2. `server.js doClientSend`：建 `agent_task`（items 逐条 pending）+ `CLIENT_TASKS` ctx → `agentHub.send` 下发 `send_batch` → `pushClientProgress` 推首帧
+3. `extension/background.js` 收 `send_batch` → 开工作标签页 → `content.js` 在 1688 聊天页逐家发送（选择器与等待逻辑见下）→ 每完成一家回 `sent`
+4. `server.js onAgentSent`：更新 items 状态 + 写 `send_log`（ok/fail + amount/order_nos/error 快照）→ 再 `pushClientProgress`
+5. `finishClientTask` 收尾（done/aborted/failed）→ 推最终进度；断线时服务器把 running 任务标记中断，看板出「继续发送未完成」横幅 → `/api/agent/resume` 只补 pending/failed
+
+**聊天页操作要点**（`extension/content.js`，与已退役的 `lib/sender.js#sendToSeller` 同源，勿轻改）：
+1. 开聊天页 `def_cbu_web_im/index.html?touid=cnalichn{loginId}` → **轮询**等 iframe `def_cbu_web_im_core` 内 `pre.edit[contenteditable=true]`（找到后 1.6s 复确认，**每次操作重新 getFrame，iframe 会重建**）
 2. ensureContact：空状态文案（"您尚未选择联系人"）消失判定（轮询）；未选中点左侧会话列表；**不确定时不拦截**
-3. sendMessage：清草稿(Ctrl+A+Delete) → `keyboard.insertText`（**绝不能用 type()，\n 会逐行发送**）→ 轮询验证编辑器有内容 → 点 `button.send-btn` → 轮询验证消息尾部30字出现在聊天记录
+3. sendMessage：清草稿(Ctrl+A+Delete) → `insertText`（**绝不能用 type()，\n 会逐行发送**）→ 轮询验证编辑器有内容 → 点 `button.send-btn` → 轮询验证消息尾部30字出现在聊天记录
 4. 消息之间随机停 1.2~2.5s（仅非最后一条）
 
-**性能与限流（2026-10-12）**：等待一律「轮询到条件满足即继续」，不再固定盲等（原单家约 45s → 现约 10~15s）。家与家的 `sendGapMinSec/MaxSec`（默认 15~30s）是**防限流主开关**，可在看板设置页调；总时长 ≈ 家数 ×（间隔均值 + 单家约 15s）。
+**性能与限流**：等待一律「轮询到条件满足即继续」，不固定盲等（单家发送动作约 10~15s）。家与家的 `sendGapMinSec/MaxSec`（默认 15~30s）是**防限流主开关**，可在看板设置页调；总时长 ≈ 家数 ×（间隔均值 + 单家约 15s）。
 
 **消息结构**（buildMessages）：3 条 = 模板({amount}/{companyName}/{taxNo}/{email} 变量) + 订单清单(单行「；」分隔，>450字分块) + 提醒。模板在 config.json messages 段。
 
-**mtop 调用**：只能页面内 `window.lib.mtop.request`（纯 Node 报 ILLEGAL_ACCESS）。发票网关 `mtop.1688.kingsuns.invoice.dataline.service`。**批量申请 `batchApplyInvoice` 已停用**。**订单列表 API 有限流，全量数据一律走 xlsx 导出**。
+**mtop 调用**：只能页面内 `window.lib.mtop.request`（纯 Node 报 ILLEGAL_ACCESS）。发票网关 `mtop.1688.kingsuns.invoice.dataline.service`。**批量申请 `batchApplyInvoice` 已停用**；**订单列表 API 有限流，全量数据一律走 xlsx 导出**；平台开票状态快照由用户手动放置 `invoice-status.json`（`refresh-status.js` 已删）。
 
 ## 硬约束（违反=功能损坏）
 
 - 订单清单消息必须单行「；」分隔（平台按行拆消息）
 - seller 对象跨函数传递必须含 `loginId`（曾漏传导致 touid=undefined，排查三天）
-- Playwright 1.64 无 `page.waitForTimeout`，用本地 `sleep(ms)`
 - 动作间保持拟人随机间隔；发送验证「消息出现在聊天记录」而非「编辑器清空」
 - 发送等待一律轮询、不固定盲等；`getFrame/getEditor` 必须容错（iframe 重建会抛 detached）
-- 登录态失效（跳回 login.1688.com）→ 引擎快速抛错、`doSend` 中止整批且**不写 send_log**（环境问题不污染统计）
+- 登录态失效（跳回 login.1688.com）→ 快速抛错、中止整批且**不写 send_log**（环境问题不污染统计）
 - server.js 改完必须重启进程才生效
 - `issued_invoice` 只能导「信息汇总表」sheet，导「发票基础信息」会重复计数
 - `db.js` 必须保持 `dateStrings:true` + `decimalNumbers:true`（否则时区漂移/字符串比较出错）
 - 库名用 `db.safeDbName()` 白名单校验后再拼接（无法参数化）
 - Excel 日期用 `XLSX.SSF.parse_date_code()` 转本地时间，不要用 `(n-25569)*86400*1000`
 - `/api/apply` 必须继续返回 410 或保持不存在（需求要求取消提交申请）
-- **发送记录只有一份真相**：`send_log` 表（一行=一次发送）。任何发送入口（server.js / send-messages.js）都必须写这张表，且"已催收"判定统一读它；不要复活 `data/sent-log.json`（旧 JSON 已由 `migrateLegacySentLog()` 在表空时自动迁入一次）
-- **老库结构升级**：新增列/索引要同时改 `sql/schema.sql` 和 `db.js migrate()`（information_schema 判断后 ALTER，幂等）
-- **人工确认防覆盖**：`applyInvoiceStatus` 带 `state_source <> 'manual'`；`importOrders` 回填 state 四件套；取消确认按 `invoice-status.json` 回推平台状态
-- `send-messages.js` 与 `refresh-status.js` 都依赖数据库连接，改动时注意 `db.closePool()`（否则进程不退出）和 DB 未启动时的友好报错
+- **发送记录只有一份真相**：`send_log` 表（一行=一次发送）。看板与扩展回执都写这张表，「已催收」判定统一读它；不要复活 `data/sent-log.json`（旧 JSON 已由 `migrateLegacySentLog()` 在表空时自动迁入一次）
+- **服务器不保存 1688 登录态、不启动浏览器**（2026-10-13 架构红线）：不要再新增 `login_state`/`/api/state/*`/`lib/live-browser.js` 之类「登录态过服务器」的代码；发送只能走 `lib/agent-hub.js` + `extension/`
+- **老库结构升级**：新增列/索引要同时改 `sql/schema.sql` 和 `db.js migrate()`（information_schema 判断后 ALTER，幂等）；`q()` 已返回行数组，**不要再解构一层**（`const [rows] = await q()` 是坑，见开发者文档 §10-19）
+- **人工确认防覆盖**：`applyInvoiceStatus` 带 `state_source <> 'manual'`；取消确认按 `invoice-status.json` 回推平台状态
+- **增量导入只插不删**：`importOrders/importInvoices` 严禁再加 `DELETE FROM`；去重在代码里查库集合过滤（`invoice_order` 无 order_no 唯一键），并在 `import_log` 区分 `inserted/skippedExisting`
 
 ## 数据库环境（本机现状）
 
@@ -147,26 +160,27 @@ invoice-bot/
 
 完整用户版步骤在 `docs/使用说明.md`「新电脑部署指南」。AI 协助部署/排查时的要点：
 
-1. **裸机顺序**：Node.js LTS → `npm config set registry https://registry.npmmirror.com` → **装 MySQL 便携版并初始化**（见下）→ 复制项目（带 data/两个数据文件夹 + config.json，**不带 node_modules 和 state-1688.json**）→ `npm install` → `set PLAYWRIGHT_DOWNLOAD_HOST=https://cdn.npmmirror.com/binaries/playwright` + `npx playwright install chromium`（同窗口连续执行）→ 改 `scripts/*.bat` 的 MYSQL_HOME → `node import-to-db.js` → `node login.js` 扫码 → `node refresh-status.js`（可选）→ `node server.js`
+1. **裸机顺序**：Node.js LTS → `npm config set registry https://registry.npmmirror.com` → **装 MySQL 便携版并初始化**（见下）→ 复制项目（带 data/两个数据文件夹 + config.json + `extension/`，**不带 node_modules**）→ `npm install` → `set PLAYWRIGHT_DOWNLOAD_HOST=https://cdn.npmmirror.com/binaries/playwright` + `npx playwright install chromium`（同窗口连续执行）→ 改 `scripts/*.bat` 的 MYSQL_HOME → `node import-to-db.js` → `node server.js` → 在自己浏览器装扩展配对（见下）
 2. **MySQL 便携版安装**：下载 `https://mirrors.tuna.tsinghua.edu.cn/mariadb/mariadb-11.4.13/winx64-packages/mariadb-11.4.13-winx64.zip` → 解压到无中文路径 → 写 `my.ini`（basedir/datadir/port/utf8mb4）→ `bin\mysql_install_db.exe --datadir=... --password=invoice123 --port=3306` → `bin\mysqld.exe --defaults-file=...` 启动
-3. **常见故障对照**：
+3. **发送通道配对（部署必需，只做一次）**：用户本机 Chrome/Edge 打开 1688 并登录 → `chrome://extensions` 开开发者模式 → 加载已解压的扩展程序选 `extension/` → 看板「配对指引」生成配对码 → 填进扩展点「连接」→ 状态条变绿。**服务器不保存登录态，泄库也拿不到 1688 账号**
+4. **常见故障对照**：
    - `npm install` 卡住 → 镜像没设置或没生效（`npm config get registry` 核对）
    - `node -v` 找不到命令 → PATH 问题，重装 Node 勾选 Add to PATH
    - 看板 /api/data 报 `ECONNREFUSED 127.0.0.1:3306` → MySQL 没启动，跑 `scripts\mysql-start.bat`
    - `Access denied for user 'root'` → 初始化时的 `--password` 与 config.json 里不一致
    - 看板卡片全是 0 / 无卖家 → 没跑 `node import-to-db.js`，或 `data/完成订单` 是空的
-   - login.js 浏览器弹不出 → 终端管控拦截 Chromium（公司电脑常见），需 IT 白名单
+   - 发送报「本机浏览器通道未连接」→ 扩展没连上/掉线：重新生成配对码连上，确认本机浏览器已登录 1688
    - chromium 下载慢/失败 → PLAYWRIGHT_DOWNLOAD_HOST 未设置或换了命令行窗口（set 只对当前窗口生效）
    - 控制台打不开 → 杀软/防火墙拦 Node 或 8787 端口
-4. **迁移红线**：config.json 含账号凭据与数据库密码，指导用户传输时必须提醒用 U 盘等安全方式，不得让用户把内容粘贴到任何在线渠道；`data/state-1688.json` 跨机必失效，一律重新 login
-5. **部署验收**：必须让用户选一家小额卖家实测催收（消息真实送达+已读）再放批量，不要只看页面能打开就算通过
-6. **多机约束**：同一 1688 账号不可两台机器同时运行 server/发送（互踢登录态+风控），部署新机时提醒停掉旧机
+5. **迁移红线**：config.json 含账号凭据与数据库密码，指导用户传输时必须提醒用 U 盘等安全方式，不得让用户把内容粘贴到任何在线渠道
+6. **部署验收**：必须让用户选一家小额卖家实测催收（消息真实送达+已读）再放批量，不要只看页面能打开就算通过
+7. **多机约束**：同一 1688 账号不可两台机器同时登录/发送（互踢登录态+风控），部署新机时提醒停掉旧机
 
 ## 二次开发流程
 
 1. 读本文档「文件地图」定位目标文件，Read 目标区域（不全量读大文件）
 2. 修改前确认与「核心机制速查」「硬约束」无冲突
 3. 实现 + `node --check <file>` 语法校验
-4. 按测试纪律验证（发送类：1 家实测+聊天记录确认；server 类：重启+curl API；数据库类：实际导入+查库核对）
+4. 按测试纪律验证（发送类：1 家实测+聊天记录确认；server 类：重启+curl API；数据库类：实际导入+查库核对；导入/测试逻辑：隔离库 + 假公司名）
 5. **同步更新三处**：代码注释（如有）、`docs/使用说明.md`、`docs/开发者需求文档.md` 对应章节（表结构/接口/踩坑）
 6. 汇报时说明：改了什么文件、验证结果、更新了哪份文档的哪一节

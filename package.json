@@ -2,7 +2,7 @@
   "name": "invoice-bot",
   "version": "0.1.0",
   "description": "1688/拼多多采购发票催收自动化",
-  "main": "login.js",
+  "main": "server.js",
   "directories": {
     "lib": "lib"
   },
@@ -16,7 +16,16 @@
     "db:init": "node import-to-db.js --schema",
     "db:import": "node import-to-db.js",
     "msg:preview": "node preview-messages.js",
-    "server": "node server.js"
+    "server": "node server.js",
+    "agent:dev": "electron electron/main.js",
+    "agent:dist": "electron-builder --win nsis portable",
+    "agent:dist:nsis": "electron-builder --win nsis",
+    "agent:dist:portable": "electron-builder --win portable",
+    "docker:build": "docker compose build",
+    "docker:up": "docker compose up -d",
+    "docker:down": "docker compose down",
+    "docker:rebuild": "docker compose build && docker compose up -d",
+    "docker:logs": "docker compose logs -f app"
   },
   "keywords": [],
   "author": "",
@@ -27,5 +36,54 @@
     "playwright": "^1.64.0",
     "ws": "^8.22.0",
     "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.xsh.invoicebot",
+    "productName": "1688催收助手",
+    "copyright": "Copyright © 2026",
+    "directories": {
+      "output": "dist"
+    },
+    "extraMetadata": {
+      "main": "electron/main.js"
+    },
+    "files": [
+      "electron/**/*",
+      "package.json",
+      "!node_modules/playwright{,/**/*}",
+      "!node_modules/playwright-core{,/**/*}",
+      "!node_modules/mysql2{,/**/*}",
+      "!node_modules/xlsx{,/**/*}",
+      "!node_modules/**/{test,tests,example,examples,benchmark,benchmarks}/**",
+      "!node_modules/**/*.{md,map,ts,d.ts}"
+    ],
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ],
+      "artifactName": "${productName}-${version}-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "1688催收助手",
+      "deleteAppDataOnUninstall": false
+    },
+    "protocols": [
+      {
+        "name": "1688催收助手",
+        "schemes": [
+          "xsh"
+        ]
+      }
+    ]
   }
 }

@@ -8,7 +8,19 @@ config.json
 data/*
 !data/.gitkeep
 
-# ── 临时脚本（本地验证用，不入库）──
+# ── 临时脚本与临时备份（本地验证用，不入库）──
 tmp-*.js
+tmp-*.sql
+
+# ── 本机便利脚本（提交/推送命令，仅本机使用，不入库）──
+git-提交推送命令.sh
+
+# ── 已废弃的浏览器扩展打包产物（扩展通道 2026-10-14 下线，改本机助手）──
+invoice-bot-extension.zip
+extension.zip
 
 node_modules/
+
+# ── 本机助手安装包构建产物（electron-builder 输出，体积大、不入库）──
+dist/
+release/

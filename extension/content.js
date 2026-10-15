@@ -11,18 +11,54 @@
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ── 元素定位 ──
+// 1688 旺旺网页版的输入框/发送按钮 class 会随版本变化，这里用「多选择器 + 尺寸过滤」兜底，
+// 优先匹配已知的 pre.edit（最常见），其余作为降级，避免一改版就彻底发不出去。
+function visible(el) {
+  if (!el) return false;
+  const r = el.getBoundingClientRect();
+  if (r.width < 40 || r.height < 12) return false;
+  try { if (getComputedStyle(el).visibility === 'hidden' || getComputedStyle(el).display === 'none') return false; } catch (e) { /* 忽略 */ }
+  return true;
+}
 function findEditor() {
-  const list = document.querySelectorAll('pre.edit');
-  for (const el of list) {
-    if (el.isContentEditable || el.getAttribute('contenteditable') === 'true') return el;
+  const editables = [
+    'pre.edit',
+    'div.edit',
+    '[contenteditable="true"]',
+    'textarea',
+    'div[class*="editor"]',
+    'div[class*="chat-input"]',
+    'div[class*="input"]',
+  ];
+  for (const sel of editables) {
+    const list = document.querySelectorAll(sel);
+    for (const el of list) {
+      const isEditable = el.isContentEditable
+        || el.getAttribute('contenteditable') === 'true'
+        || el.tagName === 'TEXTAREA' || el.tagName === 'INPUT';
+      if (isEditable && visible(el)) {
+        // 排除极小的搜索框/工具栏输入
+        if (el.tagName === 'INPUT' && (el.type === 'search' || el.type === 'text') && el.getBoundingClientRect().width < 200) continue;
+        return el;
+      }
+    }
   }
+  // 兜底：任意可见的 contenteditable
+  const all = document.querySelectorAll('[contenteditable="true"]');
+  for (const el of all) if (visible(el)) return el;
   return null;
 }
 function findSendBtn() {
+  const candidates = document.querySelectorAll('button, input[type="button"], a.btn, [role="button"]');
+  for (const b of candidates) {
+    if (!visible(b)) continue;
+    const t = ((b.innerText || '') + ' ' + (b.getAttribute('aria-label') || '') + ' ' + (b.value || '') + ' ' + (b.className || '') + ' ' + (b.id || '')).toLowerCase();
+    if (/发送|send|submit/.test(t)) return b;
+  }
   return document.querySelector('button.send-btn') || null;
 }
 function isChatFrame() {
-  return !!findEditor() || !!findSendBtn() || /def_cbu_web_im/.test(location.href);
+  return !!findEditor() || !!findSendBtn() || /def_cbu_web_im|web_im|im\.1688/.test(location.href);
 }
 async function waitEditor(timeoutMs) {
   const t0 = Date.now();
@@ -89,9 +125,15 @@ function pressEnter(editor) {
   editor.dispatchEvent(new KeyboardEvent('keypress', opts));
   editor.dispatchEvent(new KeyboardEvent('keyup', opts));
 }
-function historyContains(frag) {
+// 聊天记录里是否出现该片段。
+// ⚠ 必须排除「输入框自身」：1688 的输入框与已发送消息都用 pre.edit 渲染，若不排除，
+//   刚键入的草稿会被当成「已发送」，发送失败也会误报成功。
+function historyContains(frag, editorEl) {
   const els = [...document.querySelectorAll('pre.edit')];
-  return els.some((e) => (e.innerText || '').includes(frag));
+  return els.some((e) => {
+    if (editorEl && e === editorEl) return false;
+    return (e.innerText || '').includes(frag);
+  });
 }
 
 /** 发送单条消息（含一次重试） */
@@ -110,15 +152,23 @@ async function sendOne(editor, msg) {
         await sleep(180);
       }
       insertText(ed, msg);
-      await sleep(200);
-      if (!(ed.innerText || '').includes(msg.slice(0, 10))) throw new Error('消息未成功输入编辑器');
+      await sleep(250);
+      // 容错比较：去掉空白后看前若干字符是否已进入编辑器（富文本可能规范化换行/全角空格）
+      const head = msg.slice(0, 10).replace(/\s+/g, '');
+      const inEd = (ed.innerText || '').replace(/\s+/g, '');
+      if (head && !inEd.includes(head)) throw new Error('消息未成功输入编辑器');
       const btn = findSendBtn();
-      if (!btn) throw new Error('未找到发送按钮(button.send-btn)');
-      btn.click();
-      for (let i = 0; i < 24; i++) { await sleep(250); if (historyContains(frag)) return true; }
+      if (btn) {
+        btn.click();
+      } else {
+        // 兜底：没有发送按钮就直接回车发送
+        pressEnter(ed);
+      }
+      for (let i = 0; i < 24; i++) { await sleep(250); if (historyContains(frag, ed)) return { ok: true }; }
+      // 点击没出结果，再尝试回车兜底（部分聊天框回车即发送）
       pressEnter(ed);
-      for (let i = 0; i < 12; i++) { await sleep(250); if (historyContains(frag)) return true; }
-      throw new Error('发送未确认（消息未出现在聊天记录）');
+      for (let i = 0; i < 12; i++) { await sleep(250); if (historyContains(frag, ed)) return { ok: true }; }
+      throw new Error(btn ? '发送未确认（消息未出现在聊天记录）' : '未找到发送按钮，且回车发送未确认');
     } catch (e) {
       if (attempt === 1) return { ok: false, error: e.message };
       await sleep(1500);
@@ -150,6 +200,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
   if (msg.type === 'AGENT_SEND') {
+    // 只有本 frame 真正持有聊天输入框才处理，避免顶层 frame 抢先回「无编辑器」而让内层 frame 的成功响应丢失
+    if (!findEditor()) return false;
     sendMessages(Array.isArray(msg.messages) ? msg.messages : [])
       .then((r) => sendResponse(r))
       .catch((e) => sendResponse({ ok: false, error: e.message }));

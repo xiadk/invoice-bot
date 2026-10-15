@@ -5,11 +5,12 @@
  * 它做的事和真实扩展完全一样（连 /ws/agent、收 send_batch、回 sent），但不真的发消息。
  *
  * 用法：
- *   node scripts/mock-agent.js --code 123456
- *   node scripts/mock-agent.js --code 123456 --url http://localhost:8787 --fail   # 模拟全部失败
- *   node scripts/mock-agent.js --code 123456 --delay 800                          # 每条回执前等 800ms
+ *   node scripts/mock-agent.js --code 91442000MADQ6CKFXK
+ *   node scripts/mock-agent.js --code 91442000MADQ6CKFXK --url http://localhost:8787 --fail   # 模拟全部失败
+ *   node scripts/mock-agent.js --code 91442000MADQ6CKFXK --delay 800                          # 每条回执前等 800ms
  *
- * 配对码在看板「本机浏览器通道 → 生成配对码」里拿。
+ * 说明：配对码即该账号在「系统管理 → 用户管理」里维护的【纳税人识别号 / 税号】，固定且永不过期，
+ * 直接把税号作为 --code 传入即可（不再需要看板生成临时码）。
  */
 const WebSocket = require('ws');
 
@@ -22,7 +23,7 @@ const URL = (arg('url', 'http://localhost:8787') || '').replace(/\/+$/, '');
 const FORCE_FAIL = process.argv.includes('--fail');
 const DELAY_MS = Number(arg('delay', 400));
 
-if (!CODE) { console.error('缺少 --code（在看板生成本机通道配对码）'); process.exit(1); }
+if (!CODE) { console.error('缺少 --code（传该账号的纳税人识别号 / 税号作为配对码）'); process.exit(1); }
 
 const wsBase = URL.replace(/^http:/i, 'ws:').replace(/^https:/i, 'wss:');
 const ws = new WebSocket(`${wsBase}/ws/agent?code=${encodeURIComponent(CODE)}`);

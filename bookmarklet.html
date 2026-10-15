@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>1688 催收 · 书签工具（零安装）</title>
+<style>
+  body{font:15px/1.7 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;color:#222;max-width:760px;margin:32px auto;padding:0 20px;}
+  h1{font-size:24px;margin:0 0 6px;}
+  .sub{color:#666;margin:0 0 24px;}
+  .card{background:#f7f9fb;border:1px solid #e6ebf0;border-radius:12px;padding:18px 20px;margin:16px 0;}
+  ol{padding-left:20px;margin:0;}
+  li{margin:8px 0;}
+  .bm{display:inline-block;background:#1677ff;color:#fff;font-weight:600;font-size:16px;padding:12px 18px;border-radius:10px;text-decoration:none;box-shadow:0 4px 14px rgba(22,119,255,.35);}
+  .bm:hover{background:#0958d9;}
+  .tip{color:#1677ff;font-size:13px;margin-top:10px;}
+  code{background:#eef1f5;padding:1px 6px;border-radius:4px;font-size:13px;}
+  .warn{color:#b54708;background:#fff7e6;border:1px solid #ffd591;border-radius:8px;padding:10px 14px;margin-top:16px;font-size:13px;}
+</style>
+</head>
+<body>
+  <h1>1688 催收 · 书签工具</h1>
+  <p class="sub">零安装、零开发者模式，拖一下就能用。最适合小白用户与网站推广。</p>
+
+  <div class="card">
+    <h3 style="margin:0 0 8px">怎么用（两步）</h3>
+    <ol>
+      <li>把下面的蓝色按钮<b>拖到浏览器书签栏</b>（或右键 → 添加到书签）。</li>
+      <li>在 <b>1688 聊天页</b>（地址栏含 <code>touid=</code> 的卖家会话）里，点一下该书签，即可自动发送该卖家的催收消息。</li>
+    </ol>
+    <div class="tip">提示：书签只在你自己的浏览器里运行，1688 登录态与密码始终不离开本机；服务器只下发消息文本并记录发送结果。</div>
+  </div>
+
+  <div style="text-align:center;margin:28px 0">
+    <a id="bm" href="#" class="bm">➕ 拖我到书签栏：1688催收</a>
+    <div class="tip" id="hint">正在为你生成书签…</div>
+  </div>
+
+  <div class="card">
+    <h3 style="margin:0 0 8px">和浏览器扩展的区别</h3>
+    <ul style="margin:0;padding-left:20px">
+      <li><b>扩展</b>：适合批量、后台自动逐家发送，但需「解压→开发者模式→加载扩展」，对小白门槛高。</li>
+      <li><b>书签工具</b>：零安装，逐个卖家点一下即发；同样复用你的 1688 登录态，凭据不出本机。</li>
+    </ul>
+  </div>
+
+  <div class="warn">若本账号未配置「纳税人识别号」，将无法生成书签。请让管理员在「用户管理」里维护你的税号后再来本页。</div>
+
+  <!-- 书签运行时（text/plain，不会被当作脚本执行，仅作为文本读取后包成 javascript: 链接） -->
+  <script id="bm-runtime" type="text/plain">
+(function(){
+  var SERVER=__SERVER__, CODE=__CODE__;
+  var sleep=function(ms){return new Promise(function(r){setTimeout(r,ms);});};
+  function vis(el){ if(!el) return false; var r=el.getBoundingClientRect(); if(r.width<40||r.height<12) return false; try{var c=getComputedStyle(el); if(c.visibility==='hidden'||c.display==='none') return false;}catch(e){} return true; }
+  function findEditorIn(doc){ if(!doc) return null; var sels=['pre.edit','div.edit','[contenteditable="true"]','textarea','div[class*="editor"]','div[class*="chat-input"]','div[class*="input"]']; for(var i=0;i<sels.length;i++){ var list=doc.querySelectorAll(sels[i]); for(var j=0;j<list.length;j++){ var el=list[j]; var ed=el.isContentEditable||el.getAttribute('contenteditable')==='true'||el.tagName==='TEXTAREA'; if(ed&&vis(el)){ if(el.tagName==='INPUT'&&el.getBoundingClientRect().width<200) continue; return el; } } } return null; }
+  function findBtnIn(doc){ var c=doc.querySelectorAll('button,input[type="button"],a.btn,[role="button"]'); for(var i=0;i<c.length;i++){ var b=c[i]; if(!vis(b)) continue; var t=((b.innerText||'')+' '+(b.getAttribute('aria-label')||'')+' '+(b.value||'')+' '+(b.className||'')+' '+(b.id||'')).toLowerCase(); if(/发送|send|submit/.test(t)) return b; } return doc.querySelector('button.send-btn'); }
+  function chatDoc(){ var e=findEditorIn(document); if(e) return document; var fs=document.querySelectorAll('iframe'); for(var i=0;i<fs.length;i++){ try{ var d=fs[i].contentDocument; if(d&&findEditorIn(d)) return d; }catch(e2){} } return null; }
+  function toast(msg){ var t=document.getElementById('__bm_t'); if(!t){ t=document.createElement('div'); t.id='__bm_t'; t.style.cssText='position:fixed;right:16px;bottom:16px;max-width:340px;background:#222;color:#fff;padding:10px 14px;border-radius:8px;font:13px/1.5 sans-serif;z-index:2147483647;box-shadow:0 4px 16px rgba(0,0,0,.3)'; document.body.appendChild(t);} t.textContent=msg; t.style.display='block'; }
+  function hideToast(){ var t=document.getElementById('__bm_t'); if(t) t.style.display='none'; }
+  function dismiss(doc){ try{ var w=doc.querySelectorAll('.ant-modal-wrap,.ant-modal-mask'); var blk=false; w.forEach(function(el){var r=el.getBoundingClientRect();var c=getComputedStyle(el); if(r.width>0&&r.height>0&&c.display!=='none'&&c.visibility!=='hidden') blk=true;}); if(!blk) return; var bs=[].slice.call(doc.querySelectorAll('button,.ant-modal-close')); bs.forEach(function(b){var tx=(b.innerText||'').trim(); if(tx==='我知道了'||tx==='OK'||tx==='跳过'||b.classList.contains('ant-modal-close')){ try{b.click();}catch(e){} } }); }catch(e){} }
+  function ins(doc,ed,text){ ed.focus(); var sv=doc.defaultView.getSelection(); if(sv){var rg=doc.createRange(); try{rg.selectNodeContents(ed); sv.removeAllRanges(); sv.addRange(rg);}catch(e){} } var ok=false; try{ ok=doc.execCommand('insertText',false,text);}catch(e){ok=false;} if(!ok||!(ed.innerText||'').trim()){ ed.textContent=text; try{ ed.dispatchEvent(new InputEvent('input',{bubbles:true,cancelable:true,inputType:'insertText',data:text})); }catch(e){ ed.dispatchEvent(new Event('input',{bubbles:true})); } } }
+  function enter(ed){ var o={key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true,cancelable:true}; ed.dispatchEvent(new KeyboardEvent('keydown',o)); ed.dispatchEvent(new KeyboardEvent('keypress',o)); ed.dispatchEvent(new KeyboardEvent('keyup',o)); }
+  function hist(doc,frag){ var els=[].slice.call(doc.querySelectorAll('pre.edit')); return els.some(function(e){return (e.innerText||'').indexOf(frag)>=0;}); }
+  async function sendOne(doc,msg){ var frag=msg.length>30?msg.slice(-30):msg; dismiss(doc); var ed=findEditorIn(doc); if(!ed) throw new Error('编辑器丢失'); ed.focus(); ed.click(); if((ed.innerText||'').trim()){ var sv=doc.defaultView.getSelection(); if(sv){var rg=doc.createRange();rg.selectNodeContents(ed);sv.removeAllRanges();sv.addRange(rg);} try{doc.execCommand('delete');}catch(e){} await sleep(180);} ins(doc,ed,msg); await sleep(250); var head=msg.slice(0,10).replace(/\s+/g,''); var inEd=(ed.innerText||'').replace(/\s+/g,''); if(head&&inEd.indexOf(head)<0) throw new Error('消息未成功输入编辑器'); var btn=findBtnIn(doc); if(btn) btn.click(); else enter(ed); for(var i=0;i<24;i++){ await sleep(250); if(hist(doc,frag)) return true; } enter(ed); for(var i=0;i<12;i++){ await sleep(250); if(hist(doc,frag)) return true; } throw new Error('发送未确认（消息未出现在聊天记录）'); }
+  async function report(obj){ try{ await fetch(SERVER+'/api/agent/bm/result',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(obj)}); }catch(e){} }
+  async function run(){
+    try{
+      var doc=chatDoc(); if(!doc){ toast('未检测到 1688 聊天输入框：请先在 1688 打开与该卖家的聊天窗口'); return; }
+      var m=location.search.match(/[?&]touid=([^&]+)/); var login=m?decodeURIComponent(m[1]).replace(/^cnalichn/i,''):null;
+      if(!login){ toast('无法从本页地址识别卖家，请确认在 1688 聊天页内点击书签'); return; }
+      toast('正在获取催收消息…');
+      var res=await fetch(SERVER+'/api/agent/bm/task?login='+encodeURIComponent(login)+'&code='+encodeURIComponent(CODE),{method:'GET',headers:{'Accept':'application/json'}});
+      if(!res.ok){ toast('获取任务失败（HTTP '+res.status+'）'); return; }
+      var data=await res.json();
+      if(data.none){ toast(data.reason||'该卖家暂无需催收的消息'); await report({code:CODE,login:login,ok:true,nothing:true}); setTimeout(hideToast,3500); return; }
+      var msgs=data.messages||[]; if(!msgs.length){ toast('无消息可发'); return; }
+      for(var i=0;i<msgs.length;i++){ toast('发送第'+(i+1)+'/'+msgs.length+'条…'); try{ await sendOne(doc,msgs[i]); }catch(e){ toast('第'+(i+1)+'条失败：'+e.message); await report({code:CODE,login:login,ok:false,error:e.message}); setTimeout(hideToast,5000); return; } if(i<msgs.length-1) await sleep(1200+Math.random()*1300); }
+      toast('✓ 已全部发送'); await report({code:CODE,login:login,ok:true,amount:data.amount,orderNos:data.orderNos,company:data.company});
+    }catch(e){ toast('出错：'+e.message); }
+    setTimeout(hideToast,4000);
+  }
+  run();
+})();
+  </script>
+
+  <script>
+  (function(){
+    function setHint(t){ var h=document.getElementById('hint'); if(h) h.textContent=t; }
+    function build(){
+      fetch('/api/auth/me').then(function(r){return r.ok?r.json():null;}).then(function(me){
+        if(!me||!me.user){ location.href='/login'; return; }
+        var code=me.user.taxNo||'';
+        if(!code){ setHint('当前账号未配置税号，无法生成书签。'); document.getElementById('bm').style.opacity='.5'; return; }
+        var runtime=document.getElementById('bm-runtime').textContent;
+        var server=location.origin;
+        var js=runtime.replace('__SERVER__', JSON.stringify(server)).replace('__CODE__', JSON.stringify(code));
+        document.getElementById('bm').href='javascript:'+encodeURIComponent(js);
+        setHint('已就绪：把上面的按钮拖到书签栏即可。');
+      }).catch(function(){ setHint('加载失败，请刷新本页。'); });
+    }
+    build();
+  })();
+  </script>
+</body>
+</html>

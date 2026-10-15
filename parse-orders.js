@@ -76,7 +76,7 @@ function main() {
 
   fs.writeFileSync(OUT, JSON.stringify({ orders: [...orders.values()], sellers: [...sellers.values()] }));
   console.log(`\n[完成] 总行 ${totalRows}，去重后 ${orders.size} 单，${sellers.size} 家卖家 → ${path.basename(OUT)}`);
-  console.log('提示: 可再跑 node refresh-status.js 刷新开票状态');
+  console.log('提示: 开票状态由看板「重新导入数据」时同步 invoice-status.json，或手动标记');
 }
 
 main();

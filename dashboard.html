@@ -144,7 +144,7 @@
   .banner.view { background: #e3f2fd; color: #0d47a1; border-bottom: 1px solid #bbdefb; }
   .banner.warn { background: #fff8e1; color: #8d6e00; border-bottom: 1px solid #ffe082; }
   .banner .btn { padding: 4px 12px; font-size: 12px; }
-  /* 登录 1688（在本机浏览器登录 → 扩展上传登录态） */
+  /* 登录 1688（在本机助手内置浏览器登录；登录态只存本机，不上传服务器） */
   .steps { margin: 0 0 12px; padding-left: 20px; font-size: 13px; line-height: 1.95; }
   .steps li { margin-bottom: 2px; }
   .upload-box { background: #f7f8fa; border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; margin-bottom: 12px; }
@@ -156,13 +156,13 @@
   .state-pill.ok { background: #e8f5e9; color: #2e7d32; }
   .state-pill.warn { background: #fff3e0; color: #b26a00; }
   .small { font-size: 12px; }
-  /* 本机浏览器通道状态条（方案C） */
+  /* 本机助手状态条 */
   .agent-bar { display: flex; align-items: center; gap: 8px; margin: 10px 0 12px; padding: 8px 12px; background: #f7f8fa; border: 1px solid var(--border); border-radius: 8px; font-size: 12px; color: var(--sub); }
   .agent-dot { width: 8px; height: 8px; border-radius: 50%; background: #c9ccd1; flex: none; }
   .agent-dot.on { background: #2e7d32; }
   .agent-dot.warn { background: #ef9f27; }
   .agent-bar .btn-sm { padding: 5px 10px; font-size: 12px; }
-  /* 断线续跑提示条（方案C） */
+  /* 断线续跑提示条 */
   .resume-bar { display: none; align-items: center; gap: 10px; flex-wrap: wrap; margin: -6px 0 12px; padding: 9px 12px; background: #fff8e6; border: 1px solid #f0d79a; border-radius: 8px; font-size: 12px; color: #8a6100; }
   .resume-bar.show { display: flex; }
   .resume-bar b { color: #ad5f00; }
@@ -187,7 +187,7 @@
     <div class="nav-tab" data-page="admin" id="tabAdmin" style="display:none" onclick="switchPage('admin')">系统管理</div>
   </div>
   <div class="nav-right">
-    <button class="btn btn-outline btn-sm" id="btnLogin1688" onclick="openLoginModal()" title="在你自己的浏览器登录 1688，用扩展把登录态上传给服务器（服务器全程接触不到你的密码）">登录 1688</button>
+    <button class="btn btn-outline btn-sm" id="btnGuide" onclick="openGuideModal()" title="发送只在你本机执行：装一次「1688催收助手」→ 绑定 → 在本机登录 1688">本机助手</button>
     <div class="user-chip">
       <div class="avatar" id="userAvatar">-</div>
       <div>
@@ -252,19 +252,14 @@
     <button class="btn btn-plain" id="btnImport" onclick="importData()">重新导入数据</button>
     <button class="btn btn-outline" onclick="selectAll()" title="只勾选当前页公司的可催收会员名（不含其他分页）">全选当前页</button>
     <button class="btn btn-outline" onclick="clearSel()">取消选择</button>
-    <select id="sendChannel" title="选择由谁来发送：服务器浏览器 / 本机浏览器（方案C）" style="padding:8px 10px;border:1px solid var(--border);border-radius:8px;font-size:13px;font-family:inherit;color:var(--text);background:#fff">
-      <option value="server">通道：服务器浏览器</option>
-      <option value="client">通道：本机浏览器</option>
-    </select>
     <button class="btn btn-primary" id="btnSend" onclick="batchSend()">发送催收消息 (<span id="selCount">0</span>)</button>
   </div>
 
   <div class="agent-bar" id="agentBar">
     <span class="agent-dot" id="agentDot"></span>
-    <span id="agentText">本机浏览器通道：检测中…</span>
+    <span id="agentText">本机助手：检测中…</span>
     <span style="flex:1"></span>
-    <button class="btn btn-plain btn-sm" id="btnPair" onclick="genPairCode()">生成配对码</button>
-    <button class="btn btn-plain btn-sm" onclick="agentDisconnect()">断开本机通道</button>
+    <button class="btn btn-plain btn-sm" onclick="agentDisconnect()">断开本机助手</button>
   </div>
 
   <div class="resume-bar" id="resumeBar">
@@ -324,6 +319,15 @@
       </div>
       <div class="hint">两家之间的随机等待（防限流主要参数），对所有用户生效。总时长 ≈ 家数 ×（间隔均值 + 约 15 秒）。</div>
       <div class="form-row"><label>订单清单单条消息字数上限</label><input id="cfg-chunkMax" type="number" min="100" max="450"><div class="hint">平台单条消息上限 500 字，建议不超过 450</div></div>
+    </div>
+    <div class="setting-card">
+      <h3>本机助手 · 全局服务器地址</h3>
+      <div class="form-row"><label>服务器地址（所有用户共用）</label><input id="cfg-serverUrl" placeholder="http://你的服务器:8787 或 https://invoice.example.com"></div>
+      <div class="hint">本机助手连接看板时使用的地址。在此统一配置后，用户下载的助手里会<b>自动内置</b>该地址，无需手动填写；留空则用户需手动输入。</div>
+      <div style="margin-top:12px">
+        <a class="btn btn-primary" href="/download" target="_blank">⬇ 下载本机助手（Windows）</a>
+        <span class="hint" style="display:inline;margin-left:8px">用户下载到的助手已内置全局地址；在本机登录看板后点「绑定本机助手」即可完成绑定（设备令牌，无需填税号）。</span>
+      </div>
     </div>
     <div class="setting-card full">
       <h3>消息模板 <span style="font-weight:400;font-size:12px;color:#8a8f99">（对所有用户生效；{companyName}/{taxNo}/{email} 取各用户自己的抬头）</span></h3>
@@ -414,44 +418,36 @@
   </div>
 </div>
 
-<!-- ══════════ 登录 1688（本机浏览器登录 → 扩展上传登录态） ══════════ -->
-<div class="modal-mask" id="loginModal" onclick="if (event.target === this) closeLoginModal()">
+<!-- ══════════ 本机助手 · 绑定指引 ══════════ -->
+<div class="modal-mask" id="guideModal" onclick="if (event.target === this) closeGuideModal()">
   <div class="modal">
     <div class="modal-head">
-      <b>登录 1688（在你自己电脑的浏览器登录）</b>
-      <span class="modal-close" onclick="closeLoginModal()" title="关闭">×</span>
+      <b>本机助手 · 连接指引</b>
+      <span class="modal-close" onclick="closeGuideModal()" title="关闭">×</span>
     </div>
     <div class="modal-body">
-      <div class="warn-box" style="margin-bottom:12px" id="loginStateBox">登录态状态读取中…</div>
-
-      <ol class="steps">
-        <li>在<b>你自己电脑的浏览器</b>里打开 <b>1688</b> 并登录（通常你本来就登录着，无需重复登录）。</li>
-        <li>安装「<b>1688 发票催收 · 本机发送助手</b>」浏览器扩展（Chrome / Edge：扩展管理 → 打开「开发者模式」→「加载已解压的扩展程序」→ 选项目里的 <code>extension/</code> 目录）。</li>
-        <li>点下面「<b>生成上传码</b>」，把 <b>服务器地址</b> 与 <b>上传码</b> 填进扩展，点扩展里的「<b>上传登录态</b>」。</li>
-        <li>回到这里点「刷新状态」，显示<b>已上传 / 可用</b>即完成，之后发催收消息会自动复用。</li>
-      </ol>
-
-      <div class="upload-box">
-        <div class="upload-row">
-          <span class="k">服务器地址</span>
-          <code id="upServer">—</code>
-        </div>
-        <div class="upload-row">
-          <span class="k">上传码</span>
-          <code class="code" id="upCode">—</code>
-          <span class="muted small" id="upTtl"></span>
-        </div>
+      <div class="warn-box" style="margin-bottom:12px">
+        催收消息只在<b>你自己电脑上</b>发送：服务器不保存你的 1688 登录态、也不用服务器浏览器代发，全程接触不到你的账号密码。
       </div>
 
+      <ol class="steps">
+        <li><b>装一次</b>：点下方「<b>下载本机助手（Windows）</b>」，下载并安装（绿色便携版双击即可，无需安装）。</li>
+        <li><b>绑一次</b>：回到本页点「<b>绑定本机助手</b>」——浏览器会弹窗问是否打开「1688催收助手」，点「打开」即可自动完成绑定。若没装，会提示你先下载。</li>
+        <li><b>登一次</b>：在助手面板里点「<b>打开 1688 登录窗口</b>」登录你的 1688（登录态只存在你本机，不经过服务器）。</li>
+        <li>之后回到看板点「<b>发送催收消息</b>」：助手会自己打开 1688 聊天页逐家发送，并在面板里显示实时进度，可随时停止。</li>
+      </ol>
+
+      <div id="agentBindMsg" class="muted small" style="margin:0 0 10px"></div>
+
       <div style="display:flex;gap:8px;flex-wrap:wrap">
-        <button class="btn btn-primary" id="btnGenUpload" onclick="genUploadToken()">生成上传码</button>
-        <button class="btn btn-outline" onclick="refreshLoginState()">刷新状态</button>
-        <button class="btn btn-danger" id="btnClearState" onclick="clearLoginState()">清除登录态</button>
+        <a class="btn btn-primary" href="/download" target="_blank" onclick="closeGuideModal()">下载本机助手（Windows）</a>
+        <button class="btn btn-outline" id="btnBindAgent" onclick="bindAgent()">绑定本机助手</button>
+        <button class="btn btn-plain" onclick="closeGuideModal()">知道了</button>
       </div>
 
       <div class="muted small" style="margin-top:10px;line-height:1.8">
-        安全说明：服务器只接收<b>加密后的登录态</b>，全程接触不到你的 1688 密码；登录发生在本机浏览器、用的是你本机的真实 IP（风控更友好）。
-        上传码 10 分钟内有效、<b>用一次即作废</b>。登录态加密存储在数据库，只对你本人可用。
+        断线了？助手正常是托盘常驻的；若已退出，再点一次「批量发送」看板会自动把它唤起来。
+        发送中断后，看板会出现「继续发送未完成」——已成功的不会重发。
       </div>
     </div>
   </div>
@@ -528,11 +524,6 @@ async function boot() {
     + (ME.companyName ? ' · ' + esc(ME.companyName) : '');
   if (ME.role === 'admin') document.getElementById('tabAdmin').style.display = '';
   if (ME.mustChangePassword) document.getElementById('pwdBanner').classList.add('show');
-  // 无 1688 登录态（或已失效）→ 自动弹出「登录 1688」引导（每次会话只自动弹一次，其余靠顶部按钮）
-  if (d.needLogin1688 && !sessionStorage.getItem('autoLoginPrompted')) {
-    sessionStorage.setItem('autoLoginPrompted', '1');
-    setTimeout(() => openLoginModal(), 600);
-  }
   await loadData();
   pollTask();
   taskTimer = setInterval(pollTask, 2000);
@@ -1024,32 +1015,38 @@ async function getGapHint() {
   } catch (e) { return '15~30秒'; }
 }
 async function doSend(ids) {
-  const chEl = document.getElementById('sendChannel');
-  const channel = chEl && chEl.value === 'client' ? 'client' : 'server';
-  if (channel === 'client' && !AGENT_STATUS.online) {
-    if (!confirm('本机浏览器通道当前【未连接】。\n\n请先在本机浏览器安装扩展，并点「生成配对码」完成配对。\n仍要以本机通道下发？（会立即失败）')) return;
+  // 发送前先确保本机助手在线：不在线就尝试用深链 xsh://run 把它唤起来（最多等 25 秒）
+  if (!AGENT_STATUS.online) {
+    toast('正在启动本机助手…');
+    const ok = await ensureAgentOnline();
+    if (!ok) {
+      alert('未检测到本机助手。\n\n请先点右上角「本机助手」下载并安装（Windows），安装后再点「绑定本机助手」完成连接。\n发送只在你自己电脑上执行，服务器不代发。');
+      openGuideModal();
+      return;
+    }
   }
   try {
-    const d = await api('/api/send', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ loginIds: ids, channel }) });
+    const d = await api('/api/send', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ loginIds: ids }) });
     if (d.error) { alert('启动失败: ' + d.error); return; }
     pollTask();
   } catch (e) { alert('请求失败: ' + e.message); }
 }
 
-// ══════════════ 本机浏览器通道（方案C） ══════════════
+// ══════════════ 本机助手通道（混合模式） ══════════════
 let AGENT_STATUS = { online: false, connected: false, loggedIn: false };
 function renderAgentBar() {
   const dot = document.getElementById('agentDot');
   const txt = document.getElementById('agentText');
   if (!dot || !txt) return;
   const s = AGENT_STATUS;
+  const ver = s.agentVer || s.extVer;
   if (s.online) {
     dot.className = 'agent-dot ' + (s.loggedIn ? 'on' : 'warn');
-    txt.innerHTML = '本机浏览器通道：<b style="color:' + (s.loggedIn ? '#2e7d32' : '#b26a00') + '">已连接</b>'
-      + '（1688 ' + (s.loggedIn ? '已登录' : '未登录') + '）' + (s.extVer ? ' · 扩展 v' + esc(s.extVer) : '');
+    txt.innerHTML = '本机助手：<b style="color:' + (s.loggedIn ? '#2e7d32' : '#b26a00') + '">已连接</b>'
+      + '（1688 ' + (s.loggedIn ? '已登录' : '未登录') + '）' + (ver ? ' · 助手 v' + esc(ver) : '');
   } else {
     dot.className = 'agent-dot';
-    txt.textContent = '本机浏览器通道：未连接（点右侧「生成配对码」，在本机浏览器扩展里配对）';
+    txt.textContent = '本机助手：未连接（点右上角「本机助手」下载安装并绑定）';
   }
 }
 async function refreshAgent() {
@@ -1059,12 +1056,12 @@ async function refreshAgent() {
     if (d && !d.error) { AGENT_STATUS = d; renderAgentBar(); }
   } catch (e) { /* 忽略 */ }
   const nowOnline = !!(AGENT_STATUS && AGENT_STATUS.online);
-  // 在线状态一变（配对成功 / 掉线）立刻重算续跑横幅，别让用户干等轮询
+  // 在线状态一变（绑定成功 / 掉线）立刻重算续跑横幅，别让用户干等轮询
   RESUME_TICK++;
   if (nowOnline !== wasOnline || RESUME_TICK % 3 === 0) refreshResume();
 }
 
-// ── 断线续跑（方案C）──────────────────────────────
+// ── 断线续跑 ──────────────────────────────
 let RESUMABLE = null;
 let RESUMABLE_CHECKED = null;
 let RESUME_TICK = 0;
@@ -1082,7 +1079,7 @@ function renderResume() {
   if (t.failed > 0) parts.push(`<b>${t.failed}</b> 家发送失败`);
   const reason = t.status === 'aborted' ? '已中断' : (t.status === 'failed' ? '异常结束' : '已完成，但有失败项');
   txt.innerHTML = `↻ 上次任务 #${t.id} ${reason}${t.error ? '（' + esc(t.error) + '）' : ''}：${parts.join('，')}。`
-    + (online ? ' 可选择续跑，已成功的不会重发。' : ' <b>本机通道未连接</b>：请先在上方完成配对，再续跑。');
+    + (online ? ' 可选择续跑，已成功的不会重发。' : ' <b>本机助手未连接</b>：请先启动并绑定助手，再续跑。');
   const btnP = document.getElementById('btnResumePending');
   const btnF = document.getElementById('btnResumeFailed');
   if (btnP) { btnP.style.display = t.pending > 0 ? '' : 'none'; btnP.disabled = !online || READONLY; }
@@ -1116,24 +1113,14 @@ function dismissResume() {
   if (RESUMABLE) sessionStorage.setItem(RESUME_KEY, String(RESUMABLE.id));
   renderResume();
 }
-async function genPairCode() {
-  if (READONLY) { alert('只读模式下不能操作本机通道'); return; }
-  try {
-    const d = await api('/api/agent/pair-code', { method: 'POST' });
-    if (!d || d.error) { alert('生成失败：' + ((d && d.error) || '未知错误')); return; }
-    const ttlMin = Math.round((d.ttlSec || 300) / 60);
-    prompt('本机浏览器通道配对\n\n1) 在本机浏览器安装扩展（extension/ 目录）\n2) 打开扩展，填入下面两项后点「连接」\n\n服务器地址：' + d.serverUrl + '\n配对码：' + d.code + '\n\n有效期约 ' + ttlMin + ' 分钟。', d.code);
-    refreshAgent();
-  } catch (e) { alert('请求失败：' + e.message); }
-}
 async function agentDisconnect() {
   if (READONLY) return;
-  if (!confirm('断开本机浏览器通道？\n断开后配对码作废，需重新「生成配对码」才能再次连接。')) return;
+  if (!confirm('断开本机助手？\n断开只关闭当前连接；设备令牌仍然有效，下次启动助手会自动重连，无需重新绑定。')) return;
   try { await api('/api/agent/disconnect', { method: 'POST' }); AGENT_STATUS = { online: false }; renderAgentBar(); } catch (e) { /* 忽略 */ }
 }
 async function importData() {
   if (READONLY) { alert('只读模式下不能导入'); return; }
-  if (!confirm('重新扫描 【本账号】 data 目录下的 Excel 并导入数据库？\n（订单表与已开票表会按文件内容重建，人工维护的名称映射会保留）')) return;
+  if (!confirm('重新扫描 【本账号】 data 目录下的 Excel 并导入数据库？\n（按订单号去重：数据库已有的跳过，只插入新数据；已导入过的订单不会从看板消失；人工维护的开票状态与名称映射不受影响）')) return;
   const btn = document.getElementById('btnImport');
   btn.disabled = true; const old = btn.textContent; btn.textContent = '导入中...';
   try {
@@ -1322,6 +1309,7 @@ async function loadConfigUI() {
     document.getElementById('cfg-template').value = m.template || '';
     document.getElementById('cfg-orderItem').value = m.orderItem || '';
     document.getElementById('cfg-reminder').value = m.reminder || '';
+    document.getElementById('cfg-serverUrl').value = c.server_url || '';
     document.getElementById('saveOk').classList.remove('show');
     updatePreview();
   } catch (e) { alert('加载配置失败: ' + e.message); }
@@ -1329,6 +1317,7 @@ async function loadConfigUI() {
 // 注意：开票抬头不在这里（它是「用户信息」，按账号在「用户管理」里维护，见 ue-* 弹窗）
 function collectConfig() {
   return {
+    server_url: (document.getElementById('cfg-serverUrl').value || '').trim(),
     runtime: {
       sendGapMinSec: Number(document.getElementById('cfg-gapMin').value) || 15,
       sendGapMaxSec: Number(document.getElementById('cfg-gapMax').value) || 30,
@@ -1527,74 +1516,79 @@ async function submitPwd() {
   } catch (e) { alert('修改失败: ' + e.message); btn.disabled = false; btn.textContent = t; }
 }
 
-// ══════════════ 登录 1688（本机浏览器登录 → 扩展上传登录态） ══════════════
-// 服务器不再承载登录画面：登录在用户自己电脑的浏览器完成，扩展凭一次性上传码把
-// storageState 交给服务器，加密后写入数据库（login_state）。发送时服务端从库取用。
-let LOGIN_STATE = null;
-
-function openLoginModal() {
-  document.getElementById('loginModal').classList.add('show');
-  refreshLoginState();
+// ══════════════ 本机助手 · 绑定与唤醒（混合模式） ══════════════
+// 服务器不保存 1688 登录态、也不用服务端浏览器：发送由「1688催收助手」桌面程序在你本机执行。
+// 绑定流程：服务端签发一次性令牌 → 深链 xsh://bind?server=..&t=.. 唤起助手 → 助手换长期设备令牌。
+const XSH_PROTO = 'xsh';
+function openGuideModal() {
+  document.getElementById('guideModal').classList.add('show');
+  refreshAgent().then(() => {
+    const on = !!(AGENT_STATUS && AGENT_STATUS.online);
+    setBindMsg(on ? '✓ 助手已连接，可以发送了。' : '尚未检测到助手。请先下载安装，再点「绑定本机助手」。');
+  });
 }
-function closeLoginModal() {
-  document.getElementById('loginModal').classList.remove('show');
+function closeGuideModal() {
+  document.getElementById('guideModal').classList.remove('show');
 }
-
-function renderLoginState() {
-  const box = document.getElementById('loginStateBox');
-  const s = LOGIN_STATE || {};
-  const btnClear = document.getElementById('btnClearState');
-  if (!box) return;
-  if (!s.hasState) {
-    box.innerHTML = '<b>当前账号还没有 1688 登录态。</b>按下面四步上传一次即可（之后会自动复用）。';
-    if (btnClear) btnClear.disabled = true;
-    return;
+function setBindMsg(html, color) {
+  const el = document.getElementById('agentBindMsg');
+  if (el) el.innerHTML = html ? '<span' + (color ? ' style="color:' + color + '"' : '') + '>' + html + '</span>' : '';
+}
+/** 轻量浮动提示（避免为此引入组件） */
+function toast(msg, ms) {
+  let el = document.getElementById('xshToast');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'xshToast';
+    el.style.cssText = 'position:fixed;left:50%;bottom:36px;transform:translateX(-50%);z-index:9999;'
+      + 'background:#1f2937;color:#fff;padding:10px 16px;border-radius:10px;font-size:13px;'
+      + 'box-shadow:0 6px 20px rgba(0,0,0,.22);opacity:0;transition:opacity .18s';
+    document.body.appendChild(el);
   }
-  const fmt = (t) => (t ? new Date(t).toLocaleString('zh-CN', { hour12: false }) : '');
-  const srcMap = { extension: '本机浏览器扩展上传', migrated: '历史文件自动迁入', manual: '人工导入', cloud_login: '旧版投屏登录' };
-  const src = srcMap[s.source] || (s.source || '未知来源');
-  const pill = s.usable
-    ? '<span class="state-pill ok">可用</span>'
-    : '<span class="state-pill warn">已失效，需要重新上传</span>';
-  box.innerHTML =
-    '当前账号 1688 登录态：' + pill +
-    '<br>来源：' + esc(src) + ' · 保存于：' + esc(fmt(s.savedAt) || '未知') +
-    '<br>内容：' + (s.cookieCount || 0) + ' 个 cookie' +
-    ((s.originCount || 0) ? ' · ' + s.originCount + ' 个 localStorage 源' : '') +
-    (s.lastUsedAt ? ' · 最近使用：' + esc(fmt(s.lastUsedAt)) : '') +
-    '<br><span class="muted">登录态以密文存储在数据库，接口不下发明文；服务器全程接触不到你的 1688 密码。</span>';
-  if (btnClear) btnClear.disabled = false;
+  el.textContent = msg;
+  el.style.opacity = '1';
+  clearTimeout(el._t);
+  el._t = setTimeout(() => { el.style.opacity = '0'; }, ms || 2400);
 }
-
-async function refreshLoginState() {
-  try {
-    const d = await api('/api/state/status');
-    if (d && !d.error) { LOGIN_STATE = d; renderLoginState(); }
-  } catch (e) { /* 忽略 */ }
+async function agentOnline() {
+  try { const d = await api('/api/agent/status'); return !!(d && d.online); } catch (e) { return false; }
 }
-
-async function genUploadToken() {
-  if (READONLY) { alert('只读模式下不能操作登录态'); return; }
-  const btn = document.getElementById('btnGenUpload');
-  if (btn) { btn.disabled = true; btn.textContent = '生成中…'; }
+/** 点「绑定本机助手」：签发一次性令牌 → 深链唤起助手 → 轮询等待连上 */
+async function bindAgent() {
+  const btn = document.getElementById('btnBindAgent');
+  const label = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; }
+  setBindMsg('正在签发绑定令牌…');
   try {
-    const d = await api('/api/state/upload-token', { method: 'POST' });
-    if (!d || d.error) { alert('生成失败：' + ((d && d.error) || '未知错误')); return; }
-    document.getElementById('upServer').textContent = d.serverUrl || '—';
-    document.getElementById('upCode').textContent = d.code || '—';
-    const min = Math.max(1, Math.round((d.ttlSec || 600) / 60));
-    document.getElementById('upTtl').textContent = '（' + min + ' 分钟内有效，用一次即作废）';
-  } catch (e) { alert('请求失败：' + e.message); }
-  finally { if (btn) { btn.disabled = false; btn.textContent = '生成上传码'; } }
+    const r = await api('/api/agent/pair-code', { method: 'POST' });
+    if (!r || !r.bindToken) throw new Error((r && r.error) || '签发绑定令牌失败');
+    const link = XSH_PROTO + '://bind?server=' + encodeURIComponent(r.serverUrl) + '&t=' + r.bindToken;
+    setBindMsg('正在唤起本机助手…（浏览器若弹窗询问是否打开，请点「打开」）');
+    try { location.href = link; } catch (e) { try { window.open(link, '_self'); } catch (e2) { /* 忽略 */ } }
+    for (let i = 0; i < 30; i++) {
+      await new Promise((res) => setTimeout(res, 1000));
+      if (await agentOnline()) {
+        setBindMsg('✓ 绑定成功，助手已连接！', '#2e7d32');
+        await refreshAgent();
+        if (btn) { btn.disabled = false; btn.textContent = label; }
+        return;
+      }
+    }
+    setBindMsg('没检测到助手。可能是：尚未安装，或浏览器拦截了打开请求。请先「下载本机助手（Windows）」，安装后再点一次「绑定本机助手」。', '#b26a00');
+  } catch (e) {
+    setBindMsg('绑定失败：' + e.message, '#c62828');
+  }
+  if (btn) { btn.disabled = false; btn.textContent = label; }
 }
-
-async function clearLoginState() {
-  if (READONLY) return;
-  if (!confirm('清除当前账号的 1688 登录态？\n清除后需要重新在浏览器登录并用扩展上传，之后才能发送催收消息。')) return;
-  try {
-    await api('/api/state/clear', { method: 'POST' });
-    await refreshLoginState();
-  } catch (e) { alert('清除失败：' + e.message); }
+/** 发送前确保助手在线：离线则用深链 xsh://run 唤起，最多等 25 秒 */
+async function ensureAgentOnline() {
+  if (await agentOnline()) return true;
+  try { location.href = XSH_PROTO + '://run'; } catch (e) { /* 忽略 */ }
+  for (let i = 0; i < 25; i++) {
+    await new Promise((res) => setTimeout(res, 1000));
+    if (await agentOnline()) { await refreshAgent(); return true; }
+  }
+  return false;
 }
 
 // ══════════════ 事件绑定 & 启动 ══════════════
@@ -1611,7 +1605,7 @@ document.getElementById('filterTabs').addEventListener('click', e => {
   if (el) el.addEventListener('input', updatePreview);
 });
 document.addEventListener('keydown', e => {
-  if (e.key === 'Escape') { closeHist(); closeLoginModal(); closePwdModal(); closeUserEdit(); }
+  if (e.key === 'Escape') { closeHist(); closeGuideModal(); closePwdModal(); closeUserEdit(); }
 });
 
 boot();

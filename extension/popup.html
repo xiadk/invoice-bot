@@ -29,14 +29,14 @@
 </head>
 <body>
   <h1>1688 发票催收 · 本机发送助手</h1>
-  <div class="sub">发送在您本机浏览器执行；也可把登录态加密上传给服务器，由服务器通道代发。密码始终不离开本机。</div>
+  <div class="sub">发送在您本机浏览器执行：在看板点「发送催收消息」后，下面会显示实时进度。服务器不保存登录态，密码始终不离开本机。</div>
 
-  <h2>方式一：本机浏览器直接发送</h2>
-  <label>服务器地址</label>
+  <h2>连接看板</h2>
+  <label>服务器地址（已内置，无需填写）</label>
   <input id="serverUrl" placeholder="http://你的服务器:8787" autocomplete="off">
 
-  <label>配对码（在看板「本机浏览器通道」里生成）</label>
-  <input id="code" placeholder="6 位数字" autocomplete="off" inputmode="numeric">
+  <label>纳税人识别号 / 税号（已内置，固定配对码）</label>
+  <input id="code" placeholder="请输入您的纳税人识别号" autocomplete="off">
 
   <button class="btn" id="btnConnect">连接</button>
   <div class="row">
@@ -48,15 +48,13 @@
 
   <div class="sep"></div>
 
-  <h2>方式二：上传登录态给服务器（服务器通道代发）</h2>
-  <div class="sub">在您本机浏览器登录 1688 后点下面按钮即可。服务器只收到<b>加密后的登录态</b>，看不到您的账号密码；上传码一次有效。</div>
-  <label>服务器地址</label>
-  <input id="upServer" placeholder="http://你的服务器:8787" autocomplete="off">
-  <label>上传码（在看板「登录 1688」里生成）</label>
-  <input id="upToken" placeholder="6 位数字" autocomplete="off" inputmode="numeric">
-  <button class="btn" id="btnUpload">上传登录态</button>
-  <div class="status" id="upStatus">尚未上传</div>
+  <div id="taskPanel" style="display:none">
+    <h2 id="taskTitle">发送中</h2>
+    <div class="status" id="taskBody"></div>
+    <button class="btn" id="btnStop" style="background:#c62828">停止发送</button>
+  </div>
 
+  <script src="config.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

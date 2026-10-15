@@ -4,12 +4,9 @@
  * 连接：用配对码连服务器 /ws/agent（扩展侧没有看板登录 Cookie）
  * 保活：Chrome 116+ 下 WebSocket 活动会延长 SW 生命周期；再叠加 1 分钟 alarms 兜底重连
  * 发送：每次任务使用同一个「工作标签页」，逐个卖家导航到聊天页 → 让 content.js 发消息 → 回执
+ * 进度：服务器把任务进度（task_progress）推过来，弹窗实时渲染；弹窗可点「停止」
  *
- * 上传登录态：用户在看板「登录 1688」里生成一次性上传码后，这里把本机 1688 的
- *   cookie（含 httpOnly）+ 页面 localStorage 组装成 Playwright storageState，
- *   凭上传码 POST 给服务器（服务端加密入库，供「服务器浏览器」通道发送时取用）。
- *
- * 安全：不上报 1688 密码；登录态仅在用户主动点「上传登录态」时发送一次，且走用户填写的服务器地址。
+ * 安全：不上报 1688 密码；登录态只留在用户本机浏览器，服务器不保存、不代发。
  */
 const VERSION = '1.0.0';
 const CHAT_URL = (sellerLoginId) =>
@@ -22,7 +19,9 @@ const state = {
   workerTabId: null,
   stopFlag: false,
   currentTaskId: null,
+  currentCompany: '',
   sending: false,
+  task: null, // 服务器推送的任务进度（供弹窗面板渲染）
 };
 let ws = null;
 let reconnectTimer = null;
@@ -92,6 +91,7 @@ function handleServerMessage(m) {
   if (m.type === 'ready') { return; }
   if (m.type === 'send_batch') { runBatch(m).catch(() => {}); return; }
   if (m.type === 'stop') { state.stopFlag = true; return; }
+  if (m.type === 'task_progress') { state.task = m; return; }
 }
 
 // ── 工作标签页 ──
@@ -138,6 +138,50 @@ async function askTab(tabId, msg, { timeoutMs = 60000, retries = 4 } = {}) {
   return null;
 }
 
+/** 找到带聊天编辑器的 frameId（轮询，直到出现或超时） */
+async function findEditorFrame(tabId, timeoutMs) {
+  const t0 = Date.now();
+  for (;;) {
+    let frames = [];
+    try { frames = (await chrome.webNavigation.getAllFrames({ tabId })) || []; } catch (e) { frames = []; }
+    if (frames && frames.length) {
+      for (const f of frames) {
+        const r = await new Promise((resolve) => {
+          const t = setTimeout(() => resolve(null), 4000);
+          try {
+            chrome.tabs.sendMessage(tabId, { type: 'AGENT_PING' }, { frameId: f.frameId }, (res) => {
+              clearTimeout(t);
+              if (chrome.runtime.lastError) resolve(null); else resolve(res || null);
+            });
+          } catch (e) { clearTimeout(t); resolve(null); }
+        });
+        if (r && r.ok && r.hasEditor) return f.frameId;
+      }
+    }
+    if (Date.now() - t0 >= timeoutMs) return -1;
+    await sleep(800);
+  }
+}
+/** 向指定 frame 发消息（带重试） */
+async function askFrame(tabId, frameId, msg, { timeoutMs = 60000, retries = 4 } = {}) {
+  for (let i = 0; i < retries; i++) {
+    const resp = await new Promise((resolve) => {
+      let settled = false;
+      const t = setTimeout(() => { if (!settled) { settled = true; resolve(null); } }, timeoutMs);
+      try {
+        chrome.tabs.sendMessage(tabId, msg, { frameId }, (r) => {
+          if (settled) return;
+          settled = true; clearTimeout(t);
+          if (chrome.runtime.lastError) resolve(null); else resolve(r || null);
+        });
+      } catch (e) { clearTimeout(t); resolve(null); }
+    });
+    if (resp) return resp;
+    await sleep(1200);
+  }
+  return null;
+}
+
 // ── 执行一批发送 ──
 async function runBatch(m) {
   if (state.sending) { sendToServer({ type: 'log', text: '已有批次在执行，忽略新任务' }); return; }
@@ -155,14 +199,24 @@ async function runBatch(m) {
       continue;
     }
     let ok = false, error = '';
+    state.currentCompany = s.company || '';
     try {
       await navigateWorker(tabId, CHAT_URL(s.sellerLogin));
-      const r = await askTab(tabId, { type: 'AGENT_SEND', messages: s.messages }, { timeoutMs: 120000, retries: 3 });
+      // 定向到「带聊天输入框」的 frame 发送，避免顶层 frame 抢先回「无编辑器」导致内层 frame 响应丢失
+      const frameId = await findEditorFrame(tabId, 45000);
+      let r = null;
+      if (frameId < 0) {
+        // 兜底：拿不到 frame 列表时退化为整页广播
+        r = await askTab(tabId, { type: 'AGENT_SEND', messages: s.messages }, { timeoutMs: 120000, retries: 3 });
+      } else {
+        r = await askFrame(tabId, frameId, { type: 'AGENT_SEND', messages: s.messages }, { timeoutMs: 120000, retries: 3 });
+      }
       if (!r) { error = '本机页面未响应（未登录 1688 或页面结构变化）'; }
       else { ok = !!r.ok; error = r.error || ''; }
     } catch (e) {
       error = e.message || String(e);
     }
+    state.currentCompany = '';
     sendToServer({ type: 'sent', taskId: m.taskId, loginId: s.loginId, ok, error: ok ? undefined : error });
     if (i < sellers.length - 1 && !state.stopFlag) {
       const ms = Math.round(gap.min + Math.random() * Math.max(0, gap.max - gap.min));
@@ -171,116 +225,24 @@ async function runBatch(m) {
   }
   state.sending = false;
   state.currentTaskId = null;
+  state.currentCompany = '';
   state.stopFlag = false;
-}
-
-// ── 上传登录态（供服务器浏览器通道发送时取用） ──
-const COOKIE_DOMAIN_RE = /(^|\.)1688\.com$/i;
-
-/** chrome.cookies 的 sameSite → Playwright 的写法 */
-function mapSameSite(v) {
-  const s = String(v || '').toLowerCase();
-  if (s === 'no_restriction' || s === 'none') return 'None';
-  if (s === 'strict') return 'Strict';
-  return 'Lax'; // lax / unspecified 都按默认 Lax
-}
-
-/** 收集 1688 相关 cookie，转成 Playwright storageState.cookies 的格式 */
-async function collectCookies() {
-  let raw = [];
-  try {
-    raw = await chrome.cookies.getAll({ domain: '1688.com' });
-  } catch (e) { raw = []; }
-  if (!raw.length) {
-    try { raw = await chrome.cookies.getAll({}); } catch (e) { raw = []; }
-    raw = raw.filter((c) => COOKIE_DOMAIN_RE.test(String(c.domain || '')));
-  }
-  return raw.map((c) => ({
-    name: c.name,
-    value: c.value,
-    domain: c.domain,
-    path: c.path || '/',
-    expires: typeof c.expirationDate === 'number' ? Math.floor(c.expirationDate) : -1,
-    httpOnly: !!c.httpOnly,
-    secure: !!c.secure,
-    sameSite: mapSameSite(c.sameSite),
-  }));
-}
-
-/** 从一个已打开的 1688 标签页里取 localStorage（best-effort，取不到就返回空） */
-async function collectOrigins() {
-  const origins = [];
-  try {
-    const tabs = await chrome.tabs.query({ url: '*://*.1688.com/*' });
-    const seen = new Set();
-    for (const t of tabs.slice(0, 5)) {
-      try {
-        const results = await chrome.scripting.executeScript({
-          target: { tabId: t.id, allFrames: false },
-          func: () => {
-            const out = [];
-            try {
-              for (let i = 0; i < localStorage.length; i++) {
-                const k = localStorage.key(i);
-                out.push({ name: k, value: localStorage.getItem(k) });
-              }
-            } catch (e) { /* 忽略 */ }
-            return { origin: location.origin, localStorage: out };
-          },
-        });
-        const r = results && results[0] && results[0].result;
-        if (r && r.origin && !seen.has(r.origin) && r.localStorage.length) {
-          seen.add(r.origin);
-          origins.push({ origin: r.origin, localStorage: r.localStorage });
-        }
-      } catch (e) { /* 单个标签页失败不影响整体 */ }
-    }
-  } catch (e) { /* 忽略 */ }
-  return origins;
-}
-
-/** 组装 storageState 并上传给服务器（凭一次性上传码） */
-async function uploadLoginState(serverUrl, token) {
-  const base = String(serverUrl || '').trim().replace(/\/+$/, '');
-  if (!base) throw new Error('请填写服务器地址');
-  if (!String(token || '').trim()) throw new Error('请填写上传码（在看板「登录 1688」里生成）');
-  const cookies = await collectCookies();
-  const origins = await collectOrigins();
-  if (!cookies.length && !origins.length) {
-    throw new Error('本机没有找到 1688 登录态：请先在浏览器打开 1688 并确认已登录');
-  }
-  const res = await fetch(base + '/api/state/upload', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ token: String(token).trim(), state: { cookies, origins }, ua: navigator.userAgent }),
-  });
-  let data = {};
-  try { data = await res.json(); } catch (e) { /* 忽略 */ }
-  if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
-  const out = {
-    ok: true, cookieCount: data.cookieCount || cookies.length,
-    originCount: data.originCount || origins.length, savedAt: data.savedAt || new Date().toISOString(),
-  };
-  await chrome.storage.local.set({ lastUpload: out });
-  return out;
 }
 
 // ── 来自 content.js / popup 的消息 ──
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg || typeof msg !== 'object') return;
 
-  if (msg.type === 'UPLOAD_STATE') {
-    (async () => {
-      try {
-        const r = await uploadLoginState(msg.serverUrl, msg.token);
-        sendResponse(r);
-      } catch (e) {
-        const err = e.message || String(e);
-        try { await chrome.storage.local.set({ lastUpload: { ok: false, error: err } }); } catch (e2) { /* 忽略 */ }
-        sendResponse({ ok: false, error: err });
-      }
-    })();
-    return true; // 异步回执
+  if (msg.type === 'STOP_TASK') {
+    // 弹窗点「停止」：与看板停止等价——本机停发剩余，并通知服务端记录停止意图
+    if (state.sending && state.currentTaskId != null) {
+      state.stopFlag = true;
+      sendToServer({ type: 'client_stop', taskId: state.currentTaskId });
+      sendResponse({ ok: true });
+    } else {
+      sendResponse({ ok: false, error: '当前没有正在发送的任务' });
+    }
+    return;
   }
 
   if (msg.type === 'LOGIN_STATE') {
@@ -293,23 +255,20 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === 'GET_STATE') {
-    chrome.storage.local.get(['lastUpload']).then((s) => {
-      sendResponse({
-        connected: state.connected, loggedIn: state.loggedIn, sending: state.sending,
-        serverUrl: state.serverUrl, code: state.code, extVer: VERSION,
-        lastUpload: s.lastUpload || null,
-      });
-    }).catch(() => {
-      sendResponse({
-        connected: state.connected, loggedIn: state.loggedIn, sending: state.sending,
-        serverUrl: state.serverUrl, code: state.code, extVer: VERSION, lastUpload: null,
-      });
+    sendResponse({
+      connected: state.connected, loggedIn: state.loggedIn, sending: state.sending,
+      serverUrl: state.serverUrl, code: state.code, extVer: VERSION,
+      task: state.task ? Object.assign({}, state.task, { current: state.currentCompany || state.task.current || null }) : null,
     });
     return true;
   }
 
   if (msg.type === 'CONNECT') {
-    chrome.storage.local.set({ serverUrl: (msg.serverUrl || '').trim(), code: (msg.code || '').trim() }, async () => {
+    let inputUrl = (msg.serverUrl || '').trim();
+    // 弹出页未传地址（或为空）时，回退到打包时内置的全局地址
+    if (!inputUrl && typeof EXT_SERVER_URL !== 'undefined' && EXT_SERVER_URL) inputUrl = EXT_SERVER_URL;
+    const code = (msg.code || '').trim();
+    chrome.storage.local.set({ serverUrl: inputUrl, code }, async () => {
       await loadConfig();
       connect();
       sendResponse({ ok: true });

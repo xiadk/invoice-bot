@@ -37,7 +37,7 @@
     "dailySendLimit": 50
   },
   "mysql": {
-    "_comment4": "看板数据源数据库。本机自带的 MariaDB 实例默认即为下列配置（启动: scripts/mysql-start.bat）",
+    "_comment4": "看板数据源数据库。本机自带的 MariaDB 实例默认即为下列配置（启动: scripts/mysql-start.bat）。Docker 部署时本段可忽略——连接参数由 MYSQL_HOST/MYSQL_PORT/MYSQL_USER/MYSQL_PASSWORD/MYSQL_DATABASE 环境变量提供，优先级高于本文件（云端部署说明见 docs/使用说明.md）",
     "host": "127.0.0.1",
     "port": 3306,
     "user": "root",

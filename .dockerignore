@@ -1,0 +1,24 @@
+# 凭据与真实业务数据 —— 绝不进镜像
+config.json
+*.state.json
+/*.sql
+
+# data/ 下含真实订单/发票 Excel（公司名、税号）、数据库备份、日志，全部排除
+# 注意：只排除根目录的 .sql 备份；sql/schema.sql 是运行时建表用的，必须保留
+data/*
+!data/.gitkeep
+
+# 本地开发产物
+node_modules/
+tmp-*
+*.log
+.git/
+.gitignore
+
+# 本目录自身与编排文件（构建上下文里不需要）
+Dockerfile
+.dockerignore
+docker-compose.yml
+
+# Windows 本地脚本（镜像内用不到；容器里用 docker compose exec）
+scripts/*.bat

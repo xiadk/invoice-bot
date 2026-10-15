@@ -11,26 +11,29 @@
  *   普通用户：只能看自己的「看板」与「名称映射」，看不到「系统管理」。
  *   所有业务数据按 user_id 隔离（见 sql/schema.sql 与 lib/tenancy.js）。
  *
- * ── 1688 登录态（入库，服务端发送时取用） ─────────────────────────────────
- *   登录态 = Playwright storageState，加密后存在数据库 login_state 表（见 lib/state-store.js）。
- *   获取方式：用户在**自己电脑的浏览器**登录 1688 后，用浏览器扩展（extension/）把登录态
- *   上传给服务器（看板「登录 1688」弹窗 → 生成一次性上传码 → 扩展填写并上传）。
- *   ⚠ 服务器不再承载登录画面（无投屏登录）：服务器全程不接触 1688 密码。
- *   发送催收消息时从库里取态喂给本机 Chromium；失效自动标记 expired 并提示重新上传。
- *   兼容：历史遗留的 data/users/<id>/state-1688.json 首次启动会迁入数据库（原文件保留）。
+ * ── 1688 登录态与发送（只在用户本机执行） ─────────────────────────────────
+ *   服务器不保存任何 1688 登录态、不启动服务端浏览器：登录与发送都发生在
+ *   **用户自己电脑上的「1688 催收助手」桌面程序**（Electron 自带浏览器窗口）里。
+ *   绑定：看板点「绑定本机助手」→ 服务端签发一次性绑定令牌 → 深链 xsh://bind?... 唤起助手
+ *         → 助手用令牌换取**长期设备令牌**（本地保存）→ 连 /ws/agent?device=<token>。
+ *   发送：点「发送催收消息」后，服务器只编排任务并通过 WS 下发；
+ *         助手在自带浏览器里打开 1688 聊天页逐家发送，回执经 WS 回来落库。
+ *   断线可续跑（只补发未完成项，已成功的绝不重发）。
+ *   ⚠ 凭据演进（2026-10-14）：**设备令牌取代「税号当配对码」**——税号是半公开信息，
+ *     不可作凭据。旧浏览器扩展/书签通道已下线（/api/agent/extension-download 等返回 410）。
  *
  * ── 接口 ──────────────────────────────────────────────────────────────────
  *   认证:   POST /api/auth/login | POST /api/auth/logout | GET /api/auth/me | POST /api/auth/password
  *   看板:   GET  /api/data | GET /api/seller-detail | GET /api/collect-history
- *   发送:   POST /api/send | GET /api/task | POST /api/task/stop
+ *   发送:   POST /api/send（只走本机助手通道） | GET /api/task | POST /api/task/stop
  *   数据:   POST /api/import | GET /api/import-log
  *   映射:   GET  /api/mapping | POST /api/mapping | POST /api/mapping/delete | POST /api/mapping/ignore
  *           POST /api/order-state
  *   配置:   GET  /api/config | POST /api/config（仅管理员）
- *   登录态: GET  /api/state/status | POST /api/state/upload-token（生成一次性上传码）
- *           POST /api/state/upload（扩展上传，凭上传码，无需登录 Cookie） | POST /api/state/clear
- *   本机通道: GET /api/agent/status | POST /api/agent/pair-code | POST /api/agent/disconnect
- *           GET  /api/agent/tasks | GET /api/agent/resumable | POST /api/agent/resume | WS /ws/agent
+ *   本机通道: GET  /api/agent/status      | POST /api/agent/pair-code（签发一次性绑定令牌）
+ *             POST /api/agent/bind        | POST /api/agent/disconnect
+ *             GET  /api/agent/devices     | POST /api/agent/devices/revoke（设备管理/踢下线）
+ *             GET  /api/agent/tasks | GET /api/agent/resumable | POST /api/agent/resume | WS /ws/agent
  *   管理:   GET  /api/admin/users | POST /api/admin/users/create | /update | /password | /status | /delete
  *   运维:   GET  /healthz
  *
@@ -46,18 +49,14 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
-const crypto = require('crypto');
 const { WebSocketServer } = require('ws');
 const db = require('./db');
 const auth = require('./lib/auth');
 const tenancy = require('./lib/tenancy');
 const { runImport } = require('./import-to-db');
-const { launch, loadConfig } = require('./lib/browser');
-const stateStore = require('./lib/state-store');
+const { loadConfig } = require('./lib/browser');
 const { AgentHub } = require('./lib/agent-hub');
-const { buildMessages, sendToSeller } = require('./lib/sender');
-
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const { buildMessages } = require('./lib/sender');
 
 const PORT = Number(process.env.PORT) || 8787;
 const ROOT = __dirname;
@@ -86,6 +85,23 @@ function readBody(req) {
     req.on('data', (c) => { body += c; if (body.length > 2e6) { tooBig = true; req.destroy(); } });
     req.on('end', () => { if (tooBig) return resolve({}); try { resolve(JSON.parse(body || '{}')); } catch (e) { resolve({}); } });
   });
+}
+// ── 本机助手安装包（electron-builder 产物，输出目录 dist/）──
+//    · nsis 生成的「安装版」优先（*-setup.exe / *Setup*.exe），其次 portable（*portable*.exe）
+//    · 找不到则返回 null，下载页据此提示「尚未构建/请联系管理员」
+function findAgentInstaller() {
+  const dir = path.join(ROOT, 'dist');
+  let names = [];
+  try { names = fs.readdirSync(dir); } catch (e) { return null; }
+  const exes = names.filter((n) => /\.exe$/i.test(n)).sort((a, b) => {
+    const score = (n) => (/setup|install/i.test(n) ? 0 : (/portable/i.test(n) ? 1 : 2));
+    return score(a) - score(b) || a.localeCompare(b);
+  });
+  if (!exes.length) return null;
+  const file = exes[0];
+  let size = 0;
+  try { size = fs.statSync(path.join(dir, file)).size; } catch (e) { size = 0; }
+  return { file, size };
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -374,6 +390,36 @@ async function loadSellerDetail(userId, loginId) {
   return { orders, invoices, company: seller.company, sendLogs, invoiceCount, invoiceRowCount };
 }
 
+/** 书签工具：按卖家登录名组装该卖家的催收消息（复用看板同款逻辑，零安装方案使用） */
+async function bmComputeTask(userId, rawLogin) {
+  const data = await loadSellers(userId);
+  const key = rawLogin.replace(/^cnalichn/i, '');
+  const s = data.find(
+    (x) => x.sellerLogin === key || x.loginId === key || x.sellerLogin === rawLogin || x.loginId === rawLogin
+  );
+  if (!s || !s.sellerLogin) return { none: true, reason: '未找到该卖家的待催收数据（可能未维护会员名映射）' };
+  const detail = await loadSellerDetail(userId, s.loginId);
+  const toRemind = detail.orders.filter((o) => o.invoice_state !== 'issued');
+  if (!toRemind.length) return { none: true, reason: '该卖家订单均已开票' };
+  const buyer = await buyerInfoOf(userId);
+  const config = loadConfig();
+  const runConfig = { ...config, buyerInfo: buyer };
+  const msgSeller = {
+    loginId: s.sellerLogin,
+    amount: Number(s.pendingAmount) || 0,
+    orders: toRemind.map((o) => ({ orderId: o.order_no, amount: Number(o.pay_amount).toFixed(2) })),
+  };
+  const messages = buildMessages(msgSeller, runConfig);
+  return {
+    none: false,
+    messages,
+    company: s.company || '',
+    sellerLogin: s.sellerLogin,
+    amount: Number(s.pendingAmount) || 0,
+    orderNos: msgSeller.orders.map((o) => o.orderId).join('；'),
+  };
+}
+
 /** 催收统计（来自 send_log；催收次数只计成功） */
 async function loadSendStats(userId) {
   return db.query(`
@@ -472,16 +518,113 @@ async function buyerInfoOf(userId) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// 本机浏览器通道（方案C）：连接中枢 + 任务下发 + 结果回收
-//   发送动作在用户本机浏览器里完成；服务器只负责下发任务、记录结果、展示进度。
+// 本机通道：连接中枢 + 设备令牌（2026-10-14 起替代「税号当配对码」）
+//   发送动作在用户本机（桌面助手/浏览器）完成；服务器只负责下发任务、记录结果、展示进度。
 // ─────────────────────────────────────────────────────────────────────────
+const crypto = require('crypto');
+
+const BIND_TTL_MS = 120 * 1000;      // 一次性绑定令牌有效期（看板点「绑定本机助手」后 2 分钟内有效）
+const bindTokens = new Map();        // bindToken -> { userId, expiresAt, used }
+
+function newToken() { return crypto.randomBytes(32).toString('hex'); }
+function sha256(s) { return crypto.createHash('sha256').update(String(s)).digest('hex'); }
+function clientIp(req) {
+  const xf = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+  return (xf || req.socket.remoteAddress || '').replace(/^::ffff:/, '').slice(0, 64);
+}
+function serverUrlOf(req) {
+  const host = req.headers.host || ('localhost:' + (process.env.PORT || 8787));
+  const proto = String((req.headers['x-forwarded-proto'] || 'http')).split(',')[0].trim();
+  return `${proto}://${host}`;
+}
+
+/** 签发一次性绑定令牌（看板调用；助手用它换长期设备令牌） */
+function issueBindToken(userId) {
+  const now = Date.now();
+  for (const [k, v] of bindTokens) if (v.expiresAt < now) bindTokens.delete(k);
+  const t = newToken();
+  bindTokens.set(t, { userId: Number(userId), expiresAt: now + BIND_TTL_MS, used: false });
+  return t;
+}
+
+/** 消费一次性绑定令牌；成功返回 userId，失败返回 null */
+function redeemBindToken(token) {
+  const rec = bindTokens.get(String(token || '').trim());
+  if (!rec || rec.used || rec.expiresAt < Date.now()) return null;
+  rec.used = true;
+  bindTokens.delete(String(token).trim());
+  return rec.userId;
+}
+
+/**
+ * 用设备令牌解析 userId（并顺带刷新 last_seen）。返回 { deviceId, userId } 或 null。
+ * 令牌为 64 位十六进制；DB 只存 sha256，故按哈希查；账号须为 active、设备未被撤销。
+ */
+async function resolveDeviceToken(token) {
+  const t = String(token || '').trim();
+  if (!/^[0-9a-f]{64}$/.test(t)) return null;
+  const rows = await db.query(
+    'SELECT d.id, d.user_id FROM agent_device d JOIN app_user u ON u.id = d.user_id ' +
+    'WHERE d.token_hash = ? AND d.revoked_at IS NULL AND u.status = ?',
+    [sha256(t), 'active']
+  );
+  if (!rows[0]) return null;
+  db.exec('UPDATE agent_device SET last_seen_at = NOW() WHERE id = ?', [rows[0].id]).catch(() => {});
+  return { deviceId: Number(rows[0].id), userId: Number(rows[0].user_id) };
+}
+
+/** 新建一个设备令牌，返回 { id, token }（token 仅此一刻可见） */
+async function createDevice(userId, { deviceName, os, agentVer, kind, ip } = {}) {
+  const token = newToken();
+  const r = await db.exec(
+    'INSERT INTO agent_device (user_id, token_hash, device_name, os, agent_ver, kind, last_ip, last_seen_at) ' +
+    'VALUES (?,?,?,?,?,?,?,NOW())',
+    [
+      Number(userId), sha256(token),
+      String(deviceName || '').slice(0, 128),
+      String(os || '').slice(0, 64),
+      String(agentVer || '').slice(0, 32),
+      kind === 'bookmarklet' ? 'bookmarklet' : 'agent',
+      String(ip || '').slice(0, 64),
+    ]
+  );
+  return { id: Number(r.insertId), token };
+}
+
 const agentHub = new AgentHub({
   onMessage: (uid, msg) => handleAgentMessage(uid, msg),
   onStatus: (uid) => maybeAbortClientTask(uid),
+  // 凭据解析：只认「设备令牌」（sha256 命中 agent_device 且未撤销、账号 active）。
+  // ⚠ 不再接受税号——税号是半公开信息，不可作为凭据（见 sql/schema.sql 的 agent_device 说明）。
+  resolveUserByCode: async (credential) => {
+    const dev = await resolveDeviceToken(credential);
+    return dev ? dev.userId : null;
+  },
 });
 
 /** 正在等待本机回执的任务：taskId -> ctx */
 const CLIENT_TASKS = new Map();
+
+/**
+ * 把任务进度推送给本机助手（供助手状态面板的实时发送面板渲染）
+ * 推送失败（通道已断）无所谓：助手面板只是旁观，断线时看板仍能看到状态。
+ */
+function pushClientProgress(uid, ctx) {
+  if (!ctx) return;
+  const t = ctx.taskState;
+  const sellers = ctx.sellers.map((s) => ({
+    loginId: s.loginId, company: s.company || '', status: s._result || 'pending',
+  }));
+  agentHub.send(uid, {
+    type: 'task_progress',
+    taskId: ctx.taskId,
+    total: sellers.length,
+    done: t.done, ok: t.ok, fail: t.fail,
+    current: t.current || null,
+    finished: !!ctx.finished,
+    sellers,
+  });
+}
 
 function handleAgentMessage(uid, msg) {
   if (msg.type === 'login_state') { agentHub.setLoggedIn(uid, msg.loggedIn); return; }
@@ -489,6 +632,16 @@ function handleAgentMessage(uid, msg) {
   if (msg.type === 'log') {
     const t = taskFor(uid);
     if (t.running && t.channel === 'client') taskLog(t, '· ' + String(msg.text || '').slice(0, 200));
+    return;
+  }
+  // 本机弹窗点了「停止」：与看板停止等价——扩展侧停发剩余，服务端记录停止意图
+  if (msg.type === 'client_stop') {
+    const ctx = CLIENT_TASKS.get(Number(msg.taskId));
+    if (ctx && ctx.userId === Number(uid) && !ctx.finished) {
+      ctx.taskState.stopRequested = true;
+      taskLog(ctx.taskState, '⏸ 收到本机弹窗的停止请求：当前卖家发完即停');
+      pushClientProgress(uid, ctx);
+    }
     return;
   }
 }
@@ -513,7 +666,12 @@ function onAgentSent(uid, msg) {
   if (s) s._result = msg.ok ? 'ok' : 'fail';
   t.done++;
   t.current = null;
-  db.exec('UPDATE agent_task SET done=?, ok=?, fail=? WHERE id=?', [t.done, t.ok, t.fail, ctx.taskId]).catch(() => {});
+  // 仅当任务仍在 running 时才增量回写：本语句是 fire-and-forget，可能与 finishClientTask 的
+  // 终态写入（status='done'）乱序落库；若终态已写入，本条迟到语句必须失效，否则会用中间值覆盖
+  // 最终 done/ok/fail，导致任务行显示错误计数（曾造成续跑回归测试偶发失败）。
+  db.exec('UPDATE agent_task SET done=?, ok=?, fail=? WHERE id=? AND status=\'running\'',
+    [t.done, t.ok, t.fail, ctx.taskId]).catch(() => {});
+  pushClientProgress(uid, ctx);
   ctx.pending--;
   if (ctx.pending <= 0) finishClientTask(ctx, ctx.stopRequested ? 'aborted' : 'done');
 }
@@ -543,6 +701,7 @@ async function finishClientTask(ctx, status) {
   } else if (t.fail > 0) {
     taskLog(t, `↻ 有 ${t.fail} 家发送失败：可在看板「重试失败项」按原清单重发`);
   }
+  pushClientProgress(ctx.userId, ctx);
   try { ctx.resolve && ctx.resolve(); } catch (e) { /* 忽略 */ }
 }
 
@@ -551,8 +710,8 @@ function maybeAbortClientTask(uid) {
   if (agentHub.isOnline(uid)) return;
   for (const ctx of CLIENT_TASKS.values()) {
     if (ctx.userId === Number(uid) && !ctx.finished) {
-      taskLog(ctx.taskState, '⛔ 本机浏览器通道已断开，任务中断（重新配对连接后可点看板「继续发送未完成」续跑）');
-      ctx.abortReason = '本机浏览器通道断开';
+      taskLog(ctx.taskState, '⛔ 本机助手连接已断开，任务中断（重新启动助手并连上后，可点看板「继续发送未完成」续跑）');
+      ctx.abortReason = '本机助手通道断开';
       finishClientTask(ctx, 'aborted');
     }
   }
@@ -650,7 +809,7 @@ async function resumeLoginIds(userId, taskId, scope) {
 }
 
 /**
- * 组装并下发一次「本机浏览器」发送任务
+ * 组装并下发一次「本机助手」发送任务
  * @param {number} userId
  * @param {string[]} loginIds 要发送的卖家内部 loginId
  * @param {{resumeOf?:number}} [opts] resumeOf=断线续跑时被接续的任务 id（仅用于审计与日志）
@@ -659,7 +818,7 @@ async function doClientSend(userId, loginIds, opts = {}) {
   const resumeOf = Number(opts.resumeOf) || null;
   const taskState = taskFor(userId);
   if (taskState.running) throw new Error('已有任务在运行中');
-  if (!agentHub.isOnline(userId)) throw new Error('本机浏览器通道未连接：请先在本机浏览器安装扩展并完成配对');
+  if (!agentHub.isOnline(userId)) throw new Error('本机助手未连接：请先在本机启动「1688 催收助手」桌面程序并完成绑定（看板顶部「本机助手」有下载与绑定入口）');
 
   const config = loadConfig();
   const rt = config.runtime || {};
@@ -707,10 +866,10 @@ async function doClientSend(userId, loginIds, opts = {}) {
   });
   taskLog(taskState, resumeOf
     ? `↻ 断线续跑：接续任务 #${resumeOf}，补发剩余 ${sellers.length} 家（新任务 #${taskId}）`
-    : `▶ 通过「本机浏览器」发送催收消息：共 ${sellers.length} 家（任务 #${taskId}）`);
-  taskLog(taskState, '· 发送在您本机浏览器执行，服务器只下发任务并记录结果');
+    : `▶ 通过「本机助手」发送催收消息：共 ${sellers.length} 家（任务 #${taskId}）`);
+  taskLog(taskState, '· 发送在您本机的助手窗口里执行，服务器只下发任务并记录结果');
   if (!agentHub.status(userId).loggedIn) {
-    taskLog(taskState, '⚠ 本机浏览器尚未登录 1688：若发送失败，请在该浏览器登录 1688 后重试');
+    taskLog(taskState, '⚠ 本机助手尚未登录 1688：若发送失败，请在助手里登录 1688 后重试');
   }
 
   await new Promise((resolve) => {
@@ -718,12 +877,13 @@ async function doClientSend(userId, loginIds, opts = {}) {
       taskId, userId: Number(userId), sellers, taskState, pending: sellers.length,
       stopRequested: false, finished: false, abortReason: null, resolve,
       timer: setTimeout(() => {
-        taskLog(taskState, '⏱ 任务超时（长时间未收到本机浏览器回执），已结束');
+        taskLog(taskState, '⏱ 任务超时（长时间未收到本机助手回执），已结束');
         ctx.abortReason = '等待本机回执超时';
         finishClientTask(ctx, 'failed');
       }, estimateClientTimeout(sellers.length, gapMax)),
     };
     CLIENT_TASKS.set(taskId, ctx);
+    pushClientProgress(userId, ctx);
     const ok = agentHub.send(userId, {
       type: 'send_batch',
       taskId,
@@ -734,111 +894,10 @@ async function doClientSend(userId, loginIds, opts = {}) {
     });
     if (!ok) {
       ctx.abortReason = '下发时通道已断开';
-      taskLog(taskState, '✗ 下发失败：本机浏览器通道已断开');
+      taskLog(taskState, '✗ 下发失败：本机助手通道已断开');
       finishClientTask(ctx, 'failed');
     }
   });
-}
-
-// ─────────────────────────────────────────────────────────────────────────
-// 发送催收消息（后台任务，进度写入该用户的 taskState）
-// ─────────────────────────────────────────────────────────────────────────
-async function doSend(userId, loginIds) {
-  const taskState = taskFor(userId);
-  if (taskState.running) throw new Error('已有任务在运行中');
-  const config = loadConfig();
-  const rt = config.runtime || {};
-  const gapMin = (rt.sendGapMinSec || 15) * 1000;
-  const gapMax = (rt.sendGapMaxSec || 30) * 1000;
-  const data = await loadSellers(userId);
-  const buyer = await buyerInfoOf(userId);
-  const statePath = tenancy.statePathFor(userId);
-  const runConfig = { ...config, buyerInfo: buyer }; // 话术里的抬头取该用户账号资料
-  // 登录态：优先数据库（login_state），库为空时回退历史文件
-  const dbState = await stateStore.loadState(userId);
-
-  Object.assign(taskState, {
-    running: true, channel: 'server', type: 'send', total: loginIds.length, done: 0, ok: 0, fail: 0,
-    current: null, stopRequested: false, startedAt: new Date().toISOString(), finishedAt: null, logs: [],
-  });
-  taskLog(taskState, `▶ 开始发送催收消息：共 ${loginIds.length} 家（启动独立浏览器）`);
-  if (!dbState && !fs.existsSync(statePath)) {
-    taskLog(taskState, '⚠ 未找到 1688 登录态：请点右上角「登录 1688」，在你自己电脑的浏览器登录后，用扩展把登录态上传给服务器');
-  } else if (dbState) {
-    taskLog(taskState, `✓ 已从账号（数据库）取到 1688 登录态：${dbState.cookies.length} 个 cookie`);
-  }
-
-  let browser = null;
-  let loginLost = false;
-  try {
-    // storageState 对象优先（来自数据库）；没取到则 launch 自己回退到 statePath 文件
-    const launched = await launch({ statePath, storageState: dbState || undefined });
-    browser = launched.browser;
-    const context = launched.context;
-    taskLog(taskState, '✓ 浏览器已启动');
-
-    for (const loginId of loginIds) {
-      if (taskState.stopRequested) { taskLog(taskState, '⏹ 已手动停止'); break; }
-      const seller = data.find((s) => s.loginId === loginId);
-      if (!seller) { taskState.done++; taskState.fail++; taskLog(taskState, `✗ 卖家不存在: ${loginId}`); continue; }
-      if (!seller.sellerLogin) { taskState.done++; taskState.fail++; taskLog(taskState, `✗ ${seller.company} 缺少卖家会员名，无法发送`); continue; }
-      taskState.current = seller.company;
-      const detail = await loadSellerDetail(userId, loginId);
-      const toRemind = detail.orders.filter((o) => o.invoice_state !== 'issued');
-      const msgSeller = {
-        loginId: seller.sellerLogin,
-        amount: Number(seller.pendingAmount),
-        orders: toRemind.map((o) => ({ orderId: o.order_no, amount: Number(o.pay_amount).toFixed(2) })),
-      };
-      if (msgSeller.orders.length === 0) { taskState.done++; taskLog(taskState, `- ${seller.company} 无可催收订单，跳过`); continue; }
-      const messages = buildMessages(msgSeller, runConfig);
-      const collectAmount = Number(seller.pendingAmount) || 0;
-      const collectOrderNos = msgSeller.orders.map((o) => o.orderId).join('；');
-      const tSell = Date.now();
-      try {
-        await sendToSeller(context, msgSeller, messages);
-        await recordSent(userId, seller.sellerLogin, seller.company, 'ok', 'web', collectAmount, collectOrderNos);
-        taskState.ok++;
-        taskLog(taskState, `✓ ${seller.company} 发送成功 (${messages.length}条消息, ${Math.round((Date.now() - tSell) / 1000)}s) · 催收次数 +1`);
-      } catch (e) {
-        if (/登录态失效/.test(e.message)) {
-          taskLog(taskState, `⛔ ${e.message}`);
-          taskLog(taskState, `■ 批量发送已中止（已完成 ${taskState.ok} 家）：请在你自己电脑的浏览器重新登录 1688，再用扩展上传登录态后重试`);
-          loginLost = true;
-          break;
-        }
-        await recordSent(userId, seller.sellerLogin, seller.company, 'fail', 'web', collectAmount, collectOrderNos, e.message);
-        taskState.fail++;
-        taskLog(taskState, `✗ ${seller.company} 失败: ${e.message.split('\n')[0]} · 已记录失败尝试与原因（不计入催收次数）`);
-      }
-      taskState.done++;
-      if (!loginLost && loginIds.indexOf(loginId) < loginIds.length - 1 && !taskState.stopRequested) {
-        const gap = gapMin + Math.random() * (gapMax - gapMin);
-        taskLog(taskState, `… 等待 ${Math.round(gap / 1000)}s 后发下一家`);
-        const tEnd = Date.now() + gap;
-        while (Date.now() < tEnd && !taskState.stopRequested) {
-          await sleep(Math.min(500, tEnd - Date.now()));
-        }
-      }
-    }
-  } catch (e) {
-    taskLog(taskState, `✗ 任务异常: ${e.message.split('\n')[0]}`);
-  } finally {
-    if (browser) await browser.close().catch(() => {});
-  }
-  taskState.running = false;
-  taskState.current = null;
-  taskState.finishedAt = new Date().toISOString();
-  // 登录态维护：这次确实发出去过 → 记「最近使用」并自愈为有效；被跳登录页 → 标记失效
-  if (loginLost) {
-    await stateStore.markExpired(userId);
-    taskLog(taskState, '登录态已标记为「失效」，重新上传后即可继续发送');
-  } else if (taskState.ok > 0) {
-    await stateStore.touch(userId);
-  }
-  taskLog(taskState, loginLost
-    ? `■ 发送中止: 成功 ${taskState.ok}, 失败 ${taskState.fail}, 已处理 ${taskState.done}/${taskState.total}（登录态失效）`
-    : `■ 发送完成: 成功 ${taskState.ok}, 失败 ${taskState.fail}, 共 ${taskState.done}/${taskState.total}`);
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -1176,58 +1235,6 @@ async function deleteUser({ id, username, purge }, byUser) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// 1688 登录态（入库）：状态查询 + 扩展上传的一次性令牌
-//   服务器不再承载登录画面（无投屏登录）：登录在用户本机浏览器完成，
-//   扩展凭一次性上传码把 storageState 交给服务器，加密后写入 login_state。
-// ─────────────────────────────────────────────────────────────────────────
-const UPLOAD_TTL_MS = 10 * 60 * 1000; // 上传码有效期 10 分钟
-const UPLOAD_TOKEN_MAX = 5;           // 每个用户同时最多保留几个未用上传码
-const uploadTokens = new Map();       // token -> { uid, expireAt }
-
-function sweepUploadTokens() {
-  const now = Date.now();
-  for (const [k, v] of uploadTokens) if (v.expireAt <= now) uploadTokens.delete(k);
-}
-
-/** 为某用户生成一次性上传码（同用户旧码全部作废，避免堆积） */
-function createUploadToken(uid) {
-  const id = Number(uid);
-  sweepUploadTokens();
-  const mine = [...uploadTokens.entries()].filter(([, v]) => v.uid === id);
-  for (const [k] of mine) uploadTokens.delete(k);
-  const token = String(crypto.randomInt(0, 1000000)).padStart(6, '0');
-  const expireAt = Date.now() + UPLOAD_TTL_MS;
-  uploadTokens.set(token, { uid: id, expireAt });
-  return { code: token, ttlSec: Math.round(UPLOAD_TTL_MS / 1000), expiresAt: new Date(expireAt).toISOString() };
-}
-
-/** 校验上传码 → 返回 uid 或 null（校验成功即作废，一次性） */
-function redeemUploadToken(token) {
-  sweepUploadTokens();
-  const key = String(token || '').trim();
-  if (!key) return null;
-  const hit = uploadTokens.get(key);
-  if (!hit) return null;
-  uploadTokens.delete(key);
-  return hit.uid;
-}
-
-/** 该用户的登录态状态（读库，不含密文） */
-async function stateStatus(userId) {
-  const meta = await stateStore.getMeta(userId);
-  return {
-    hasState: meta.hasState,
-    usable: !!(meta.hasState && meta.status === 'active'),
-    status: meta.status,
-    source: meta.source,
-    savedAt: meta.savedAt,
-    lastUsedAt: meta.lastUsedAt,
-    cookieCount: meta.cookieCount,
-    originCount: meta.originCount,
-  };
-}
-
-// ─────────────────────────────────────────────────────────────────────────
 // HTTP 服务器
 // ─────────────────────────────────────────────────────────────────────────
 const server = http.createServer(async (req, res) => {
@@ -1238,6 +1245,14 @@ const server = http.createServer(async (req, res) => {
   try {
     // ── 静态页 / 页面路由 ──
     if (method === 'GET' && (p === '/login' || p === '/login.html')) return sendHtml(res, 'login.html');
+    // 公开下载落地页（无需登录，供用户获取本机发送扩展）
+    if (method === 'GET' && (p === '/download' || p === '/download.html')) return sendHtml(res, 'download.html');
+    // 书签工具落地页（登录可用，零安装方案；未登录跳转登录页）
+    if (method === 'GET' && (p === '/bookmarklet' || p === '/bookmarklet.html')) {
+      const bu = await currentUser(req);
+      if (!bu) return redirect(res, '/login');
+      return sendHtml(res, 'bookmarklet.html');
+    }
     if (method === 'GET' && p === '/healthz') return sendJson(res, 200, { ok: true, ts: new Date().toISOString() });
     if (method === 'GET' && (p === '/' || p === '/index.html')) {
       const u = await currentUser(req);
@@ -1269,12 +1284,7 @@ const server = http.createServer(async (req, res) => {
     if (method === 'GET' && p === '/api/auth/me') {
       const u = await currentUser(req);
       if (!u) return sendJson(res, 401, { error: '未登录' });
-      const st = await stateStatus(u.id);
-      return sendJson(res, 200, {
-        user: publicUser(u),
-        needLogin1688: !st.usable,
-        login1688: st,
-      });
+      return sendJson(res, 200, { user: publicUser(u) });
     }
 
     if (method === 'POST' && p === '/api/auth/password') {
@@ -1292,35 +1302,124 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { ok: true });
     }
 
-    // ── 扩展上传登录态（公开：凭一次性上传码鉴权，不需要看板会话 Cookie）──
-    // 注意：必须放在「以下接口都需要登录」之前——扩展侧没有登录 Cookie，只有上传码。
-    if (method === 'OPTIONS' && p === '/api/state/upload') {
-      res.writeHead(204, {
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'POST, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type',
-        'Access-Control-Max-Age': '600',
-      });
-      return res.end();
-    }
-    if (method === 'POST' && p === '/api/state/upload') {
+    // ── 本机助手：公开端点（无需登录，供扩展首次拉取全局服务器地址）──
+    if (method === 'GET' && p === '/api/agent/channel-info') {
       res.setHeader('Access-Control-Allow-Origin', '*');
-      const body = await readBody(req);
-      const state = body.state || ((body.cookies || body.origins) ? body : null);
-      // 先做形状校验：空登录态直接拒绝，不消耗上传码（避免用户白跑一趟、白生成一次码）
-      const sum = stateStore.summarize(state);
-      if (!sum.cookieCount && !sum.originCount) {
-        return sendJson(res, 400, { error: '登录态为空（没有 cookie 也没有 localStorage），拒绝保存' });
+      const cfg = loadConfig();
+      const ins = findAgentInstaller();
+      return sendJson(res, 200, {
+        serverUrl: (cfg.server_url || '').trim(),
+        permanentPairing: true,
+        agentDownload: ins
+          ? { available: true, url: '/api/agent/download-exe', fileName: ins.file, sizeBytes: ins.size }
+          : { available: false, url: null, fileName: null, sizeBytes: 0 },
+      });
+    }
+
+    // ── 本机助手安装包下载（公开；文件来自 dist/，未构建则 404）──
+    if (method === 'GET' && p === '/api/agent/download-exe') {
+      const ins = findAgentInstaller();
+      if (!ins) {
+        return sendJson(res, 404, {
+          error: '安装包尚未构建。请管理员在本机执行 npm run agent:dist 生成，或联系管理员获取「1688催收助手」安装包。',
+          hint: 'electron-builder 产物输出到 dist/ 目录（nsis 安装版优先）。',
+        });
       }
-      const uid = redeemUploadToken(body.token || body.code);
-      if (!uid) return sendJson(res, 401, { error: '上传码无效或已过期，请在看板重新生成' });
       try {
-        const r = await stateStore.saveState(uid, state, { source: 'extension' });
-        console.log(`[state] 用户 #${uid} 上传了 1688 登录态（${r.cookieCount} cookie / ${r.originCount} 源）`);
-        return sendJson(res, 200, Object.assign({ ok: true }, r));
+        const full = path.join(ROOT, 'dist', ins.file);
+        const stat = fs.statSync(full);
+        res.writeHead(200, {
+          'content-type': 'application/octet-stream',
+          'content-length': stat.size,
+          'content-disposition': `attachment; filename="${encodeURIComponent(ins.file)}"`,
+          'cache-control': 'no-store',
+        });
+        return fs.createReadStream(full).pipe(res);
       } catch (e) {
-        return sendJson(res, 400, { error: e.message });
+        return sendJson(res, 500, { error: '读取安装包失败：' + e.message });
       }
+    }
+
+    // ── 本机助手：用一次性绑定令牌换取长期设备令牌（**公开端点**：助手没有看板 Cookie）──
+    //    · 带 bindToken → 校验令牌（绝不回退 Cookie，否则伪造/重放令牌会被静默降级成自签）
+    //    · 不带 bindToken 但已登录 → 看板自签（用于签发「书签令牌」）
+    if (method === 'POST' && p === '/api/agent/bind') {
+      const body = await readBody(req);
+      const rawBind = String(body.bindToken || '').trim();
+      const me = await currentUser(req);
+      let uid = null;
+      if (rawBind) {
+        uid = redeemBindToken(rawBind);
+        if (!uid) return sendJson(res, 401, { error: '绑定令牌无效或已过期；请在网站上重新点击「绑定本机助手」' });
+      } else {
+        if (!me) return sendJson(res, 401, { error: '缺少绑定令牌且未登录' });
+        uid = me.id;
+      }
+      const kind = body.kind === 'bookmarklet' ? 'bookmarklet' : 'agent';
+      if (kind === 'bookmarklet' && !me) return sendJson(res, 401, { error: '书签令牌需在登录状态下签发' });
+      const { id, token } = await createDevice(uid, {
+        deviceName: body.deviceName, os: body.os, agentVer: body.agentVer,
+        kind, ip: clientIp(req),
+      });
+      return sendJson(res, 200, {
+        ok: true, deviceId: id, deviceToken: token,
+        serverUrl: serverUrlOf(req), userId: Number(uid), kind,
+        note: '设备令牌仅此一次返回，请妥善保存在本机（助手会自动保存）。',
+      });
+    }
+
+    // ── 已废弃（2026-10-14）：浏览器扩展包下载下线，统一迁移到桌面助手 ──
+    if (method === 'GET' && p === '/api/agent/extension-download') {
+      return sendJson(res, 410, {
+        error: '浏览器扩展已下线，请到下载页获取「1688 催收助手」桌面程序',
+        migrateTo: '/download',
+      });
+    }
+
+    // ── 书签工具（零安装方案）：跨域 CORS（1688 页面内的书签会跨域调用本站）──
+    function allowBmCors(req, res) {
+      const origin = (req.headers.origin || '').trim();
+      const svr = ((loadConfig().server_url || '').trim());
+      const is1688 = /(^|\.)1688\.com$/i.test(origin);
+      const allow = (is1688 || (svr && origin === svr)) ? origin : (svr || `http://${req.headers.host || 'localhost'}`);
+      res.setHeader('Access-Control-Allow-Origin', allow);
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+      res.setHeader('Access-Control-Max-Age', '600');
+      res.setHeader('Vary', 'Origin');
+    }
+    // 书签工具：CORS 预检
+    if (method === 'OPTIONS' && p.startsWith('/api/agent/bm/')) {
+      allowBmCors(req, res);
+      return res.writeHead(204).end();
+    }
+    // 书签工具：按卖家登录名拉取待发催收消息（公开，用 code=设备令牌 解析用户，凭据不出本机）
+    if (method === 'GET' && p === '/api/agent/bm/task') {
+      allowBmCors(req, res);
+      const code = (url.searchParams.get('code') || '').trim();
+      const rawLogin = (url.searchParams.get('login') || '').trim();
+      if (!code || !rawLogin) return sendJson(res, 400, { error: '缺少参数' });
+      const uid = await agentHub.resolveUserByCode(code);
+      if (!uid) return sendJson(res, 401, { error: '设备令牌无效或已撤销（不再接受税号；请在看板「本机助手 → 书签令牌」重新签发）' });
+      return sendJson(res, 200, await bmComputeTask(uid, rawLogin));
+    }
+    // 书签工具：回报发送结果（公开，用 code=设备令牌 解析用户）
+    if (method === 'POST' && p === '/api/agent/bm/result') {
+      allowBmCors(req, res);
+      const body = await readBody(req);
+      const code = (body.code || '').trim();
+      const login = (body.login || '').trim();
+      if (!code) return sendJson(res, 400, { error: '缺少 code' });
+      const uid = await agentHub.resolveUserByCode(code);
+      if (!uid) return sendJson(res, 401, { error: '设备令牌无效或已撤销' });
+      if (body.nothing) return sendJson(res, 200, { ok: true, skipped: true });
+      const ok = !!body.ok;
+      await recordSent(
+        uid, login, body.company || '', ok ? 'ok' : 'fail', 'bookmarklet',
+        body.amount == null ? null : Number(body.amount), body.orderNos || null,
+        ok ? null : (String(body.error || '').split('\n')[0].slice(0, 250))
+      );
+      return sendJson(res, 200, { ok: true });
     }
 
     // ── 以下接口都需要登录 ──
@@ -1329,6 +1428,15 @@ const server = http.createServer(async (req, res) => {
     const tenantId = tenantOf(req, url, user);
     const isAdmin = user.role === 'admin';
     const writeGuard = () => assertWritable(user, tenantId);
+
+    // ── 已废弃（2026-10-14）：浏览器扩展通道下线，统一迁移到「1688 催收助手」桌面程序 ──
+    if (method === 'GET' && p === '/api/agent/my-extension-download') {
+      return sendJson(res, 410, {
+        error: '浏览器扩展通道已下线，请改用「1688 催收助手」桌面程序',
+        migrateTo: '/download',
+        note: '桌面助手自带浏览器、无需再装扩展，且用设备令牌连接、更安全。',
+      });
+    }
 
     // 看板数据
     if (method === 'GET' && p === '/api/data') {
@@ -1378,7 +1486,7 @@ const server = http.createServer(async (req, res) => {
     if (method === 'GET' && p === '/api/config') {
       const config = loadConfig();
       const { DEFAULT_MESSAGES } = require('./lib/sender');
-      const safe = { runtime: config.runtime || {}, messages: config.messages || {} };
+      const safe = { runtime: config.runtime || {}, messages: config.messages || {}, serverUrl: (config.server_url || '').trim() };
       return sendJson(res, 200, {
         config: { ...safe, buyerInfo: await buyerInfoOf(user.id) },
         defaultMessages: DEFAULT_MESSAGES,
@@ -1394,6 +1502,8 @@ const server = http.createServer(async (req, res) => {
       const merged = { ...old };
       merged.runtime = { ...(old.runtime || {}), ...(config.runtime || {}) };
       merged.messages = { ...(old.messages || {}), ...(config.messages || {}) };
+      // 全局通道服务器地址：所有用户的本机扩展共用，可由系统管理统一维护
+      if (config.server_url !== undefined) merged.server_url = String(config.server_url || '').trim();
       fs.writeFileSync(filePath, JSON.stringify(merged, null, 2), 'utf-8');
       // 兼容旧调用：允许随配置一起提交本人抬头。看板已不再走这条路
       // （抬头属于用户信息，统一在「系统管理 → 用户管理」里按账号维护）
@@ -1452,23 +1562,61 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { ok: true });
     }
 
-    // ── 本机浏览器通道（方案C）：始终作用于「当前登录者本人」的本机浏览器 ──
+    // ── 本机助手通道（方案C）：始终作用于「当前登录者本人」的本机助手 ──
     if (method === 'GET' && p === '/api/agent/status') {
       return sendJson(res, 200, { ...agentHub.status(user.id), userId: user.id });
     }
     if (method === 'POST' && p === '/api/agent/pair-code') {
       if (Number(tenantId) !== Number(user.id)) throw Object.assign(new Error('查看他人数据为只读模式，无法操作本机通道'), { code: 403 });
-      const info = agentHub.createPairCode(user.id);
-      const host = req.headers.host || ('localhost:' + (process.env.PORT || 8787));
-      const proto = String((req.headers['x-forwarded-proto'] || 'http')).split(',')[0].trim();
-      return sendJson(res, 200, { ...info, serverUrl: `${proto}://${host}` });
+      // 签发「一次性绑定令牌」：本机助手拿它换取长期设备令牌（之后一律用设备令牌连接）。
+      // 深链形如 xsh://bind?server=<serverUrl>&t=<bindToken>
+      const bindToken = issueBindToken(user.id);
+      const serverUrl = serverUrlOf(req);
+      return sendJson(res, 200, {
+        bindToken,
+        ttlSec: Math.round(BIND_TTL_MS / 1000),
+        serverUrl,
+        deepLink: 'xsh://bind?server=' + encodeURIComponent(serverUrl) + '&t=' + bindToken,
+        taxNo: (user.tax_no || '').trim(), // 仅用于展示（话术里的 {taxNo}），不再作为凭据
+        note: '一次性绑定令牌（2 分钟内有效）。本机助手用它换取长期设备令牌；令牌不再等同于税号，泄露税号无法冒用。',
+      });
+    }
+    // 本机助手用绑定令牌换取长期设备令牌（助手无看板 Cookie，故同时支持 Cookie 自签）
+    // （注：POST /api/agent/bind 在公开区——桌面助手没有看板 Cookie，
+    //   靠「一次性绑定令牌」鉴权；若带登录态也可用于签发书签令牌。）
+    if (method === 'GET' && p === '/api/agent/devices') {
+      const rows = await db.query(
+        'SELECT id, device_name, os, agent_ver, kind, last_ip, last_seen_at, revoked_at, created_at ' +
+        'FROM agent_device WHERE user_id = ? ORDER BY id DESC',
+        [user.id]
+      );
+      return sendJson(res, 200, {
+        devices: rows.map((r) => ({
+          id: Number(r.id), name: r.device_name || '', os: r.os || '', agentVer: r.agent_ver || '',
+          kind: r.kind, lastIp: r.last_ip || '', lastSeenAt: r.last_seen_at, revokedAt: r.revoked_at,
+          createdAt: r.created_at, active: !r.revoked_at,
+        })),
+      });
+    }
+    if (method === 'POST' && p === '/api/agent/devices/revoke') {
+      writeGuard();
+      const body = await readBody(req);
+      const id = Number(body.id);
+      if (!id) return sendJson(res, 400, { error: '缺少设备 id' });
+      const rows = await db.query('SELECT id FROM agent_device WHERE id = ? AND user_id = ?', [id, user.id]);
+      if (!rows[0]) return sendJson(res, 404, { error: '设备不存在' });
+      await db.exec('UPDATE agent_device SET revoked_at = NOW() WHERE id = ?', [id]);
+      // 若当前在线连接正来自被撤销的设备，一并断开（下次连接会因令牌无效被拒）
+      const closed = agentHub.disconnect(user.id, '设备令牌已被撤销');
+      return sendJson(res, 200, { ok: true, closed });
     }
     if (method === 'POST' && p === '/api/agent/disconnect') {
       writeGuard();
+      // 税号配对是永久的，「断开」只关闭当前 WebSocket 连接；下次打开扩展点「连接」即可重连，无需重新配对
       const closed = agentHub.disconnect(user.id, '用户主动断开');
-      const revoked = agentHub.revokePairs(user.id);
-      return sendJson(res, 200, { ok: true, closed, revoked });
+      return sendJson(res, 200, { ok: true, closed });
     }
+    // ── 本机通道：打包扩展供用户下载（服务器地址按全局配置注入，用户只需填税号）──
     if (method === 'GET' && p === '/api/agent/tasks') {
       const rows = await db.query(
         'SELECT id, status, total, done, ok, fail, error, resume_of, items, started_at, finished_at, created_at ' +
@@ -1510,7 +1658,7 @@ const server = http.createServer(async (req, res) => {
         throw new Error(scope === 'failed' ? '该任务没有失败项需要重试' : '该任务没有未完成的卖家');
       }
       if (!agentHub.isOnline(user.id)) {
-        throw new Error('本机浏览器通道未连接：请先在本机浏览器扩展里重新配对连接，再点「续跑」');
+        throw new Error('本机助手未连接：请先在本机启动「1688 催收助手」桌面程序，再点「续跑」');
       }
       doClientSend(tenantId, picked.loginIds, { resumeOf: picked.taskId }).catch((e) => {
         const ts = taskFor(tenantId);
@@ -1523,45 +1671,23 @@ const server = http.createServer(async (req, res) => {
       });
     }
 
-    // 发送催收消息（channel 缺省=server，即服务器浏览器；client=本机浏览器通道）
+    // 发送催收消息（只走「本机助手通道」：发送在用户本机助手执行，服务器不接触登录态）
     if (method === 'POST' && p === '/api/send') {
       writeGuard();
       const body = await readBody(req);
       const { loginIds } = body || {};
-      const channel = body && body.channel === 'client' ? 'client' : 'server';
       if (!Array.isArray(loginIds) || loginIds.length === 0) throw new Error('缺少 loginIds');
       const t = taskFor(tenantId);
       if (t.running) throw new Error('已有任务在运行中');
-      if (channel === 'client') {
-        doClientSend(tenantId, loginIds).catch((e) => {
-          const ts = taskFor(tenantId);
-          ts.running = false;
-          taskLog(ts, '✗ 任务异常: ' + e.message);
-        });
-      } else {
-        doSend(tenantId, loginIds).catch((e) => { t.running = false; taskLog(t, '✗ 任务异常: ' + e.message); });
+      if (!agentHub.isOnline(tenantId)) {
+        throw new Error('本机助手未连接：请先在本机启动「1688 催收助手」桌面程序并完成绑定（看板顶部「本机助手」有下载与绑定入口）。发送只在你本机执行');
       }
-      return sendJson(res, 200, { started: true, channel });
-    }
-
-    // ── 1688 登录态（入库）：状态查询 / 生成上传码 / 清除（需登录，按 tenant 隔离）──
-    // 说明：扩展上传接口 /api/state/upload 在登录闸门之前（凭上传码鉴权），见上方。
-    if (method === 'GET' && p === '/api/state/status') {
-      return sendJson(res, 200, await stateStatus(tenantId));
-    }
-    if (method === 'POST' && p === '/api/state/upload-token') {
-      writeGuard();
-      const t = createUploadToken(tenantId);
-      // 反代后面用 x-forwarded-proto，直连则看连接是否 TLS
-      const proto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim()
-        || ((req.socket && req.socket.encrypted) ? 'https' : 'http');
-      const serverUrl = proto + '://' + (req.headers.host || ('localhost:' + PORT));
-      return sendJson(res, 200, Object.assign({ ok: true, serverUrl }, t));
-    }
-    if (method === 'POST' && p === '/api/state/clear') {
-      writeGuard();
-      await stateStore.clearState(tenantId);
-      return sendJson(res, 200, { ok: true });
+      doClientSend(tenantId, loginIds).catch((e) => {
+        const ts = taskFor(tenantId);
+        ts.running = false;
+        taskLog(ts, '✗ 任务异常: ' + e.message);
+      });
+      return sendJson(res, 200, { started: true, channel: 'client' });
     }
 
     // ── 系统管理（仅超级管理员） ──
@@ -1624,7 +1750,7 @@ const server = http.createServer(async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────
 const wsAgent = new WebSocketServer({ noServer: true });
 
-// 本机浏览器通道：扩展用配对码鉴权（扩展侧没有看板登录 Cookie）
+// 本机通道：桌面助手/书签用「设备令牌」鉴权（本机侧没有看板登录 Cookie）
 wsAgent.on('connection', (ws) => {
   const uid = ws._agentUid;
   let bound = false;
@@ -1634,11 +1760,11 @@ wsAgent.on('connection', (ws) => {
     agentHub.attach(uid, ws, {
       loggedIn: !!(hello && hello.loggedIn),
       ua: (hello && hello.ua) || '',
-      extVer: (hello && hello.extVer) || '',
-      platform: (hello && hello.platform) || '',
+      agentVer: (hello && hello.agentVer) || '',
+      os: (hello && hello.os) || (hello && hello.platform) || '',
     });
     try { ws.send(JSON.stringify({ type: 'ready', uid, serverTime: Date.now() })); } catch (e) { /* 忽略 */ }
-    console.log(`[agent] uid=${uid} 已配对本机浏览器${hello && hello.extVer ? ' (扩展 v' + hello.extVer + ')' : ''}`);
+    console.log(`[agent] uid=${uid} 本机助手已连接${hello && hello.agentVer ? ' (v' + hello.agentVer + ')' : ''}`);
   };
   const helloTimer = setTimeout(() => { if (!bound) { try { ws.close(4003, 'hello timeout'); } catch (e) { /* 忽略 */ } } }, 15000);
   ws.on('message', (raw) => {
@@ -1660,7 +1786,10 @@ server.on('upgrade', async (req, socket, head) => {
   try { url = new URL(req.url, `http://${req.headers.host || 'localhost'}`); } catch (e) { socket.destroy(); return; }
 
   if (url.pathname === '/ws/agent') {
-    const uid = agentHub.redeem(url.searchParams.get('code'));
+    // 凭据 = 设备令牌（?device=<token>）。为兼容旧版助手，也接受 ?code=<token>，
+    // 但两者语义相同：都必须是设备令牌，**税号不再被接受**。
+    const cred = url.searchParams.get('device') || url.searchParams.get('code');
+    const uid = await agentHub.redeem(cred);
     if (!uid) {
       socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
       socket.destroy();
@@ -1690,11 +1819,6 @@ server.listen(PORT, async () => {
       const notes = tenancy.migrateLegacyData(admin.id);
       for (const n of notes) console.log('  [迁移] ' + n);
     }
-    // 登录态加密密钥自检（未用环境变量时给出告警，不阻断启动）
-    for (const n of stateStore.startupNotices()) console.log('  [提示] ' + n);
-    // 历史登录态文件 → 数据库（幂等：库里已有则跳过，原文件保留）
-    const snotes = await stateStore.migrateFromFiles();
-    for (const n of snotes) console.log('  [迁移] ' + n);
     const v = await db.ping();
     console.log(`✓ 数据库连接正常 (MySQL ${v})`);
     const [{ n: userCount }] = await db.query('SELECT COUNT(*) AS n FROM app_user');

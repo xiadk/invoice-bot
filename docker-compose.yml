@@ -1,0 +1,64 @@
+# ============================================================================
+# invoice-bot 云端部署（应用 + MariaDB 一体）
+#
+# 快速开始：
+#   docker compose up -d          # 首次启动自动建库建表、种子化 admin/admin
+#   docker compose logs -f app    # 看启动日志
+#   浏览器打开 http://<服务器IP>:8080/login  （admin / admin，登录后立即改密）
+#
+# 可用环境变量（也可写在同目录 .env 文件里，compose 自动读取）：
+#   APP_PORT            宿主端口，默认 8080（容器内固定 8787）
+#   MYSQL_ROOT_PASSWORD 数据库 root 密码，默认 invoice123（上云必须改！）
+#   MYSQL_DATABASE      数据库名，默认 invoice_bot
+#   TZ                  时区，默认 Asia/Shanghai
+#   SESSION_SECRET      会话签名密钥；不设则自动生成并持久化在数据卷
+#                       （多副本/K8s 场景必须显式设置同一值）
+#
+# 数据卷：db-data（数据库）、app-data（/app/data：用户上传的 xlsx、config.json、
+#         平台状态快照、.session-secret）。删除卷 = 清空所有数据，慎用 down -v。
+# ============================================================================
+
+services:
+  db:
+    image: mariadb:11.4
+    environment:
+      MARIADB_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-invoice123}
+      MARIADB_DATABASE: ${MYSQL_DATABASE:-invoice_bot}
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - db-data:/var/lib/mysql
+    # 只绑本地回环，方便本机排错；不要暴露到公网
+    ports:
+      - "127.0.0.1:${DB_PORT:-3307}:3306"
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  app:
+    build: .
+    environment:
+      # 数据库：走 compose 内部网络，连 db 服务（凭据与上面 MARIADB_* 一致）
+      MYSQL_HOST: db
+      MYSQL_PORT: "3306"
+      MYSQL_USER: root
+      MYSQL_PASSWORD: ${MYSQL_ROOT_PASSWORD:-invoice123}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-invoice_bot}
+      # 会话密钥：不设则用数据卷里的 .session-secret（重建容器不失效）
+      SESSION_SECRET: ${SESSION_SECRET:-}
+      TZ: ${TZ:-Asia/Shanghai}
+      PORT: "8787"
+    ports:
+      - "${APP_PORT:-8080}:8787"
+    volumes:
+      - app-data:/app/data
+    depends_on:
+      db:
+        condition: service_healthy   # 库就绪后才启动应用（entrypoint 里还有一道等待）
+    restart: unless-stopped
+
+volumes:
+  db-data:
+  app-data:

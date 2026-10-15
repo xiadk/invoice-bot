@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>1688 催收助手</title>
+<style>
+  :root { --brand:#2563eb; --brand-d:#1d4ed8; --ok:#16a34a; --warn:#d97706; --err:#dc2626;
+          --bg:#f5f7fb; --card:#fff; --line:#e5e9f2; --ink:#1f2937; --mut:#6b7280; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+         background:var(--bg); color:var(--ink); }
+  .wrap { padding:18px 18px 24px; }
+  h1 { font-size:17px; margin:0 0 4px; display:flex; align-items:center; gap:8px; }
+  .ver { font-size:11px; color:var(--mut); font-weight:400; }
+  .sub { color:var(--mut); font-size:12px; margin:0 0 14px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:12px 14px; margin-bottom:12px; }
+  .row { display:flex; justify-content:space-between; align-items:center; gap:10px; padding:5px 0; }
+  .row + .row { border-top:1px dashed var(--line); }
+  .k { color:var(--mut); font-size:12px; }
+  .v { font-weight:600; text-align:right; word-break:break-all; }
+  .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px; vertical-align:1px; }
+  .g { background:var(--ok); } .y { background:var(--warn); } .r { background:var(--err); } .n { background:#9ca3af; }
+  button { font:inherit; border:1px solid var(--line); background:#fff; color:var(--ink);
+           border-radius:8px; padding:8px 12px; cursor:pointer; }
+  button:hover { border-color:#cbd5e1; background:#f8fafc; }
+  button.primary { background:var(--brand); border-color:var(--brand); color:#fff; }
+  button.primary:hover { background:var(--brand-d); }
+  button.danger { color:var(--err); border-color:#fecaca; }
+  .btns { display:flex; flex-wrap:wrap; gap:8px; }
+  .tip { font-size:12px; color:var(--mut); background:#fff; border:1px dashed var(--line);
+         border-radius:8px; padding:10px 12px; }
+  .mono { font-family:ui-monospace,Consolas,monospace; font-size:11px; color:var(--mut); word-break:break-all; }
+  .hide { display:none; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>1688 催收助手 <span class="ver" id="ver"></span></h1>
+  <p class="sub">在本机浏览器里帮你逐条发送催收消息。服务器只下发任务、记录结果。</p>
+
+  <div class="card">
+    <div class="row"><span class="k">连接状态</span><span class="v" id="conn"><i class="dot n"></i>检测中…</span></div>
+    <div class="row"><span class="k">1688 登录</span><span class="v" id="login"><i class="dot n"></i>未知</span></div>
+    <div class="row"><span class="k">服务器</span><span class="v mono" id="server">—</span></div>
+    <div class="row"><span class="k">本机设备</span><span class="v" id="device">—</span></div>
+  </div>
+
+  <div class="card" id="taskCard">
+    <div class="row"><span class="k">发送状态</span><span class="v" id="taskState">空闲</span></div>
+    <div class="btns" style="margin-top:10px">
+      <button class="primary" id="btnLogin">打开 1688 登录窗口</button>
+      <button class="danger hide" id="btnStop">停止发送</button>
+    </div>
+  </div>
+
+  <div class="card" id="unboundCard" style="display:none">
+    <div class="tip">
+      尚未绑定账号。请到网站看板点「<b>绑定本机助手</b>」——浏览器会弹窗询问是否打开本助手，点「打开」即可自动完成绑定。
+    </div>
+  </div>
+
+  <div class="btns">
+    <button id="btnData">打开数据目录</button>
+    <button class="danger" id="btnUnbind">解绑</button>
+    <button id="btnQuit">退出程序</button>
+  </div>
+
+  <p class="tip" style="margin-top:12px">
+    隐私说明：本程序<b>不读取、不上传</b>你的 1688 账号密码与 Cookie；登录态只保存在本机；
+    除连接你自己的服务器外不发起任何网络请求。
+  </p>
+</div>
+
+<script>
+const S = { connected:false, ready:false, sending:false, loggedIn:false };
+function dot(cls){ return '<i class="dot ' + cls + '"></i>'; }
+function render(s){
+  Object.assign(S, s || {});
+  document.getElementById('ver').textContent = S.version ? 'v' + S.version : '';
+  const conn = document.getElementById('conn');
+  if (!S.bound) conn.innerHTML = dot('n') + '未绑定';
+  else if (S.ready) conn.innerHTML = dot('g') + '已连接';
+  else if (S.connected) conn.innerHTML = dot('y') + '握手中…';
+  else conn.innerHTML = dot('r') + '未连接（重连中）';
+  document.getElementById('login').innerHTML = S.loggedIn ? (dot('g') + '已登录') : (dot('y') + '未登录（发送前请先登录）');
+  document.getElementById('server').textContent = S.serverUrl || '—';
+  document.getElementById('device').textContent = S.deviceName || '—';
+  document.getElementById('unboundCard').style.display = S.bound ? 'none' : 'block';
+  const st = document.getElementById('taskState');
+  if (S.sending) {
+    const t = S.sendState || {};
+    st.textContent = '发送中 ' + (t.done||0) + '/' + (t.total||0) + (t.current ? ' · 当前 ' + t.current : '');
+  } else st.textContent = '空闲';
+  document.getElementById('btnStop').classList.toggle('hide', !S.sending);
+}
+document.getElementById('btnLogin').onclick = () => window.xsh.openLoginWindow();
+document.getElementById('btnStop').onclick = () => window.xsh.stopTask();
+document.getElementById('btnData').onclick = () => window.xsh.openDataDir();
+document.getElementById('btnQuit').onclick = () => window.xsh.quit();
+document.getElementById('btnUnbind').onclick = async () => {
+  if (!confirm('解绑后本机将断开与服务器的连接，需要重新到网站绑定。确定解绑？')) return;
+  await window.xsh.unbind();
+};
+window.xsh.onState(render);
+window.xsh.getState().then(render);
+</script>
+</body>
+</html>
