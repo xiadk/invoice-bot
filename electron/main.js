@@ -69,6 +69,7 @@ function showStatusWin() {
   statusWin = new BrowserWindow({
     width: 460, height: 620, resizable: false, title: '1688 催收助手',
     autoHideMenuBar: true,
+    backgroundColor: '#f5f6f8', // 立即绘制底色，避免启动/加载时闪白
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       nodeIntegration: false, contextIsolation: true, sandbox: false,
@@ -114,13 +115,33 @@ function refreshTray() {
   } catch (e) { /* 图标缺失时忽略 */ }
 }
 
-/** 用 canvas 生成纯色小圆点图标，避免依赖图片资源 */
+/**
+ * 托盘图标：必须是位图（PNG）。此前用 SVG data URL —— nativeImage 不支持 SVG，
+ * createFromDataURL 返回空图像，托盘显示为一块白板（用户截图证实）。
+ * 这里内嵌代码生成的 PNG（绿色=已连接，灰色=未连接），16x16 + 32x32 两档适配高分屏。
+ */
+const TRAY_PNG = {
+  green: {
+    1: 'iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAaklEQVR42mPQqzViwIPZoBinGmyCGnq1RpP1ao3u6dUa/Yfie1AxDUIG5CNpwoXzcRlAjGYMQ5Cd/Z9ErIFswGQyDJiMbMA9Mgy4BzOAjQzNMMxGFQMo9gJVApHiaKQ4IVElKVMlM5GcnQFArXj0EvkRGAAAAABJRU5ErkJggg==',
+    2: 'iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAA20lEQVR42s2X3Q2FIAyF7QoMwgNLOAMzOEOXYStmYAe4mpSEEH+uILQPJyZGOJ9QSrtoNAunegaDRqNIMAPgMLEajdufXqOJGk0iRXrn6Bv4EuCYDDWaUBg+KdAY6AVY6c9SozzN0QSwdRjX2t4CfGl+C3G17GmQ1icA6Nzzf2IC7gBwoHkWXgHAy6PWqlCuQglgJ5hn2TMANxHAnQH4iQC+BoAqt49WzHGQAdRE8ywlCoB9C9iDUMQxZE9E7KmY/TIScR2zFyQiSjIRRamIslxEYyKiNRPTnA7RD2cV4Nw28vr+AAAAAElFTkSuQmCC',
+  },
+  grey: {
+    1: 'iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAbElEQVR42mOYtWAZAx7MBsU41WAT1Ji1YNnkWQuW3Zu1YNl/KL4HFdMgZEA+kiZcOB+XAcRoxjAE2dn/ScQayAZMJsOAycgG3CPDgHswA9jI0AzDbFQxgGIvUCUQKY5GihMSVZIyVTITydkZAPD/fAMdFUBFAAAAAElFTkSuQmCC',
+    2: 'iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAA3ElEQVR42s2X3Q2FIAyF7Qos5QzM4AwswhPhgZ2YgR3Aa1ISQvy5gtA+nJgY4XxCKe2ijVso1TMYtHECBTMADhOpjbO/p9fGRW1cQkV8Z/Eb+BLgmExp40Jh+KSAY6AXYMU/S43yOEcTwNZhXGt7C/Cl+S3E1bKnQVqfAKBzz/+JCbgDUAPNs9QVALw8aq0K5SqUAHKCeZY8A7ATAewZgJ8I4GsAqHL7aMUcBxlATDTPEqwAyLeAPAhZHEPyRESeiskvIxbXMXlBwqIkY1GUsijLWTQmLFozNs3pEO32se0YCAHWcwAAAABJRU5ErkJggg==',
+  },
+};
+
 function trayIcon(color) {
   if (trayIcon._cache === undefined) trayIcon._cache = {};
   if (trayIcon._cache[color]) return trayIcon._cache[color];
-  const c = color === 'green' ? '#2e7d32' : '#9aa0a6';
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><circle cx="8" cy="8" r="6" fill="${c}"/></svg>`;
-  const icon = nativeImage.createFromDataURL('data:image/svg+xml;base64,' + Buffer.from(svg).toString('base64'));
+  const src = TRAY_PNG[color] || TRAY_PNG.grey;
+  const img = nativeImage.createEmpty();
+  img.addRepresentation({ scaleFactor: 1, dataURL: 'data:image/png;base64,' + src[1] });
+  img.addRepresentation({ scaleFactor: 2, dataURL: 'data:image/png;base64,' + src[2] });
+  // 防御：万一 addRepresentation 产物异常，至少保证返回有效图像
+  const icon = img.isEmpty()
+    ? nativeImage.createFromDataURL('data:image/png;base64,' + src[2])
+    : img;
   trayIcon._cache[color] = icon;
   return icon;
 }
@@ -219,6 +240,17 @@ app.on('before-quit', () => { quitting = true; try { sender.closeSendWindow(); }
 app.whenReady().then(() => {
   store = createStore(app.getPath('userData'));
 
+  // 启动提速：界面最先出。窗口带底色立即绘制（不等 HTML 加载完才不闪白），
+  // 其余初始化（托盘/协议注册/连服务器）全部排到窗口之后，避免挤占首帧。
+  showStatusWin();
+
+  // 托盘
+  try {
+    tray = new Tray(trayIcon('grey'));
+    tray.on('click', () => showStatusWin());
+    refreshTray();
+  } catch (e) { log('创建托盘失败: ' + e.message); }
+
   // 注册自定义协议（Windows 写 HKCU\Software\Classes\xsh，无需管理员；卸载时由安装器清理）
   try {
     if (process.defaultApp && process.argv.length >= 2) {
@@ -229,21 +261,12 @@ app.whenReady().then(() => {
     log('已注册协议 ' + PROTOCOL + '://');
   } catch (e) { log('注册协议失败: ' + e.message); }
 
-  // 托盘
-  try {
-    tray = new Tray(trayIcon('grey'));
-    tray.on('click', () => showStatusWin());
-    refreshTray();
-  } catch (e) { log('创建托盘失败: ' + e.message); }
-
-  // 冷启动时进程参数里可能就带着深链
-  const coldLink = extractLink(process.argv);
-  if (coldLink) handleDeepLink(coldLink).catch((e) => log('深链处理失败: ' + e.message));
-  else startAgent();
-
-  // 启动即展示主窗口（无论是否已绑定）：用户点 exe 应直接看到界面，
-  // 而不是只呆在托盘里、要手动点托盘图标才弹出来。
-  showStatusWin();
+  // 冷启动时进程参数里可能就带着深链；连服务器放到窗口首帧之后
+  setImmediate(() => {
+    const coldLink = extractLink(process.argv);
+    if (coldLink) handleDeepLink(coldLink).catch((e) => log('深链处理失败: ' + e.message));
+    else startAgent();
+  });
 });
 
 // ── IPC（状态窗 → 主进程）──

@@ -60,10 +60,9 @@
     ],
     "win": {
       "target": [
-        "nsis",
-        "portable"
-      ],
-      "artifactName": "${productName}-${version}-${arch}.${ext}"
+        { "target": "nsis", "arch": ["x64"], "artifactName": "${productName}-Setup-${version}.${ext}" },
+        { "target": "portable", "arch": ["x64"], "artifactName": "${productName}-${version}-portable.${ext}" }
+      ]
     },
     "nsis": {
       "oneClick": false,
