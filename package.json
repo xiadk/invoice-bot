@@ -60,8 +60,8 @@
     ],
     "win": {
       "target": [
-        { "target": "nsis", "arch": ["x64"], "artifactName": "${productName}-Setup-${version}.${ext}" },
-        { "target": "portable", "arch": ["x64"], "artifactName": "${productName}-${version}-portable.${ext}" }
+        { "target": "nsis", "arch": ["x64"] },
+        { "target": "portable", "arch": ["x64"] }
       ]
     },
     "nsis": {
@@ -71,7 +71,11 @@
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "1688催收助手",
-      "deleteAppDataOnUninstall": false
+      "deleteAppDataOnUninstall": false,
+      "artifactName": "${productName}-Setup-${version}.${ext}"
+    },
+    "portable": {
+      "artifactName": "${productName}-${version}-portable.${ext}"
     },
     "protocols": [
       {
