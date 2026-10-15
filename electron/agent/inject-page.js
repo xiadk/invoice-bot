@@ -132,8 +132,10 @@
   }
 
   // 聊天记录里是否出现该片段。
-  // ⚠ 必须排除「输入框自身」：1688 的输入框与已发送消息都用 pre.edit 渲染，
-  //   若不排除，刚键入的草稿会被当成「已发送」，发送失败也会误报成功（本测试 tmp-inject-kernel.js 抓到）。
+  // ⚠ 必须排除「输入框自身」：1688 的输入框与已发送消息都用 pre.edit 渲染。
+  //   排除规则不能只比对节点身份（editorEl）：发送后 React 可能重建编辑器 DOM 节点，
+  //   旧节点引用失效 → 草稿滞留在「新编辑器节点」里会被误判成「已发送」（严格自测抓到过）。
+  //   因此这里排除**所有** contenteditable 元素（编辑器无论怎么重建都不是聊天记录）。
   // ⚠ 比对前去掉所有空白：1688 回显时换行/缩进可能与原文不同，严格比对会误判「发送未确认」→ 重复发送。
   function historyContains(frag, editorEl) {
     var norm = function (s) { return String(s || '').replace(/\s+/g, ''); };
@@ -142,6 +144,7 @@
     var els = Array.prototype.slice.call(document.querySelectorAll('pre.edit'));
     return els.some(function (e) {
       if (editorEl && e === editorEl) return false;
+      if (e.getAttribute && e.getAttribute('contenteditable') === 'true') return false;
       return norm(e.innerText).indexOf(target) >= 0;
     });
   }
