@@ -134,17 +134,22 @@
   // 聊天记录里是否出现该片段。
   // ⚠ 必须排除「输入框自身」：1688 的输入框与已发送消息都用 pre.edit 渲染，
   //   若不排除，刚键入的草稿会被当成「已发送」，发送失败也会误报成功（本测试 tmp-inject-kernel.js 抓到）。
+  // ⚠ 比对前去掉所有空白：1688 回显时换行/缩进可能与原文不同，严格比对会误判「发送未确认」→ 重复发送。
   function historyContains(frag, editorEl) {
+    var norm = function (s) { return String(s || '').replace(/\s+/g, ''); };
+    var target = norm(frag);
+    if (!target) return false;
     var els = Array.prototype.slice.call(document.querySelectorAll('pre.edit'));
     return els.some(function (e) {
       if (editorEl && e === editorEl) return false;
-      return (e.innerText || '').indexOf(frag) >= 0;
+      return norm(e.innerText).indexOf(target) >= 0;
     });
   }
 
   /** 发送单条消息（含一次重试） */
   async function sendOne(msg) {
-    var frag = msg.length > 30 ? msg.slice(-30) : msg;
+    var normMsg = String(msg || '').replace(/\s+/g, '');
+    var frag = normMsg.length > 30 ? normMsg.slice(-30) : normMsg;
     for (var attempt = 0; attempt < 2; attempt++) {
       try {
         dismissModals();
@@ -198,5 +203,44 @@
     return { ok: !!ed, hasEditor: !!ed, url: location.href };
   }
 
-  window.__xsh = { ping: ping, waitReady: waitReady, sendBatch: sendBatch, isChatFrame: isChatFrame };
+  /** 通道自检：定位编辑器 → 输入文本 → 校验文本确实进了编辑器 → 找到发送按钮，
+   *  随后**清空输入框**（绝不点发送）。用于在真实环境验证发送通道而无需惊动卖家。 */
+  async function selfTest(probeText) {
+    var text = probeText || ('通道自检 ' + Date.now());
+    var out = { ok: false, url: location.href };
+    try {
+      dismissModals();
+      var ed = await waitEditor(15000);
+      if (!ed) { out.error = '编辑器未出现'; return out; }
+      ed.focus(); ed.click();
+      if ((ed.innerText || '').trim()) { selectAll(ed); document.execCommand('delete'); await sleep(180); }
+      insertText(ed, text);
+      await sleep(300);
+      var norm = function (s) { return String(s || '').replace(/\s+/g, ''); };
+      var typed = norm(ed.innerText).indexOf(norm(text).slice(0, 6)) >= 0;
+      var btn = findSendBtn();
+      out.typed = typed;
+      out.sendBtn = !!btn;
+      out.sendBtnText = btn ? (btn.innerText || '').trim().slice(0, 10) : '';
+      out.editorTag = ed.tagName;
+      out.editorClass = String(ed.className || '');
+      out.historyPreEdit = document.querySelectorAll('pre.edit').length;
+      // 清空，避免误发
+      selectAll(ed); document.execCommand('delete');
+      await sleep(200);
+      out.cleared = !norm(ed.innerText);
+      out.ok = !!typed && !!out.cleared;
+      if (!typed) out.error = '文本未成功进入编辑器（编辑器可能被遮挡或页面未就绪）';
+      else if (!out.cleared) out.error = '自检文本未能清空，请手动检查输入框';
+      return out;
+    } catch (e) {
+      out.error = e && e.message ? e.message : String(e);
+      return out;
+    }
+  }
+
+  window.__xsh = {
+    ping: ping, waitReady: waitReady, sendBatch: sendBatch,
+    isChatFrame: isChatFrame, selfTest: selfTest,
+  };
 })();

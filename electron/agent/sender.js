@@ -153,30 +153,65 @@ function closeSendWindow() {
   sendWin = null;
 }
 
-/** 递归查找聊天核心 frame（编辑器在其中） */
-function findChatFrame(wc) {
-  const walk = (f) => {
-    try {
-      if (/def_cbu_web_im|web_im/i.test(f.url || '')) return f;
-      for (const c of f.frames || []) { const r = walk(c); if (r) return r; }
-    } catch (e) { /* frame 可能已销毁 */ }
-    return null;
+/** 递归收集「聊天相关」frame，按优先级排序（越优先越靠前）：
+ *   ① IM 核心框（def_cbu_web_im_core）—— 编辑器与「发送」按钮真正所在的 frame
+ *   ② 其它 web_im 页面（排除埋点 iframe、开询盘弹窗等干扰项）
+ *
+ * ⚠ 实测（tmp-probe-frames.js，真实登录态）：
+ *   主框 def_cbu_web_im/index.html 内 preEdit=0、contenteditable=0 —— **没有编辑器**；
+ *   编辑器(pre.edit[contenteditable=true])与可见「发送」按钮都在其子框
+ *   def_cbu_web_im_core/index.html 内（preEdit=4）。旧逻辑返回「第一个 URL 命中的 frame」
+ *   = 主框，注入后 findEditor 永远为空 → 报「聊天编辑器未出现」。
+ *   旧浏览器扩展之所以能发，是因为 content script 默认注入所有 frame（含该核心子框）。
+ */
+function collectChatFrames(wc) {
+  const out = [];
+  const walk = (f, depth) => {
+    let url = '', kids = [];
+    try { url = String(f.url || ''); kids = f.frames || []; } catch (e) { /* frame 可能已销毁 */ }
+    if (/insights\.1688\.com|ww-bulk-inquiry-modal/i.test(url)) {
+      // 埋点/弹窗框：不选它，但仍需继续下钻其子框
+    } else if (/web_im_core/i.test(url)) {
+      out.push({ f, score: 1000 - depth });
+    } else if (/def_cbu_web_im|web_im/i.test(url)) {
+      out.push({ f, score: 100 - depth });
+    }
+    for (const c of kids) walk(c, depth + 1);
   };
-  try { return walk(wc.mainFrame); } catch (e) { return null; }
+  try { walk(wc.mainFrame, 0); } catch (e) { /* 忽略 */ }
+  out.sort((a, b) => b.score - a.score);
+  return out.map((x) => x.f);
 }
 
+/** 递归查找聊天核心 frame（编辑器在其中）：优先 IM 核心子框 */
+function findChatFrame(wc) {
+  const list = collectChatFrames(wc);
+  return list.length ? list[0] : null;
+}
+
+/** 找到「可用于执行的聊天 frame」。
+ *  优先返回已渲染出编辑器/发送按钮的 frame；编辑器可能晚于 frame 出现
+ *  （实测核心框先就绪，编辑器约 20~35s 后才渲染），因此此时先返回可执行的核心框，
+ *  由注入脚本的 waitReady 继续轮询，避免误报「聊天窗口未就绪」。 */
 async function waitChatFrame(wc, timeoutMs) {
   const t0 = Date.now();
+  let fallback = null;
   for (;;) {
-    const f = findChatFrame(wc);
-    if (f) {
-      // 等可执行后再返回，避免在 iframe 导航期间执行脚本触发 handler 销毁
+    for (const f of collectChatFrames(wc)) {
+      if (!frameAlive(f)) continue;
       const remain = timeoutMs - (Date.now() - t0);
-      const stable = await frameExecutable(f, Math.min(8000, Math.max(1500, remain)));
-      if (stable) return f;
+      if (remain <= 0) return fallback;
+      const ok = await frameExecutable(f, Math.min(3000, Math.max(1000, remain)));
+      if (!ok) continue;
+      if (!fallback) fallback = f;
+      try {
+        const has = await f.executeJavaScript(
+          '!!document.querySelector(\'pre.edit,[contenteditable="true"],textarea\')', false);
+        if (has) return f;
+      } catch (e) { /* 该 frame 不可用，试下一个 */ }
     }
-    if (Date.now() - t0 >= timeoutMs) return null;
-    await sleep(400);
+    if (Date.now() - t0 >= timeoutMs) return fallback;
+    await sleep(500);
   }
 }
 
@@ -321,4 +356,6 @@ function state() { return { ...st }; }
 module.exports = {
   getSendWindow, openLoginWindow, closeSendWindow, createBatchHandler, state,
   probeLoggedIn, findChatFrame, REAL_UA, PARTITION, CHAT_URL, LOGIN_URL,
+  // 仅供本机自测脚本（tmp-selftest-*.js）复用的内部件，不影响正常流程
+  _test: { collectChatFrames, waitChatFrame, execInChat, loadUrl, frameExecutable },
 };
