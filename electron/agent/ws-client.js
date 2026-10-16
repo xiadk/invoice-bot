@@ -264,3 +264,5 @@ class AgentClient extends EventEmitter {
     }
   }
 }
+
+module.exports = { AgentClient, toWsBase };
