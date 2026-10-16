@@ -1,7 +1,7 @@
 /**
  * electron/agent/inject-page.js —— 在 1688 聊天页里执行的脚本（**由主进程作为文本注入，不是模块**）
  *
- * 来源：移植自 extension/content.js（该逻辑已在真实环境验证过）。改动：
+ * 来源：移植自旧浏览器扩展的 content.js（扩展通道 2026-10-14 已下线；该逻辑已在真实环境验证过）。改动：
  *   · 去掉 chrome.runtime 通信段（桌面程序里由主进程用 frame.executeJavaScript 直接调用）
  *   · 改为把能力挂到 window.__xsh，供主进程调用：__xsh.ping() / __xsh.sendBatch(messages)
  *   · 其余（编辑器定位、弹窗清理、输入、发送、聊天记录校验）**保持原样**，两边行为一致

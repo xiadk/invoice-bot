@@ -1,7 +1,7 @@
 /**
  * electron/agent/ws-client.js — 与服务器 /ws/agent 的长连接客户端（纯 Node，便于单测）
  *
- * 移植自 extension/background.js（原 MV3 Service Worker 版本），改动：
+ * 移植自旧浏览器扩展的 background.js（原 MV3 Service Worker 版本，扩展通道 2026-10-14 已下线），改动：
  *   · WebSocket 用 ws 包（Node）而非浏览器原生
  *   · chrome.storage.local → 由调用方注入的 store
  *   · chrome.alarms 保活 → setInterval（桌面程序常驻，不再受 SW 被杀之苦）

@@ -1,7 +1,7 @@
 /**
  * electron/agent/sender.js — 发送内核：用内置浏览器驱动 1688 发送
  *
- * 取代了原来的两套实现（extension/content.js 注入 + lib/sender.js 的 Playwright 引擎），
+ * 取代了原来的两套实现（旧浏览器扩展 content.js 注入 + lib/sender.js 的 Playwright 引擎），
  * 合并为一套：主进程创建「1688 发送窗」→ 导航到聊天页 → 定位聊天 frame → 注入脚本发送。
  *
  * 关键设计：
