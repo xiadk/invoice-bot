@@ -88,15 +88,6 @@
     </ol>
   </div>
 
-  <div class="card" style="border-color:#a7f3d0; background:#f0fdf4;">
-    <h2><span class="n" style="background:#059669">★</span> 不想装程序？用「书签工具」（零安装备选）</h2>
-    <p style="margin:0 0 10px; font-size:14px;">适合快速体验：<b>无需安装任何程序</b>，把一段书签拖到浏览器书签栏即可。在 1688 聊天页点一下该书签，自动发送该卖家的催收消息，凭据同样不出本机。（功能与稳定性不如桌面助手，长期使用建议装助手。）</p>
-    <div class="download-row">
-      <a class="btn" style="background:#059669" href="/bookmarklet">➡ 获取书签工具</a>
-      <span class="muted">登录本系统后，按页面提示把书签拖到书签栏即可。</span>
-    </div>
-  </div>
-
   <div class="card">
     <h2>常见问题</h2>
     <details>
@@ -148,7 +139,6 @@
     } catch (e) {}
 
     const dl = (cfg && cfg.agentDownload) || {};
-    const hasServer = !!(cfg && cfg.serverUrl);
     const who = me ? (me.displayName || me.companyName || me.username || '') : '';
 
     let html = '';
@@ -171,14 +161,12 @@
       html += '<div class="muted" style="margin-top:10px">未检测到登录状态：可先下载安装，安装后请登录本系统，再到看板点「绑定本机助手」完成绑定。</div>';
     }
 
-    const noteClass = dl.available ? (hasServer ? 'ok' : 'warn') : 'warn';
+    const noteClass = dl.available ? 'ok' : 'warn';
     let noteHtml;
     if (!dl.available) {
       noteHtml = '⚠️ 安装包尚未构建到服务器（<code>dist/*.exe</code>）。安装与绑定流程不受影响，拿到安装包后按下方步骤操作即可。';
-    } else if (!hasServer) {
-      noteHtml = '⚠️ 服务器尚未配置全局地址，安装包内未内置服务器地址，绑定后可用看板地址自动纠正。';
     } else {
-      noteHtml = '✓ 安装包已内置服务器地址 <code>' + cfg.serverUrl + '</code>，绑定免手填。';
+      noteHtml = '✓ 安装包已完成配置，绑定免手填——服务器地址已内置，无需手动输入。';
     }
     setDynamic(html, noteClass, noteHtml);
   })();

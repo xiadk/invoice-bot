@@ -1584,12 +1584,18 @@ const server = http.createServer(async (req, res) => {
       const companies = await loadCompanies(tenantId);
       const sendStats = await loadSendStats(tenantId);
       const sentList = sendStats.filter((r) => Number(r.sendCount) > 0).map((r) => r.login);
+      // 「已开票金额（税务局）」全局统计：排除「已忽略」销方名称的发票（用户点忽略后不计入看板总额）
       const invSummary = await db.query(`
         SELECT COUNT(*) AS rows_count,
-               COUNT(DISTINCT COALESCE(NULLIF(e_invoice_no,''), NULLIF(invoice_no,''), row_hash)) AS invoice_count,
+               COUNT(DISTINCT COALESCE(NULLIF(e_invoice_no,''), NULLIF(invoice_no,''), i.row_hash)) AS invoice_count,
                ROUND(SUM(COALESCE(total_amount,0)),2) AS amount,
                SUM(seller_company IS NULL) AS unmapped_rows
-        FROM issued_invoice WHERE user_id = ?
+        FROM issued_invoice i
+        WHERE i.user_id = ?
+          AND NOT EXISTS (
+            SELECT 1 FROM seller_name_mapping m
+            WHERE m.user_id = i.user_id AND m.tax_seller_name = i.seller_name AND m.is_ignored = 1
+          )
       `, [tenantId]);
       const unmatched = await db.query('SELECT COUNT(*) AS n FROM v_unmatched_seller_name WHERE user_id = ?', [tenantId]);
       const ignoredCnt = await db.query('SELECT COUNT(*) AS n FROM seller_name_mapping WHERE user_id = ? AND is_ignored = 1', [tenantId]);
@@ -1608,6 +1614,102 @@ const server = http.createServer(async (req, res) => {
         isOtherTenant: Number(tenantId) !== Number(user.id),
         generatedAt: new Date().toLocaleString('zh-CN', { hour12: false }),
       });
+    }
+
+    // 订单明细（看板「订单总金额」卡片点击）—— 分页 + 可选关键字
+    if (method === 'GET' && p === '/api/detail/orders') {
+      const page = Math.max(1, Number(url.searchParams.get('page')) || 1);
+      const size = Math.min(200, Math.max(1, Number(url.searchParams.get('size')) || 20));
+      const kw = (url.searchParams.get('q') || '').trim();
+      const w = kw ? 'AND (o.order_no LIKE ? OR o.seller_company LIKE ? OR o.seller_login LIKE ?)' : '';
+      const args = kw ? [`%${kw}%`, `%${kw}%`, `%${kw}%`] : [];
+      const totalR = await db.query(`SELECT COUNT(*) AS n FROM invoice_order o WHERE o.user_id = ? ${w}`, [tenantId, ...args]);
+      const rows = await db.query(`
+        SELECT o.order_no, o.seller_company, o.seller_login, o.pay_amount, o.pay_time, o.invoice_state, o.state_source
+        FROM invoice_order o
+        WHERE o.user_id = ? AND o.pay_time IS NOT NULL ${w}
+        ORDER BY o.pay_time DESC, o.order_no DESC
+        LIMIT ${size} OFFSET ${(page - 1) * size}
+      `, [tenantId, ...args]);
+      return sendJson(res, 200, {
+        total: totalR[0] ? totalR[0].n : 0, page, size, rows,
+        amount: (await db.query('SELECT ROUND(SUM(COALESCE(pay_amount,0)),2) AS a FROM invoice_order WHERE user_id = ? AND pay_time IS NOT NULL', [tenantId]))[0].a,
+      });
+    }
+
+    // 发票明细（看板「已开票金额（税务局）」卡片点击）—— 排除已忽略销方，分页 + 可选关键字
+    if (method === 'GET' && p === '/api/detail/invoices') {
+      const page = Math.max(1, Number(url.searchParams.get('page')) || 1);
+      const size = Math.min(200, Math.max(1, Number(url.searchParams.get('size')) || 20));
+      const kw = (url.searchParams.get('q') || '').trim();
+      const w = kw ? 'AND (i.seller_name LIKE ? OR i.buyer_name LIKE ? OR i.invoice_no LIKE ? OR i.e_invoice_no LIKE ?)' : '';
+      const args = kw ? [`%${kw}%`, `%${kw}%`, `%${kw}%`, `%${kw}%`] : [];
+      const base = `
+        FROM issued_invoice i
+        WHERE i.user_id = ?
+          AND NOT EXISTS (
+            SELECT 1 FROM seller_name_mapping m
+            WHERE m.user_id = i.user_id AND m.tax_seller_name = i.seller_name AND m.is_ignored = 1
+          ) ${w}`;
+      const totalR = await db.query(`SELECT COUNT(*) AS n ${base}`, [tenantId, ...args]);
+      const rows = await db.query(`
+        SELECT COALESCE(NULLIF(i.e_invoice_no,''), NULLIF(i.invoice_no,''), i.row_hash) AS invoice_no,
+               i.seller_name, i.buyer_name, i.total_amount, i.invoice_date, i.invoice_status
+        ${base}
+        ORDER BY i.invoice_date DESC, i.id DESC
+        LIMIT ${size} OFFSET ${(page - 1) * size}
+      `, [tenantId, ...args]);
+      return sendJson(res, 200, {
+        total: totalR[0] ? totalR[0].n : 0, page, size, rows,
+        amount: (await db.query(`
+          SELECT ROUND(SUM(COALESCE(i2.total_amount,0)),2) AS a
+          FROM issued_invoice i2
+          WHERE i2.user_id = ?
+            AND NOT EXISTS (
+              SELECT 1 FROM seller_name_mapping m3
+              WHERE m3.user_id = i2.user_id AND m3.tax_seller_name = i2.seller_name AND m3.is_ignored = 1
+            )
+        `, [tenantId]).then(r => (r[0] && r[0].a) || 0)),
+      });
+    }
+
+    // 趋势：最近 30 天每日支付订单金额 / 每日已开票金额（排除已忽略销方）
+    if (method === 'GET' && p === '/api/trend') {
+      const dstr = (d) => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+      const start = new Date(Date.now() - 29 * 86400000);
+      const fromStr = dstr(start);
+      const noIgnore = `
+        AND NOT EXISTS (
+          SELECT 1 FROM seller_name_mapping m2
+          WHERE m2.user_id = i.user_id AND m2.tax_seller_name = i.seller_name AND m2.is_ignored = 1
+        )`;
+      const ordRows = await db.query(`
+        SELECT DATE(pay_time) AS d, COUNT(*) AS n, ROUND(SUM(COALESCE(pay_amount,0)),2) AS amt
+        FROM invoice_order o
+        WHERE o.user_id = ? AND o.pay_time IS NOT NULL AND DATE(o.pay_time) >= ?
+        GROUP BY DATE(o.pay_time)
+      `, [tenantId, fromStr]);
+      const invRows = await db.query(`
+        SELECT DATE(i.invoice_date) AS d, COUNT(*) AS n, ROUND(SUM(COALESCE(i.total_amount,0)),2) AS amt
+        FROM issued_invoice i
+        WHERE i.user_id = ? AND i.invoice_date IS NOT NULL AND DATE(i.invoice_date) >= ? ${noIgnore}
+        GROUP BY DATE(i.invoice_date)
+      `, [tenantId, fromStr]);
+      const oMap = new Map(ordRows.map(r => [String(r.d).slice(0, 10), r]));
+      const iMap = new Map(invRows.map(r => [String(r.d).slice(0, 10), r]));
+      const days = [];
+      for (let t = start.getTime(); t <= Date.now(); t += 86400000) {
+        const ds = dstr(new Date(t));
+        const o = oMap.get(ds), v = iMap.get(ds);
+        days.push({
+          date: ds,
+          orderAmount: o ? Number(o.amt) || 0 : 0,
+          orderCount: o ? Number(o.n) || 0 : 0,
+          invoiceAmount: v ? Number(v.amt) || 0 : 0,
+          invoiceCount: v ? Number(v.n) || 0 : 0,
+        });
+      }
+      return sendJson(res, 200, { days });
     }
 
     if (method === 'GET' && p === '/api/seller-detail') {

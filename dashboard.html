@@ -138,6 +138,27 @@
   .hist-table td, .hist-table th { font-size: 12px; }
   .hist-table .order-nos { word-break: break-all; line-height: 1.7; font-family: Consolas, monospace; }
   .muted { color: var(--sub); }
+  /* 趋势图 */
+  .trend-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:12px; }
+  @media (max-width: 900px) { .trend-grid { grid-template-columns:1fr; } }
+  .trend-card { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:12px 14px; }
+  .trend-title { font-size:13px; font-weight:600; color:var(--ink); margin-bottom:8px; }
+  .trend-chart svg { display:block; width:100%; height:170px; }
+  /* 可点击统计卡 */
+  .stat-card.clickable { cursor:pointer; transition:.15s; }
+  .stat-card.clickable:hover { transform:translateY(-1px); box-shadow:0 3px 10px rgba(16,24,40,.10); }
+  .stat-card.clickable .label::after { content:' ⤢'; font-size:11px; color:var(--sub); }
+  /* 排序表头 */
+  .th-sort { cursor:pointer; user-select:none; white-space:nowrap; }
+  .th-sort:hover { color:var(--primary); }
+  #pendSortMark { font-size:11px; margin-left:2px; }
+  /* 明细弹窗表格 */
+  .detail-tbl { width:100%; border-collapse:collapse; font-size:13px; }
+  .detail-tbl th, .detail-tbl td { border-bottom:1px solid var(--border); padding:7px 8px; text-align:left; white-space:nowrap; }
+  .detail-tbl th { color:var(--sub); font-weight:600; background:#f7f8fa; position:sticky; top:0; }
+  .detail-scroll { max-height:56vh; overflow:auto; border:1px solid var(--border); border-radius:8px; }
+  .detail-sum { font-size:13px; color:var(--sub); margin:0 0 10px; }
+  .detail-sum b { color:var(--ink); }
   /* 上传导入弹框 */
   .up-guide { background: #f6f9ff; border: 1px solid #d7e5ff; border-radius: 8px; padding: 12px 14px; font-size: 13px; line-height: 1.85; color: #1f3a5f; margin-bottom: 12px; }
   .up-guide ol { margin: 6px 0 8px 18px; padding: 0; }
@@ -230,12 +251,9 @@
 <!-- ══════════ 看板页 ══════════ -->
 <div class="page active" id="page-board">
   <div class="stats" id="stats"></div>
-  <div class="hint">
-    <b>看板结构：</b>一行 = <b>一家公司</b>（发票是公司口径开的）；点「展开会员名」能看到这家公司名下的各个 <b>1688 会员名（店铺）</b>，每个店铺各自带订单和催收按钮。
-    <br><b>统计口径：</b>「已开票金额（税务局）」= 税务局导出文件的<b>价税合计</b>逐行相加（含税，与订单实付款同口径）；「N 张发票」= 按<b>数电发票号码去重</b>后的发票张数。
-    <br><b>催收口径（按会员名）：</b>点某个店铺的「催收消息」，<b>{amount}</b> 取<b>该会员名的待开票金额</b>，<b>{orderId}</b> 为<b>该会员名除已开票外的全部订单号</b>。
-    <br><b>筛选：</b><b>催收状态</b> = 已催收 / 最近一周、半个月、一个月、三个月未催收；<b>开票状态</b> = 待开票金额为 0（已开票）/ 大于 0（未开票）。可与搜索框<b>任意组合</b>；点「催收次数」可查看历史催收记录。
-    <br><b>排序：</b>按<b>最近催收时间倒序</b>（从没催收过的沉底），催收时间相同则按<b>待开票金额倒序</b>。
+  <div class="trend-grid" id="trendGrid">
+    <div class="trend-card"><div class="trend-title">最近 30 天 · 每日支付订单总金额</div><div class="trend-chart" id="trendOrders">加载中...</div></div>
+    <div class="trend-card"><div class="trend-title">最近 30 天 · 每日已开票金额（税务局）</div><div class="trend-chart" id="trendInvoices">加载中...</div></div>
   </div>
   <div class="progress-wrap" id="progressWrap">
     <div class="progress-head">
@@ -270,8 +288,6 @@
     <span style="flex:1"></span>
     <button class="btn btn-plain" onclick="openUpload('orders')" title="上传从 1688 导出的订单 Excel 并导入（重复订单按最新数据更新）">导入1688订单数据</button>
     <button class="btn btn-plain" onclick="openUpload('invoices')" title="上传从电子税务局导出的发票 Excel 并导入（重复发票按最新数据更新）">导入税务局发票数据</button>
-    <button class="btn btn-outline" onclick="selectAll()" title="只勾选当前页公司的可催收会员名（不含其他分页）">全选当前页</button>
-    <button class="btn btn-outline" onclick="clearSel()">取消选择</button>
     <button class="btn btn-primary" id="btnSend" onclick="batchSend()">发送催收消息 (<span id="selCount">0</span>)</button>
   </div>
 
@@ -279,7 +295,6 @@
     <span class="agent-dot" id="agentDot"></span>
     <span id="agentText">本机助手：检测中…</span>
     <span style="flex:1"></span>
-    <button class="btn btn-plain btn-sm" onclick="agentDisconnect()">断开本机助手</button>
   </div>
 
   <div class="resume-bar" id="resumeBar">
@@ -293,11 +308,11 @@
   <table id="tbl">
     <thead>
       <tr>
-        <th style="width:32px"></th>
+        <th style="width:32px" title="勾选 = 全选当前页可催收会员名；取消 = 清空全部已选"><input type="checkbox" id="selAllCb" onchange="toggleSelAll(this.checked)"></th>
         <th>公司 / 会员名</th>
         <th style="width:130px">订单 / 金额</th>
         <th style="width:180px" title="该公司在税务局导出文件里的发票额与张数">已开票金额（税务局）</th>
-        <th style="width:110px" title="公司订单金额 − 公司已开票金额（不小于 0）">待开票金额</th>
+        <th style="width:110px" class="th-sort" title="点击按待开票金额排序（倒序/正序切换）" onclick="togglePendSort()">待开票金额<span id="pendSortMark"></span></th>
         <th style="width:180px" title="平台状态 + 人工确认">订单开票状态</th>
         <th style="width:130px" title="最近一次成功催收的时间（失败尝试不算）">最近催收时间</th>
         <th style="width:80px" title="只统计成功发送的次数">催收次数</th>
@@ -417,6 +432,17 @@
   </div>
 </div>
 
+<!-- ══════════ 订单 / 发票明细弹窗 ══════════ -->
+<div class="modal-mask" id="detailModal" onclick="if (event.target === this) closeDetail()">
+  <div class="modal">
+    <div class="modal-head">
+      <b id="detailTitle">明细</b>
+      <span class="modal-close" onclick="closeDetail()" title="关闭">×</span>
+    </div>
+    <div class="modal-body" id="detailBody">加载中...</div>
+  </div>
+</div>
+
 <!-- ══════════ 编辑用户（账号 + 开票抬头）══════════ -->
 <div class="modal-mask" id="userEditModal" onclick="if (event.target === this) closeUserEdit()">
   <div class="modal">
@@ -523,6 +549,7 @@ let ME = null;                 // 当前登录用户
 let VIEW_TENANT = null;        // 管理员正在查看的租户ID（null=自己）
 let READONLY = false;          // 查看他人数据时为只读
 let COMPANIES = [], SENT = new Set(), selected = new Set(), filter = 'all', keyword = '';
+let pendSort = '';   // 待开票金额排序：'' 默认（最近催收倒序）| 'desc' 倒序 | 'asc' 正序
 let collectStateFilter = '15', invoiceStateFilter = '';
 let INV_SUMMARY = null, UNMATCHED_CNT = 0, IGNORED_CNT = 0, MANUAL_CNT = 0;
 let taskTimer = null;
@@ -659,6 +686,7 @@ async function loadData() {
     '数据: ' + d.generatedAt + ' · ' + COMPANIES.length + ' 家公司 / ' + memberCnt + ' 个会员名 · 数据源 MySQL'
     + (d.tenant ? ' · 租户: ' + d.tenant.username : '');
   render();
+  loadTrend();
 }
 function stats() {
   const orderAmt = COMPANIES.reduce((a, c) => a + Number(c.totalAmount), 0);
@@ -669,8 +697,8 @@ function stats() {
   const members = COMPANIES.flatMap(c => c.members);
   const sentCnt = members.filter(m => m.sendCount > 0).length;
   document.getElementById('stats').innerHTML = `
-    <div class="stat-card"><div class="num">${yuan(orderAmt)}</div><div class="label">订单总金额</div><div class="sub">共 ${orderCnt} 单 / ${COMPANIES.length} 家公司</div></div>
-    <div class="stat-card info"><div class="num">${yuan(invAmt)}</div><div class="label">已开票金额（税务局）</div><div class="sub">共 ${INV_SUMMARY ? INV_SUMMARY.invoice_count : 0} 张发票 / ${INV_SUMMARY ? INV_SUMMARY.rows_count : 0} 行明细</div></div>
+    <div class="stat-card clickable" onclick="openDetail('orders')" title="点击查看订单明细"><div class="num">${yuan(orderAmt)}</div><div class="label">订单总金额</div><div class="sub">共 ${orderCnt} 单 / ${COMPANIES.length} 家公司</div></div>
+    <div class="stat-card info clickable" onclick="openDetail('invoices')" title="点击查看发票明细"><div class="num">${yuan(invAmt)}</div><div class="label">已开票金额（税务局）</div><div class="sub">共 ${INV_SUMMARY ? INV_SUMMARY.invoice_count : 0} 张发票 / ${INV_SUMMARY ? INV_SUMMARY.rows_count : 0} 行明细</div></div>
     <div class="stat-card warn"><div class="num">${yuan(pendingAmt)}</div><div class="label">待开票金额</div><div class="sub">${hasPending} 家公司有待开票</div></div>
     <div class="stat-card done"><div class="num">${MANUAL_CNT}</div><div class="label">人工确认已开票</div><div class="sub">订单数（商家线下开票）</div></div>
     <div class="stat-card"><div class="num">${sentCnt}</div><div class="label">已催收会员名</div><div class="sub">累计成功 ${members.reduce((a, m) => a + (m.sendCount || 0), 0)} 次（失败不计）</div></div>
@@ -699,6 +727,8 @@ function visibleCompanies() {
     return true;
   });
   list.sort((a, b) => {
+    if (pendSort === 'desc') return Number(b.pendingAmount) - Number(a.pendingAmount);
+    if (pendSort === 'asc') return Number(a.pendingAmount) - Number(b.pendingAmount);
     const ta = lastSentTs(a), tb = lastSentTs(b);
     if (tb !== ta) return tb - ta;
     return Number(b.pendingAmount) - Number(a.pendingAmount);
@@ -793,12 +823,14 @@ function render() {
   if (all.length === 0) {
     tb.innerHTML = '<tr><td colspan="9" style="text-align:center;color:#8a8f99;padding:40px">无匹配公司</td></tr>';
     pagerBox.innerHTML = '';
+    syncSelAll();
     return;
   }
   const p = pageOf('dash', all.length);
   tb.innerHTML = p.slice(all).map(c => companyRows(c)).join('');
   pagerBox.innerHTML = pagerHtml('dash', all.length);
   restoreExpanded();
+  syncSelAll();
 }
 function restoreExpanded() {
   for (const key of EXPANDED) {
@@ -838,14 +870,37 @@ function syncCompanyChecks() {
     cb.indeterminate = n > 0 && n < sendable.length;
   }
 }
-function selectAll() {
-  if (READONLY) { alert('只读模式下不能选择发送对象'); return; }
+// 表头全选复选框：勾选 = 全选当前页可催收会员名；取消 = 清空全部已选（含其他页）
+function toggleSelAll(on) {
+  if (READONLY) { syncSelAll(); return; }
+  if (on) {
+    const all = visibleCompanies();
+    const p = pageOf('dash', all.length);
+    p.slice(all).forEach(c => c.members.forEach(m => { if (m.canSend) selected.add(m.loginId); }));
+  } else {
+    selected.clear();
+  }
+  render();
+  document.getElementById('selCount').textContent = selected.size;
+}
+// 同步表头复选框状态（当前页全部选中 = 勾选；部分选中 = 半选；否则空）
+function syncSelAll() {
+  const cb = document.getElementById('selAllCb');
+  if (!cb) return;
   const all = visibleCompanies();
   const p = pageOf('dash', all.length);
-  p.slice(all).forEach(c => c.members.forEach(m => { if (m.canSend) selected.add(m.loginId); }));
-  render(); document.getElementById('selCount').textContent = selected.size;
+  const sendable = p.slice(all).flatMap(c => c.members.filter(m => m.canSend));
+  const n = sendable.filter(m => selected.has(m.loginId)).length;
+  cb.disabled = READONLY;
+  cb.checked = sendable.length > 0 && n === sendable.length;
+  cb.indeterminate = n > 0 && n < sendable.length;
 }
-function clearSel() { selected.clear(); render(); document.getElementById('selCount').textContent = 0; }
+// 待开票金额排序切换：默认 → 倒序 → 正序 → 默认
+function togglePendSort() {
+  pendSort = pendSort === '' ? 'desc' : (pendSort === 'desc' ? 'asc' : '');
+  document.getElementById('pendSortMark').textContent = pendSort === 'desc' ? ' ↓' : (pendSort === 'asc' ? ' ↑' : '');
+  resetPage('dash'); render();
+}
 
 // ══════════════ 历史催收记录 ══════════════
 function openCompanyHistory(el) { showCollectHistory({ company: el.dataset.company }, el.dataset.company); }
@@ -1172,11 +1227,89 @@ function dismissResume() {
   if (RESUMABLE) sessionStorage.setItem(RESUME_KEY, String(RESUMABLE.id));
   renderResume();
 }
-async function agentDisconnect() {
-  if (READONLY) return;
-  if (!confirm('断开本机助手？\n断开只关闭当前连接；设备令牌仍然有效，下次启动助手会自动重连，无需重新绑定。')) return;
-  try { await api('/api/agent/disconnect', { method: 'POST' }); AGENT_STATUS = { online: false }; renderAgentBar(); } catch (e) { /* 忽略 */ }
+// ══════════════ 订单 / 发票明细弹窗 ══════════════
+const DETAIL_ST = { kind: 'orders', page: 1, size: 20, q: '' };
+function closeDetail() { document.getElementById('detailModal').classList.remove('show'); }
+async function openDetail(kind) {
+  DETAIL_ST.kind = kind; DETAIL_ST.page = 1; DETAIL_ST.q = '';
+  document.getElementById('detailModal').classList.add('show');
+  await loadDetailRows();
 }
+async function loadDetailRows() {
+  const kind = DETAIL_ST.kind;
+  const body = document.getElementById('detailBody');
+  document.getElementById('detailTitle').textContent = kind === 'orders' ? '订单明细（全部订单，按支付时间倒序）' : '发票明细（税务局，按开票日期倒序）';
+  body.innerHTML = '<div class="muted">加载中...</div>';
+  try {
+    const p = new URLSearchParams({ page: DETAIL_ST.page, size: DETAIL_ST.size });
+    if (DETAIL_ST.q) p.set('q', DETAIL_ST.q);
+    const d = await api('/api/detail/' + kind + '?' + p.toString());
+    if (d.error) { body.innerHTML = '<div class="warn-box">' + esc(d.error) + '</div>'; return; }
+    const pages = Math.max(1, Math.ceil(d.total / DETAIL_ST.size));
+    const sumTxt = kind === 'orders'
+      ? `共 <b>${d.total}</b> 单 · 总金额 <b>${yuan(d.amount)}</b>`
+      : `共 <b>${d.total}</b> 行 · 总金额 <b>${yuan(d.amount)}</b>（已排除「已忽略」销方名称）`;
+    const head = kind === 'orders'
+      ? '<tr><th>订单编号</th><th>卖家公司</th><th>会员名</th><th>实付款</th><th>支付时间</th><th>开票状态</th></tr>'
+      : '<tr><th>发票号码</th><th>销方名称</th><th>购买方</th><th>价税合计</th><th>开票日期</th><th>状态</th></tr>';
+    const rows = (d.rows || []).map(r => kind === 'orders'
+      ? `<tr><td>${esc(r.order_no || '')}</td><td>${esc(r.seller_company || '')}</td><td>${esc(r.seller_login || '')}</td>
+           <td class="amount">${yuan(r.pay_amount)}</td><td>${esc(String(r.pay_time || '').slice(0, 19))}</td>
+           <td>${r.invoice_state === 'issued' ? '<span class="badge issued">已开票</span>' : (r.invoice_state === 'applying' ? '<span class="badge applying">已申请</span>' : '<span class="badge none">未申请</span>')}${r.state_source === 'manual' ? '<span class="badge manual">人工</span>' : ''}</td></tr>`
+      : `<tr><td>${esc(r.invoice_no || '')}</td><td>${esc(r.seller_name || '')}</td><td>${esc(r.buyer_name || '')}</td>
+           <td class="amount">${yuan(r.total_amount)}</td><td>${esc(String(r.invoice_date || '').slice(0, 10))}</td>
+           <td>${esc(r.invoice_status || '')}</td></tr>`).join('');
+    const qHtml = `<div style="display:flex;gap:8px;margin-bottom:10px">
+        <input type="text" id="detailQ" placeholder="${kind === 'orders' ? '搜订单编号 / 公司 / 会员名' : '搜发票号码 / 销方 / 购买方'}" value="${esc(DETAIL_ST.q)}" style="flex:1"
+               onkeydown="if (event.key === 'Enter') detailSearch()">
+        <button class="btn btn-outline btn-sm" onclick="detailSearch()">查询</button>
+      </div>`;
+    const pager = `<div style="display:flex;gap:8px;align-items:center;margin-top:10px;font-size:13px">
+        <span class="muted">第 ${DETAIL_ST.page}/${pages} 页</span>
+        <button class="btn btn-outline btn-sm" ${DETAIL_ST.page <= 1 ? 'disabled' : ''} onclick="detailPage(${DETAIL_ST.page - 1})">上一页</button>
+        <button class="btn btn-outline btn-sm" ${DETAIL_ST.page >= pages ? 'disabled' : ''} onclick="detailPage(${DETAIL_ST.page + 1})">下一页</button>
+      </div>`;
+    body.innerHTML = `<div class="detail-sum">${sumTxt}</div>${qHtml}
+      <div class="detail-scroll"><table class="detail-tbl"><thead>${head}</thead><tbody>${rows || '<tr><td colspan="6" style="text-align:center;color:#8a8f99;padding:24px">无数据</td></tr>'}</tbody></table></div>${pager}`;
+  } catch (e) { body.innerHTML = '<div class="warn-box">加载失败：' + esc(e.message) + '</div>'; }
+}
+function detailPage(p) { DETAIL_ST.page = Math.max(1, p); loadDetailRows(); }
+function detailSearch() {
+  const el = document.getElementById('detailQ');
+  DETAIL_ST.q = el ? el.value.trim() : ''; DETAIL_ST.page = 1; loadDetailRows();
+}
+
+// ══════════════ 趋势图（最近 30 天）══════════════
+//  · 纯内联 SVG 柱状图：不依赖外部图表库（内网可用）
+let TREND = null;
+async function loadTrend() {
+  try {
+    TREND = await api('/api/trend');
+  } catch (e) { TREND = null; }
+  renderTrend('trendOrders', 'orderAmount', 'orderCount', '#2563eb');
+  renderTrend('trendInvoices', 'invoiceAmount', 'invoiceCount', '#059669');
+}
+function renderTrend(elId, amtKey, cntKey, color) {
+  const box = document.getElementById(elId);
+  if (!box) return;
+  if (!TREND || !Array.isArray(TREND.days) || !TREND.days.length) { box.innerHTML = '<div class="muted" style="font-size:13px">暂无数据</div>'; return; }
+  const days = TREND.days;
+  const W = 560, H = 170, padL = 8, padR = 8, padT = 14, padB = 22;
+  const iw = W - padL - padR, ih = H - padT - padB;
+  const max = Math.max(...days.map(d => d[amtKey]), 0.01);
+  const bw = iw / days.length;
+  const bars = days.map((d, i) => {
+    const h = Math.max(d[amtKey] > 0 ? 2 : 0, (d[amtKey] / max) * ih);
+    const x = padL + i * bw + 1, y = padT + ih - h;
+    const label = d.date.slice(5);
+    const tip = `${d.date}\n金额 ${yuan(d[amtKey])}（${d[cntKey]} 笔）`;
+    const xLabel = (i % 5 === 0 || i === days.length - 1) ? `<text x="${x + bw / 2 - 2}" y="${H - 6}" font-size="9" fill="#8a8f99" text-anchor="middle">${label}</text>` : '';
+    return `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${Math.max(1, bw - 2).toFixed(1)}" height="${h.toFixed(1)}" rx="1.5" fill="${color}" opacity="${d[amtKey] > 0 ? 0.85 : 0.15}"><title>${tip}</title></rect>${xLabel}`;
+  }).join('');
+  const topTip = `<text x="${padL}" y="10" font-size="10" fill="#8a8f99">峰值 ${yuan(max)}</text>`;
+  box.innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${topTip}${bars}</svg>`;
+}
+
 // ══════════════ 上传导入（1688 订单 / 税务局发票）══════════════
 //  · 点击按钮只弹出「拖拽上传」弹框：用户自己去 1688 / 税务局 导出 Excel，再拖进来导入
 //  · 重复数据做更新（订单按订单编号、发票按 用户+行指纹 upsert）
@@ -1808,7 +1941,7 @@ document.getElementById('filterTabs').addEventListener('click', e => {
   if (el) el.addEventListener('input', updatePreview);
 });
 document.addEventListener('keydown', e => {
-  if (e.key === 'Escape') { closeHist(); closeGuideModal(); closePwdModal(); closeUserEdit(); closeUpload(); }
+  if (e.key === 'Escape') { closeHist(); closeGuideModal(); closePwdModal(); closeUserEdit(); closeUpload(); closeDetail(); }
 });
 
 boot();
