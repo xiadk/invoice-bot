@@ -235,7 +235,7 @@
       <select id="collectState">
         <option value="collected">已催收</option>
         <option value="7">最近一周未催收</option>
-        <option value="15">最近半个月未催收</option>
+        <option value="15" selected>最近半个月未催收</option>
         <option value="30">最近一个月未催收</option>
         <option value="90">最近三个月未催收</option>
       </select>
@@ -247,9 +247,11 @@
         <option value="pending">未开票（待开票金额&gt;0）</option>
       </select>
     </label>
-    <input type="text" id="search" placeholder="搜索卖家公司名 / 登录ID">
+    <input type="text" id="search" placeholder="搜索卖家公司名 / 登录ID" autocomplete="off">
+    <button class="btn btn-outline" id="btnSearch" onclick="applyFilters()" title="输入名称或切换状态后，点此查询">查询</button>
     <span style="flex:1"></span>
     <button class="btn btn-plain" id="btnImport" onclick="importData()">重新导入数据</button>
+    <button class="btn btn-plain" onclick="openOrderExport()" title="由本机助手自动在 1688 导出指定时间段的订单并导入">导入1688订单数据</button>
     <button class="btn btn-outline" onclick="selectAll()" title="只勾选当前页公司的可催收会员名（不含其他分页）">全选当前页</button>
     <button class="btn btn-outline" onclick="clearSel()">取消选择</button>
     <button class="btn btn-primary" id="btnSend" onclick="batchSend()">发送催收消息 (<span id="selCount">0</span>)</button>
@@ -454,6 +456,28 @@
 </div>
 
 <!-- ══════════ 修改密码弹窗 ══════════ -->
+<div class="modal-mask" id="orderExportModal" onclick="if (event.target === this) closeOrderExport()">
+  <div class="modal small">
+    <div class="modal-head"><b>导入1688订单数据</b><span class="modal-close" onclick="closeOrderExport()">×</span></div>
+    <div class="modal-body">
+      <div class="hint" style="margin-bottom:12px">
+        由<b>本机助手</b>自动完成：打开 1688「交易 → 已买到的货品 → 全部订单」→
+        按下方<b>下单时间</b>设置筛选（订单状态/订单类型/支付方式=全部，其余清空）→
+        点「导出当前条件」→「生成新报表」→ 等报表生成并自动下载 → 回传本系统按订单号去重导入。
+      </div>
+      <div class="form-row"><label>开始日期 a（下单时间起）</label><input type="date" id="expDateStart"></div>
+      <div class="form-row"><label>结束日期 b（下单时间止）</label><input type="date" id="expDateEnd"></div>
+      <div class="hint" style="color:#c62828" id="orderExportErr"></div>
+      <div style="display:flex;gap:10px;margin-top:8px">
+        <button class="btn btn-primary" id="btnOrderExport" onclick="submitOrderExport()">确定</button>
+        <button class="btn btn-plain" onclick="closeOrderExport()">取消</button>
+      </div>
+      <div class="hint" style="margin-top:10px">
+        注意：1688 平台要求两次导出间隔 5 分钟以上；导出过程中请勿操作助手里已打开的 1688 页面。进度与结果看下方面板日志。
+      </div>
+    </div>
+  </div>
+</div>
 <div class="modal-mask" id="pwdModal" onclick="if (event.target === this) closePwdModal()">
   <div class="modal small">
     <div class="modal-head"><b>修改密码</b><span class="modal-close" onclick="closePwdModal()">×</span></div>
@@ -475,7 +499,7 @@ let ME = null;                 // 当前登录用户
 let VIEW_TENANT = null;        // 管理员正在查看的租户ID（null=自己）
 let READONLY = false;          // 查看他人数据时为只读
 let COMPANIES = [], SENT = new Set(), selected = new Set(), filter = 'all', keyword = '';
-let collectStateFilter = 'collected', invoiceStateFilter = '';
+let collectStateFilter = '15', invoiceStateFilter = '';
 let INV_SUMMARY = null, UNMATCHED_CNT = 0, IGNORED_CNT = 0, MANUAL_CNT = 0;
 let taskTimer = null;
 let MAP = { mappings: [], unmatched: [], sellers: [] };
@@ -514,6 +538,10 @@ async function logout() {
 
 // ══════════════ 初始化：加载当前用户 → 角色化导航 ══════════════
 async function boot() {
+  // 刷新后搜索框强制置空：浏览器（Chrome/Edge）会在刷新时恢复表单值、或把保存的
+  // 登录用户名（=公司全称）自动填充进第一个文本框；两者都以这里的显式清空为准。
+  const searchEl = document.getElementById('search');
+  searchEl.value = ''; searchEl.autocomplete = 'off';
   let d;
   try { d = await api('/api/auth/me'); } catch (e) { return; }
   if (!d || !d.user) { goLogin(); return; }
@@ -975,7 +1003,7 @@ async function pollTask() {
         if (t.running && t.done > 0) timeInfo += ` · 约剩${fmtDur((t.total - t.done) * (elapsed / t.done))}`;
       }
       document.getElementById('progressText').textContent =
-        (t.type === 'send' ? '发送催收消息' : '任务') + `：${t.done}/${t.total}` + (t.current ? ` · 当前: ${t.current}` : '') + ` · 成功${t.ok} 失败${t.fail}` + timeInfo;
+        (t.type === 'send' ? '发送催收消息' : (t.type === 'export' ? '导入1688订单' : '任务')) + `：${t.done}/${t.total}` + (t.current ? ` · 当前: ${t.current}` : '') + ` · 成功${t.ok} 失败${t.fail}` + timeInfo;
       document.getElementById('progressFill').style.width = (t.total ? (t.done / t.total * 100) : 0) + '%';
       document.getElementById('logPanel').innerHTML = t.logs.slice(-40).map(l => `<div>${l.time} ${esc(l.text)}</div>`).join('');
       document.getElementById('logPanel').scrollTop = 99999;
@@ -1132,6 +1160,39 @@ async function importData() {
     if (document.getElementById('page-mapping').classList.contains('active')) loadMapping();
   } catch (e) { alert('导入失败: ' + e.message); }
   btn.disabled = false; btn.textContent = old;
+}
+
+// ══════════════ 导入1688订单数据（本机助手自动导出→回传→入库） ══════════════
+function openOrderExport() {
+  if (READONLY) { alert('只读模式下不能导入'); return; }
+  const iso = (d) => new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+  const end = new Date();
+  const start = new Date(Date.now() - 29 * 864e5); // 默认最近一个月
+  document.getElementById('expDateStart').value = iso(start);
+  document.getElementById('expDateEnd').value = iso(end);
+  document.getElementById('orderExportErr').textContent = '';
+  document.getElementById('orderExportModal').classList.add('show');
+}
+function closeOrderExport() { document.getElementById('orderExportModal').classList.remove('show'); }
+
+async function submitOrderExport() {
+  const a = document.getElementById('expDateStart').value;
+  const b = document.getElementById('expDateEnd').value;
+  const err = document.getElementById('orderExportErr');
+  if (!a || !b) { err.textContent = '开始日期与结束日期都必须选择（必填）'; return; }
+  if (a > b) { err.textContent = '开始日期不能晚于结束日期'; return; }
+  if (!confirm(`将由本机助手自动导出 ${a} ~ ${b} 的 1688 订单并导入数据库。\n（平台要求两次导出间隔 5 分钟以上；导出期间请勿操作助手里的 1688 页面）\n\n确定开始？`)) return;
+  closeOrderExport();
+  if (!(await ensureAgentOnline())) { alert('本机助手未连接：请启动「1688 催收助手」桌面程序并完成绑定后重试'); return; }
+  try {
+    // 该请求阻塞到整个「导出→下载→回传→入库」流程结束（通常 1~5 分钟），实时进度看上方面板日志
+    await api('/api/agent/export-orders', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ dateStart: a, dateEnd: b }) });
+    DETAIL_CACHE_RESET();
+    await loadData();
+    alert('1688 订单导入流程已结束，明细结果见进度面板日志（新订单按订单号去重后入库）');
+  } catch (e) {
+    alert('导入失败：' + e.message);
+  }
 }
 
 // ══════════════ 名称映射页 ══════════════
@@ -1592,9 +1653,18 @@ async function ensureAgentOnline() {
 }
 
 // ══════════════ 事件绑定 & 启动 ══════════════
-document.getElementById('search').addEventListener('input', e => { keyword = e.target.value.trim(); resetPage('dash'); render(); });
-document.getElementById('collectState').addEventListener('change', e => { collectStateFilter = e.target.value; resetPage('dash'); render(); });
-document.getElementById('invoiceState').addEventListener('change', e => { invoiceStateFilter = e.target.value; resetPage('dash'); render(); });
+// 查询交互：输入/切换筛选只暂存草稿，点「查询」（或回车）才真正应用。
+// applyFilters 从 DOM 读当前值 → 同步到渲染变量 → 重置分页并渲染。
+function applyFilters() {
+  keyword = document.getElementById('search').value.trim();
+  collectStateFilter = document.getElementById('collectState').value;
+  invoiceStateFilter = document.getElementById('invoiceState').value;
+  resetPage('dash'); render();
+}
+document.getElementById('search').addEventListener('input', e => { /* 草稿：点「查询」才生效 */ });
+document.getElementById('search').addEventListener('keydown', e => { if (e.key === 'Enter') applyFilters(); });
+document.getElementById('collectState').addEventListener('change', e => { /* 草稿：点「查询」才生效 */ });
+document.getElementById('invoiceState').addEventListener('change', e => { /* 草稿：点「查询」才生效 */ });
 document.getElementById('filterTabs').addEventListener('click', e => {
   const tab = e.target.closest('.filter-tab'); if (!tab) return;
   document.querySelectorAll('.filter-tab').forEach(t => t.classList.remove('active'));
@@ -1605,7 +1675,7 @@ document.getElementById('filterTabs').addEventListener('click', e => {
   if (el) el.addEventListener('input', updatePreview);
 });
 document.addEventListener('keydown', e => {
-  if (e.key === 'Escape') { closeHist(); closeGuideModal(); closePwdModal(); closeUserEdit(); }
+  if (e.key === 'Escape') { closeHist(); closeGuideModal(); closePwdModal(); closeUserEdit(); closeOrderExport(); }
 });
 
 boot();

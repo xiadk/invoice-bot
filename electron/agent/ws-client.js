@@ -169,7 +169,8 @@ class AgentClient extends EventEmitter {
     if (m.type === 'ping') { this.send({ type: 'pong', t: Date.now() }); return; }
     if (m.type === 'ready') { clearTimeout(this._helloTimer); this._setReady(true); this.emit('ready', m); return; }
     if (m.type === 'send_batch') { this._runBatch(m).catch((e) => this.log('批次异常: ' + e.message)); return; }
-    if (m.type === 'stop') { this.stopFlag = true; this.log('收到停止指令：当前卖家发完即停'); return; }
+    if (m.type === 'export_orders') { this._runExport(m).catch((e) => this.log('订单导出异常: ' + e.message)); return; }
+    if (m.type === 'stop') { this.stopFlag = true; this.log('收到停止指令：当前步骤完成后即停'); return; }
     if (m.type === 'task_progress') { this.emit('progress', m); return; }
   }
 
@@ -221,6 +222,45 @@ class AgentClient extends EventEmitter {
       this._emitState();
     }
   }
-}
 
-module.exports = { AgentClient, toWsBase };
+  /** 注册「导出1688订单」处理器（main.js 注入 order-export 模块） */
+  setExportHandler(fn) { this._exportHandler = fn; }
+
+  /**
+   * 执行一次「导出1688订单」任务。api 与 _runBatch 同构：
+   *   log(text) / isStopped() / sleep(ms)
+   * 完成或失败都必须回报 export_done（上传文件走 HTTP，不在此通道传字节）。
+   */
+  async _runExport(m) {
+    if (this.sending) {
+      this.send({ type: 'export_done', taskId: m.taskId, ok: false, error: '正在发送催收消息，请等发送完成后再导入订单' });
+      return;
+    }
+    this.sending = true;
+    this.stopFlag = false;
+    this._emitState();
+    const api = {
+      log: (text) => this.send({ type: 'export_log', taskId: m.taskId, text: String(text == null ? '' : text).slice(0, 300) }),
+      isStopped: () => this.stopFlag,
+      sleep: async (ms) => {
+        for (let waited = 0; waited < ms && !this.stopFlag; waited += 300) {
+          await new Promise((r) => setTimeout(r, Math.min(300, ms - waited)));
+        }
+        if (this.stopFlag) throw new Error('已被停止');
+      },
+    };
+    try {
+      if (typeof this._exportHandler === 'function') {
+        await this._exportHandler(m, api);
+      } else {
+        throw new Error('助手版本过旧，不支持导入1688订单数据，请重新下载安装助手');
+      }
+    } catch (e) {
+      this.send({ type: 'export_done', taskId: m.taskId, ok: false, error: e.message || String(e) });
+    } finally {
+      this.sending = false;
+      this.stopFlag = false;
+      this._emitState();
+    }
+  }
+}

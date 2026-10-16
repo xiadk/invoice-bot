@@ -86,6 +86,15 @@ function readBody(req) {
     req.on('end', () => { if (tooBig) return resolve({}); try { resolve(JSON.parse(body || '{}')); } catch (e) { resolve({}); } });
   });
 }
+/** 原始字节 body（二进制上传用，如订单 Excel 回传） */
+function readRawBody(req, cap) {
+  return new Promise((resolve) => {
+    const chunks = []; let size = 0; let tooBig = false;
+    req.on('data', (c) => { size += c.length; if (size > cap) { tooBig = true; req.destroy(); return; } chunks.push(c); });
+    req.on('end', () => resolve(tooBig ? null : Buffer.concat(chunks)));
+    req.on('error', () => resolve(null));
+  });
+}
 // ── 本机助手安装包（electron-builder 产物，输出目录 dist/）──
 //    · nsis 生成的「安装版」优先（*-setup.exe / *Setup*.exe），其次 portable（*portable*.exe）
 //    · 找不到则返回 null，下载页据此提示「尚未构建/请联系管理员」
@@ -634,6 +643,20 @@ function handleAgentMessage(uid, msg) {
     if (t.running && t.channel === 'client') taskLog(t, '· ' + String(msg.text || '').slice(0, 200));
     return;
   }
+  // ── 「导入1688订单」流程：助手回报进度/结果 ──
+  if (msg.type === 'export_log') {
+    const ctx = EXPORTS.get(String(msg.taskId || ''));
+    if (ctx && ctx.userId === Number(uid)) taskLog(ctx.taskState, '· ' + String(msg.text || '').slice(0, 300));
+    return;
+  }
+  if (msg.type === 'export_done') {
+    const ctx = EXPORTS.get(String(msg.taskId || ''));
+    if (ctx && ctx.userId === Number(uid)) {
+      if (msg.ok) taskLog(ctx.taskState, '✓ 助手回报：导出下载完成，文件已回传（导入结果见上方步骤）');
+      finishExport(ctx, !!msg.ok, msg.error || null);
+    }
+    return;
+  }
   // 本机弹窗点了「停止」：与看板停止等价——扩展侧停发剩余，服务端记录停止意图
   if (msg.type === 'client_stop') {
     const ctx = CLIENT_TASKS.get(Number(msg.taskId));
@@ -715,6 +738,71 @@ function maybeAbortClientTask(uid) {
       finishClientTask(ctx, 'aborted');
     }
   }
+  for (const ctx of EXPORTS.values()) {
+    if (ctx.userId === Number(uid) && !ctx.finished) {
+      taskLog(ctx.taskState, '⛔ 本机助手连接已断开，订单导出中断');
+      finishExport(ctx, false, '本机助手通道断开');
+    }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// 「导入1688订单数据」：看板发起 → 本机助手在自带浏览器里按条件导出 1688 报表
+//   → 文件回传（/api/agent/upload-orders，设备令牌鉴权）→ 复用 runImport 入库
+// ─────────────────────────────────────────────────────────────────────────
+/** 进行中的订单导出任务：taskId -> ctx */
+const EXPORTS = new Map();
+// 平台限制两次导出间隔 ≥5 分钟，报表生成+下载通常 1~3 分钟；给足 15 分钟兜底
+const EXPORT_TIMEOUT_MS = 15 * 60 * 1000;
+
+function finishExport(ctx, ok, error) {
+  if (ctx.finished) return;
+  ctx.finished = true;
+  clearTimeout(ctx.timer);
+  EXPORTS.delete(ctx.taskId);
+  const t = ctx.taskState;
+  t.running = false;
+  t.current = null;
+  t.finishedAt = new Date().toISOString();
+  t.done = 1;
+  if (ok) t.ok = 1; else { t.fail = 1; t.error = error || null; }
+  taskLog(t, ok
+    ? `■ 1688 订单导出+导入流程结束`
+    : `■ 1688 订单导出失败：${String(error || '未知原因')}`);
+  try { ctx.resolve && ctx.resolve(); } catch (e) { /* 忽略 */ }
+}
+
+/** 下发一次「导出 1688 订单」任务并等待助手完成（含回传导入）。返回时任务已收尾。 */
+async function doExportOrders(userId, { dateStart, dateEnd }) {
+  const taskState = taskFor(userId);
+  if (taskState.running) throw new Error('已有任务在运行中，请等待完成或点「停止」');
+  if (!agentHub.isOnline(userId)) throw new Error('本机助手未连接：请先在本机启动「1688 催收助手」桌面程序并完成绑定');
+
+  Object.assign(taskState, {
+    running: true, channel: 'client', type: 'export',
+    total: 1, done: 0, ok: 0, fail: 0, current: '1688 订单导出',
+    startedAt: new Date().toISOString(), finishedAt: null, logs: [],
+  });
+  taskLog(taskState, `▶ 通过「本机助手」导出 1688 订单：下单时间 ${dateStart} ~ ${dateEnd}`);
+  taskLog(taskState, '· 助手将打开 1688「交易 → 已买到的货品」按条件导出报表，生成后自动下载并回传服务器导入');
+  taskLog(taskState, '· 平台限制：两次导出需间隔 5 分钟以上，导出期间请勿在 1688 页面操作订单');
+
+  await new Promise((resolve) => {
+    const ctx = {
+      taskId: 'E' + Date.now().toString(36) + Math.floor(Math.random() * 1e4),
+      userId: Number(userId), taskState, finished: false, resolve, importStarted: false,
+      timer: setTimeout(() => {
+        taskLog(taskState, '⏱ 导出超时（15 分钟未收到助手回执），已结束');
+        finishExport(ctx, false, '等待本机助手回执超时');
+      }, EXPORT_TIMEOUT_MS),
+    };
+    EXPORTS.set(ctx.taskId, ctx);
+    const ok = agentHub.send(userId, { type: 'export_orders', taskId: ctx.taskId, dateStart, dateEnd });
+    if (!ok) {
+      taskLog(taskState, '✗ 下发失败：本机助手通道已断开');
+      finishExport(ctx, false, '下发时通道已断开');
+    }
+  });
 }
 
 function estimateClientTimeout(n, gapMaxMs) {
@@ -1368,6 +1456,40 @@ const server = http.createServer(async (req, res) => {
       });
     }
 
+    // ── 本机助手回传「导出的 1688 订单 Excel」(**公开端点**：助手用设备令牌鉴权) ──
+    //    文件落到该用户的「完成订单」目录后，复用「重新导入数据」同一套解析入库逻辑。
+    if (method === 'POST' && p === '/api/agent/upload-orders') {
+      const dev = await resolveDeviceToken(req.headers['x-device-token']);
+      if (!dev) return sendJson(res, 401, { error: '设备令牌无效' });
+      const userId = dev.userId;
+      const ctx = EXPORTS.get(String(url.searchParams.get('taskId') || ''));
+      if (!ctx || ctx.userId !== userId) return sendJson(res, 404, { error: '导出任务不存在或已结束' });
+      if (ctx.importStarted) return sendJson(res, 409, { error: '该任务已在导入中，请勿重复上传' });
+      const raw = await readRawBody(req, 80e6);
+      if (!raw || !raw.length) return sendJson(res, 400, { error: '文件内容为空或超过大小限制（80MB）' });
+      const origName = String(url.searchParams.get('name') || '1688导出.xlsx')
+        .replace(/[\\/:*?"<>|\r\n]/g, '_').slice(-80);
+      const dir = tenancy.orderDirFor(userId);
+      fs.mkdirSync(dir, { recursive: true });
+      const fname = '1688自动导出_' + new Date().toISOString().slice(0, 19).replace(/[-:T]/g, '') + '_' + origName;
+      fs.writeFileSync(path.join(dir, fname), raw);
+      ctx.importStarted = true;
+      taskLog(ctx.taskState, `· 已收到订单文件「${fname}」（${Math.round(raw.length / 1024)} KB），开始解析入库（与「重新导入数据」同一套逻辑）`);
+      let r;
+      try { r = await runImport({ userId, orders: true }); }
+      catch (e) {
+        taskLog(ctx.taskState, '✗ 解析入库失败: ' + e.message);
+        finishExport(ctx, false, '解析入库失败: ' + e.message);
+        return sendJson(res, 500, { error: String(e.message || e) });
+      }
+      for (const s of r.steps || []) taskLog(ctx.taskState, '  ' + s);
+      const ins = r.orders && r.orders.inserted;
+      taskLog(ctx.taskState, `✓ 订单导入完成${ins !== undefined ? `（新写入 ${ins} 单）` : ''}`);
+      // 上传即导入完成 = 导出任务成功收尾（助手端只在失败时发 export_done）
+      finishExport(ctx, true);
+      return sendJson(res, 200, { ok: true, import: { inserted: ins, skipped: r.orders && r.orders.skippedExisting, files: r.orders && r.orders.files } });
+    }
+
     // ── 已废弃（2026-10-14）：浏览器扩展包下载下线，统一迁移到桌面助手 ──
     if (method === 'GET' && p === '/api/agent/extension-download') {
       return sendJson(res, 410, {
@@ -1526,6 +1648,22 @@ const server = http.createServer(async (req, res) => {
       const r = await runImport(opts);
       for (const s of r.steps) taskLog(taskState, '  ' + s);
       return sendJson(res, 200, r);
+    }
+
+    // 导入1688订单数据：下发任务给本机助手 → 助手在自带浏览器里按条件导出报表
+    //   → 下载完成回传 /api/agent/upload-orders → 复用上面的解析入库逻辑。
+    //    该请求会阻塞到整个流程结束（通常 1~5 分钟），期间看板通过 /api/task 看实时日志。
+    if (method === 'POST' && p === '/api/agent/export-orders') {
+      writeGuard();
+      const body = await readBody(req);
+      const dateStart = String(body.dateStart || '').trim();
+      const dateEnd = String(body.dateEnd || '').trim();
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStart) || !/^\d{4}-\d{2}-\d{2}$/.test(dateEnd))
+        return sendJson(res, 400, { error: '开始与结束日期均必填，格式 YYYY-MM-DD' });
+      if (dateStart > dateEnd) return sendJson(res, 400, { error: '开始日期不能晚于结束日期' });
+      try { await doExportOrders(tenantId, { dateStart, dateEnd }); }
+      catch (e) { return sendJson(res, 400, { error: e.message }); }
+      return sendJson(res, 200, { ok: true });
     }
 
     if (method === 'GET' && p === '/api/import-log') {

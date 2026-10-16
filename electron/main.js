@@ -20,6 +20,7 @@ const fs = require('fs');
 const { createStore } = require('./store');
 const { AgentClient } = require('./agent/ws-client');
 const sender = require('./agent/sender');
+const orderExport = require('./agent/order-export');
 
 // 隐藏自动化特征（navigator.webdriver=false），降低 1688 风控识别 Electron 的概率。
 // 必须在 app ready 前调用，渲染进程启动后即失效。
@@ -183,6 +184,11 @@ function startAgent() {
     getWindow: () => sender.getSendWindow(),
     log: (m) => { log(m); pushState(); },
     onLoginState: (v, url) => client.reportLoginState(v, url),
+  }));
+  // 「导入1688订单数据」内核：在同一 1688 分区里按条件导出报表并回传服务器
+  client.setExportHandler((m, api) => orderExport.runExport(m, api, {
+    serverUrl: store.get('serverUrl'),
+    deviceToken: store.get('deviceToken'),
   }));
   client.on('ready', () => { log('已连接服务器'); refreshTray(); pushState(); });
   client.on('connected', () => { refreshTray(); pushState(); });
