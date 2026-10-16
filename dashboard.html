@@ -138,6 +138,24 @@
   .hist-table td, .hist-table th { font-size: 12px; }
   .hist-table .order-nos { word-break: break-all; line-height: 1.7; font-family: Consolas, monospace; }
   .muted { color: var(--sub); }
+  /* 上传导入弹框 */
+  .up-guide { background: #f6f9ff; border: 1px solid #d7e5ff; border-radius: 8px; padding: 12px 14px; font-size: 13px; line-height: 1.85; color: #1f3a5f; margin-bottom: 12px; }
+  .up-guide ol { margin: 6px 0 8px 18px; padding: 0; }
+  .up-guide li { margin: 2px 0; }
+  .up-guide .link-btn { display: inline-flex; align-items: center; gap: 6px; background: #fff; border: 1px solid #ff6a00; color: #d1580a; font-weight: 600; border-radius: 6px; padding: 6px 12px; text-decoration: none; font-size: 13px; }
+  .up-guide .link-btn:hover { background: #fff4ec; }
+  .drop-zone { border: 2px dashed #c7ced9; border-radius: 10px; padding: 26px 16px; text-align: center; color: var(--sub); cursor: pointer; transition: .15s; background: #fafbfc; }
+  .drop-zone:hover, .drop-zone.over { border-color: var(--primary, #2b7de9); background: #f2f7ff; color: var(--text); }
+  .drop-zone .drop-main { font-size: 14px; color: var(--text); }
+  .drop-zone .drop-main u { color: #2b7de9; text-decoration: none; font-weight: 600; }
+  .drop-zone .drop-sub { font-size: 12px; margin-top: 6px; }
+  .up-file { display: flex; align-items: center; gap: 8px; font-size: 13px; margin-top: 10px; padding: 8px 10px; background: #f5f7fa; border-radius: 6px; }
+  .up-bar { height: 8px; background: #e9edf3; border-radius: 6px; overflow: hidden; margin-top: 10px; }
+  .up-bar > i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, #4a9bf5, #2b7de9); transition: width .2s; }
+  .up-result { margin-top: 12px; padding: 10px 12px; border-radius: 8px; font-size: 13px; line-height: 1.9; display: none; }
+  .up-result.ok { display: block; background: #f1f9f2; border: 1px solid #cdead3; color: #1b5e20; }
+  .up-result.err { display: block; background: #fdf2f2; border: 1px solid #f5c6c6; color: #b71c1c; }
+  .up-num { font-weight: 700; color: #1565c0; }
   /* 顶部横幅（查看他人数据 / 强制改密） */
   .banner { display: none; margin: 0; padding: 10px 20px; font-size: 13px; align-items: center; gap: 12px; }
   .banner.show { display: flex; }
@@ -250,8 +268,8 @@
     <input type="text" id="search" placeholder="搜索卖家公司名 / 登录ID" autocomplete="off">
     <button class="btn btn-outline" id="btnSearch" onclick="applyFilters()" title="输入名称或切换状态后，点此查询">查询</button>
     <span style="flex:1"></span>
-    <button class="btn btn-plain" id="btnImport" onclick="importData()">重新导入数据</button>
-    <button class="btn btn-plain" onclick="openOrderExport()" title="由本机助手自动在 1688 导出指定时间段的订单并导入">导入1688订单数据</button>
+    <button class="btn btn-plain" onclick="openUpload('orders')" title="上传从 1688 导出的订单 Excel 并导入（重复订单按最新数据更新）">导入1688订单数据</button>
+    <button class="btn btn-plain" onclick="openUpload('invoices')" title="上传从电子税务局导出的发票 Excel 并导入（重复发票按最新数据更新）">导入税务局发票数据</button>
     <button class="btn btn-outline" onclick="selectAll()" title="只勾选当前页公司的可催收会员名（不含其他分页）">全选当前页</button>
     <button class="btn btn-outline" onclick="clearSel()">取消选择</button>
     <button class="btn btn-primary" id="btnSend" onclick="batchSend()">发送催收消息 (<span id="selCount">0</span>)</button>
@@ -456,24 +474,30 @@
 </div>
 
 <!-- ══════════ 修改密码弹窗 ══════════ -->
-<div class="modal-mask" id="orderExportModal" onclick="if (event.target === this) closeOrderExport()">
-  <div class="modal small">
-    <div class="modal-head"><b>导入1688订单数据</b><span class="modal-close" onclick="closeOrderExport()">×</span></div>
+<div class="modal-mask" id="uploadModal" onclick="if (event.target === this) closeUpload()">
+  <div class="modal" style="max-width:640px">
+    <div class="modal-head"><b id="upTitle">导入数据</b><span class="modal-close" onclick="closeUpload()">×</span></div>
     <div class="modal-body">
-      <div class="hint" style="margin-bottom:12px">
-        由<b>本机助手</b>自动完成：打开 1688「交易 → 已买到的货品 → 全部订单」→
-        按下方<b>下单时间</b>设置筛选（订单状态/订单类型/支付方式=全部，其余清空）→
-        点「导出当前条件」→「生成新报表」→ 等报表生成并自动下载 → 回传本系统按订单号去重导入。
+      <!-- 导出引导（按 kind 动态填） -->
+      <div class="up-guide" id="upGuide"></div>
+
+      <!-- 拖拽上传区 -->
+      <div class="drop-zone" id="upDrop">
+        <div class="drop-main">把导出的 Excel 文件<b>拖到这里</b>，或 <u>点击选择文件</u></div>
+        <div class="drop-sub">支持 .xlsx / .xls，单个文件最大 80MB</div>
+        <input type="file" id="upFile" accept=".xlsx,.xls" style="display:none">
       </div>
-      <div class="form-row"><label>开始日期 a（下单时间起）</label><input type="date" id="expDateStart"></div>
-      <div class="form-row"><label>结束日期 b（下单时间止）</label><input type="date" id="expDateEnd"></div>
-      <div class="hint" style="color:#c62828" id="orderExportErr"></div>
-      <div style="display:flex;gap:10px;margin-top:8px">
-        <button class="btn btn-primary" id="btnOrderExport" onclick="submitOrderExport()">确定</button>
-        <button class="btn btn-plain" onclick="closeOrderExport()">取消</button>
+      <div class="up-file" id="upFileInfo" style="display:none"></div>
+      <div class="up-bar" id="upBarWrap" style="display:none"><i id="upBar"></i></div>
+      <div class="hint" id="upMsg" style="margin-top:8px"></div>
+      <div class="up-result" id="upResult"></div>
+
+      <div style="display:flex;gap:10px;margin-top:12px">
+        <button class="btn btn-primary" id="btnUpSubmit" onclick="doUpload()" disabled>开始导入</button>
+        <button class="btn btn-plain" onclick="closeUpload()">取消</button>
       </div>
       <div class="hint" style="margin-top:10px">
-        注意：1688 平台要求两次导出间隔 5 分钟以上；导出过程中请勿操作助手里已打开的 1688 页面。进度与结果看下方面板日志。
+        导入规则：<b>重复数据做更新</b>——订单按「订单编号」、发票按「发票号码+明细」匹配，已存在则用本次文件里的最新内容覆盖（人工维护的开票状态与名称映射不受影响）。
       </div>
     </div>
   </div>
@@ -548,6 +572,7 @@ async function boot() {
   // 登录用户名（=公司全称）自动填充进第一个文本框；两者都以这里的显式清空为准。
   const searchEl = document.getElementById('search');
   searchEl.value = ''; searchEl.autocomplete = 'off';
+  initUploadDrop(); // 绑定上传弹框的拖拽/选择文件（一次即可）
   let d;
   try { d = await api('/api/auth/me'); } catch (e) { return; }
   if (!d || !d.user) { goLogin(); return; }
@@ -575,7 +600,7 @@ function setTenantView(id, label) {
   DETAIL_CACHE_RESET();
   selected.clear();
   document.getElementById('btnSend').disabled = READONLY;
-  document.getElementById('btnImport').disabled = READONLY;
+  initUploadDrop();
   EXPANDED.clear(); ORDER_OPEN.clear();
   resetPage('dash');
   switchPage('board');
@@ -1152,54 +1177,156 @@ async function agentDisconnect() {
   if (!confirm('断开本机助手？\n断开只关闭当前连接；设备令牌仍然有效，下次启动助手会自动重连，无需重新绑定。')) return;
   try { await api('/api/agent/disconnect', { method: 'POST' }); AGENT_STATUS = { online: false }; renderAgentBar(); } catch (e) { /* 忽略 */ }
 }
-async function importData() {
+// ══════════════ 上传导入（1688 订单 / 税务局发票）══════════════
+//  · 点击按钮只弹出「拖拽上传」弹框：用户自己去 1688 / 税务局 导出 Excel，再拖进来导入
+//  · 重复数据做更新（订单按订单编号、发票按 用户+行指纹 upsert）
+const UP_GUIDES = {
+  orders: {
+    title: '导入1688订单数据',
+    html: `<div style="font-weight:600;margin-bottom:4px">第一步：从 1688 导出订单 Excel</div>
+      <ol>
+        <li>点击下方按钮打开 1688「交易 → 已买到的货品 → 全部订单」（需已登录 1688）</li>
+        <li>按需要设置筛选条件（如<b>下单时间</b>；订单状态/订单类型/支付方式可选「全部」）</li>
+        <li>点页面下方「<b>导出当前条件</b>」→ 在弹窗里点「<b>生成新报表</b>」</li>
+        <li>等 1~5 分钟报表生成（状态变「导出成功」）后点「<b>下载</b>」，得到 Excel 文件</li>
+      </ol>
+      <a class="link-btn" href="https://work.1688.com/?spm=a262jm.22620049.quickentry.dbuylist.44f54aadOnKN0s&_path_=buyer2017Base/2017buyerbase_trade/buyList" target="_blank" rel="noopener">前往 1688 订单页下载 ↗</a>
+      <div style="margin-top:8px;color:#5a7291">第二步：把下载好的 Excel 拖到下方上传区导入（找不到文件？看浏览器「下载」目录）</div>`,
+    accept: '.xlsx,.xls',
+  },
+  invoices: {
+    title: '导入税务局发票数据',
+    html: `<div style="font-weight:600;margin-bottom:4px">第一步：从电子税务局导出「发票信息汇总表」</div>
+      <ol>
+        <li>登录电子税务局 → <b>税务数字账户</b>（或「我要办税 → 发票业务 → 发票查询统计」）</li>
+        <li>选择<b>开票日期</b>范围，点「查询」后选择「导出」为 Excel</li>
+        <li>导出的表需包含表头：发票号码/数电发票号码、开票日期、销方名称、购买方名称、价税合计 等</li>
+      </ol>
+      <a class="link-btn" href="https://etax.chinatax.gov.cn/" target="_blank" rel="noopener">打开电子税务局（全国统一入口）↗</a>
+      <div style="margin-top:8px;color:#5a7291">第二步：把导出的 Excel 拖到下方上传区导入（系统会按「销方名称」自动匹配 1688 卖家）</div>`,
+    accept: '.xlsx,.xls',
+  },
+};
+let UP_KIND = 'orders';
+let UP_FILE = null;
+let UP_BUSY = false;
+
+function openUpload(kind) {
   if (READONLY) { alert('只读模式下不能导入'); return; }
-  if (!confirm('重新扫描 【本账号】 data 目录下的 Excel 并导入数据库？\n（按订单号去重：数据库已有的跳过，只插入新数据；已导入过的订单不会从看板消失；人工维护的开票状态与名称映射不受影响）')) return;
-  const btn = document.getElementById('btnImport');
-  btn.disabled = true; const old = btn.textContent; btn.textContent = '导入中...';
-  try {
-    const d = await api('/api/import', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({}) });
-    if (d.error) { alert('导入失败: ' + d.error); return; }
-    alert('导入完成：\n' + (d.steps || []).join('\n'));
-    DETAIL_CACHE_RESET();
-    await loadData();
-    if (document.getElementById('page-mapping').classList.contains('active')) loadMapping();
-  } catch (e) { alert('导入失败: ' + e.message); }
-  btn.disabled = false; btn.textContent = old;
+  UP_KIND = UP_GUIDES[kind] ? kind : 'orders';
+  const g = UP_GUIDES[UP_KIND];
+  document.getElementById('upTitle').textContent = g.title;
+  document.getElementById('upGuide').innerHTML = g.html;
+  document.getElementById('upFile').setAttribute('accept', g.accept);
+  resetUploadForm();
+  document.getElementById('uploadModal').classList.add('show');
+}
+function closeUpload() {
+  if (UP_BUSY) { alert('正在导入中，请等待完成'); return; }
+  document.getElementById('uploadModal').classList.remove('show');
+}
+function resetUploadForm() {
+  UP_FILE = null;
+  document.getElementById('upFile').value = '';
+  document.getElementById('upFileInfo').style.display = 'none';
+  document.getElementById('upBarWrap').style.display = 'none';
+  document.getElementById('upBar').style.width = '0%';
+  document.getElementById('upMsg').textContent = '';
+  const r = document.getElementById('upResult');
+  r.className = 'up-result'; r.innerHTML = '';
+  const b = document.getElementById('btnUpSubmit');
+  b.disabled = true; b.textContent = '开始导入';
+}
+function fmtSize(n) { return n > 1048576 ? (n / 1048576).toFixed(2) + ' MB' : (n / 1024).toFixed(0) + ' KB'; }
+function setUploadFile(file) {
+  const msg = document.getElementById('upMsg');
+  if (!file) return;
+  if (!/\.(xlsx|xls)$/i.test(file.name)) { msg.style.color = '#c62828'; msg.textContent = '只支持 .xlsx / .xls 文件'; return; }
+  if (file.size > 80 * 1024 * 1024) { msg.style.color = '#c62828'; msg.textContent = '文件超过 80MB 上限'; return; }
+  UP_FILE = file;
+  msg.style.color = ''; msg.textContent = '';
+  const info = document.getElementById('upFileInfo');
+  info.style.display = 'flex';
+  info.innerHTML = '📄 <b>' + esc(file.name) + '</b> <span class="muted">' + fmtSize(file.size) + '</span>' +
+    '<span style="margin-left:auto;color:#2b7de9;cursor:pointer" onclick="resetUploadForm()">重新选择</span>';
+  document.getElementById('btnUpSubmit').disabled = false;
+}
+function initUploadDrop() {
+  const zone = document.getElementById('upDrop');
+  const input = document.getElementById('upFile');
+  if (!zone || zone.dataset.bound) return;
+  zone.dataset.bound = '1';
+  zone.addEventListener('click', () => { if (!UP_BUSY) input.click(); });
+  input.addEventListener('change', () => setUploadFile(input.files && input.files[0]));
+  ['dragenter', 'dragover'].forEach((ev) => zone.addEventListener(ev, (e) => { e.preventDefault(); zone.classList.add('over'); }));
+  ['dragleave', 'drop'].forEach((ev) => zone.addEventListener(ev, (e) => { e.preventDefault(); zone.classList.remove('over'); }));
+  zone.addEventListener('drop', (e) => {
+    const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+    if (f) setUploadFile(f);
+  });
+  // 防止拖到弹框其它地方时浏览器直接打开文件
+  const mask = document.getElementById('uploadModal');
+  mask.addEventListener('dragover', (e) => e.preventDefault());
+  mask.addEventListener('drop', (e) => e.preventDefault());
+}
+async function doUpload() {
+  if (READONLY) { alert('只读模式下不能导入'); return; }
+  if (!UP_FILE) { alert('请先选择或拖入文件'); return; }
+  const btn = document.getElementById('btnUpSubmit');
+  const msg = document.getElementById('upMsg');
+  const res = document.getElementById('upResult');
+  const barWrap = document.getElementById('upBarWrap');
+  const bar = document.getElementById('upBar');
+  UP_BUSY = true;
+  btn.disabled = true; btn.textContent = '导入中…';
+  msg.style.color = ''; msg.textContent = '正在上传并解析入库，请勿关闭弹框…';
+  res.className = 'up-result'; res.innerHTML = '';
+  barWrap.style.display = 'block';
+
+  const q = withTenant('/api/import/upload?kind=' + encodeURIComponent(UP_KIND) + '&name=' + encodeURIComponent(UP_FILE.name));
+  const done = (okFlag, payload) => {
+    UP_BUSY = false;
+    btn.disabled = false; btn.textContent = '开始导入';
+    barWrap.style.display = 'none';
+    if (okFlag) {
+      const d = payload || {};
+      msg.textContent = '';
+      res.className = 'up-result ok';
+      if (UP_KIND === 'invoices') {
+        const un = (d.unmatchedNames || []);
+        res.innerHTML = '✓ 导入完成：新增 <span class="up-num">' + (d.inserted || 0) + '</span> 行 · 更新 <span class="up-num">' + (d.updated || 0) + '</span> 行' +
+          (d.autoMapped ? ' · 自动匹配销方 <span class="up-num">' + d.autoMapped + '</span> 个' : '') +
+          (un.length ? '<div style="margin-top:6px">⚠ 还有 ' + un.length + ' 个销方未匹配 1688 卖家（可在「名称映射」页手动维护）：<br><span class="muted">' + esc(un.slice(0, 12).join('、')) + (un.length > 12 ? ' 等' : '') + '</span></div>' : '');
+      } else {
+        res.innerHTML = '✓ 导入完成：新增 <span class="up-num">' + (d.inserted || 0) + '</span> 单 · 更新 <span class="up-num">' + (d.updated || 0) + '</span> 单（重复订单已用本次文件的数据更新）';
+      }
+      DETAIL_CACHE_RESET();
+      loadData();
+      if (document.getElementById('page-mapping').classList.contains('active')) loadMapping();
+    } else {
+      res.className = 'up-result err';
+      res.innerHTML = '✗ ' + esc((payload && payload.error) || '导入失败');
+      msg.style.color = '#c62828'; msg.textContent = '';
+    }
+  };
+
+  // 用 XHR 以便显示上传进度
+  const xhr = new XMLHttpRequest();
+  xhr.open('POST', q, true);
+  xhr.withCredentials = true;
+  xhr.setRequestHeader('content-type', 'application/octet-stream');
+  xhr.upload.onprogress = (e) => { if (e.lengthComputable) bar.style.width = Math.round(e.loaded / e.total * 100) + '%'; };
+  xhr.onload = () => {
+    let body = null;
+    try { body = JSON.parse(xhr.responseText); } catch (e) { body = null; }
+    if (xhr.status === 401) { location.href = '/login'; return; }
+    if (xhr.status >= 200 && xhr.status < 300 && body && body.ok) done(true, body);
+    else done(false, body || { error: '服务响应异常 (HTTP ' + xhr.status + ')：' + String(xhr.responseText || '').slice(0, 120) });
+  };
+  xhr.onerror = () => done(false, { error: '网络错误：上传失败，请重试' });
+  xhr.send(UP_FILE);
 }
 
-// ══════════════ 导入1688订单数据（本机助手自动导出→回传→入库） ══════════════
-function openOrderExport() {
-  if (READONLY) { alert('只读模式下不能导入'); return; }
-  const iso = (d) => new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
-  const end = new Date();
-  const start = new Date(Date.now() - 29 * 864e5); // 默认最近一个月
-  document.getElementById('expDateStart').value = iso(start);
-  document.getElementById('expDateEnd').value = iso(end);
-  document.getElementById('orderExportErr').textContent = '';
-  document.getElementById('orderExportModal').classList.add('show');
-}
-function closeOrderExport() { document.getElementById('orderExportModal').classList.remove('show'); }
-
-async function submitOrderExport() {
-  const a = document.getElementById('expDateStart').value;
-  const b = document.getElementById('expDateEnd').value;
-  const err = document.getElementById('orderExportErr');
-  if (!a || !b) { err.textContent = '开始日期与结束日期都必须选择（必填）'; return; }
-  if (a > b) { err.textContent = '开始日期不能晚于结束日期'; return; }
-  if (!confirm(`将由本机助手自动导出 ${a} ~ ${b} 的 1688 订单并导入数据库。\n（平台要求两次导出间隔 5 分钟以上；导出期间请勿操作助手里的 1688 页面）\n\n确定开始？`)) return;
-  closeOrderExport();
-  if (!(await ensureAgentOnline())) { alert('本机助手未连接：请启动「1688 催收助手」桌面程序并完成绑定后重试'); return; }
-  try {
-    // 该请求阻塞到整个「导出→下载→回传→入库」流程结束（通常 1~5 分钟），实时进度看上方面板日志
-    await api('/api/agent/export-orders', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ dateStart: a, dateEnd: b }) });
-    DETAIL_CACHE_RESET();
-    await loadData();
-    alert('1688 订单导入流程已结束，明细结果见进度面板日志（新订单按订单号去重后入库）');
-  } catch (e) {
-    alert('导入失败：' + e.message);
-  }
-}
 
 // ══════════════ 名称映射页 ══════════════
 async function loadMapping() {
@@ -1252,7 +1379,7 @@ function renderMapping() {
        ${pagerHtml('unmatched', unmatched.length)}`;
 
   const mp = pageOf('mapping', mappings.length);
-  const mappingHtml = mappings.length === 0 ? '<div class="empty-hint">映射表还是空的，先点看板的「重新导入数据」触发自动匹配。</div>'
+  const mappingHtml = mappings.length === 0 ? '<div class="empty-hint">映射表还是空的，先点看板的「导入税务局发票数据」上传发票后自动匹配。</div>'
     : `<table>
          <thead><tr>
            <th>税务局销方名称</th><th>对应的 1688 商家</th><th style="width:140px">卖家会员名</th>
@@ -1681,7 +1808,7 @@ document.getElementById('filterTabs').addEventListener('click', e => {
   if (el) el.addEventListener('input', updatePreview);
 });
 document.addEventListener('keydown', e => {
-  if (e.key === 'Escape') { closeHist(); closeGuideModal(); closePwdModal(); closeUserEdit(); closeOrderExport(); }
+  if (e.key === 'Escape') { closeHist(); closeGuideModal(); closePwdModal(); closeUserEdit(); closeUpload(); }
 });
 
 boot();

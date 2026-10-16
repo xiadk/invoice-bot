@@ -53,7 +53,7 @@ const { WebSocketServer } = require('ws');
 const db = require('./db');
 const auth = require('./lib/auth');
 const tenancy = require('./lib/tenancy');
-const { runImport } = require('./import-to-db');
+const { runImport, importOrderUpload, importInvoiceUpload } = require('./import-to-db');
 const { loadConfig } = require('./lib/browser');
 const { AgentHub } = require('./lib/agent-hub');
 const { buildMessages } = require('./lib/sender');
@@ -1655,18 +1655,45 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { ok: true });
     }
 
-    // 导入（按用户的数据目录）
-    if (method === 'POST' && p === '/api/import') {
+    // 上传导入：用户在浏览器里拖拽/选择上传 1688 订单 Excel 或 税务局发票 Excel
+    //   · kind=orders   → 解析后写入 invoice_order（按订单号 upsert：重复数据做更新）
+    //   · kind=invoices → 解析后写入 issued_invoice（按 用户+行指纹 upsert）
+    //   · 请求体是文件二进制（application/octet-stream），文件名走 query 参数
+    if (method === 'POST' && p === '/api/import/upload') {
       writeGuard();
-      const body = await readBody(req);
-      const opts = { userId: tenantId };
-      if (body.orders) opts.orders = true;
-      if (body.invoices) opts.invoices = true;
-      const taskState = taskFor(tenantId);
-      taskLog(taskState, '▶ 收到「重新导入数据」请求');
-      const r = await runImport(opts);
-      for (const s of r.steps) taskLog(taskState, '  ' + s);
-      return sendJson(res, 200, r);
+      const up = new URL(req.url, 'http://localhost');
+      const kind = up.searchParams.get('kind') === 'invoices' ? 'invoices' : 'orders';
+      const rawName = String(up.searchParams.get('name') || '').trim();
+      const safeName = path.basename(rawName).replace(/[\\/:*?"<>|]+/g, '_').slice(-120)
+        || (kind === 'invoices' ? 'invoices.xlsx' : 'orders.xlsx');
+      if (!/\.(xlsx|xls)$/i.test(safeName)) throw new Error('只支持 .xlsx / .xls 文件（请上传从 1688 / 税务局导出的 Excel）');
+      const buf = await readRawBody(req, 80e6);
+      if (!buf) throw new Error('上传失败：内容过大（上限 80MB）或读取中断');
+      if (!buf.length) throw new Error('上传失败：文件内容为空');
+
+      const dir = kind === 'invoices' ? tenancy.invoiceDirFor(tenantId) : tenancy.orderDirFor(tenantId);
+      fs.mkdirSync(dir, { recursive: true });
+      const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14);
+      const dest = path.join(dir, stamp + '-' + safeName);
+      fs.writeFileSync(dest, buf);
+
+      const t = taskFor(tenantId);
+      taskLog(t, `▶ 上传导入（${kind === 'invoices' ? '税务局发票' : '1688订单'}）：${safeName} · ${(buf.length / 1024).toFixed(0)}KB`);
+      const r = kind === 'invoices'
+        ? await importInvoiceUpload(tenantId, dest, safeName)
+        : await importOrderUpload(tenantId, dest, safeName);
+      if (!r.ok) {
+        taskLog(t, `✗ 导入失败：${r.error}`);
+        return sendJson(res, 400, { ok: false, kind, error: r.error, file: safeName });
+      }
+      if (kind === 'invoices') {
+        taskLog(t, `✓ 发票导入完成：新增 ${r.inserted} 行 · 更新 ${r.updated} 行` +
+          (r.autoMapped ? ` · 自动匹配 ${r.autoMapped} 个销方` : '') +
+          (r.unmatchedNames && r.unmatchedNames.length ? ` · 待人工匹配 ${r.unmatchedNames.length} 个销方` : ''));
+      } else {
+        taskLog(t, `✓ 订单导入完成：新增 ${r.inserted} 单 · 更新 ${r.updated} 单`);
+      }
+      return sendJson(res, 200, { ok: true, kind, ...r });
     }
 
     // 导入1688订单数据：下发任务给本机助手 → 助手在自带浏览器里按条件导出报表

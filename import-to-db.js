@@ -390,6 +390,41 @@ async function bulkInsert(table, fields, rows, chunk = 400) {
   return inserted;
 }
 
+/**
+ * upsert 写入：唯一键冲突时更新（不改唯一键列）
+ * @param {string} table
+ * @param {string[]} fields 参与写入的列
+ * @param {object[]} rows
+ * @param {string[]} [updateFields] 冲突时要更新的列（默认 fields 去掉 user_id/唯一键列）
+ * @param {number} [chunk]
+ * @returns {Promise<number>} 受影响行数（插入=1，更新=2，未变化=0，故仅供粗略计数）
+ */
+async function bulkUpsert(table, fields, rows, updateFields, chunk = 400) {
+  if (!rows.length) return 0;
+  const keep = new Set(['user_id', 'order_no', 'row_hash', 'id']);
+  const upd = (updateFields && updateFields.length ? updateFields : fields.filter((f) => !keep.has(f)));
+  const setSql = upd.map((f) => `\`${f}\` = VALUES(\`${f}\`)`).join(', ');
+  let affected = 0;
+  for (let i = 0; i < rows.length; i += chunk) {
+    const part = rows.slice(i, i + chunk);
+    const values = [];
+    const ph = part.map((r) => {
+      const one = fields.map((f) => {
+        let v = r[f];
+        if (v === undefined) v = null;
+        values.push(v);
+        return '?';
+      });
+      return `(${one.join(',')})`;
+    });
+    const sql = `INSERT INTO \`${table}\` (${fields.map((f) => `\`${f}\``).join(',')}) VALUES ${ph.join(',')}`
+      + (setSql ? ` ON DUPLICATE KEY UPDATE ${setSql}` : ' ON DUPLICATE KEY UPDATE `id` = `id`');
+    const r = await db.exec(sql, values);
+    affected += r.affectedRows || 0;
+  }
+  return affected;
+}
+
 async function logImport(userId, entry) {
   const fields = ['user_id', 'kind', 'source_file', 'total_rows', 'inserted', 'skipped', 'auto_mapped', 'unmatched', 'status', 'message'];
   const numFields = new Set(['total_rows', 'inserted', 'skipped', 'auto_mapped', 'unmatched']);
@@ -565,6 +600,131 @@ async function importInvoices(userId) {
   };
 }
 
+/**
+ * 上传导入：单个订单 Excel（拖拽/选择上传的文件）
+ *   · 按订单号 upsert：库中已有 → 用文件里的最新平台数据**更新**；没有 → 插入
+ *   · 只更新平台数据列；人工/平台维护的开票状态（invoice_state/state_source/state_updated_at/state_note）原样保留
+ */
+async function importOrderUpload(userId, filePath, displayName) {
+  const name = displayName || path.basename(filePath);
+  const { orders, totalRows } = parseOrderFile(filePath);
+  if (!orders.length) {
+    await logImport(userId, { kind: 'order', source_file: name, total_rows: totalRows, inserted: 0, skipped: 0, status: 'error', message: '未解析到订单行（表头不匹配或文件为空）' });
+    return { file: name, ok: false, error: '未解析到订单行（请确认是 1688「导出当前条件」下载的 Excel）', totalRows, inserted: 0, updated: 0 };
+  }
+
+  // 库里已有的订单号（用于区分「新增」与「更新」计数）
+  const existing = new Set();
+  try {
+    const old = await db.query('SELECT order_no FROM invoice_order WHERE user_id = ?', [userId]);
+    for (const r of old) existing.add(r.order_no);
+  } catch (e) { /* 首次运行表可能为空 */ }
+
+  const rows = orders.map((o) => ({
+    ...o,
+    user_id: userId,
+    source_file: name,
+    // 仅新增行会用到；重复行的这些列不在 updateFields 里，不会被覆盖
+    invoice_state: 'none',
+    state_source: 'platform',
+    state_updated_at: null,
+    state_note: null,
+  }));
+  let inserted = 0, updated = 0;
+  for (const o of rows) { if (existing.has(o.order_no)) updated++; else inserted++; }
+
+  // 冲突时只更新平台数据列（保留开票状态类列不参与 UPDATE）
+  const updateFields = ORDER_FIELDS.filter(
+    (f) => !['user_id', 'order_no', 'invoice_state', 'state_source', 'state_updated_at', 'state_note'].includes(f)
+  );
+  const affected = await bulkUpsert('invoice_order', ORDER_FIELDS, rows, updateFields);
+
+  await logImport(userId, {
+    kind: 'order', source_file: name, total_rows: totalRows, inserted, skipped: updated,
+    status: 'ok', message: `上传导入：新增 ${inserted} · 更新 ${updated}（affected=${affected}）`,
+  });
+  return { file: name, ok: true, totalRows, kept: rows.length, inserted, updated, affected };
+}
+
+/**
+ * 上传导入：单个税务局发票 Excel（拖拽/选择上传的文件）
+ *   · 按 (user_id, row_hash) upsert：已有发票行用最新数据**更新**，新行插入
+ *   · 先按「销方名称」自动匹配本账号的 1688 卖家，并把映射回填到发票行
+ */
+async function importInvoiceUpload(userId, filePath, displayName) {
+  const name = displayName || path.basename(filePath);
+  const { invoices, totalRows, sheet } = parseInvoiceFile(filePath);
+  if (!invoices.length) {
+    await logImport(userId, { kind: 'invoice', source_file: name, total_rows: totalRows, inserted: 0, skipped: 0, status: 'error', message: `未解析到发票行（sheet=${sheet}）` });
+    return { file: name, ok: false, error: '未解析到发票行（请确认是税务局导出的「发票信息汇总表」Excel）', totalRows, inserted: 0, updated: 0 };
+  }
+
+  // 文件内按 row_hash 去重（同一次导出一般不会重复，防御性处理）
+  const byHash = new Map();
+  for (const inv of invoices) byHash.set(inv.row_hash, inv);
+  const rows = [...byHash.values()];
+
+  // 1) 销方名称 → 本账号 1688 卖家 自动匹配
+  const sellers = await db.query(
+    `SELECT seller_login, MAX(seller_company) AS seller_company, COUNT(*) AS order_cnt
+     FROM invoice_order
+     WHERE user_id = ? AND seller_company IS NOT NULL
+     GROUP BY seller_login
+     ORDER BY seller_login`,
+    [userId]
+  );
+  const taxTotals = new Map();
+  for (const inv of rows) {
+    if (!taxTotals.has(inv.seller_name)) taxTotals.set(inv.seller_name, { tax_seller_name: inv.seller_name, remark: inv.remark });
+  }
+  const mapped = await autoMapSellers(sellers, [...taxTotals.values()], userId);
+
+  // 2) 依据映射表（含人工维护）回填 seller_company
+  const mapRows = await db.query(
+    'SELECT tax_seller_name, seller_company FROM seller_name_mapping WHERE user_id = ? AND seller_company IS NOT NULL',
+    [userId]
+  );
+  const nameMap = new Map(mapRows.map((r) => [r.tax_seller_name, r.seller_company]));
+  for (const inv of rows) {
+    inv.user_id = userId;
+    inv.seller_company = nameMap.get(inv.seller_name) || null;
+    inv.source_file = name;
+  }
+
+  // 3) 计数：库里已有的 row_hash = 更新，其余 = 新增
+  const existingHash = new Set();
+  try {
+    const old = await db.query('SELECT row_hash FROM issued_invoice WHERE user_id = ?', [userId]);
+    for (const r of old) existingHash.add(r.row_hash);
+  } catch (e) { /* 首次运行表可能为空 */ }
+  let inserted = 0, updated = 0;
+  for (const inv of rows) { if (existingHash.has(inv.row_hash)) updated++; else inserted++; }
+
+  // 4) upsert（冲突按 user_id+row_hash 更新全部数据列）
+  const updateFields = INVOICE_FIELDS.filter((f) => !['user_id', 'row_hash'].includes(f));
+  await bulkUpsert('issued_invoice', INVOICE_FIELDS, rows, updateFields);
+
+  // 5) 映射回填：自动匹配/人工维护的映射同步到已有发票行
+  const backfilled = await db.exec(
+    `UPDATE issued_invoice i JOIN seller_name_mapping m
+       ON m.user_id = i.user_id AND m.tax_seller_name = i.seller_name AND m.seller_company IS NOT NULL
+     SET i.seller_company = m.seller_company
+     WHERE i.user_id = ? AND (i.seller_company IS NULL OR i.seller_company <> m.seller_company)`,
+    [userId]
+  ).catch(() => ({ affectedRows: 0 }));
+
+  await logImport(userId, {
+    kind: 'invoice', source_file: name, total_rows: totalRows, inserted, skipped: updated,
+    auto_mapped: mapped.autoMapped.length, unmatched: mapped.unmatched.length, status: 'ok',
+    message: `上传导入(sheet=${sheet})：新增 ${inserted} · 更新 ${updated}`,
+  });
+  return {
+    file: name, ok: true, totalRows, kept: rows.length, sheet, inserted, updated,
+    backfilled: backfilled.affectedRows || 0,
+    autoMapped: mapped.autoMapped.length, unmatchedNames: mapped.unmatched,
+  };
+}
+
 /** 旧版 data/sent-log.json → send_log（仅该用户表为空时执行一次） */
 async function migrateLegacySentLog(userId) {
   const f = path.join(tenancy.DATA_ROOT, 'sent-log.json');
@@ -643,7 +803,11 @@ async function runImport(opts) {
   return out;
 }
 
-module.exports = { runImport, importOrders, importInvoices, applyInvoiceStatus, migrateLegacySentLog, matchSeller, autoMapSellers, normName, toDateTime };
+module.exports = {
+  runImport, importOrders, importInvoices, applyInvoiceStatus, migrateLegacySentLog,
+  importOrderUpload, importInvoiceUpload,
+  matchSeller, autoMapSellers, normName, toDateTime,
+};
 
 // ──────────────────────── CLI ────────────────────────
 if (require.main === module) {
