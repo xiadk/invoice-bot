@@ -528,6 +528,12 @@ function withTenant(url) {
 async function api(path, opts) {
   const r = await fetch(withTenant(path), Object.assign({ credentials: 'same-origin' }, opts || {}));
   if (r.status === 401) { location.href = '/login'; throw new Error('登录已失效'); }
+  const ct = String(r.headers.get('content-type') || '');
+  if (!/json/i.test(ct)) {
+    // 非 JSON（如服务未更新时的纯文本 404 / 代理错误页）→ 给出可读错误，而不是 JSON 解析异常
+    const txt = (await r.text().catch(() => '')).trim().slice(0, 120);
+    throw new Error('服务响应异常 (HTTP ' + r.status + (txt ? '): ' + txt : ('): ' + (r.statusText || '非 JSON 响应'))));
+  }
   return r.json();
 }
 function goLogin() { location.href = '/login'; }

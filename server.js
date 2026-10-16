@@ -640,7 +640,13 @@ function handleAgentMessage(uid, msg) {
   if (msg.type === 'sent') { onAgentSent(uid, msg); return; }
   if (msg.type === 'log') {
     const t = taskFor(uid);
-    if (t.running && t.channel === 'client') taskLog(t, '· ' + String(msg.text || '').slice(0, 200));
+    if (t.running && t.channel === 'client') {
+      taskLog(t, '· ' + String(msg.text || '').slice(0, 200));
+      // 助手仍在推进 → 找到对应任务上下文重新计时（防止慢加载被误判超时）
+      for (const c of CLIENT_TASKS.values()) {
+        if (c.userId === Number(uid) && !c.finished && typeof c.armTimer === 'function') { c.armTimer(); break; }
+      }
+    }
     return;
   }
   // ── 「导入1688订单」流程：助手回报进度/结果 ──
@@ -697,6 +703,7 @@ function onAgentSent(uid, msg) {
   pushClientProgress(uid, ctx);
   ctx.pending--;
   if (ctx.pending <= 0) finishClientTask(ctx, ctx.stopRequested ? 'aborted' : 'done');
+  else if (typeof ctx.armTimer === 'function') ctx.armTimer(); // 还有剩余家数 → 重新计时
 }
 
 async function finishClientTask(ctx, status) {
@@ -806,7 +813,10 @@ async function doExportOrders(userId, { dateStart, dateEnd }) {
 }
 
 function estimateClientTimeout(n, gapMaxMs) {
-  return Math.max(120000, n * (Math.ceil(gapMaxMs / 1000) + 60) * 1000);
+  // 单家最坏耗时 = 聊天页加载 60s + frame 定位 45s + 编辑器就绪 40s + 发送 240s ≈ 6.5 分钟；
+  // 旧公式只给 ~95s/家（n=1 时下限 120s），聊天页首次加载稍慢就误报「等待本机回执超时」。
+  // 正常推进时每条回执都会重置计时（见 doClientSend 的 armTimer），所以这只是兜底上限。
+  return Math.max(300000, n * (Math.ceil(gapMaxMs / 1000) + 420) * 1000);
 }
 
 // ── 断线续跑（方案C） ──────────────────────────────────────────────────────
@@ -963,13 +973,22 @@ async function doClientSend(userId, loginIds, opts = {}) {
   await new Promise((resolve) => {
     const ctx = {
       taskId, userId: Number(userId), sellers, taskState, pending: sellers.length,
-      stopRequested: false, finished: false, abortReason: null, resolve,
-      timer: setTimeout(() => {
+      stopRequested: false, finished: false, abortReason: null, resolve, timer: null,
+    };
+    // 超时兜底：以「剩余未回报家数」重新计算预算；每收到一条本机回执（log/sent）
+    // 都会调用 ctx.armTimer() 重新计时 —— 只要任务还在推进就不会被误杀，
+    // 只有助手彻底失联（断线且无任何回执）达到预算后才判超时。
+    ctx.armTimer = () => {
+      if (ctx.finished) return;
+      const left = Math.max(1, ctx.pending != null ? ctx.pending : sellers.length);
+      if (ctx.timer) clearTimeout(ctx.timer);
+      ctx.timer = setTimeout(() => {
         taskLog(taskState, '⏱ 任务超时（长时间未收到本机助手回执），已结束');
         ctx.abortReason = '等待本机回执超时';
         finishClientTask(ctx, 'failed');
-      }, estimateClientTimeout(sellers.length, gapMax)),
+      }, estimateClientTimeout(left, gapMax));
     };
+    ctx.armTimer();
     CLIENT_TASKS.set(taskId, ctx);
     pushClientProgress(userId, ctx);
     const ok = agentHub.send(userId, {
