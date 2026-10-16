@@ -4,6 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>1688 发票催收控制台</title>
+<!-- Element UI 主题（本地 vendor，免外网 CDN）；须在本页自身样式之前加载，便于本页样式覆盖 -->
+<link rel="stylesheet" href="/vendor/element-ui/index.css">
 <style>
   :root { --primary: #ff6a00; --bg: #f5f6f8; --card: #fff; --border: #e8e9eb; --text: #26282c; --sub: #8a8f99; }
   * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -138,11 +140,18 @@
   .hist-table td, .hist-table th { font-size: 12px; }
   .hist-table .order-nos { word-break: break-all; line-height: 1.7; font-family: Consolas, monospace; }
   .muted { color: var(--sub); }
-  /* 趋势图 */
-  .trend-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:12px; }
-  @media (max-width: 900px) { .trend-grid { grid-template-columns:1fr; } }
-  .trend-card { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:12px 14px; }
-  .trend-title { font-size:13px; font-weight:600; color:var(--ink); margin-bottom:8px; }
+  /* 趋势图（Element UI 卡片 + ECharts） */
+  [v-cloak] { display: none; }
+  #trendApp { margin-bottom: 12px; }
+  #trendApp .el-col { margin-bottom: 0; }
+  #trendApp .trend-card.el-card { border-radius: 10px; border-color: var(--border); }
+  #trendApp .trend-card .el-card__header { padding: 10px 14px; }
+  .trend-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .trend-card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; }
+  .trend-title { font-size: 13px; font-weight: 600; color: var(--text); }
+  .trend-chart { height: 190px; width: 100%; }
+  /* 窄屏堆叠 */
+  @media (max-width: 900px) { #trendApp .el-col-12 { width: 100%; max-width: 100%; flex: 0 0 100%; } }
   .trend-chart svg { display:block; width:100%; height:170px; }
   /* 可点击统计卡 */
   .stat-card.clickable { cursor:pointer; transition:.15s; }
@@ -251,9 +260,21 @@
 <!-- ══════════ 看板页 ══════════ -->
 <div class="page active" id="page-board">
   <div class="stats" id="stats"></div>
-  <div class="trend-grid" id="trendGrid">
-    <div class="trend-card"><div class="trend-title">最近 30 天 · 每日支付订单总金额</div><div class="trend-chart" id="trendOrders">加载中...</div></div>
-    <div class="trend-card"><div class="trend-title">最近 30 天 · 每日已开票金额（税务局）</div><div class="trend-chart" id="trendInvoices">加载中...</div></div>
+  <!-- 趋势图：Vue 2 + Element UI（el-row/el-col/el-card/el-tooltip/el-tag）+ ECharts，悬浮查看每日金额 -->
+  <div id="trendApp" v-cloak>
+    <el-row :gutter="12">
+      <el-col :xs="24" :sm="12" v-for="c in charts" :key="c.key">
+        <el-card shadow="hover" class="trend-card" :body-style="{ padding: '6px 10px 2px' }">
+          <div slot="header" class="trend-head">
+            <span class="trend-title">{{ c.title }}</span>
+            <el-tooltip effect="dark" placement="top" :content="'近 30 天该图峰值：' + c.peakText + '（' + c.peakDate + '）'">
+              <el-tag size="mini" type="info">峰值 {{ c.peakText }}</el-tag>
+            </el-tooltip>
+          </div>
+          <div class="trend-chart" :id="'trend-chart-' + c.key"></div>
+        </el-card>
+      </el-col>
+    </el-row>
   </div>
   <div class="progress-wrap" id="progressWrap">
     <div class="progress-head">
@@ -543,6 +564,10 @@
   </div>
 </div>
 
+<!-- 前端本地依赖（项目自带 vendor 目录，不依赖外网 CDN） -->
+<script src="/vendor/vue.min.js"></script>
+<script src="/vendor/element-ui/index.js"></script>
+<script src="/vendor/echarts.min.js"></script>
 <script>
 // ══════════════ 全局状态 ══════════════
 let ME = null;                 // 当前登录用户
@@ -1279,35 +1304,131 @@ function detailSearch() {
   DETAIL_ST.q = el ? el.value.trim() : ''; DETAIL_ST.page = 1; loadDetailRows();
 }
 
-// ══════════════ 趋势图（最近 30 天）══════════════
-//  · 纯内联 SVG 柱状图：不依赖外部图表库（内网可用）
+// ══════════════ 趋势图（Vue 2 + Element UI + ECharts）══════════════
+//  · Element UI：el-row/el-col/el-card 布局，el-tooltip + el-tag 展示峰值
+//  · ECharts：柱状图，鼠标悬浮（axis 触发）查看每一天的金额与笔数
+//  · 依赖全部走本地 /vendor，无外网 CDN；若本地库缺失则退回内联 SVG
 let TREND = null;
+let trendVm = null;
+// ECharts UMD 全局名是小写 echarts（兼容两种命名）
+const ecLib = () => window.echarts || window.ECharts;
+const TREND_CHARTS = [
+  { key: 'orders', title: '最近 30 天 · 每日支付订单总金额', amtKey: 'orderAmount', cntKey: 'orderCount', unit: '单', color: '#2563eb' },
+  { key: 'invoices', title: '最近 30 天 · 每日已开票金额（税务局）', amtKey: 'invoiceAmount', cntKey: 'invoiceCount', unit: '张', color: '#059669' },
+];
 async function loadTrend() {
   try {
     TREND = await api('/api/trend');
   } catch (e) { TREND = null; }
-  renderTrend('trendOrders', 'orderAmount', 'orderCount', '#2563eb');
-  renderTrend('trendInvoices', 'invoiceAmount', 'invoiceCount', '#059669');
+  const days = (TREND && TREND.days) || [];
+  if (window.Vue && ecLib() && window.ELEMENT) {
+    mountTrendApp();
+    if (trendVm) trendVm.days = days;
+    return;
+  }
+  renderTrendFallback(days); // 兜底：无本地库时用内联 SVG
 }
-function renderTrend(elId, amtKey, cntKey, color) {
-  const box = document.getElementById(elId);
+function mountTrendApp() {
+  if (trendVm) return trendVm;
+  Vue.use(ELEMENT);
+  Vue.config.productionTip = false;
+  trendVm = new Vue({
+    el: '#trendApp',
+    data: { days: [] },
+    computed: {
+      charts() {
+        return TREND_CHARTS.map((c) => {
+          let peak = 0, peakDate = '—';
+          for (const d of this.days) { const v = Number(d[c.amtKey]) || 0; if (v > peak) { peak = v; peakDate = d.date; } }
+          return Object.assign({}, c, { peak, peakText: yuan(peak), peakDate });
+        });
+      },
+    },
+    watch: {
+      days() { this.$nextTick(() => this.draw()); },
+    },
+    mounted() {
+      this.draw();
+      window.addEventListener('resize', this.onResize);
+    },
+    beforeDestroy() { window.removeEventListener('resize', this.onResize); },
+    methods: {
+      onResize() { if (this._charts) this._charts.forEach((ch) => { try { ch.resize(); } catch (e) {} }); },
+      draw() {
+        if (!this._charts) this._charts = [];
+        const EC = ecLib();
+        if (!EC) return;
+        this.charts.forEach((c, i) => {
+          const dom = document.getElementById('trend-chart-' + c.key);
+          if (!dom) return;
+          const ch = this._charts[i] || (this._charts[i] = EC.init(dom));
+          const days = this.days;
+          ch.setOption({
+            grid: { left: 6, right: 10, top: 14, bottom: 4, containLabel: true },
+            tooltip: {
+              trigger: 'axis',
+              axisPointer: { type: 'shadow' },
+              confine: true,
+              backgroundColor: 'rgba(38,40,44,.92)',
+              borderWidth: 0,
+              textStyle: { color: '#fff', fontSize: 12 },
+              formatter: (ps) => {
+                const p = ps && ps[0];
+                if (!p) return '';
+                const d = days[p.dataIndex] || {};
+                return `<b>${d.date || ''}</b><br/>金额：<b>${yuan(d[c.amtKey])}</b><br/>${c.unit}数：${d[c.cntKey] || 0}`;
+              },
+            },
+            xAxis: {
+              type: 'category',
+              data: days.map((d) => String(d.date).slice(5)),
+              axisTick: { show: false },
+              axisLine: { lineStyle: { color: '#e8e9eb' } },
+              axisLabel: { fontSize: 10, color: '#8a8f99', interval: 4, margin: 6 },
+            },
+            yAxis: {
+              type: 'value',
+              splitLine: { lineStyle: { color: '#f2f3f5' } },
+              axisLabel: {
+                fontSize: 10, color: '#8a8f99',
+                formatter: (v) => (v >= 10000 ? (v / 10000).toFixed(1) + '万' : v),
+              },
+            },
+            series: [{
+              type: 'bar',
+              name: c.title,
+              data: days.map((d) => Number(d[c.amtKey]) || 0),
+              barMaxWidth: 18,
+              itemStyle: { color: c.color, borderRadius: [3, 3, 0, 0] },
+              emphasis: { itemStyle: { color: c.color } },
+            }],
+            animationDuration: 300,
+          }, true);
+        });
+      },
+    },
+  });
+  return trendVm;
+}
+// 兜底渲染（仅在 /vendor 库不可用时使用）
+function renderTrendFallback(days) {
+  const box = document.getElementById('trendApp');
   if (!box) return;
-  if (!TREND || !Array.isArray(TREND.days) || !TREND.days.length) { box.innerHTML = '<div class="muted" style="font-size:13px">暂无数据</div>'; return; }
-  const days = TREND.days;
-  const W = 560, H = 170, padL = 8, padR = 8, padT = 14, padB = 22;
-  const iw = W - padL - padR, ih = H - padT - padB;
-  const max = Math.max(...days.map(d => d[amtKey]), 0.01);
-  const bw = iw / days.length;
-  const bars = days.map((d, i) => {
-    const h = Math.max(d[amtKey] > 0 ? 2 : 0, (d[amtKey] / max) * ih);
-    const x = padL + i * bw + 1, y = padT + ih - h;
-    const label = d.date.slice(5);
-    const tip = `${d.date}\n金额 ${yuan(d[amtKey])}（${d[cntKey]} 笔）`;
-    const xLabel = (i % 5 === 0 || i === days.length - 1) ? `<text x="${x + bw / 2 - 2}" y="${H - 6}" font-size="9" fill="#8a8f99" text-anchor="middle">${label}</text>` : '';
-    return `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${Math.max(1, bw - 2).toFixed(1)}" height="${h.toFixed(1)}" rx="1.5" fill="${color}" opacity="${d[amtKey] > 0 ? 0.85 : 0.15}"><title>${tip}</title></rect>${xLabel}`;
-  }).join('');
-  const topTip = `<text x="${padL}" y="10" font-size="10" fill="#8a8f99">峰值 ${yuan(max)}</text>`;
-  box.innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${topTip}${bars}</svg>`;
+  box.removeAttribute('v-cloak');
+  if (!days.length) { box.innerHTML = '<div class="muted">暂无数据</div>'; return; }
+  box.innerHTML = '<div class="trend-grid">' + TREND_CHARTS.map((c) => {
+    const max = Math.max(...days.map((d) => Number(d[c.amtKey]) || 0), 0.01);
+    const W = 560, H = 150, iw = W - 16, ih = H - 34;
+    const bw = iw / days.length;
+    const bars = days.map((d, i) => {
+      const v = Number(d[c.amtKey]) || 0;
+      const h = Math.max(v > 0 ? 2 : 0, (v / max) * ih);
+      const x = 8 + i * bw + 1, y = 14 + ih - h;
+      const lab = (i % 5 === 0 || i === days.length - 1) ? `<text x="${x + bw / 2 - 2}" y="${H - 4}" font-size="9" fill="#8a8f99" text-anchor="middle">${d.date.slice(5)}</text>` : '';
+      return `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${Math.max(1, bw - 2).toFixed(1)}" height="${h.toFixed(1)}" rx="1.5" fill="${c.color}" opacity="${v > 0 ? 0.85 : 0.15}"><title>${d.date}\n金额 ${yuan(v)}（${d[c.cntKey]} ${c.unit}）</title></rect>${lab}`;
+    }).join('');
+    return `<div class="trend-card"><div class="trend-title">${c.title}</div><svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${bars}</svg></div>`;
+  }).join('') + '</div>';
 }
 
 // ══════════════ 上传导入（1688 订单 / 税务局发票）══════════════

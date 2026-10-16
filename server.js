@@ -74,6 +74,19 @@ function sendHtml(res, file) {
   res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
   res.end(fs.readFileSync(path.join(ROOT, file), 'utf-8'));
 }
+// 前端本地依赖（Vue2 / Element UI / ECharts）—— 白名单式静态服务，杜绝路径穿越
+const VENDOR_DIR = path.join(ROOT, 'vendor');
+const VENDOR_MIME = { '.js': 'application/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.woff': 'font/woff', '.ttf': 'font/ttf', '.map': 'application/json' };
+function sendVendor(res, rel) {
+  const target = path.normalize(path.join(VENDOR_DIR, rel));
+  if (!target.startsWith(VENDOR_DIR + path.sep)) { res.writeHead(403); return res.end('forbidden'); }
+  const ext = path.extname(target).toLowerCase();
+  if (!VENDOR_MIME[ext]) { res.writeHead(403); return res.end('forbidden'); }
+  let buf;
+  try { buf = fs.readFileSync(target); } catch (e) { res.writeHead(404); return res.end('not found'); }
+  res.writeHead(200, { 'content-type': VENDOR_MIME[ext], 'cache-control': 'public, max-age=86400' });
+  res.end(buf);
+}
 function redirect(res, to) {
   res.writeHead(302, { location: to });
   res.end();
@@ -1361,6 +1374,8 @@ const server = http.createServer(async (req, res) => {
       return sendHtml(res, 'bookmarklet.html');
     }
     if (method === 'GET' && p === '/healthz') return sendJson(res, 200, { ok: true, ts: new Date().toISOString() });
+    // 前端本地依赖（免外网 CDN）：/vendor/vue.min.js、/vendor/echarts.min.js、/vendor/element-ui/*
+    if (method === 'GET' && p.startsWith('/vendor/')) return sendVendor(res, decodeURIComponent(p.slice('/vendor/'.length)));
     if (method === 'GET' && (p === '/' || p === '/index.html')) {
       const u = await currentUser(req);
       if (!u) return redirect(res, '/login');
