@@ -91,6 +91,14 @@ function redirect(res, to) {
   res.writeHead(302, { location: to });
   res.end();
 }
+/** 校验并归一化 YYYY-MM-DD 日期参数（非法/缺省返回 null，避免拼进 SQL 的意外值） */
+function normalizeDay(v) {
+  const s = String(v || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return null;
+  const t = new Date(s + 'T00:00:00');
+  if (Number.isNaN(t.getTime())) return null;
+  return s;
+}
 function readBody(req) {
   return new Promise((resolve) => {
     let body = '';
@@ -1631,14 +1639,18 @@ const server = http.createServer(async (req, res) => {
       });
     }
 
-    // 订单明细（看板「订单总金额」卡片点击）—— 分页 + 可选关键字
+    // 订单明细（看板「订单总金额」卡片 / 趋势图某一天）—— 分页 + 可选关键字 + 可选日期(YYYY-MM-DD)
     if (method === 'GET' && p === '/api/detail/orders') {
       const page = Math.max(1, Number(url.searchParams.get('page')) || 1);
       const size = Math.min(200, Math.max(1, Number(url.searchParams.get('size')) || 20));
       const kw = (url.searchParams.get('q') || '').trim();
-      const w = kw ? 'AND (o.order_no LIKE ? OR o.seller_company LIKE ? OR o.seller_login LIKE ?)' : '';
-      const args = kw ? [`%${kw}%`, `%${kw}%`, `%${kw}%`] : [];
-      const totalR = await db.query(`SELECT COUNT(*) AS n FROM invoice_order o WHERE o.user_id = ? ${w}`, [tenantId, ...args]);
+      const date = normalizeDay(url.searchParams.get('date'));
+      const w = (kw ? 'AND (o.order_no LIKE ? OR o.seller_company LIKE ? OR o.seller_login LIKE ?) ' : '')
+        + (date ? 'AND DATE(o.pay_time) = ? ' : '');
+      const args = [];
+      if (kw) args.push(`%${kw}%`, `%${kw}%`, `%${kw}%`);
+      if (date) args.push(date);
+      const totalR = await db.query(`SELECT COUNT(*) AS n FROM invoice_order o WHERE o.user_id = ? AND o.pay_time IS NOT NULL ${w}`, [tenantId, ...args]);
       const rows = await db.query(`
         SELECT o.order_no, o.seller_company, o.seller_login, o.pay_amount, o.pay_time, o.invoice_state, o.state_source
         FROM invoice_order o
@@ -1647,18 +1659,26 @@ const server = http.createServer(async (req, res) => {
         LIMIT ${size} OFFSET ${(page - 1) * size}
       `, [tenantId, ...args]);
       return sendJson(res, 200, {
-        total: totalR[0] ? totalR[0].n : 0, page, size, rows,
-        amount: (await db.query('SELECT ROUND(SUM(COALESCE(pay_amount,0)),2) AS a FROM invoice_order WHERE user_id = ? AND pay_time IS NOT NULL', [tenantId]))[0].a,
+        total: totalR[0] ? totalR[0].n : 0, page, size, date: date || null, rows,
+        // 金额合计与当前筛选口径一致（关键字 + 日期）
+        amount: (await db.query(`
+          SELECT ROUND(SUM(COALESCE(o.pay_amount,0)),2) AS a FROM invoice_order o
+          WHERE o.user_id = ? AND o.pay_time IS NOT NULL ${w}
+        `, [tenantId, ...args]))[0].a,
       });
     }
 
-    // 发票明细（看板「已开票金额（税务局）」卡片点击）—— 排除已忽略销方，分页 + 可选关键字
+    // 发票明细（看板「已开票金额（税务局）」卡片 / 趋势图某一天）—— 排除已忽略销方，分页 + 可选关键字 + 可选日期
     if (method === 'GET' && p === '/api/detail/invoices') {
       const page = Math.max(1, Number(url.searchParams.get('page')) || 1);
       const size = Math.min(200, Math.max(1, Number(url.searchParams.get('size')) || 20));
       const kw = (url.searchParams.get('q') || '').trim();
-      const w = kw ? 'AND (i.seller_name LIKE ? OR i.buyer_name LIKE ? OR i.invoice_no LIKE ? OR i.e_invoice_no LIKE ?)' : '';
-      const args = kw ? [`%${kw}%`, `%${kw}%`, `%${kw}%`, `%${kw}%`] : [];
+      const date = normalizeDay(url.searchParams.get('date'));
+      const w = (kw ? 'AND (i.seller_name LIKE ? OR i.buyer_name LIKE ? OR i.invoice_no LIKE ? OR i.e_invoice_no LIKE ?) ' : '')
+        + (date ? 'AND DATE(i.invoice_date) = ? ' : '');
+      const args = [];
+      if (kw) args.push(`%${kw}%`, `%${kw}%`, `%${kw}%`, `%${kw}%`);
+      if (date) args.push(date);
       const base = `
         FROM issued_invoice i
         WHERE i.user_id = ?
@@ -1675,16 +1695,10 @@ const server = http.createServer(async (req, res) => {
         LIMIT ${size} OFFSET ${(page - 1) * size}
       `, [tenantId, ...args]);
       return sendJson(res, 200, {
-        total: totalR[0] ? totalR[0].n : 0, page, size, rows,
+        total: totalR[0] ? totalR[0].n : 0, page, size, date: date || null, rows,
         amount: (await db.query(`
-          SELECT ROUND(SUM(COALESCE(i2.total_amount,0)),2) AS a
-          FROM issued_invoice i2
-          WHERE i2.user_id = ?
-            AND NOT EXISTS (
-              SELECT 1 FROM seller_name_mapping m3
-              WHERE m3.user_id = i2.user_id AND m3.tax_seller_name = i2.seller_name AND m3.is_ignored = 1
-            )
-        `, [tenantId]).then(r => (r[0] && r[0].a) || 0)),
+          SELECT ROUND(SUM(COALESCE(i.total_amount,0)),2) AS a ${base}
+        `, [tenantId, ...args]).then(r => (r[0] && r[0].a) || 0)),
       });
     }
 

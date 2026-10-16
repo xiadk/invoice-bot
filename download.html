@@ -4,172 +4,143 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>1688 发票催收 · 本机助手（Windows）— 下载与安装</title>
+<!-- Element UI（本地 vendor，免外网 CDN） -->
+<link rel="stylesheet" href="/vendor/element-ui/index.css">
 <style>
-  :root { --brand:#2563eb; --brand-d:#1d4ed8; --bg:#f5f7fb; --card:#fff; --line:#e5e9f2; --ink:#1f2937; --mut:#6b7280; }
-  * { box-sizing:border-box; }
-  body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; background:var(--bg); color:var(--ink); line-height:1.6; }
-  .wrap { max-width:760px; margin:0 auto; padding:32px 20px 64px; }
-  header { display:flex; align-items:center; gap:12px; margin-bottom:8px; }
-  .logo { width:40px; height:40px; border-radius:10px; background:linear-gradient(135deg,var(--brand),#7c3aed); color:#fff; display:flex; align-items:center; justify-content:center; font-size:20px; font-weight:700; }
-  h1 { font-size:22px; margin:0; }
-  .sub { color:var(--mut); margin:2px 0 24px; font-size:14px; }
-  .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:22px 24px; margin-bottom:16px; box-shadow:0 1px 2px rgba(16,24,40,.04); }
-  .card h2 { font-size:16px; margin:0 0 12px; display:flex; align-items:center; gap:8px; }
-  .card h2 .n { width:24px; height:24px; border-radius:50%; background:var(--brand); color:#fff; font-size:13px; display:flex; align-items:center; justify-content:center; flex:none; }
-  ol, ul { margin:0; padding-left:20px; }
-  li { margin:6px 0; }
-  code { background:#eef2ff; color:#3730a3; padding:2px 6px; border-radius:5px; font-size:13px; }
-  .btn { display:inline-flex; align-items:center; gap:8px; background:var(--brand); color:#fff; text-decoration:none; font-weight:600; padding:13px 22px; border-radius:10px; font-size:15px; transition:.15s; border:none; cursor:pointer; }
-  .btn:hover { background:var(--brand-d); transform:translateY(-1px); }
-  .btn.ghost { background:#fff; color:var(--brand); border:1px solid var(--brand); }
-  .btn[disabled], .btn.disabled { background:#c3c8d1; pointer-events:none; transform:none; }
-  .download-row { display:flex; align-items:center; gap:16px; flex-wrap:wrap; }
-  .note { border-radius:10px; padding:12px 14px; font-size:13px; margin-top:14px; }
-  .ok { background:#ecfdf5; border:1px solid #a7f3d0; color:#065f46; }
-  .warn { background:#fffbeb; border:1px solid #fde68a; color:#92400e; }
-  .info { background:#eff6ff; border:1px solid #bfdbfe; color:#1e40af; }
-  details { margin-top:10px; }
-  summary { cursor:pointer; color:var(--brand); font-size:14px; }
-  footer { color:var(--mut); font-size:12px; text-align:center; margin-top:24px; }
-  a.link { color:var(--brand); }
-  #dynamicArea { min-height:96px; }
-  .muted { color:var(--mut); font-size:13px; }
+  :root { --primary:#ff6a00; --bg:#f5f6f8; --border:#e8e9eb; --text:#26282c; --sub:#8a8f99; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  [v-cloak] { display: none; }
+  body { font-family: "Microsoft YaHei", "PingFang SC", sans-serif; background: var(--bg); color: var(--text); line-height: 1.7; padding: 30px 20px 60px; }
+  .wrap { max-width: 780px; margin: 0 auto; }
+  header { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+  .logo { width: 42px; height: 42px; border-radius: 11px; background: linear-gradient(135deg, #ff6a00, #ff9a3c); color: #fff; display: flex; align-items: center; justify-content: center; font-size: 20px; font-weight: 700; }
+  header h1 { font-size: 21px; }
+  header .sub { color: var(--sub); font-size: 13px; }
+  .card-title { font-size: 15px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+  .card-title .n { width: 22px; height: 22px; border-radius: 50%; background: var(--primary); color: #fff; font-size: 12px; display: inline-flex; align-items: center; justify-content: center; flex: none; }
+  ol, ul { margin: 0; padding-left: 20px; }
+  li { margin: 6px 0; font-size: 13.5px; }
+  code { background: #eef2ff; color: #3730a3; padding: 2px 6px; border-radius: 5px; font-size: 13px; }
+  .download-row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+  .muted { color: var(--sub); font-size: 13px; }
+  footer { color: var(--sub); font-size: 12px; text-align: center; margin-top: 22px; }
+  /* Element 品牌色覆盖 */
+  .el-button--primary { background-color: #ff6a00; border-color: #ff6a00; }
+  .el-button--primary:hover, .el-button--primary:focus { background-color: #ff8533; border-color: #ff8533; }
+  .el-button--primary.is-disabled { background-color: #ffc9a3; border-color: #ffc9a3; }
 </style>
 </head>
 <body>
-<div class="wrap">
-  <header>
-    <div class="logo">发</div>
-    <div>
-      <h1>1688 发票催收 · 本机助手</h1>
-      <div class="sub">Windows 桌面程序（Windows 10 / 11）· 发送只在你本机执行，登录凭据不出本机 · 断线续跑</div>
-    </div>
-  </header>
+<div id="app" v-cloak>
+  <div class="wrap">
+    <header>
+      <div class="logo">发</div>
+      <div>
+        <h1>1688 发票催收 · 本机助手</h1>
+        <div class="sub">Windows 桌面程序（Windows 10 / 11）· 发送只在你本机执行，登录凭据不出本机 · 断线续跑</div>
+      </div>
+    </header>
 
-  <div class="card" id="dynamicArea">
-    <div id="loading">正在检测登录状态与安装包…</div>
+    <el-card shadow="never" class="dl-card" style="margin-bottom:16px;border-radius:12px">
+      <div class="card-title"><span class="n">⬇</span> 获取安装包</div>
+      <div style="margin-top:12px">
+        <div class="download-row">
+          <el-button v-if="dl.available" type="primary" size="medium" @click="goDownload">⬇ 下载 1688催收助手（Windows）</el-button>
+          <el-button v-else type="primary" size="medium" disabled>⬇ 安装包尚未就绪</el-button>
+          <span class="muted" v-if="dl.available && dl.fileName">{{ dl.fileName }}<span v-if="dl.sizeBytes"> · {{ fmtSize(dl.sizeBytes) }}</span></span>
+          <span class="muted" v-else>管理员需先在本机构建安装包（<code>npm run agent:dist</code>），或直接向管理员索取「1688催收助手」安装包。</span>
+        </div>
+        <div class="muted" style="margin-top:10px" v-if="me">
+          当前账号：<b>{{ who }}</b><span v-if="me.taxNo">（税号 {{ maskTax(me.taxNo) }}，仅作抬头展示，不再用于绑定）</span> · 下载后回看板点「绑定本机助手」即可完成绑定。
+        </div>
+        <div class="muted" style="margin-top:10px" v-else>未检测到登录状态：可先下载安装，安装后请登录本系统，再到看板点「绑定本机助手」完成绑定。</div>
+      </div>
+      <el-alert :type="dl.available ? 'success' : 'warning'" :closable="false" show-icon style="margin-top:12px"
+                :title="dl.available ? '✓ 安装包已完成配置，绑定免手填——服务器地址已内置，无需手动输入。' : '⚠ 安装包尚未构建到服务器（dist/*.exe）。安装与绑定流程不受影响，拿到安装包后按下方步骤操作即可。'"></el-alert>
+    </el-card>
+
+    <el-card shadow="never" style="margin-bottom:16px;border-radius:12px">
+      <div class="card-title"><span class="n">1</span> 下载并安装</div>
+      <ol style="margin-top:10px">
+        <li>点上方「<b>下载 1688催收助手（Windows）</b>」，得到安装包（<code>.exe</code>）。</li>
+        <li>双击运行：安装版按向导一路「下一步」即可；绿色便携版双击直接启动。</li>
+        <li>首次运行 Windows 可能提示「<b>未知发布者</b>」——这是未签名程序的正常提示，点「<b>更多信息 → 仍要运行</b>」即可。</li>
+      </ol>
+      <el-alert type="info" :closable="false" style="margin-top:10px" title="助手启动后会常驻系统托盘（右下角小图标），图标右键可打开状态面板或退出。"></el-alert>
+    </el-card>
+
+    <el-card shadow="never" style="margin-bottom:16px;border-radius:12px">
+      <div class="card-title"><span class="n">2</span> 绑定到你的账号</div>
+      <ol style="margin-top:10px">
+        <li>回到发票看板，点右上角「<b>本机助手</b>」→ 弹窗里点「<b>绑定本机助手</b>」。</li>
+        <li>浏览器会弹窗询问是否打开「<b>1688催收助手</b>」，点「<b>打开</b>」。</li>
+        <li>助手自动完成绑定（用一次性令牌换取本机长期<b>设备令牌</b>），看板显示「<b>助手已连接</b>」即成功。</li>
+      </ol>
+      <el-alert type="success" :closable="false" style="margin-top:10px" title="全程不需要手填服务器地址或税号：安装包已内置服务器地址，绑定令牌由看板自动签发。"></el-alert>
+    </el-card>
+
+    <el-card shadow="never" style="margin-bottom:16px;border-radius:12px">
+      <div class="card-title"><span class="n">3</span> 在助手里登录 1688（只需一次）</div>
+      <ol style="margin-top:10px">
+        <li>点看板「本机助手」弹窗里的「<b>打开 1688 登录页</b>」（或在助手托盘面板点「打开登录页」）。</li>
+        <li>在打开的窗口里正常登录 1688。</li>
+        <li>登录态只保存在<b>你本机</b>的助手浏览器里，<b>不会上传服务器</b>，下次无需重复登录。</li>
+      </ol>
+    </el-card>
+
+    <el-card shadow="never" style="margin-bottom:16px;border-radius:12px">
+      <div class="card-title"><span class="n">4</span> 开始催收</div>
+      <ol style="margin-top:10px">
+        <li>回到发票看板，勾选要催收发票的卖家 → 点「<b>发送催收消息</b>」。</li>
+        <li>若助手没开着，看板会自动用 <code>xsh://run</code> 唤起它，请在弹出的询问里点「打开」。</li>
+        <li>消息经由<b>你自己电脑上的浏览器</b>逐家发出；中途断网/关机，重新打开助手即可续跑，已成功的不会重发。</li>
+      </ol>
+    </el-card>
+
+    <el-card shadow="never" style="border-radius:12px">
+      <div class="card-title">常见问题</div>
+      <el-collapse style="margin-top:10px">
+        <el-collapse-item title="点了「绑定本机助手」没反应？" name="q1">
+          <div style="font-size:13.5px">两个常见原因：① 还没安装助手——先完成上方第 1 步；② 浏览器拦截了打开外部程序（<code>xsh://</code>）的请求——地址栏右侧通常会出现一个「打开 1688催收助手」的小图标，点它并允许即可。Edge/Chrome 首次都会询问一次，允许后不再打扰。</div>
+        </el-collapse-item>
+        <el-collapse-item title="运行时提示「未知发布者 / 已保护你的电脑」？" name="q2">
+          <div style="font-size:13.5px">这是未签名程序的常规提示，并非病毒。点「更多信息」→「仍要运行」即可。若被 360/火绒等拦截，选择「允许本次运行 / 信任此程序」。正式对外发售的版本会购买代码签名证书以消除该类提示。</div>
+        </el-collapse-item>
+        <el-collapse-item title="为什么不用浏览器扩展了？" name="q3">
+          <div style="font-size:13.5px">桌面助手把发送能力放进独立程序，绕开了浏览器扩展商店对「自动发送」类扩展的政策限制，同时免去「开发者模式加载已解压扩展」等繁琐步骤，对普通用户更友好。</div>
+        </el-collapse-item>
+        <el-collapse-item title="安全说明" name="q4">
+          <div style="font-size:13.5px">发送全程在你本机浏览器执行，1688 登录凭据<b>不出本机</b>；服务器只负责下发任务、记录结果。<b>绑定不再使用税号</b>：改为一次性绑定令牌换取本机长期设备令牌，服务器仅保存令牌的 SHA-256 摘要，可在看板「本机助手」中随时查看并撤销已绑定设备。</div>
+        </el-collapse-item>
+      </el-collapse>
+    </el-card>
+
+    <footer>本页仅供内部使用 · 发票催收系统</footer>
   </div>
-
-  <div class="card">
-    <h2><span class="n">1</span> 下载并安装</h2>
-    <ol>
-      <li>点上方「<b>下载 1688催收助手（Windows）</b>」，得到安装包（<code>.exe</code>）。</li>
-      <li>双击运行：安装版按向导一路「下一步」即可；绿色便携版双击直接启动。</li>
-      <li>首次运行 Windows 可能提示「<b>未知发布者</b>」——这是未签名程序的正常提示，点「<b>更多信息 → 仍要运行</b>」即可。</li>
-    </ol>
-    <div class="note info">助手启动后会常驻系统托盘（右下角小图标），图标右键可打开状态面板或退出。</div>
-  </div>
-
-  <div class="card">
-    <h2><span class="n">2</span> 绑定到你的账号</h2>
-    <ol>
-      <li>回到发票看板，点右上角「<b>本机助手</b>」→ 弹窗里点「<b>绑定本机助手</b>」。</li>
-      <li>浏览器会弹窗询问是否打开「<b>1688催收助手</b>」，点「<b>打开</b>」。</li>
-      <li>助手自动完成绑定（用一次性令牌换取本机长期<b>设备令牌</b>），看板显示「<b>助手已连接</b>」即成功。</li>
-    </ol>
-    <div class="note ok">全程<b>不需要</b>手填服务器地址或税号：安装包已内置服务器地址，绑定令牌由看板自动签发。</div>
-  </div>
-
-  <div class="card">
-    <h2><span class="n">3</span> 在助手里登录 1688（只需一次）</h2>
-    <ol>
-      <li>点看板「本机助手」弹窗里的「<b>打开 1688 登录页</b>」（或在助手托盘面板点「打开登录页」）。</li>
-      <li>在打开的窗口里正常登录 1688。</li>
-      <li>登录态只保存在<b>你本机</b>的助手浏览器里，<b>不会上传服务器</b>，下次无需重复登录。</li>
-    </ol>
-  </div>
-
-  <div class="card">
-    <h2><span class="n">4</span> 开始催收</h2>
-    <ol>
-      <li>回到发票看板，勾选要催收发票的卖家 → 点「<b>发送催收消息</b>」。</li>
-      <li>若助手没开着，看板会自动用 <code>xsh://run</code> 唤起它，请在弹出的询问里点「打开」。</li>
-      <li>消息经由<b>你自己电脑上的浏览器</b>逐家发出；中途断网/关机，重新打开助手即可续跑，已成功的不会重发。</li>
-    </ol>
-  </div>
-
-  <div class="card">
-    <h2>常见问题</h2>
-    <details>
-      <summary>点了「绑定本机助手」没反应？</summary>
-      <p style="font-size:14px;">两个常见原因：① 还没安装助手——先完成上方第 1 步；② 浏览器拦截了打开外部程序（<code>xsh://</code>）的请求——地址栏右侧通常会出现一个「打开 1688催收助手」的小图标，点它并允许即可。Edge/Chrome 首次都会询问一次，允许后不再打扰。</p>
-    </details>
-    <details>
-      <summary>运行时提示「未知发布者 / 已保护你的电脑」？</summary>
-      <p style="font-size:14px;">这是未签名程序的常规提示，并非病毒。点「更多信息」→「仍要运行」即可。若被 360/火绒等拦截，选择「允许本次运行 / 信任此程序」。正式对外发售的版本会购买代码签名证书以消除该类提示。</p>
-    </details>
-    <details>
-      <summary>为什么不用浏览器扩展了？</summary>
-      <p style="font-size:14px;">桌面助手把发送能力放进独立程序，绕开了浏览器扩展商店对「自动发送」类扩展的政策限制，同时免去「开发者模式加载已解压扩展」等繁琐步骤，对普通用户更友好。</p>
-    </details>
-    <details>
-      <summary>安全说明</summary>
-      <p style="font-size:14px;">发送全程在你本机浏览器执行，1688 登录凭据<b>不出本机</b>；服务器只负责下发任务、记录结果。<b>绑定不再使用税号</b>：改为一次性绑定令牌换取本机长期设备令牌，服务器仅保存令牌的 SHA-256 摘要，可在看板「本机助手」中随时查看并撤销已绑定设备。</p>
-    </details>
-  </div>
-
-  <footer>本页仅供内部使用 · 发票催收系统</footer>
 </div>
 
+<script src="/vendor/vue.min.js"></script>
+<script src="/vendor/element-ui/index.js"></script>
 <script>
-  function maskTax(tax) {
-    if (!tax || tax.length < 8) return tax;
-    return tax.slice(0, 4) + '****' + tax.slice(-4);
-  }
-  function fmtSize(n) {
-    if (!n) return '';
-    const mb = n / 1048576;
-    return mb >= 1 ? (mb.toFixed(1) + ' MB') : (Math.max(1, Math.round(n / 1024)) + ' KB');
-  }
-  function setDynamic(html, noteClass, noteHtml) {
-    document.getElementById('dynamicArea').innerHTML =
-      html + (noteHtml ? ('<div class="note ' + (noteClass || 'info') + '">' + noteHtml + '</div>') : '');
-  }
-
-  (async function init() {
-    let cfg = {};
-    let me = null;
-    try {
-      const r1 = await fetch('/api/agent/channel-info', { cache: 'no-store' });
-      if (r1.ok) cfg = await r1.json();
-    } catch (e) {}
-    try {
-      const r2 = await fetch('/api/auth/me', { cache: 'no-store' });
-      if (r2.ok) { const d2 = await r2.json(); me = d2.user || null; }
-    } catch (e) {}
-
-    const dl = (cfg && cfg.agentDownload) || {};
-    const who = me ? (me.displayName || me.companyName || me.username || '') : '';
-
-    let html = '';
-    if (dl.available) {
-      html += '<div class="download-row">'
-        + '<a class="btn" href="' + dl.url + '">⬇ 下载 1688催收助手（Windows）</a>'
-        + '<span class="muted">' + (dl.fileName ? (dl.fileName + (dl.sizeBytes ? (' · ' + fmtSize(dl.sizeBytes)) : '')) : '') + '</span>'
-        + '</div>';
-    } else {
-      html += '<div class="download-row">'
-        + '<a class="btn disabled" href="javascript:void(0)">⬇ 安装包尚未就绪</a>'
-        + '<span class="muted">管理员需先在本机执行 <code>npm run agent:dist</code> 构建，或直接向管理员索取「1688催收助手」安装包。</span>'
-        + '</div>';
-    }
-    if (me) {
-      html += '<div class="muted" style="margin-top:10px">当前账号：<b>' + who + '</b>'
-        + (me.taxNo ? ('（税号 ' + maskTax(me.taxNo) + '，仅作抬头展示，不再用于绑定）') : '')
-        + ' · 下载后回看板点「绑定本机助手」即可完成绑定。</div>';
-    } else {
-      html += '<div class="muted" style="margin-top:10px">未检测到登录状态：可先下载安装，安装后请登录本系统，再到看板点「绑定本机助手」完成绑定。</div>';
-    }
-
-    const noteClass = dl.available ? 'ok' : 'warn';
-    let noteHtml;
-    if (!dl.available) {
-      noteHtml = '⚠️ 安装包尚未构建到服务器（<code>dist/*.exe</code>）。安装与绑定流程不受影响，拿到安装包后按下方步骤操作即可。';
-    } else {
-      noteHtml = '✓ 安装包已完成配置，绑定免手填——服务器地址已内置，无需手动输入。';
-    }
-    setDynamic(html, noteClass, noteHtml);
-  })();
+Vue.use(ELEMENT);
+Vue.config.productionTip = false;
+new Vue({
+  el: '#app',
+  data: { dl: { available: false, url: null, fileName: null, sizeBytes: 0 }, me: null, ready: false },
+  computed: {
+    who() { const m = this.me || {}; return m.displayName || m.companyName || m.username || ''; },
+  },
+  methods: {
+    maskTax(tax) { if (!tax || tax.length < 8) return tax; return tax.slice(0, 4) + '****' + tax.slice(-4); },
+    fmtSize(n) { if (!n) return ''; const mb = n / 1048576; return mb >= 1 ? (mb.toFixed(1) + ' MB') : (Math.max(1, Math.round(n / 1024)) + ' KB'); },
+    goDownload() { if (this.dl && this.dl.url) window.location.href = this.dl.url; },
+  },
+  async mounted() {
+    try { const r = await fetch('/api/agent/channel-info', { cache: 'no-store' }); if (r.ok) { const d = await r.json(); this.dl = d.agentDownload || this.dl; } } catch (e) {}
+    try { const r = await fetch('/api/auth/me', { cache: 'no-store' }); if (r.ok) { const d = await r.json(); this.me = d.user || null; } } catch (e) {}
+    this.ready = true;
+  },
+});
 </script>
 </body>
 </html>
