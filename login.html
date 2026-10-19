@@ -38,14 +38,14 @@
       <div class="logo">票</div>
       <h1>1688 发票催收控制台</h1>
     </div>
-    <div class="subtitle">请使用管理员分配的账号登录。本系统不开放自助注册，账号由超级管理员在「系统管理」中创建。</div>
+    <div class="subtitle">登录账号就是公司全称（开票抬头），联系管理员进行创建。</div>
 
     <el-alert v-if="err" type="error" :title="err" :closable="false" show-icon style="margin-bottom:14px"></el-alert>
 
     <el-form @submit.native.prevent="submit" autocomplete="on">
       <el-form-item label="公司全称（登录账号）">
         <el-input id="username" name="username" v-model="username" autocomplete="username"
-                  placeholder="如：中山仕赫贸易有限公司" @keyup.enter.native="submit"></el-input>
+                  placeholder="阿里巴巴贸易有限公司" @keyup.enter.native="submit"></el-input>
       </el-form-item>
       <el-form-item label="密码">
         <el-input id="password" name="password" type="password" v-model="password" autocomplete="current-password"
@@ -54,10 +54,6 @@
       <el-button type="primary" style="width:100%;margin-top:4px" :loading="loading" native-type="submit" @click="submit">登 录</el-button>
     </el-form>
 
-    <div class="foot">
-      首次部署的超级管理员账号为 <b>admin</b>，默认密码 <b>admin</b>，登录后请立即在「系统管理」中修改密码。<br>
-      普通用户的登录账号就是<b>公司全称</b>（开票抬头），由超级管理员在「系统管理 → 用户管理」里创建。
-    </div>
   </el-card>
 </div>
 
