@@ -42,6 +42,8 @@
   .app-header .brand { font-size: 16px; font-weight: 700; color: var(--primary); white-space: nowrap; }
   .app-header .nav-menu { flex: 1; border-bottom: none !important; display: flex; align-items: center; }
   .app-header .nav-menu .el-menu-item { height: 54px; line-height: 54px; }
+  /* 退单列表：已取货/送达的行加淡橙底，方便一眼扫到 */
+  .el-table .row-picked td { background: #fff8ec !important; }
   .nav-right { display: flex; align-items: center; gap: 10px; }
   .user-chip { display: flex; align-items: center; gap: 8px; font-size: 13px; }
   .user-chip .avatar { width: 28px; height: 28px; border-radius: 50%; background: #fff1e6; color: var(--primary); display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 12px; }
@@ -119,6 +121,7 @@
         <el-menu class="nav-menu" :default-active="page" mode="horizontal" @select="switchPage">
           <el-menu-item index="board">看板</el-menu-item>
           <el-menu-item index="mapping">名称映射</el-menu-item>
+          <el-menu-item index="refund" v-if="canRefund">退单列表</el-menu-item>
           <el-menu-item index="admin" v-if="isAdmin">系统管理</el-menu-item>
           <el-menu-item index="audit" v-if="isAdmin">操作日志</el-menu-item>
         </el-menu>
@@ -623,6 +626,13 @@
             <el-table-column label="收票邮箱" width="170"><template slot-scope="p"><span class="loginid">{{ p.row.email || '—' }}</span></template></el-table-column>
             <el-table-column label="数据量" width="130"><template slot-scope="p"><span class="loginid">{{ p.row.role === 'admin' ? '系统账号 · 不承载业务数据' : p.row.orderCount + ' 单 / ' + p.row.mappingCount + ' 映射' }}</span></template></el-table-column>
             <el-table-column label="最近登录" width="140"><template slot-scope="p"><span class="loginid">{{ fmtMinute(p.row.lastLoginAt) || '—' }}</span></template></el-table-column>
+            <el-table-column label="退单列表" width="100">
+              <template slot-scope="p">
+                <el-tag v-if="p.row.role === 'admin'" size="mini" type="success">默认开启</el-tag>
+                <el-switch v-else :value="p.row.qnhRefundEnabled" size="mini"
+                           @change="v => toggleQnhPermit(p.row, v)"></el-switch>
+              </template>
+            </el-table-column>
             <el-table-column label="操作" width="270">
               <template slot-scope="p">
                 <div style="display:flex;gap:6px;flex-wrap:wrap">
@@ -699,8 +709,216 @@
           </div>
         </el-card>
       </div>
+
+      <!-- ══════════ 退单列表（牵牛花，需管理员开启权限） ══════════ -->
+      <div v-show="page === 'refund'" id="page-refund">
+        <div class="page-head">
+          <h2>退单列表</h2>
+          <div class="meta-line">
+            数据来自美团牵牛花（qnh.meituan.com）的退单列表，每日自动增量同步，也可以随时点「立即刷新数据」。
+            标记为 <el-tag size="mini" type="warning">已取货/送达</el-tag> 的退单表示商品已经出库，请重点核查。
+          </div>
+        </div>
+
+        <!-- 顶部状态条：Cookie / 立即刷新 / 定时 -->
+        <el-card class="section-card" shadow="never" :body-style="{ padding: '12px 14px' }">
+          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+            <el-button size="small" :type="rq.cookie.logined ? 'success' : 'danger'"
+                       :loading="rq.cookie.loading" @click="onCookieBtn">
+              {{ rq.cookie.loading ? '检查中…' : (rq.cookie.logined ? '已登录牵牛花' : '登录牵牛花') }}
+            </el-button>
+            <el-button size="small" type="primary" :loading="rq.syncing" @click="doSync">立即刷新数据</el-button>
+            <el-tag v-if="rq.lastRun" size="small" type="info">
+              最近同步 {{ rq.lastRun.finishedAt || rq.lastRun.startedAt || '—' }}
+              · {{ rq.lastRun.status === 'ok' ? '成功' : '有失败项' }}
+            </el-tag>
+            <el-tag v-if="rq.config && rq.config.scheduleEnabled" size="small" type="success">
+              每日 {{ rq.config.scheduleTime }} 自动同步
+            </el-tag>
+            <span style="flex:1"></span>
+            <span class="loginid" v-if="rq.cookie.tenantName">租户：{{ rq.cookie.tenantName }}（{{ rq.cookie.tenantId }}）</span>
+            <span class="loginid" v-if="rq.cookie.message" style="color:#e6a23c">{{ rq.cookie.message }}</span>
+          </div>
+        </el-card>
+
+        <!-- 汇总 -->
+        <div style="display:flex;gap:12px;margin:12px 0;flex-wrap:wrap">
+          <el-card v-for="s in refundStats" :key="s.label" shadow="never" :body-style="{ padding: '12px 16px' }"
+                   style="flex:1;min-width:150px">
+            <div style="font-size:20px;font-weight:600;color:#26282c">{{ s.value }}</div>
+            <div class="loginid">{{ s.label }}</div>
+          </el-card>
+        </div>
+
+        <!-- 每天退单数量趋势 -->
+        <el-card class="section-card" shadow="never">
+          <div slot="header" style="display:flex;align-items:center;gap:10px">
+            <b>每天退单数量趋势</b>
+            <el-radio-group v-model="rq.days" size="mini" @change="loadRefundTrend">
+              <el-radio-button :label="7">近 7 天</el-radio-button>
+              <el-radio-button :label="30">近 30 天</el-radio-button>
+              <el-radio-button :label="90">近 90 天</el-radio-button>
+            </el-radio-group>
+            <span style="flex:1"></span>
+            <span class="loginid">柱状=退单数量，橙色=其中已取货/送达</span>
+          </div>
+          <div id="refund-trend" style="height:200px"></div>
+        </el-card>
+
+        <!-- 筛选 + 列表 -->
+        <el-card class="section-card" shadow="never">
+          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px">
+            <el-date-picker v-model="rq.range" type="daterange" size="small" value-format="yyyy-MM-dd"
+                            start-placeholder="申请开始" end-placeholder="申请结束"
+                            style="width:250px" unlink-panels></el-date-picker>
+            <el-input v-model="rq.filter.keyword" size="small" clearable style="width:220px"
+                      placeholder="退单号 / 订单号 / 门店 / 收货人" @keyup.enter.native="applyRefundFilter"></el-input>
+            <el-select v-model="rq.filter.delivery" size="small" style="width:150px" placeholder="配送">
+              <el-option label="全部退单" value=""></el-option>
+              <el-option label="已取货/送达" value="picked"></el-option>
+              <el-option label="有配送日志" value="1"></el-option>
+            </el-select>
+            <el-select v-model="rq.filter.sort" size="small" style="width:150px">
+              <el-option label="申请时间新→旧" value="apply_desc"></el-option>
+              <el-option label="申请时间旧→新" value="apply_asc"></el-option>
+              <el-option label="退单金额高→低" value="amount_desc"></el-option>
+              <el-option label="退单金额低→高" value="amount_asc"></el-option>
+            </el-select>
+            <el-button size="small" type="primary" @click="applyRefundFilter">查询</el-button>
+            <el-button size="small" @click="resetRefundFilter">重置</el-button>
+            <span style="flex:1"></span>
+            <span class="loginid">共 {{ rq.total }} 条</span>
+          </div>
+
+          <el-table :data="rq.rows" size="small" border style="width:100%" v-loading="rq.loading"
+                    empty-text="暂无退单数据" :row-class-name="refundRowClass">
+            <el-table-column label="退单号" width="170">
+              <template slot-scope="p">
+                <el-button type="text" size="mini" @click="openRefundLog(p.row)">{{ p.row.refundNo }}</el-button>
+              </template>
+            </el-table-column>
+            <el-table-column label="退单类型" width="130">
+              <template slot-scope="p">
+                <el-tag v-if="p.row.isAppeal" size="mini" type="danger" style="margin-right:4px">申诉</el-tag>
+                {{ p.row.refundType || '—' }}
+              </template>
+            </el-table-column>
+            <el-table-column label="退单金额" width="100" align="right">
+              <template slot-scope="p"><span class="amount">{{ p.row.refundAmount == null ? '—' : yuan(p.row.refundAmount) }}</span></template>
+            </el-table-column>
+            <el-table-column label="订单状态" width="100">
+              <template slot-scope="p">
+                <el-tag size="mini" :type="p.row.orderStatus === '已完成' ? 'success' : (p.row.orderStatus === '已取消' ? 'info' : 'warning')">
+                  {{ p.row.orderStatus || '—' }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="退单状态" width="100">
+              <template slot-scope="p">{{ p.row.refundStatus || '—' }}</template>
+            </el-table-column>
+            <el-table-column label="配送日志" width="130">
+              <template slot-scope="p">
+                <el-tag v-if="p.row.picked" size="mini" type="warning">已取货/送达</el-tag>
+                <el-tag v-else-if="p.row.hasDeliveryLog" size="mini" type="info">仅接单</el-tag>
+                <span v-else class="muted">无</span>
+                <span v-if="p.row.deliveryCount" class="loginid"> · {{ p.row.deliveryCount }} 条</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="门店" min-width="170"><template slot-scope="p">{{ p.row.storeName || '—' }}</template></el-table-column>
+            <el-table-column label="申请时间" width="150"><template slot-scope="p">{{ p.row.applyTime || '—' }}</template></el-table-column>
+            <el-table-column label="操作" width="90">
+              <template slot-scope="p"><el-button size="mini" @click="openRefundLog(p.row)">日志</el-button></template>
+            </el-table-column>
+          </el-table>
+
+          <div class="pager-wrap">
+            <el-pagination background layout="total, sizes, prev, pager, next"
+                           :current-page="rq.page" :page-size="rq.size"
+                           :page-sizes="[20, 50, 100]" :total="rq.total"
+                           @current-change="onRefundPage" @size-change="onRefundSize"></el-pagination>
+            <span class="total">共 {{ rq.total }} 条</span>
+          </div>
+        </el-card>
+
+        <!-- 同步设置（仅超级管理员） -->
+        <el-card v-if="isAdmin" class="section-card" shadow="never">
+          <div slot="header"><b>退单同步设置</b> <span class="loginid">（仅超级管理员可改）</span></div>
+          <el-form label-position="top" size="small">
+            <el-row :gutter="12">
+              <el-col :xs="24" :md="6">
+                <el-form-item label="每日自动同步">
+                  <el-switch v-model="rq.config.scheduleEnabled" active-text="开启" inactive-text="关闭"></el-switch>
+                </el-form-item>
+              </el-col>
+              <el-col :xs="24" :md="6">
+                <el-form-item label="每天几点跑">
+                  <el-time-picker v-model="rq.config.scheduleTime" value-format="HH:mm" format="HH:mm"
+                                  placeholder="选择时间" style="width:100%" :disabled="!rq.config.scheduleEnabled"></el-time-picker>
+                </el-form-item>
+              </el-col>
+              <el-col :xs="24" :md="6">
+                <el-form-item label="有配送日志时提醒企业微信">
+                  <el-switch v-model="rq.config.alertDelivery" active-text="提醒" inactive-text="不提醒"></el-switch>
+                </el-form-item>
+              </el-col>
+              <el-col :xs="24" :md="6">
+                <el-form-item label="机器人总开关">
+                  <el-switch v-model="rq.config.wecomEnabled" active-text="开启" inactive-text="关闭"></el-switch>
+                </el-form-item>
+              </el-col>
+              <el-col :xs="24">
+                <el-form-item label="企业微信机器人 webhook">
+                  <el-input v-model="rq.config.webhook" placeholder="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=...">
+                    <el-button slot="append" size="mini" @click="testWebhook">发送测试</el-button>
+                  </el-input>
+                </el-form-item>
+              </el-col>
+            </el-row>
+          </el-form>
+          <el-button type="primary" size="small" :loading="rq.savingCfg" @click="saveQnhConfig">保存设置</el-button>
+          <el-tag v-if="rq.savedCfg" type="success" size="small" style="margin-left:10px">✓ 已保存</el-tag>
+          <div class="form-tip" style="margin-top:8px">
+            定时由服务进程内的调度器触发（服务需保持运行）；也可以继续用 Windows 计划任务跑
+            <code>run_daily.bat</code>，两种方式互不影响（同日只跑一次由水位保证幂等）。
+            提醒按退单号去重，同一笔退单只推一次。
+          </div>
+        </el-card>
+      </div>
     </el-main>
   </el-container>
+
+  <!-- ══════════ 退单日志（订单日志 / 配送日志） ══════════ -->
+  <el-dialog :title="'订单日志 · ' + (rq.log.row.refundNo || '')" :visible.sync="rq.log.visible"
+             width="820px" top="8vh" append-to-body>
+    <div v-if="rq.log.row.refundNo" class="detail-sum" style="margin-bottom:10px">
+      退单类型：<b>{{ rq.log.row.refundType || '—' }}</b>
+      · 退单金额：<b class="amount">{{ rq.log.row.refundAmount == null ? '—' : yuan(rq.log.row.refundAmount) }}</b>
+      · 订单状态：<b>{{ rq.log.row.orderStatus || '—' }}</b>
+      · 申请时间：{{ rq.log.row.applyTime || '—' }}
+    </div>
+    <el-alert v-if="rq.log.row.picked" type="warning" :closable="false" show-icon
+              title="该单商品已经取货/送达，退单会产生逆向物流与货损，请重点核查。"
+              style="margin-bottom:10px"></el-alert>
+    <el-tabs v-model="rq.log.tab">
+      <el-tab-pane :label="'全部日志（' + rq.log.rows.length + '）'" name="all"></el-tab-pane>
+      <el-tab-pane :label="'订单日志（' + refundLogCount('order') + '）'" name="order"></el-tab-pane>
+      <el-tab-pane :label="'配送日志（' + refundLogCount('delivery') + '）'" name="delivery"></el-tab-pane>
+    </el-tabs>
+    <el-table :data="refundLogRows" size="mini" border max-height="56vh" style="width:100%"
+              v-loading="rq.log.loading" empty-text="暂无日志">
+      <el-table-column label="操作人" width="140">
+        <template slot-scope="p">{{ p.row.operatorName || (p.row.logType === 'delivery' ? '配送系统' : '系统') }}</template>
+      </el-table-column>
+      <el-table-column label="操作时间" width="170"><template slot-scope="p">{{ p.row.opTime || '—' }}</template></el-table-column>
+      <el-table-column label="操作内容" min-width="200">
+        <template slot-scope="p">
+          <el-tag v-if="p.row.logType === 'delivery'" size="mini" type="warning" style="margin-right:6px">配送</el-tag>
+          {{ p.row.content || '—' }}
+        </template>
+      </el-table-column>
+      <el-table-column label="备注" width="150"><template slot-scope="p"><span class="loginid">{{ p.row.note || '—' }}</span></template></el-table-column>
+    </el-table>
+  </el-dialog>
 
   <!-- ══════════ 明细弹窗（订单 / 发票；支持按天钻取） ══════════ -->
   <el-dialog :title="detailTitle" :visible.sync="detail.visible" width="900px" top="6vh" append-to-body>
@@ -918,6 +1136,18 @@ const vm = new Vue({
       userEdit: { visible: false, id: null, title: '', company: '', taxNo: '', email: '', note: '', hint: '', lockCompany: false, saving: false },
       // 操作日志（仅超级管理员）
       opLog: { draftUsername: '', username: '', page: 1, size: 20, total: 0, rows: [], loading: false },
+      // 退单列表（牵牛花）
+      rq: {
+        loading: false, rows: [], total: 0, page: 1, size: 20,
+        range: null,
+        filter: { keyword: '', delivery: '', sort: 'apply_desc' },
+        trend: [], days: 30, summary: null,
+        cookie: { logined: false, loading: false, configured: false, tenantId: '', tenantName: '', message: '' },
+        lastRun: null, syncing: false, syncPoll: null,
+        config: { scheduleEnabled: false, scheduleTime: '03:00', webhook: '', wecomEnabled: false, alertDelivery: true },
+        savingCfg: false, savedCfg: false,
+        log: { visible: false, row: {}, rows: [], tab: 'all', loading: false },
+      },
       // 上传
       up: { visible: false, kind: 'orders', title: '', guide: '', accept: '.xlsx,.xls', file: null, busy: false, percent: 0, msg: '', result: null },
       // 指引 / 改密
@@ -927,6 +1157,23 @@ const vm = new Vue({
   },
   computed: {
     isAdmin() { return !!(this.me && this.me.role === 'admin'); },
+    // 退单列表页权限：超级管理员始终可见，普通用户由管理员在「系统管理」里开启
+    canRefund() { return !!(this.me && (this.me.role === 'admin' || this.me.qnhRefundEnabled)); },
+    refundStats() {
+      const s = this.rq.summary || {};
+      return [
+        { label: '退单总数', value: (s.total || 0) + ' 单' },
+        { label: '退单金额合计', value: yuan(s.amount || 0) },
+        { label: '今日新增', value: (s.today || 0) + ' 单' },
+        { label: '已取货/送达', value: (s.picked || 0) + ' 单' },
+      ];
+    },
+    refundLogRows() {
+      const t = this.rq.log.tab;
+      const rows = this.rq.log.rows || [];
+      if (t === 'order' || t === 'delivery') return rows.filter((r) => r.logType === t);
+      return rows;
+    },
     readonly() {
       if (this.viewTenant == null || !this.me) return false;
       return Number(this.viewTenant) !== Number(this.me.id);
@@ -1049,7 +1296,10 @@ const vm = new Vue({
   },
   watch: {
     trendDays() { this.$nextTick(() => this.renderTrend()); },
-    page(p) { if (p === 'board') this.$nextTick(() => this.renderTrend()); },
+    page(p) {
+      if (p === 'board') this.$nextTick(() => this.renderTrend());
+      if (p === 'refund') this.$nextTick(() => this.renderRefundTrend());
+    },
     'detail.visible'(v) { if (!v) this.detail.q = ''; },
   },
   mounted() {
@@ -1107,10 +1357,17 @@ const vm = new Vue({
     switchPage(p) {
       if (p === 'admin' && !this.isAdmin) p = 'board';
       if (p === 'audit' && !this.isAdmin) p = 'board';
+      if (p === 'refund' && !this.canRefund) p = 'board';
       this.page = p;
       if (p === 'admin') { this.loadConfigUI(); this.loadUsers(); }
       if (p === 'mapping') this.loadMapping();
       if (p === 'audit') this.loadOpLog();
+      if (p === 'refund') {
+        this.reportOp('qnh.view');
+        this.loadRefundStatus();
+        this.loadRefunds();
+        this.loadRefundTrend();
+      }
     },
     // ── 看板数据 ──
     async loadData() {
@@ -1389,6 +1646,7 @@ const vm = new Vue({
     },
     onResize() {
       if (this._charts) this._charts.forEach((ch) => { try { ch.resize(); } catch (e) {} });
+      if (this._rqChart) { try { this._rqChart.resize(); } catch (e) {} }
     },
     renderTrend() {
       if (this.page !== 'board') return;
@@ -1433,6 +1691,226 @@ const vm = new Vue({
           animationDuration: 300,
         }, true);
       });
+    },
+
+    // ══════ 退单列表（牵牛花） ══════
+    async loadRefundStatus() {
+      try {
+        const d = await this.api('/api/qnh/status');
+        if (d.error) { this.$message.error(d.error); return; }
+        const c = d.cookie || {};
+        const acc = c.account || {};
+        this.rq.cookie = {
+          logined: !!c.logined,
+          loading: false,
+          configured: !!c.configured,
+          tenantId: acc.tenantId || c.tenantId || '',
+          tenantName: acc.tenantName || '',
+          message: c.ok ? '' : (c.message || ''),
+        };
+        if (d.config) this.rq.config = Object.assign({}, this.rq.config, d.config);
+        this.rq.lastRun = c.lastRun || null;
+        this.rq.summary = d.summary || null;
+        this.rq.syncing = !!(d.sync && d.sync.running);
+      } catch (e) {
+        this.$message.error('获取牵牛花状态失败：' + e.message);
+      }
+    },
+    async loadRefunds() {
+      this.rq.loading = true;
+      try {
+        const q = new URLSearchParams();
+        const f = this.rq.filter || {};
+        if (this.rq.range && this.rq.range.length === 2) {
+          q.set('from', this.rq.range[0]); q.set('to', this.rq.range[1]);
+        }
+        if (f.keyword) q.set('keyword', f.keyword);
+        if (f.delivery) q.set('delivery', f.delivery);
+        if (f.sort) q.set('sort', f.sort);
+        q.set('page', this.rq.page);
+        q.set('size', this.rq.size);
+        const d = await this.api('/api/qnh/refunds?' + q.toString());
+        if (d.error) { this.$message.error(d.error); return; }
+        this.rq.rows = d.rows || [];
+        this.rq.total = d.total || 0;
+      } catch (e) {
+        this.$message.error('加载退单失败：' + e.message);
+      } finally {
+        this.rq.loading = false;
+      }
+    },
+    applyRefundFilter() {
+      this.rq.page = 1;
+      this.loadRefunds();
+      this.reportOp('btn.click', { btn: '退单列表查询' });
+    },
+    resetRefundFilter() {
+      this.rq.range = null;
+      this.rq.filter = { keyword: '', delivery: '', sort: 'apply_desc' };
+      this.rq.page = 1;
+      this.loadRefunds();
+    },
+    onRefundPage(p) { this.rq.page = p; this.loadRefunds(); },
+    onRefundSize(s) { this.rq.size = s; this.rq.page = 1; this.loadRefunds(); },
+    refundRowClass({ row }) { return row && row.picked ? 'row-picked' : ''; },
+
+    async loadRefundTrend() {
+      try {
+        const d = await this.api('/api/qnh/trend?days=' + this.rq.days);
+        this.rq.trend = (d && d.days) || [];
+      } catch (e) { this.rq.trend = []; }
+      this.$nextTick(() => this.renderRefundTrend());
+    },
+    renderRefundTrend() {
+      if (this.page !== 'refund') return;
+      const EC = ecLib();
+      const dom = document.getElementById('refund-trend');
+      if (!EC || !dom) return;
+      this._rqChart = this._rqChart || EC.init(dom);
+      const days = this.rq.trend || [];
+      this._rqChart.setOption({
+        grid: { left: 6, right: 10, top: 26, bottom: 4, containLabel: true },
+        legend: { right: 0, top: 0, itemHeight: 8, itemWidth: 10, textStyle: { fontSize: 11, color: '#8a8f99' } },
+        tooltip: {
+          trigger: 'axis', axisPointer: { type: 'shadow' }, confine: true,
+          backgroundColor: 'rgba(38,40,44,.92)', borderWidth: 0, textStyle: { color: '#fff', fontSize: 12 },
+          formatter: (ps) => {
+            const p = ps && ps[0];
+            if (!p) return '';
+            const d = days[p.dataIndex] || {};
+            return `<b>${d.date || ''}</b><br/>退单数：<b>${d.count || 0}</b> 单`
+              + `<br/>其中已取货/送达：${d.delivered || 0} 单`
+              + `<br/>退单金额：${yuan(d.amount || 0)}`;
+          },
+        },
+        xAxis: {
+          type: 'category', data: days.map((d) => String(d.date).slice(5)),
+          axisTick: { show: false }, axisLine: { lineStyle: { color: '#e8e9eb' } },
+          axisLabel: { fontSize: 10, color: '#8a8f99', interval: days.length > 30 ? 8 : 2, margin: 6 },
+        },
+        yAxis: {
+          type: 'value', minInterval: 1, splitLine: { lineStyle: { color: '#f2f3f5' } },
+          axisLabel: { fontSize: 10, color: '#8a8f99' },
+        },
+        series: [
+          {
+            name: '退单数量', type: 'bar', data: days.map((d) => Number(d.count) || 0),
+            barMaxWidth: 16, itemStyle: { color: '#7aa7ff', borderRadius: [3, 3, 0, 0] },
+          },
+          {
+            name: '已取货/送达', type: 'bar', data: days.map((d) => Number(d.delivered) || 0),
+            barMaxWidth: 16, itemStyle: { color: '#ff9f43', borderRadius: [3, 3, 0, 0] },
+          },
+        ],
+        animationDuration: 300,
+      }, true);
+    },
+
+    async onCookieBtn() {
+      if (this.rq.cookie.loading) return;
+      if (this.rq.cookie.logined) {
+        const c = this.rq.cookie;
+        this.$message.success(
+          '牵牛花已登录' + (c.tenantName ? '（' + c.tenantName + '）' : '') + '，Cookie 有效'
+        );
+        await this.loadRefundStatus();
+        return;
+      }
+      if (!this.isAdmin) {
+        this.$message.warning('Cookie 已失效，请联系超级管理员重新登录牵牛花');
+        return;
+      }
+      try {
+        await this.$confirm(
+          '将打开一个 Chrome 窗口，请在其中登录牵牛花（最多等 3 分钟）。登录成功后 Cookie 会自动保存，之后可静默刷新。',
+          '登录牵牛花',
+          { confirmButtonText: '打开登录窗口', cancelButtonText: '取消', type: 'warning' }
+        );
+      } catch (e) { return; }
+
+      this.rq.cookie.loading = true;
+      try {
+        const d = await this.api('/api/qnh/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+        if (d.ok && d.logined) this.$message.success('已登录牵牛花，Cookie 已更新');
+        else this.$message.error('登录未完成：' + (d.message || '未检测到登录态'));
+        await this.loadRefundStatus();
+      } catch (e) {
+        this.$message.error('登录失败：' + e.message);
+      } finally {
+        this.rq.cookie.loading = false;
+      }
+    },
+
+    async doSync() {
+      if (this.rq.syncing) return;
+      this.rq.syncing = true;
+      try {
+        this.$message.info('已开始同步，完成后会自动刷新列表（可能需要几十秒）');
+        const d = await this.api('/api/qnh/sync', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+        if (d.running) { this.$message.warning(d.message || '已有同步任务在运行'); return; }
+        if (d.ok) this.$message.success('同步完成');
+        else this.$message.error('同步失败：' + (d.message || '请查看 logs/sync.log'));
+        await this.loadRefundStatus();
+        await this.loadRefunds();
+        await this.loadRefundTrend();
+      } catch (e) {
+        this.$message.error('同步失败：' + e.message);
+      } finally {
+        this.rq.syncing = false;
+      }
+    },
+
+    async saveQnhConfig() {
+      this.rq.savingCfg = true;
+      this.rq.savedCfg = false;
+      try {
+        const c = this.rq.config;
+        const d = await this.api('/api/qnh/config', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            scheduleEnabled: c.scheduleEnabled,
+            scheduleTime: c.scheduleTime || '03:00',
+            webhook: c.webhook || '',
+            wecomEnabled: c.wecomEnabled,
+            alertDelivery: c.alertDelivery,
+          }),
+        });
+        if (d.error) { this.$message.error(d.error); return; }
+        if (d.config) this.rq.config = Object.assign({}, this.rq.config, d.config);
+        this.rq.savedCfg = true;
+        this.$message.success('设置已保存');
+      } catch (e) {
+        this.$message.error('保存失败：' + e.message);
+      } finally {
+        this.rq.savingCfg = false;
+      }
+    },
+
+    async testWebhook() {
+      try {
+        const d = await this.api('/api/qnh/test-webhook', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+        if (d.ok) this.$message.success('测试消息已发送，请查看企业微信群');
+        else this.$message.error('发送失败：' + (d.message || '未配置 webhook'));
+      } catch (e) { this.$message.error('发送失败：' + e.message); }
+    },
+
+    async openRefundLog(row) {
+      this.rq.log.visible = true;
+      this.rq.log.row = row || {};
+      this.rq.log.tab = 'all';
+      this.rq.log.rows = [];
+      this.rq.log.loading = true;
+      try {
+        const d = await this.api('/api/qnh/logs?refundNo=' + encodeURIComponent(row.refundNo));
+        this.rq.log.rows = d.logs || [];
+      } catch (e) {
+        this.$message.error('加载日志失败：' + e.message);
+      } finally {
+        this.rq.log.loading = false;
+      }
+    },
+    refundLogCount(type) {
+      return (this.rq.log.rows || []).filter((r) => r.logType === type).length;
     },
 
     // ══════ 名称映射 ══════
@@ -1528,6 +2006,22 @@ const vm = new Vue({
         if (d.error) { this.$message.error(d.error); return; }
         this.users = d.users || [];
       } catch (e) { this.$message.error('加载失败: ' + e.message); }
+    },
+    // 开关某个账号的「退单列表」权限
+    async toggleQnhPermit(row, enabled) {
+      try {
+        const d = await this.api('/api/admin/users/qnh-refund', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ id: row.id, enabled }),
+        });
+        if (d.error) { this.$message.error(d.error); return; }
+        this.$set(row, 'qnhRefundEnabled', !!d.qnhRefundEnabled);
+        this.$message.success(
+          (d.qnhRefundEnabled ? '已开启' : '已关闭') + '「' + row.username + '」的退单列表权限'
+        );
+      } catch (e) {
+        this.$message.error('设置失败：' + e.message);
+      }
     },
     async createUser() {
       const payload = {

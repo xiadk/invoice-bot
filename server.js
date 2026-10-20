@@ -57,6 +57,7 @@ const { runImport, importOrderUpload, importInvoiceUpload } = require('./import-
 const { loadConfig } = require('./lib/browser');
 const { AgentHub } = require('./lib/agent-hub');
 const { buildMessages } = require('./lib/sender');
+const qnh = require('./lib/qnh');
 
 const PORT = Number(process.env.PORT) || 8787;
 const ROOT = __dirname;
@@ -162,6 +163,8 @@ function publicUser(u) {
     email: u.email || '',
     displayName: u.display_name || '',
     mustChangePassword: !!u.must_change_password,
+    // 退单列表页权限（超级管理员始终可见，普通用户由管理员逐个开启）
+    qnhRefundEnabled: u.role === 'admin' ? true : !!Number(u.qnh_refund_enabled),
     lastLoginAt: u.last_login_at,
     createdAt: u.created_at,
   };
@@ -586,6 +589,11 @@ const OP_ACTIONS = {
   'view.day.invoices': (d) => `点击了 ${d.date} 的每日已开票金额进行查看`,
   'agent.download': () => '下载了本机助手',
   'agent.bind': (d) => `绑定了本机助手${d.deviceName ? '（' + d.deviceName + '）' : ''}`,
+  'qnh.sync': (d) => `在退单列表点击了「立即刷新数据」${d.ok ? '（成功）' : '（失败）'}`,
+  'qnh.login': (d) => `在退单列表点击了「登录牵牛花」刷新 Cookie${d.ok ? '（成功）' : '（失败）'}`,
+  'qnh.config': (d) => `修改了退单同步设置（${d.items}）`,
+  'qnh.permit': (d) => `${d.enabled ? '开启' : '关闭'}了账号「${d.username}」的退单列表权限`,
+  'qnh.view': () => '打开了退单列表页',
 };
 
 // 前端下拉是「值」，日志里要显示人能看懂的「文案」，在服务端做映射，避免客户端乱传
@@ -1301,7 +1309,7 @@ async function setOrderState(userId, { orderNo, loginId, action }) {
 async function listUsers() {
   const users = await db.query(`
     SELECT u.id, u.username, u.role, u.status, u.company_name, u.tax_no, u.email, u.display_name, u.note,
-           u.must_change_password, u.last_login_at, u.created_at, u.updated_at,
+           u.must_change_password, u.last_login_at, u.created_at, u.updated_at, u.qnh_refund_enabled,
            (SELECT COUNT(*) FROM invoice_order o WHERE o.user_id = u.id)              AS order_count,
            (SELECT COUNT(DISTINCT o.seller_company) FROM invoice_order o WHERE o.user_id = u.id) AS company_count,
            (SELECT COUNT(*) FROM issued_invoice i WHERE i.user_id = u.id)             AS invoice_rows,
@@ -1314,6 +1322,7 @@ async function listUsers() {
     companyName: u.company_name || '', taxNo: u.tax_no || '', email: u.email || '',
     displayName: u.display_name || '', note: u.note || '',
     mustChangePassword: !!u.must_change_password,
+    qnhRefundEnabled: u.role === 'admin' ? true : !!Number(u.qnh_refund_enabled),
     lastLoginAt: u.last_login_at, createdAt: u.created_at, updatedAt: u.updated_at,
     orderCount: Number(u.order_count) || 0,
     companyCount: Number(u.company_count) || 0,
@@ -2112,6 +2121,110 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { started: true, channel: 'client' });
     }
 
+    // ── 牵牛花退单列表（需「退单列表」权限；超级管理员始终可用）──
+    if (p.startsWith('/api/qnh/')) {
+      const canRefund = isAdmin || !!Number(user.qnh_refund_enabled);
+      if (!canRefund) return sendJson(res, 403, { error: '未开启退单列表权限，请联系超级管理员' });
+
+      if (method === 'GET' && p === '/api/qnh/status') {
+        const [cookie, cfg, sum] = await Promise.all([
+          qnh.cookieStatus(), qnh.getConfig(), qnh.summary().catch(() => null),
+        ]);
+        return sendJson(res, 200, {
+          cookie,
+          config: qnh.publicConfig(cfg),
+          sync: qnh.getSyncState(),
+          summary: sum,
+          isAdmin,
+        });
+      }
+
+      if (method === 'GET' && p === '/api/qnh/summary') {
+        return sendJson(res, 200, await qnh.summary());
+      }
+
+      if (method === 'GET' && p === '/api/qnh/refunds') {
+        const q = url.searchParams;
+        return sendJson(res, 200, await qnh.listRefunds({
+          from: q.get('from') || '',
+          to: q.get('to') || '',
+          keyword: q.get('keyword') || '',
+          status: q.get('status') || '',
+          type: q.get('type') || '',
+          delivery: q.get('delivery') || '',
+          sort: q.get('sort') || '',
+          page: q.get('page'),
+          size: q.get('size'),
+        }));
+      }
+
+      if (method === 'GET' && p === '/api/qnh/trend') {
+        return sendJson(res, 200, { days: await qnh.refundTrend(url.searchParams.get('days') || 30) });
+      }
+
+      if (method === 'GET' && p === '/api/qnh/logs') {
+        const refundNo = (url.searchParams.get('refundNo') || '').trim().slice(0, 64);
+        if (!refundNo) return sendJson(res, 400, { error: '缺少退单号' });
+        return sendJson(res, 200, {
+          refundNo,
+          logs: await qnh.getLogs(refundNo, url.searchParams.get('type') || ''),
+        });
+      }
+
+      // 以下仅超级管理员
+      if (method === 'POST' && p === '/api/qnh/login') {
+        if (!isAdmin) return sendJson(res, 403, { error: '仅超级管理员可刷新牵牛花登录态' });
+        const body = await readBody(req);
+        const resLogin = await qnh.loginCookie({ headless: !!body.headless });
+        await logOp(user, 'qnh.login', { ok: resLogin.ok });
+        return sendJson(res, 200, resLogin);
+      }
+
+      if (method === 'POST' && p === '/api/qnh/sync') {
+        if (!isAdmin) return sendJson(res, 403, { error: '仅超级管理员可触发同步' });
+        const body = await readBody(req);
+        const out = await qnh.runSync({
+          trigger: 'manual',
+          days: Number(body.days) || null,
+          date: body.date || null,
+        });
+        await logOp(user, 'qnh.sync', { ok: !!out.ok });
+        return sendJson(res, 200, out);
+      }
+
+      if (method === 'POST' && p === '/api/qnh/config') {
+        if (!isAdmin) return sendJson(res, 403, { error: '仅超级管理员可修改退单同步设置' });
+        const body = await readBody(req);
+        const patch = {};
+        if (body.scheduleEnabled !== undefined) patch[qnh.CFG.scheduleEnabled] = body.scheduleEnabled ? '1' : '0';
+        if (body.scheduleTime !== undefined) {
+          const t = String(body.scheduleTime).trim();
+          if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(t)) return sendJson(res, 400, { error: '时间格式应为 HH:mm' });
+          patch[qnh.CFG.scheduleTime] = t;
+        }
+        if (body.webhook !== undefined) patch[qnh.CFG.webhook] = String(body.webhook).trim().slice(0, 500);
+        if (body.wecomEnabled !== undefined) patch[qnh.CFG.wecomEnabled] = body.wecomEnabled ? '1' : '0';
+        if (body.alertDelivery !== undefined) patch[qnh.CFG.alertDelivery] = body.alertDelivery ? '1' : '0';
+
+        const cfg = await qnh.setConfig(patch);
+        const labels = [];
+        if (patch[qnh.CFG.scheduleEnabled] !== undefined) labels.push('定时' + (patch[qnh.CFG.scheduleEnabled] === '1' ? '开启' : '关闭'));
+        if (patch[qnh.CFG.scheduleTime] !== undefined) labels.push('时间 ' + patch[qnh.CFG.scheduleTime]);
+        if (patch[qnh.CFG.wecomEnabled] !== undefined) labels.push('企业微信' + (patch[qnh.CFG.wecomEnabled] === '1' ? '开启' : '关闭'));
+        if (patch[qnh.CFG.alertDelivery] !== undefined) labels.push('配送日志提醒' + (patch[qnh.CFG.alertDelivery] === '1' ? '开启' : '关闭'));
+        if (patch[qnh.CFG.webhook] !== undefined) labels.push('更新了机器人地址');
+        await logOp(user, 'qnh.config', { items: labels.join('、') || '无变化' });
+        return sendJson(res, 200, { ok: true, config: qnh.publicConfig(cfg) });
+      }
+
+      if (method === 'POST' && p === '/api/qnh/test-webhook') {
+        if (!isAdmin) return sendJson(res, 403, { error: '仅超级管理员可测试机器人' });
+        return sendJson(res, 200, await qnh.testWebhook());
+      }
+
+      return sendJson(res, 404, { error: '未知退单接口' });
+    }
+
     // ── 系统管理（仅超级管理员） ──
     if (p.startsWith('/api/admin/')) {
       if (!isAdmin) return sendJson(res, 403, { error: '仅超级管理员可访问' });
@@ -2133,6 +2246,21 @@ const server = http.createServer(async (req, res) => {
       }
       if (method === 'POST' && p === '/api/admin/users/delete') {
         return sendJson(res, 200, await deleteUser(await readBody(req), user));
+      }
+      // 退单列表页权限：逐个账号开启/关闭
+      if (method === 'POST' && p === '/api/admin/users/qnh-refund') {
+        const b = await readBody(req);
+        const id = Number(b.id);
+        const enabled = !!b.enabled;
+        if (!id) return sendJson(res, 400, { error: '缺少用户ID' });
+        const rows = await db.query('SELECT id, username, role FROM app_user WHERE id = ?', [id]);
+        if (!rows.length) return sendJson(res, 404, { error: '用户不存在' });
+        if (rows[0].role === 'admin') {
+          return sendJson(res, 400, { error: '超级管理员默认拥有退单列表权限，无需开启' });
+        }
+        await db.exec('UPDATE app_user SET qnh_refund_enabled = ? WHERE id = ?', [enabled ? 1 : 0, id]);
+        await logOp(user, 'qnh.permit', { username: rows[0].username, enabled });
+        return sendJson(res, 200, { ok: true, id, qnhRefundEnabled: enabled });
       }
       // 按用户名/ID 查用户概况（配合 ?tenant= 查看其看板）
       if (method === 'GET' && p === '/api/admin/user-lookup') {
@@ -2273,5 +2401,7 @@ server.listen(PORT, async () => {
     console.error('✗ 数据库初始化失败:', e.message);
     console.error('  请先启动数据库并确认 config.json 的 mysql 段（或设置 MYSQL_* 环境变量）');
   }
+  // 退单同步定时任务（到点在进程内触发，不依赖 Windows 计划任务）
+  try { qnh.startScheduler(); } catch (e) { console.error('✗ 退单定时器启动失败:', e.message); }
   console.log('Ctrl+C 停止服务器');
 });
