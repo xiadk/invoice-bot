@@ -8,10 +8,11 @@
  *   · chrome.tabs.sendMessage → 由注入的 batchHandler 承担（见 agent/sender.js）
  *
  * 协议（与服务器一致，未做任何服务端改动）：
- *   上行: hello | pong | log | sent | client_stop | login_state
- *   下行: ping | ready | send_batch | stop | task_progress
+ *   上行: hello | pong | log | sent | client_stop | login_state | profit_report | profit_state
+ *   下行: ping | ready | send_batch | stop | task_progress | profit_watch_config | profit_report_ack | profit_run_now
  *
- * 安全：连/收/发都只走服务器；不接触 1688 凭据。
+ * 安全：连/收/发都只走服务器；不接触 1688 凭据。毛利采集的数据也只回传给自己的服务器，
+ *      美团页面只读不写，登录态留在本机浏览器 profile 里。
  */
 const EventEmitter = require('events');
 const WebSocket = require('ws');
@@ -53,6 +54,9 @@ class AgentClient extends EventEmitter {
     this._stopped = false;
     this._batchHandler = null;
     this._helloTimer = null;
+    // 毛利采集（2026-10-20）：服务器下发的规则 + 本地采集状态（供状态面板展示）
+    this.profitConfig = null;
+    this.profitState = null;
   }
 
   /** 连接地址（供测试断言） */
@@ -97,8 +101,12 @@ class AgentClient extends EventEmitter {
       userId: null,
       serverUrl: this.serverUrl,
       version: this.version,
+      profit: this.profitState || null,
     };
   }
+
+  /** 更新毛利采集状态（由 main.js 的采集循环调用，用于面板展示） */
+  setProfitState(s) { this.profitState = s || null; this._emitState(); }
 
   send(obj) {
     try {
@@ -170,6 +178,15 @@ class AgentClient extends EventEmitter {
     if (m.type === 'ready') { clearTimeout(this._helloTimer); this._setReady(true); this.emit('ready', m); return; }
     if (m.type === 'send_batch') { this._runBatch(m).catch((e) => this.log('批次异常: ' + e.message)); return; }
     if (m.type === 'export_orders') { this._runExport(m).catch((e) => this.log('订单导出异常: ' + e.message)); return; }
+    // 毛利采集：服务器下发规则（连上就会发一次，规则改动也会再发）
+    if (m.type === 'profit_watch_config') {
+      this.profitConfig = (m && m.config) || null;
+      this.emit('profit_config', this.profitConfig);
+      return;
+    }
+    if (m.type === 'profit_report_ack') { this.emit('profit_ack', m); return; }
+    // 看板点「立即采集」：服务器转发过来的手动触发（附带最新规则）
+    if (m.type === 'profit_run_now') { this.emit('profit_run_now', m); return; }
     if (m.type === 'stop') { this.stopFlag = true; this.log('收到停止指令：当前步骤完成后即停'); return; }
     if (m.type === 'task_progress') { this.emit('progress', m); return; }
   }

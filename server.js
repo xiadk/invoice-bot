@@ -57,6 +57,7 @@ const { runImport, importOrderUpload, importInvoiceUpload } = require('./import-
 const { loadConfig } = require('./lib/browser');
 const { AgentHub } = require('./lib/agent-hub');
 const { buildMessages } = require('./lib/sender');
+const profit = require('./lib/profit-warn');
 
 const PORT = Number(process.env.PORT) || 8787;
 const ROOT = __dirname;
@@ -123,7 +124,21 @@ function findAgentInstaller() {
   const dir = path.join(ROOT, 'dist');
   let names = [];
   try { names = fs.readdirSync(dir); } catch (e) { return null; }
+  // 从文件名里抠出版本号，如「1688催收助手-Setup-0.3.0.exe」→ [0,3,0]
+  const verOf = (n) => {
+    const m = String(n).match(/(\d+)\.(\d+)\.(\d+)/);
+    return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : [-1, -1, -1];
+  };
+  const cmpVer = (a, b) => {
+    const va = verOf(a), vb = verOf(b);
+    for (let i = 0; i < 3; i++) if (va[i] !== vb[i]) return vb[i] - va[i];  // 版本高的在前
+    return 0;
+  };
   const exes = names.filter((n) => /\.exe$/i.test(n)).sort((a, b) => {
+    // ① 先按版本号倒序（dist 里常同时留着多个历史版本，必须给最新的）
+    const byVer = cmpVer(a, b);
+    if (byVer !== 0) return byVer;
+    // ② 同版本内：安装版优先，其次 portable
     const score = (n) => (/setup|install/i.test(n) ? 0 : (/portable/i.test(n) ? 1 : 2));
     return score(a) - score(b) || a.localeCompare(b);
   });
@@ -659,6 +674,28 @@ function pushClientProgress(uid, ctx) {
 function handleAgentMessage(uid, msg) {
   if (msg.type === 'login_state') { agentHub.setLoggedIn(uid, msg.loggedIn); return; }
   if (msg.type === 'sent') { onAgentSent(uid, msg); return; }
+  // ── 美团毛利采集（2026-10-20）：助手每轮上报「已解析好的订单行」──
+  if (msg.type === 'profit_report') {
+    profit.ingest(uid, {
+      rows: Array.isArray(msg.rows) ? msg.rows : [],
+      pageTitle: msg.pageTitle, pageUrl: msg.pageUrl, agentVer: msg.agentVer,
+      target: msg.target, mode: msg.mode,
+    }, { dryRun: !!msg.dryRun })
+      .then((r) => agentHub.send(uid, { type: 'profit_report_ack', reqId: msg.reqId || null, ok: true, summary: r }))
+      .catch((e) => {
+        console.error('[profit] 上报处理失败 uid=' + uid, e.message);
+        agentHub.send(uid, { type: 'profit_report_ack', reqId: msg.reqId || null, ok: false, error: e.message });
+      });
+    return;
+  }
+  // 助手报告采集端自身的异常（打不开页面 / 未登录 / 选择器失效）
+  if (msg.type === 'profit_state') {
+    profit.touchState(uid, {
+      ok: !!msg.ok, rows: msg.rows, parsed: msg.parsed, pageTitle: msg.pageTitle, pageUrl: msg.pageUrl,
+      error: msg.error, agentVer: msg.agentVer, target: msg.target, mode: msg.mode,
+    }).catch((e) => console.error('[profit] 写心跳失败', e.message));
+    return;
+  }
   if (msg.type === 'log') {
     const t = taskFor(uid);
     if (t.running && t.channel === 'client') {
@@ -1591,6 +1628,8 @@ const server = http.createServer(async (req, res) => {
     if (!user) return sendJson(res, 401, { error: '登录已失效，请重新登录' });
     const tenantId = tenantOf(req, url, user);
     const isAdmin = user.role === 'admin';
+    // 管理员以「查看他人租户」方式进来时是只读（沿用 assertWritable 的约定）
+    const readonlyTenant = (tid, u) => Number(tid) !== Number(u.id);
     const writeGuard = () => assertWritable(user, tenantId);
 
     // ── 已废弃（2026-10-14）：浏览器扩展通道下线，统一迁移到「1688 催收助手」桌面程序 ──
@@ -1745,6 +1784,79 @@ const server = http.createServer(async (req, res) => {
       const loginId = url.searchParams.get('loginId');
       if (!loginId) return sendJson(res, 400, { error: '缺少 loginId' });
       return sendJson(res, 200, await loadSellerDetail(tenantId, loginId));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // 美团「毛利明细」告警（2026-10-20）
+    //   采集在用户本机助手执行（见 electron/agent/profit-watch.js）；服务端只做
+    //   规则、判定、去重、企业微信推送与心跳巡检。服务器从不登录美团。
+    // ─────────────────────────────────────────────────────────────────────
+    if (p === '/api/profit/overview' && method === 'GET') {
+      const rule = await profit.loadRule(tenantId);
+      return sendJson(res, 200, {
+        rule: profit.maskRule(rule),
+        agentRule: profit.toAgentConfig(rule),
+        state: await profit.loadState(tenantId),
+        summary: await profit.summary(tenantId),
+        agentOnline: agentHub.isOnline(tenantId),
+        canEdit: !readonlyTenant(tenantId, user),
+        limits: { wecomMaxPerMin: profit.WECOM_MAX_PER_MIN },
+      });
+    }
+    if (p === '/api/profit/rule' && method === 'POST') {
+      writeGuard();
+      const body = await readBody(req);
+      const saved = await profit.saveRule(tenantId, body.rule || body, user.id);
+      // 规则变化立即下发给在线助手（改完不用等下一轮心跳）
+      if (agentHub.isOnline(tenantId)) {
+        agentHub.send(tenantId, { type: 'profit_watch_config', config: profit.toAgentConfig(saved) });
+      }
+      return sendJson(res, 200, { ok: true, rule: profit.maskRule(saved), agentRule: profit.toAgentConfig(saved) });
+    }
+    // 「立即采集」：让在线助手马上跑一轮（不用等下一个轮询周期）。
+    //   采集仍在本机执行，这里只发一个触发指令；结果会以 profit_report 回传，
+    //   前端拿到 reqId 后轮询 /api/profit/overview 的 lastReportAt 判断是否完成。
+    if (p === '/api/profit/run-now' && method === 'POST') {
+      writeGuard();
+      const rule = await profit.loadRule(tenantId);
+      if (!rule.enabled) {
+        return sendJson(res, 400, { ok: false, error: '采集已暂停，请先点「启用采集」再立即采集' });
+      }
+      if (!agentHub.isOnline(tenantId)) {
+        return sendJson(res, 409, {
+          ok: false, error: '本机助手当前不在线，无法立即采集。请确认那台常开电脑上的「1688催收助手」正在运行并已连接。',
+          agentOnline: false,
+        });
+      }
+      const reqId = 'run-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+      const sent = agentHub.send(tenantId, {
+        type: 'profit_run_now',
+        reqId,
+        // 顺带把最新规则带过去，避免规则刚改完助手还没收到
+        config: profit.toAgentConfig(rule),
+      });
+      return sendJson(res, 200, { ok: true, reqId, sent: sent !== false });
+    }
+    if (p === '/api/profit/test-push' && method === 'POST') {
+      writeGuard();
+      const rule = await profit.loadRule(tenantId);
+      const r = await profit.sendTest(tenantId, rule);
+      return sendJson(res, 200, r);
+    }
+    if (p === '/api/profit/events' && method === 'GET') {
+      return sendJson(res, 200, await profit.listEvents(tenantId, {
+        kind: (url.searchParams.get('kind') || '').trim() || null,
+        limit: url.searchParams.get('limit'),
+        offset: url.searchParams.get('offset'),
+      }));
+    }
+    if (p === '/api/profit/snapshots' && method === 'GET') {
+      return sendJson(res, 200, {
+        rows: await profit.listSnapshots(tenantId, {
+          onlyNegative: url.searchParams.get('negative') === '1',
+          limit: url.searchParams.get('limit'),
+        }),
+      });
     }
 
     if (method === 'GET' && p === '/api/collect-history') {
@@ -2080,6 +2192,12 @@ wsAgent.on('connection', (ws) => {
     });
     try { ws.send(JSON.stringify({ type: 'ready', uid, serverTime: Date.now() })); } catch (e) { /* 忽略 */ }
     console.log(`[agent] uid=${uid} 本机助手已连接${hello && hello.agentVer ? ' (v' + hello.agentVer + ')' : ''}`);
+    // 连上即下发毛利采集配置：助手重启/换机后无需人工干预就能按最新规则继续采
+    profit.agentBootstrap(uid)
+      .then((b) => {
+        try { ws.send(JSON.stringify({ type: 'profit_watch_config', ...b })); } catch (e) { /* 忽略 */ }
+      })
+      .catch((e) => console.error('[profit] 下发采集配置失败', e.message));
   };
   const helloTimer = setTimeout(() => { if (!bound) { try { ws.close(4003, 'hello timeout'); } catch (e) { /* 忽略 */ } } }, 15000);
   ws.on('message', (raw) => {
@@ -2126,7 +2244,6 @@ server.on('upgrade', async (req, socket, head) => {
 // ─────────────────────────────────────────────────────────────────────────
 server.listen(PORT, async () => {
   console.log(`发票催收控制台已启动: http://localhost:${PORT}`);
-  console.log(`  登录页: http://localhost:${PORT}/login   （超级管理员 admin / admin，首次登录请改密）`);
   try {
     await db.ensureSchema();
     const admin = (await db.query("SELECT id FROM app_user WHERE username = 'admin'"))[0];
@@ -2142,5 +2259,13 @@ server.listen(PORT, async () => {
     console.error('✗ 数据库初始化失败:', e.message);
     console.error('  请先启动数据库并确认 config.json 的 mysql 段（或设置 MYSQL_* 环境变量）');
   }
+  // 毛利采集心跳巡检：每 5 分钟看一次「采集端是否还在上报」，超时推企业微信（只推一次/按间隔重复）
+  const OFFLINE_TICK_MS = 5 * 60 * 1000;
+  const offlineTimer = setInterval(() => {
+    profit.checkOffline().then((r) => {
+      for (const x of r) console.log(`[profit] 离线告警 uid=${x.userId} ${x.ok ? '已推送' : '推送失败: ' + x.error}`);
+    }).catch((e) => console.error('[profit] 离线巡检异常', e.message));
+  }, OFFLINE_TICK_MS);
+  if (offlineTimer.unref) offlineTimer.unref();
   console.log('Ctrl+C 停止服务器');
 });

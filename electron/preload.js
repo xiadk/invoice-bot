@@ -16,4 +16,8 @@ contextBridge.exposeInMainWorld('xsh', {
   openDataDir: () => ipcRenderer.invoke('agent:openDataDir'),
   unbind: () => ipcRenderer.invoke('agent:unbind'),
   quit: () => ipcRenderer.invoke('agent:quit'),
+  // 美团毛利采集
+  profitOpen: () => ipcRenderer.invoke('agent:profitOpen'),
+  profitRunNow: () => ipcRenderer.invoke('agent:profitRunNow'),
+  profitSetEnabled: (on) => ipcRenderer.invoke('agent:profitSetEnabled', !!on),
 });

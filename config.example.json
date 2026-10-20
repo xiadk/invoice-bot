@@ -44,5 +44,11 @@
     "password": "invoice123",
     "database": "invoice_bot",
     "connectionLimit": 8
+  },
+  "profitWatch": {
+    "_comment5": "美团毛利明细告警：采集在本机助手执行（用本机浏览器打开 qnh.meituan.com 报表页），服务器只做判定与推送。wecomKey 为「系统内置企业微信机器人」的 key（只填 key 部分，或整条 webhook 地址都行）；也可用环境变量 PROFIT_WECOM_KEY 覆盖。具体规则（阈值/间隔/店铺过滤等）在看板「毛利告警」页按账号维护，存 profit_alert_rule 表。",
+    "wecomKey": "",
+    "defaultPollIntervalSec": 60,
+    "defaultThreshold": 0
   }
 }

@@ -345,3 +345,118 @@ CREATE TABLE IF NOT EXISTS `agent_device` (
   KEY `idx_agent_device_user` (`user_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   COMMENT='本机助手/书签的设备令牌（替代「税号当配对码」）';
+
+-- ----------------------------------------------------------------------------
+-- 表 6: profit_alert_rule —— 美团「毛利明细」告警规则（每用户一行，2026-10-20 新增）
+--   采集在用户本机助手执行（electron/agent/profit-watch.js，用本机浏览器打开
+--   https://qnh.meituan.com 报表页只读 DOM）；**服务器不登录美团、不存美团登录态**。
+--   本表只承载「判定与推送」的配置，以及企业微信机器人 key（仅本表存，不回传前端明文）。
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `profit_alert_rule` (
+  `user_id`                 INT UNSIGNED  NOT NULL                COMMENT '数据归属用户ID（app_user.id）',
+  `enabled`                 TINYINT(1)    NOT NULL DEFAULT 1      COMMENT '是否启用采集（0=本机助手停止采集）',
+  `watch_url`               VARCHAR(500)  NOT NULL DEFAULT ''     COMMENT '监控页面地址（仅允许 qnh.meituan.com 域名）',
+  `poll_interval_sec`       INT           NOT NULL DEFAULT 60     COMMENT '读取 DOM 的间隔（秒）。不发请求，仅本机页面内读取',
+  `refresh_every_sec`       INT           NOT NULL DEFAULT 300    COMMENT '多少秒点一次页面自带的刷新按钮（0=不刷新）',
+  `jitter_ratio`            DECIMAL(4,2)   NOT NULL DEFAULT 0.20  COMMENT '间隔随机抖动比例（0~0.5），让节奏不像机器',
+  `threshold`               DECIMAL(14,2) NOT NULL DEFAULT 0.00   COMMENT '阈值：线上毛利小于该值即告警（默认 0=负毛利）',
+  `value_column`            VARCHAR(64)   NOT NULL DEFAULT '线上毛利' COMMENT '判定用列（按表头文字模糊匹配）',
+  `amount_column`           VARCHAR(64)   DEFAULT NULL            COMMENT '金额列（仅展示用）',
+  `status_column`           VARCHAR(64)   NOT NULL DEFAULT '订单状态' COMMENT '状态列（用于排除取消/退款）',
+  `store_column`            VARCHAR(64)   NOT NULL DEFAULT '店铺名称' COMMENT '店铺列',
+  `order_column`            VARCHAR(64)   NOT NULL DEFAULT '订单号'   COMMENT '订单号列',
+  `ignore_status`           JSON          DEFAULT NULL            COMMENT '要排除的状态数组，如 ["已取消","已退款"]',
+  `include_stores`          JSON          DEFAULT NULL            COMMENT '只关注这些店铺（空=全部）',
+  `exclude_stores`          JSON          DEFAULT NULL            COMMENT '排除这些店铺',
+  `excludes`                JSON          DEFAULT NULL            COMMENT '关键词排除（命中店铺名/商品名/备注即跳过）',
+  `first_page_only`         TINYINT(1)    NOT NULL DEFAULT 1      COMMENT '只读第一页（最安全；0=自动翻页）',
+  `push_channel`            ENUM('wecom','none') NOT NULL DEFAULT 'wecom' COMMENT '推送渠道：wecom=企业微信机器人，none=只记录不推送',
+  `wecom_key_mode`          ENUM('builtin','custom') NOT NULL DEFAULT 'builtin' COMMENT 'builtin=用系统内置机器人，custom=用自定义 key',
+  `wecom_key`               VARCHAR(128)  DEFAULT NULL            COMMENT '自定义机器人 key（仅存库，永不回传明文）',
+  `wecom_mention`           VARCHAR(200)  DEFAULT NULL            COMMENT '@手机号，多个用逗号分隔',
+  `max_detail`              INT           NOT NULL DEFAULT 10     COMMENT '单条推送最多列出的明细条数',
+  `repeat_after_hours`      INT           NOT NULL DEFAULT 0      COMMENT '同一笔（金额未变）多少小时后再提醒；0=只提醒一次',
+  `quiet_hours`             VARCHAR(16)   DEFAULT NULL            COMMENT '免打扰时段，如 23:00-07:00（离线告警不受限）',
+  `offline_alert_min`       INT           NOT NULL DEFAULT 20     COMMENT '超过 N 分钟没收到采集心跳→推离线告警（0=关闭）',
+  `offline_alert_repeat_min` INT          NOT NULL DEFAULT 120    COMMENT '离线告警重复间隔（分钟）',
+  `updated_by`              INT           DEFAULT NULL            COMMENT '最后修改人',
+  `updated_at`              DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`user_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  COMMENT='美团毛利明细告警规则（每用户一行；采集在本机助手执行）';
+
+-- ----------------------------------------------------------------------------
+-- 表 7: profit_order_snapshot —— 毛利明细快照（助手每轮上报的最新值）
+--   主键 (user_id, order_no)：同一订单只留最新一行（毛利变化时覆盖并更新 last_seen_at）。
+--   用途：看板「毛利明细」、已推送去重的辅助依据、以及负毛利金额的变化轨迹（看 event 表）。
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `profit_order_snapshot` (
+  `user_id`       INT UNSIGNED  NOT NULL                COMMENT '数据归属用户ID',
+  `order_no`      VARCHAR(64)   NOT NULL                COMMENT '订单号（平台订单编号）',
+  `store_name`    VARCHAR(255)  DEFAULT NULL            COMMENT '店铺名称',
+  `goods_title`   VARCHAR(512)  DEFAULT NULL            COMMENT '商品名称',
+  `order_status`  VARCHAR(64)   DEFAULT NULL            COMMENT '订单状态（已取消/已完成等）',
+  `gross_profit`  DECIMAL(14,2) DEFAULT NULL            COMMENT '线上毛利（元，负数为亏损）',
+  `amount`        DECIMAL(14,2) DEFAULT NULL            COMMENT '订单金额/实付（元，仅展示）',
+  `order_time`    DATETIME      DEFAULT NULL            COMMENT '下单时间（页面能取到才填）',
+  `remark`        VARCHAR(255)  DEFAULT NULL            COMMENT '备注/摘要（用于关键词排除）',
+  `first_seen_at` DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '首次采集到的时间',
+  `last_seen_at`  DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '最近一次采集到的时间',
+  PRIMARY KEY (`user_id`, `order_no`),
+  KEY `idx_profit_snap_value` (`user_id`, `gross_profit`),
+  KEY `idx_profit_snap_seen`  (`user_id`, `last_seen_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  COMMENT='美团毛利明细快照（本机助手采集上报；每单一行最新值）';
+
+-- ----------------------------------------------------------------------------
+-- 表 8: profit_alert_event —— 毛利告警事件（去重与审计）
+--   去重指纹 fingerprint = sha1(订单号 + 毛利值)：同一笔同一金额只推一次；
+--   毛利数值发生变化会算新事件（一条负毛利从 -8.2 变成 -15.6 值得再提醒一次）。
+--   kind: neg=负毛利，recovered=已恢复，offline=采集端离线，test=测试推送
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `profit_alert_event` (
+  `id`            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `user_id`       INT UNSIGNED  NOT NULL                COMMENT '数据归属用户ID',
+  `kind`          ENUM('neg','recovered','offline','test') NOT NULL DEFAULT 'neg' COMMENT '事件类型',
+  `order_no`      VARCHAR(64)   NOT NULL DEFAULT ''     COMMENT '订单号（offline/test 为空）',
+  `fingerprint`   CHAR(40)      NOT NULL                COMMENT '去重指纹 sha1(订单号+毛利值)',
+  `store_name`    VARCHAR(255)  DEFAULT NULL            COMMENT '店铺名称（快照）',
+  `goods_title`   VARCHAR(512)  DEFAULT NULL            COMMENT '商品名称（快照）',
+  `order_status`  VARCHAR(64)   DEFAULT NULL            COMMENT '订单状态（快照）',
+  `gross_profit`  DECIMAL(14,2) DEFAULT NULL            COMMENT '告警时的线上毛利',
+  `amount`        DECIMAL(14,2) DEFAULT NULL            COMMENT '告警时的订单金额',
+  `rule_threshold` DECIMAL(14,2) DEFAULT NULL           COMMENT '判定时使用的阈值',
+  `channel`       VARCHAR(16)   NOT NULL DEFAULT 'wecom' COMMENT '推送渠道',
+  `status`        ENUM('sent','pending','failed','skipped') NOT NULL DEFAULT 'pending'
+                                                        COMMENT '推送状态：sent=已推送，pending=待推送（免打扰/未配置），failed=推送失败',
+  `alerted_at`    DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '告警时间',
+  `recovered_at`  DATETIME      DEFAULT NULL            COMMENT '负毛利恢复时间（kind=neg 用）',
+  `meta`          JSON          DEFAULT NULL            COMMENT '附加信息（推送结果、离线时长等）',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_profit_event_fp` (`user_id`, `fingerprint`),
+  KEY `idx_profit_event_time` (`user_id`, `alerted_at`),
+  KEY `idx_profit_event_kind` (`user_id`, `kind`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  COMMENT='毛利告警事件（指纹去重 + 推送审计）';
+
+-- ----------------------------------------------------------------------------
+-- 表 9: profit_collect_state —— 毛利采集心跳（每用户一行）
+--   助手每轮采集都会上报；服务器据此判断「采集端是否还活着」，超时推离线告警。
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `profit_collect_state` (
+  `user_id`       INT UNSIGNED  NOT NULL                COMMENT '数据归属用户ID',
+  `last_report_at` DATETIME     DEFAULT NULL            COMMENT '最近一次上报时间（无论成功失败）',
+  `last_ok_at`    DATETIME      DEFAULT NULL            COMMENT '最近一次成功采集时间',
+  `ok`            TINYINT(1)    NOT NULL DEFAULT 0      COMMENT '最近一轮是否成功',
+  `rows`          INT           NOT NULL DEFAULT 0      COMMENT '页面读到的原始行数',
+  `parsed`        INT           NOT NULL DEFAULT 0      COMMENT '成功解析的订单数',
+  `page_title`    VARCHAR(200)  DEFAULT NULL            COMMENT '页面标题（判断是否停在正确页面）',
+  `page_url`      VARCHAR(500)  DEFAULT NULL            COMMENT '页面地址',
+  `error`         VARCHAR(500)  DEFAULT NULL            COMMENT '最近一次错误（未登录/选择器失效等）',
+  `agent_ver`     VARCHAR(32)   DEFAULT NULL            COMMENT '执行采集的助手版本',
+  `target`        VARCHAR(120)  DEFAULT NULL            COMMENT '本机助手自报的采集目标（店铺/账号提示）',
+  `mode`          VARCHAR(16)   DEFAULT NULL            COMMENT '采集模式：live=正式采集，dryrun=只看不推',
+  `updated_at`    DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`user_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  COMMENT='毛利采集心跳（用于离线告警与看板状态展示）';

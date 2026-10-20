@@ -7,8 +7,10 @@
  *   · deviceName   设备名（默认取主机名）
  *   · autoStart    是否开机自启
  *   · lastLoggedIn 上次上报的 1688 登录态（仅布尔，用于状态展示）
+ *   · profitConfig 美团毛利采集规则（服务器下发的只读副本）
  *
  * ⚠ 本文件**不含**任何 1688 凭据：助手不读取、不保存 1688 账号密码或 Cookie。
+ * ⚠ 也**不含**任何美团凭据：美团登录态留在浏览器 profile（persist:meituan 分区）里，本文件不碰。
  */
 const fs = require('fs');
 const path = require('path');
@@ -21,6 +23,8 @@ const DEFAULTS = {
   deviceName: '',
   autoStart: true,
   lastLoggedIn: false,
+  // 美团毛利采集规则（服务器下发后缓存一份，断线/刚启动时先按它跑）
+  profitConfig: null,
 };
 
 function createStore(dir) {

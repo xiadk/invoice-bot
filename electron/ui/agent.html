@@ -53,6 +53,25 @@
     </div>
   </div>
 
+  <div class="card" id="profitCard">
+    <div class="row"><span class="k">毛利采集</span><span class="v" id="pwState"><i class="dot n"></i>未启用</span></div>
+    <div class="row"><span class="k">采集节奏</span><span class="v" id="pwInterval">—</span></div>
+    <div class="row"><span class="k">最近一轮</span><span class="v" id="pwLast">—</span></div>
+    <div class="row"><span class="k">读到订单</span><span class="v" id="pwRows">—</span></div>
+    <div id="pwWarnBox" class="hide" style="margin-top:8px">
+      <div class="tip" style="border-color:#fde68a;background:#fffbeb;color:#92400e" id="pwWarn"></div>
+    </div>
+    <div class="btns" style="margin-top:10px">
+      <button class="primary" id="btnProfitOpen">打开美团报表窗口</button>
+      <button id="btnProfitRun">立即采集一次</button>
+      <button id="btnProfitToggle">暂停采集</button>
+    </div>
+    <p class="tip" style="margin-top:10px">
+      采集用<b>本机浏览器</b>打开美团毛利明细页，只读页面上的表格，不发额外接口请求；
+      解析出的订单只回传到你自己的服务器。规则（间隔/阈值/店铺）在网站看板「毛利告警」里改。
+    </p>
+  </div>
+
   <div class="card" id="unboundCard" style="display:none">
     <div class="tip">
       尚未绑定账号。请到网站看板点「<b>绑定本机助手</b>」——浏览器会弹窗询问是否打开本助手，点「打开」即可自动完成绑定。
@@ -67,7 +86,8 @@
 
   <p class="tip" style="margin-top:12px">
     隐私说明：本程序<b>不读取、不上传</b>你的 1688 账号密码与 Cookie；登录态只保存在本机；
-    除连接你自己的服务器外不发起任何网络请求。
+    除连接你自己的服务器外不发起任何网络请求。美团的登录态同样只留在本机浏览器里，
+    毛利采集只读页面表格、不发额外接口请求、也不替你做任何操作。
   </p>
 </div>
 
@@ -92,11 +112,98 @@ function render(s){
     st.textContent = '发送中 ' + (t.done||0) + '/' + (t.total||0) + (t.current ? ' · 当前 ' + t.current : '');
   } else st.textContent = '空闲';
   document.getElementById('btnStop').classList.toggle('hide', !S.sending);
+  renderProfit();
 }
+
+// ── 毛利采集面板 ──
+let pwPausedLocal = false;
+function fmtClock(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '—';
+  return d.toLocaleTimeString('zh-CN', { hour12: false });
+}
+function renderProfit() {
+  const st = S.profitState || {};
+  const cfg = S.profitConfig || {};
+  const el = document.getElementById('pwState');
+  if (!st.enabled) el.innerHTML = dot('n') + '未启用（看板里开启）';
+  else if (st.running && st.lastError) el.innerHTML = dot('r') + '采集中（上一轮失败）';
+  else if (st.running) el.innerHTML = dot('g') + '采集中';
+  else el.innerHTML = dot('y') + '已暂停';
+
+  const interval = st.intervalSec || cfg.pollIntervalSec || 0;
+  const refresh = cfg.refreshEverySec ? ` · 每 ${Math.round(cfg.refreshEverySec / 60)} 分钟刷新页面` : ' · 不刷新页面';
+  document.getElementById('pwInterval').textContent = interval ? `约 ${interval} 秒一次${refresh}` : '—';
+
+  const last = st.lastRunAt ? `${fmtClock(st.lastRunAt)}${st.lastError ? '（失败）' : '（成功）'}` : '—';
+  document.getElementById('pwLast').textContent = last;
+  document.getElementById('pwRows').textContent = st.rows || st.rows === 0
+    ? `${st.rows} 行${st.negative ? ` · 负毛利 ${st.negative} 笔` : ''}`
+    : '—';
+
+  const warns = [];
+  if (st.lastError) warns.push('采集失败：' + st.lastError);
+  for (const w of (st.warnings || [])) warns.push(w);
+  const box = document.getElementById('pwWarnBox');
+  if (warns.length) { box.classList.remove('hide'); document.getElementById('pwWarn').textContent = warns.join('　|　'); }
+  else box.classList.add('hide');
+
+  document.getElementById('btnProfitToggle').textContent = st.running ? '暂停采集' : '恢复采集';
+  document.getElementById('btnProfitToggle').disabled = !st.enabled;
+}
+
 document.getElementById('btnLogin').onclick = () => window.xsh.openLoginWindow();
 document.getElementById('btnStop').onclick = () => window.xsh.stopTask();
 document.getElementById('btnData').onclick = () => window.xsh.openDataDir();
 document.getElementById('btnQuit').onclick = () => window.xsh.quit();
+document.getElementById('btnProfitOpen').onclick = () => window.xsh.profitOpen();
+// 把采集失败的技术原因翻译成能照着做的中文
+function explainProfitFail(raw) {
+  const r = String(raw || '');
+  if (/login-required/i.test(r)) {
+    // 诊断段：reason 里可能带「命中URL特征/DOM特征 | 页面URL=…」，显示出来便于排查
+    const diag = r.split('|').map((s) => s.trim()).filter((s) => s && !/^login-required$/i.test(s)).join('；');
+    return '采集失败：助手认为美团页面还没登录。\n\n' +
+      '注意：助手用的是它自己独立的登录会话，你平时浏览器里登录的牵牛花不算数。\n' +
+      '请点「打开美团报表窗口」，在【弹出的那个窗口】里用你本人的账号登录美团，' +
+      '等窗口里显示出「毛利明细」的表格后，再回来点「立即采集一次」。\n\n' +
+      '（登录态会保存在本机，只要不点退出，以后就不用再登了。）' +
+      (diag ? '\n\n诊断信息：' + diag : '');
+  }
+  if (/exec-error/i.test(r)) {
+    return '采集失败：读取页面时出错。\n\n' +
+      '通常是美团页面正在加载或刚刚刷新过，稍等几秒再试一次。\n' +
+      '如果一直失败，请点「打开美团报表窗口」确认页面能正常显示表格。\n\n' +
+      '原始信息：' + r;
+  }
+  if (/bad-result/i.test(r)) {
+    return '采集失败：页面没返回可识别的数据。\n\n' +
+      '请点「打开美团报表窗口」，确认页面停在「毛利明细」的订单明细列表上，而不是概览/图表页。';
+  }
+  if (/collect-error/i.test(r)) {
+    return '采集失败：' + r.replace(/^collect-error:\s*/i, '') + '\n\n请稍后重试，或点「打开美团报表窗口」检查页面状态。';
+  }
+  if (/页面结构|no-table|no-rows/i.test(r)) {
+    return '没读到订单数据（' + r + '）。\n\n' +
+      '可能原因：① 页面还没加载完；② 当前不是「毛利明细」页；③ 美团改了页面结构。\n' +
+      '请先点「打开美团报表窗口」看一眼，确认表格里确实有数据。';
+  }
+  return '采集未取到数据（' + (r || '原因未知') + '）。\n\n请先点「打开美团报表窗口」确认已登录且停在毛利明细页。';
+}
+
+document.getElementById('btnProfitRun').onclick = async () => {
+  const btn = document.getElementById('btnProfitRun');
+  btn.disabled = true; btn.textContent = '采集中…';
+  const r = await window.xsh.profitRunNow().catch((e) => ({ ok: false, error: e.message }));
+  btn.disabled = false; btn.textContent = '立即采集一次';
+  if (r && r.ok === false && r.error) alert('采集失败：' + r.error);
+  else if (r && r.ok === false) alert(explainProfitFail(r.reason));
+};
+document.getElementById('btnProfitToggle').onclick = async () => {
+  const st = S.profitState || {};
+  await window.xsh.profitSetEnabled(!st.running);
+};
 document.getElementById('btnUnbind').onclick = async () => {
   if (!confirm('解绑后本机将断开与服务器的连接，需要重新到网站绑定。确定解绑？')) return;
   await window.xsh.unbind();

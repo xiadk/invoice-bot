@@ -21,6 +21,8 @@ const { createStore } = require('./store');
 const { AgentClient } = require('./agent/ws-client');
 const sender = require('./agent/sender');
 const orderExport = require('./agent/order-export');
+const profitWatch = require('./agent/profit-watch');
+const { ProfitScheduler } = require('./agent/profit-scheduler');
 
 // 隐藏自动化特征（navigator.webdriver=false），降低 1688 风控识别 Electron 的概率。
 // 必须在 app ready 前调用，渲染进程启动后即失效。
@@ -34,6 +36,7 @@ let client = null;
 let tray = null;
 let statusWin = null;
 let quitting = false;
+let profitSched = null;   // 美团毛利采集的节奏控制（profit-scheduler）
 
 // ── 单实例：第二次启动（多半来自深链）→ 交给已运行实例处理 ──
 const gotLock = app.requestSingleInstanceLock();
@@ -91,6 +94,8 @@ function pushState() {
     serverUrl: store.get('serverUrl') || '',
     bound: store.isBound(),
     sendState: sender.state ? sender.state() : null,
+    profitState: profitSched ? profitSched.state() : null,
+    profitConfig: client ? client.profitConfig : null,
     dataDir: app.getPath('userData'),
   });
 }
@@ -190,12 +195,103 @@ function startAgent() {
     serverUrl: store.get('serverUrl'),
     deviceToken: store.get('deviceToken'),
   }));
-  client.on('ready', () => { log('已连接服务器'); refreshTray(); pushState(); });
+  client.on('ready', () => {
+    log('已连接服务器'); refreshTray(); pushState();
+    // 连上后如果服务器还没推配置，就用上次缓存的规则先跑（避免刚启动空等）
+    if (profitSched) {
+      const cfg = client.profitConfig || store.get('profitConfig');
+      if (cfg) profitSched.setConfig(cfg);
+      profitSched.start();
+    }
+  });
   client.on('connected', () => { refreshTray(); pushState(); });
   client.on('disconnected', (info) => { log(`连接断开 (${info && info.code})，稍后重连`); refreshTray(); pushState(); });
   client.on('state', () => { refreshTray(); pushState(); });
   client.on('progress', () => pushState());
+  setupProfitWatch();
   client.start();
+}
+
+/**
+ * 美团毛利采集的装配（2026-10-20）
+ *  · 规则来自服务器（profit_watch_config）；助手只执行，不自己决定阈值
+ *  · 采集全在本机浏览器（persist:meituan 分区），服务器不接触美团登录态
+ *  · 上报走已建立的 WS 通道；断线时这轮数据直接丢弃（下一轮会重新采，不需要补传）
+ */
+function setupProfitWatch() {
+  if (profitSched) return;
+  profitSched = new ProfitScheduler({
+    log: (m) => log('[毛利] ' + m),
+    collect: async (cfg) => {
+      const r = await profitWatch.collectOnce(cfg || {});
+      return {
+        ok: !!r.ok,
+        reason: r.reason || '',
+        rows: profitWatch.normalizeRows(r.rows),
+        pageTitle: r.pageTitle || '',
+        warnings: r.warnings || [],
+      };
+    },
+    refresh: () => profitWatch.clickRefresh(),
+    report: (rows, info) => {
+      if (!client) return;
+      if (!info.ok) {
+        // 采集失败也要报心跳，否则服务器会误判「离线」并疯狂告警
+        client.send({
+          type: 'profit_state', ok: false, rows: 0, parsed: 0,
+          pageTitle: info.pageTitle || '', pageUrl: (profitSched && profitSched.state().pageUrl) || '',
+          error: info.reason || '', agentVer: VERSION,
+          target: (profitSched && profitSched.state().target) || '', mode: 'live',
+        });
+        return;
+      }
+      client.send({
+        type: 'profit_report',
+        rows,
+        pageTitle: info.pageTitle || '',
+        pageUrl: (profitSched && profitSched.state().pageUrl) || '',
+        agentVer: VERSION,
+        target: (profitSched && profitSched.state().target) || '',
+        mode: 'live',
+        // 手动触发时用服务器下发的 reqId（便于前端对应），自动轮询用时间戳
+        reqId: info.reqId || String(Date.now()),
+        manual: !!info.manual,
+      });
+      if (info.warnings && info.warnings.length) log('[毛利] ' + info.warnings.join('；'));
+    },
+    onState: () => pushState(),
+  });
+
+  client.on('ready', () => {
+    // 连上后如果服务器还没推配置，就用上次缓存的规则先跑（避免刚启动空等）
+    if (!client.profitConfig && store.get('profitConfig')) profitSched.setConfig(store.get('profitConfig'));
+    if (client.profitConfig) profitSched.setConfig(client.profitConfig);
+    profitSched.start();
+  });
+  client.on('profit_config', (cfg) => {
+    store.set({ profitConfig: cfg || null });
+    profitSched.setConfig(cfg);
+    if (cfg && cfg.enabled) profitSched.start();
+    pushState();
+  });
+  // 看板点「立即采集」：服务器转发过来，附带最新规则
+  client.on('profit_run_now', (m) => {
+    const reqId = (m && m.reqId) || '';
+    if (m && m.config) {
+      store.set({ profitConfig: m.config });
+      profitSched.setConfig(m.config);
+    }
+    if (!profitSched.state().enabled) {
+      log('[毛利] 收到立即采集指令，但采集已被暂停，忽略');
+      return;
+    }
+    log('[毛利] 收到立即采集指令' + (reqId ? '（' + reqId + '）' : ''));
+    profitSched.runNow({ reqId }).catch((e) => log('[毛利] 立即采集失败: ' + e.message));
+  });
+  client.on('disconnected', () => {
+    // WS 断了就暂停采集（采集结果也发不出去，白跑）；重连后 ready 会重新 start
+    if (profitSched) profitSched.stop();
+  });
 }
 
 // ── 深链处理 ──
@@ -293,3 +389,25 @@ ipcMain.handle('agent:unbind', () => {
   return true;
 });
 ipcMain.handle('agent:quit', () => { quitting = true; app.quit(); return true; });
+
+// ── 美团毛利采集（面板按钮）──
+ipcMain.handle('agent:profitOpen', async () => {
+  const url = (client && client.profitConfig && client.profitConfig.url) || profitWatch.DEFAULT_URL;
+  await profitWatch.openWindow(url);
+  return true;
+});
+ipcMain.handle('agent:profitRunNow', async () => {
+  if (!profitSched) return { ok: false, error: '采集未初始化（请先绑定并连接服务器）' };
+  const r = await profitSched.runNow();
+  pushState();
+  return r;
+});
+ipcMain.handle('agent:profitSetEnabled', (e, on) => {
+  // 面板上的「暂停/恢复采集」只影响本机（服务器规则仍以看板为准，下次下发会覆盖）
+  if (!profitSched) return false;
+  const cfg = { ...(client && client.profitConfig ? client.profitConfig : store.get('profitConfig') || {}), enabled: !!on };
+  profitSched.setConfig(cfg);
+  if (on) profitSched.start(); else profitSched.stop();
+  pushState();
+  return true;
+});

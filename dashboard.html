@@ -118,6 +118,7 @@
         <div class="brand">1688 发票催收</div>
         <el-menu class="nav-menu" :default-active="page" mode="horizontal" @select="switchPage">
           <el-menu-item index="board">看板</el-menu-item>
+          <el-menu-item index="profit">毛利告警</el-menu-item>
           <el-menu-item index="mapping">名称映射</el-menu-item>
           <el-menu-item index="admin" v-if="isAdmin">系统管理</el-menu-item>
         </el-menu>
@@ -418,6 +419,268 @@
                          @size-change="onDashSize" @current-change="onDashPage"></el-pagination>
         </div>
         <div class="meta-line">{{ meta }}</div>
+      </div>
+
+      <!-- ══════════ 毛利告警 ══════════ -->
+      <div v-show="page === 'profit'" id="page-profit">
+        <div class="page-head">
+          <h2>美团毛利明细告警</h2>
+          <div style="font-size:12px;color:var(--sub);line-height:1.8">
+            采集在<b>你本机的「1688催收助手」</b>里执行：用它自带的浏览器打开
+            <code>qnh.meituan.com</code> 的毛利明细页，<b>只读页面表格</b>，不发额外接口请求，用你本人的登录态与 IP。
+            服务器只接收解析好的订单行，负责判定、去重与企业微信推送——<b>服务器不登录美团、不保存美团登录态</b>。
+          </div>
+        </div>
+
+        <el-alert v-if="readonly" type="warning" :closable="false" show-icon style="margin-bottom:12px" title="只读模式：正在查看他人数据，不能修改规则。"></el-alert>
+
+        <!-- 采集状态 -->
+        <el-card shadow="never" class="section-card" :body-style="{ padding: '12px 16px' }">
+          <div style="display:flex;flex-wrap:wrap;gap:18px;align-items:center;font-size:13px">
+            <span>
+              <span class="agent-dot" :style="{background: profitStatus.color}"></span>
+              采集端：<b :style="{color: profitStatus.color}">{{ profitStatus.text }}</b>
+            </span>
+            <span>最近上报：<b>{{ profitState.lastReportAt ? fmtMinute(profitState.lastReportAt) : '从未' }}</b></span>
+            <span>最近成功：<b>{{ profitState.lastOkAt ? fmtMinute(profitState.lastOkAt) : '从未' }}</b></span>
+            <span>读到订单：<b>{{ profitState.rows || 0 }}</b> 行 · 负毛利 <b :style="{color:'#c62828'}">{{ profitSummary.negative || 0 }}</b> 笔</span>
+            <span>今日已告警：<b>{{ profitSummary.alertedToday || 0 }}</b> 次</span>
+            <span class="spacer" style="flex:1"></span>
+            <el-button size="mini" type="primary" plain icon="el-icon-refresh-right"
+                       :loading="profitRunning" :disabled="readonly || !profitRule.enabled || !profitAgentOnline"
+                       :title="!profitAgentOnline ? '本机助手不在线，无法立即采集' : (!profitRule.enabled ? '采集已暂停' : '让助手马上跑一轮，不用等下一个周期')"
+                       @click="runProfitNow">立即采集</el-button>
+            <el-button size="mini" @click="loadProfit" icon="el-icon-refresh">刷新</el-button>
+            <el-button size="mini" :type="profitRule.enabled ? 'danger' : 'success'" plain :disabled="readonly"
+                       @click="toggleProfitEnabled">{{ profitRule.enabled ? '暂停采集' : '启用采集' }}</el-button>
+          </div>
+          <div v-if="profitState.error" style="margin-top:8px;font-size:12px;color:#c62828">
+            ⚠ 最近错误：{{ profitErrorText }}
+          </div>
+          <div v-else-if="!profitState.exists" style="margin-top:8px;font-size:12px;color:#8a6100">
+            还没有任何采集数据。请在那台常开电脑上启动「1688催收助手」，点状态面板里的「打开美团报表窗口」登录美团并停在毛利明细页。
+          </div>
+          <div v-else-if="profitState.pageTitle" style="margin-top:8px;font-size:12px;color:var(--sub)">
+            采集页：{{ profitState.pageTitle }} <span v-if="profitState.agentVer">· 助手 v{{ profitState.agentVer }}</span>
+          </div>
+        </el-card>
+
+        <!-- 规则配置 -->
+        <el-card shadow="never" class="section-card" :body-style="{ padding: '14px 16px' }">
+          <div slot="header"><b>告警规则</b> <span class="loginid">（保存后立即下发给在线助手，无需重启）</span></div>
+          <el-form label-position="top" size="small" :disabled="readonly">
+            <el-row :gutter="12">
+              <el-col :xs="24" :md="12">
+                <el-form-item label="监控页面地址">
+                  <el-input v-model="profitRule.watchUrl" placeholder="https://qnh.meituan.com/home.html#/data/gross-profit-warn?tabNo=orderDetail"></el-input>
+                  <div class="form-tip">只允许 qnh.meituan.com 域名</div>
+                </el-form-item>
+              </el-col>
+              <el-col :xs="12" :md="6">
+                <el-form-item label="采集间隔（秒）">
+                  <el-input-number v-model="profitRule.pollIntervalSec" :min="15" :max="3600" :step="15" controls-position="right" style="width:100%"></el-input-number>
+                  <div class="form-tip">读 DOM 不发请求；默认 60</div>
+                </el-form-item>
+              </el-col>
+              <el-col :xs="12" :md="6">
+                <el-form-item label="刷新页面间隔（秒）">
+                  <el-input-number v-model="profitRule.refreshEverySec" :min="0" :max="7200" :step="60" controls-position="right" style="width:100%"></el-input-number>
+                  <div class="form-tip">点页面自带刷新；0=不刷</div>
+                </el-form-item>
+              </el-col>
+            </el-row>
+
+            <el-row :gutter="12">
+              <el-col :xs="12" :md="6">
+                <el-form-item label="毛利阈值（小于此值告警）">
+                  <el-input-number v-model="profitRule.threshold" :step="0.5" controls-position="right" style="width:100%"></el-input-number>
+                  <div class="form-tip">默认 0 = 只报负毛利</div>
+                </el-form-item>
+              </el-col>
+              <el-col :xs="12" :md="6">
+                <el-form-item label="判定列名（表头文字）">
+                  <el-input v-model="profitRule.valueColumn" placeholder="线上毛利"></el-input>
+                </el-form-item>
+              </el-col>
+              <el-col :xs="12" :md="6">
+                <el-form-item label="状态列名">
+                  <el-input v-model="profitRule.statusColumn" placeholder="订单状态"></el-input>
+                </el-form-item>
+              </el-col>
+              <el-col :xs="12" :md="6">
+                <el-form-item label="订单号列名">
+                  <el-input v-model="profitRule.orderColumn" placeholder="订单号"></el-input>
+                </el-form-item>
+              </el-col>
+            </el-row>
+
+            <el-row :gutter="12">
+              <el-col :xs="24" :md="12">
+                <el-form-item label="排除状态（逗号分隔）">
+                  <el-input v-model="profitRuleText.ignoreStatus" placeholder="已取消,已退款,待支付"></el-input>
+                  <div class="form-tip">这些状态的订单不告警（取消/退款的毛利没有意义）</div>
+                </el-form-item>
+              </el-col>
+              <el-col :xs="24" :md="12">
+                <el-form-item label="关键词排除（逗号分隔）">
+                  <el-input v-model="profitRuleText.excludes" placeholder="例如：测试店铺,赠品"></el-input>
+                  <div class="form-tip">命中店铺名/商品名/备注任一即跳过</div>
+                </el-form-item>
+              </el-col>
+            </el-row>
+
+            <el-row :gutter="12">
+              <el-col :xs="24" :md="12">
+                <el-form-item label="只关注这些店铺（留空=全部）">
+                  <el-input v-model="profitRuleText.includeStores" placeholder="门店A,门店B"></el-input>
+                </el-form-item>
+              </el-col>
+              <el-col :xs="24" :md="12">
+                <el-form-item label="排除这些店铺">
+                  <el-input v-model="profitRuleText.excludeStores" placeholder=""></el-input>
+                </el-form-item>
+              </el-col>
+            </el-row>
+
+            <el-row :gutter="12">
+              <el-col :xs="12" :md="4">
+                <el-form-item label="抖动比例">
+                  <el-input-number v-model="profitRule.jitterRatio" :min="0" :max="0.5" :step="0.05" controls-position="right" style="width:100%"></el-input-number>
+                </el-form-item>
+              </el-col>
+              <el-col :xs="12" :md="4">
+                <el-form-item label="单条明细上限">
+                  <el-input-number v-model="profitRule.maxDetail" :min="1" :max="30" controls-position="right" style="width:100%"></el-input-number>
+                </el-form-item>
+              </el-col>
+              <el-col :xs="12" :md="4">
+                <el-form-item label="同笔重复提醒（小时）">
+                  <el-input-number v-model="profitRule.repeatAfterHours" :min="0" :max="720" controls-position="right" style="width:100%"></el-input-number>
+                  <div class="form-tip">0 = 只提醒一次</div>
+                </el-form-item>
+              </el-col>
+              <el-col :xs="12" :md="4">
+                <el-form-item label="免打扰时段">
+                  <el-input v-model="profitRule.quietHours" placeholder="23:00-07:00"></el-input>
+                </el-form-item>
+              </el-col>
+              <el-col :xs="12" :md="4">
+                <el-form-item label="离线告警（分钟）">
+                  <el-input-number v-model="profitRule.offlineAlertMin" :min="0" :max="1440" controls-position="right" style="width:100%"></el-input-number>
+                  <div class="form-tip">0 = 关闭</div>
+                </el-form-item>
+              </el-col>
+              <el-col :xs="12" :md="4">
+                <el-form-item label="离线告警重复（分钟）">
+                  <el-input-number v-model="profitRule.offlineAlertRepeatMin" :min="5" :max="1440" controls-position="right" style="width:100%"></el-input-number>
+                </el-form-item>
+              </el-col>
+            </el-row>
+
+            <el-row :gutter="12">
+              <el-col :xs="24" :md="8">
+                <el-form-item label="推送渠道">
+                  <el-select v-model="profitRule.pushChannel" style="width:100%">
+                    <el-option label="企业微信机器人" value="wecom"></el-option>
+                    <el-option label="只记录，不推送" value="none"></el-option>
+                  </el-select>
+                </el-form-item>
+              </el-col>
+              <el-col :xs="24" :md="8">
+                <el-form-item label="机器人">
+                  <el-radio-group v-model="profitRule.wecomKeyMode">
+                    <el-radio-button label="builtin">系统内置</el-radio-button>
+                    <el-radio-button label="custom">自定义</el-radio-button>
+                  </el-radio-group>
+                  <div class="form-tip" v-if="profitRule.wecomKeyMode === 'builtin'">
+                    {{ profitRule.hasBuiltinKey ? '已配置内置机器人（config.json / 环境变量）' : '⚠ 系统未配置内置机器人 key，请在 config.json 的 profitWatch.wecomKey 填写' }}
+                  </div>
+                </el-form-item>
+              </el-col>
+              <el-col :xs="24" :md="8">
+                <el-form-item label="自定义 key">
+                  <el-input v-model="profitRuleNewKey" :disabled="profitRule.wecomKeyMode !== 'custom'"
+                            :placeholder="profitRule.wecomKeySet ? ('已设置 ' + profitRule.wecomKeyHint + '（留空则不修改）') : '粘贴 webhook 地址或 key'"></el-input>
+                </el-form-item>
+              </el-col>
+            </el-row>
+
+            <el-form-item label="@手机号（可选，逗号分隔）">
+              <el-input v-model="profitRule.wecomMention" placeholder="13800000000" style="max-width:320px"></el-input>
+            </el-form-item>
+
+            <div style="margin-top:4px">
+              <el-button type="primary" size="small" :loading="profitSaving" :disabled="readonly" @click="saveProfitRule">保存规则</el-button>
+              <el-button size="small" :disabled="readonly" @click="testProfitPush" :loading="profitTesting">发送测试消息</el-button>
+              <el-button size="small" @click="loadProfit">重新读取</el-button>
+              <span class="form-tip" style="display:inline;margin-left:8px">企业微信机器人限 20 条/分钟，多条负毛利会合并成一条推送。</span>
+            </div>
+          </el-form>
+        </el-card>
+
+        <!-- 告警记录 -->
+        <el-card shadow="never" class="section-card" :body-style="{ padding: '10px 14px' }">
+          <div slot="header" style="display:flex;align-items:center;gap:8px">
+            <b>告警记录</b>
+            <el-radio-group v-model="profitEventKind" size="mini" @change="loadProfitEvents">
+              <el-radio-button label="">全部</el-radio-button>
+              <el-radio-button label="neg">负毛利</el-radio-button>
+              <el-radio-button label="recovered">已恢复</el-radio-button>
+              <el-radio-button label="offline">采集端离线</el-radio-button>
+            </el-radio-group>
+            <span class="spacer" style="flex:1"></span>
+            <span class="loginid">共 {{ profitEvents.total }} 条</span>
+          </div>
+          <el-table :data="profitEvents.rows" size="small" border empty-text="暂无告警记录">
+            <el-table-column label="时间" width="140"><template slot-scope="p">{{ fmtMinute(p.row.alertedAt) }}</template></el-table-column>
+            <el-table-column label="类型" width="90">
+              <template slot-scope="p">
+                <el-tag size="mini" :type="p.row.kind === 'neg' ? 'danger' : (p.row.kind === 'recovered' ? 'success' : 'warning')">
+                  {{ p.row.kind === 'neg' ? '负毛利' : (p.row.kind === 'recovered' ? '已恢复' : '离线') }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="线上毛利" width="110" align="right">
+              <template slot-scope="p"><b :style="{color: Number(p.row.gross) < 0 ? '#c62828' : '#2e7d32'}">{{ p.row.gross == null ? '—' : yuan(p.row.gross) }}</b></template>
+            </el-table-column>
+            <el-table-column label="订单号" width="180" prop="orderNo"></el-table-column>
+            <el-table-column label="店铺" prop="store" min-width="130"></el-table-column>
+            <el-table-column label="商品" prop="title" min-width="180" show-overflow-tooltip></el-table-column>
+            <el-table-column label="推送" width="90">
+              <template slot-scope="p">
+                <el-tag size="mini" :type="p.row.pushStatus === 'sent' ? 'success' : (p.row.pushStatus === 'failed' ? 'danger' : 'info')">
+                  {{ p.row.pushStatus === 'sent' ? '已推送' : (p.row.pushStatus === 'failed' ? '失败' : '未推送') }}
+                </el-tag>
+              </template>
+            </el-table-column>
+          </el-table>
+          <div style="margin-top:10px;text-align:right">
+            <el-pagination small background layout="prev, pager, next" :total="profitEvents.total"
+                           :page-size="profitEvents.size" :current-page.sync="profitEvents.page"
+                           @current-change="loadProfitEvents"></el-pagination>
+          </div>
+        </el-card>
+
+        <!-- 最新毛利明细 -->
+        <el-card shadow="never" class="section-card" :body-style="{ padding: '10px 14px' }">
+          <div slot="header" style="display:flex;align-items:center;gap:8px">
+            <b>最新毛利明细</b>
+            <span class="loginid">（助手每轮上报的快照，按毛利升序）</span>
+            <span class="spacer" style="flex:1"></span>
+            <el-checkbox v-model="profitOnlyNeg" @change="loadProfitSnapshots">只看负毛利</el-checkbox>
+          </div>
+          <el-table :data="profitSnapshots" size="small" border empty-text="暂无数据（助手还没采到订单）">
+            <el-table-column label="线上毛利" width="110" align="right">
+              <template slot-scope="p"><b :style="{color: Number(p.row.gross) < 0 ? '#c62828' : '#2e7d32'}">{{ p.row.gross == null ? '—' : yuan(p.row.gross) }}</b></template>
+            </el-table-column>
+            <el-table-column label="订单号" width="180" prop="orderNo"></el-table-column>
+            <el-table-column label="店铺" prop="store" min-width="130"></el-table-column>
+            <el-table-column label="商品" prop="title" min-width="180" show-overflow-tooltip></el-table-column>
+            <el-table-column label="状态" prop="status" width="110"></el-table-column>
+            <el-table-column label="实付" width="100" align="right"><template slot-scope="p">{{ p.row.amount == null ? '—' : yuan(p.row.amount) }}</template></el-table-column>
+            <el-table-column label="采集时间" width="140"><template slot-scope="p">{{ fmtMinute(p.row.seenAt) }}</template></el-table-column>
+          </el-table>
+        </el-card>
       </div>
 
       <!-- ══════════ 名称映射 ══════════ -->
@@ -870,6 +1133,20 @@ const vm = new Vue({
       users: [], newUser: { company: '', password: '', role: 'user', taxNo: '', email: '', note: '' },
       creatingUser: false, createOk: false,
       userEdit: { visible: false, id: null, title: '', company: '', taxNo: '', email: '', note: '', hint: '', lockCompany: false, saving: false },
+      // 毛利告警
+      profitRule: { enabled: true, watchUrl: '', pollIntervalSec: 60, refreshEverySec: 300, jitterRatio: 0.2, threshold: 0,
+                    valueColumn: '线上毛利', statusColumn: '订单状态', orderColumn: '订单号', amountColumn: '',
+                    ignoreStatus: [], includeStores: [], excludeStores: [], excludes: [], firstPageOnly: true,
+                    pushChannel: 'wecom', wecomKeyMode: 'builtin', wecomKeySet: false, wecomKeyHint: '', hasBuiltinKey: false,
+                    wecomMention: '', maxDetail: 10, repeatAfterHours: 0, quietHours: '', offlineAlertMin: 20, offlineAlertRepeatMin: 120 },
+      profitRuleText: { ignoreStatus: '', excludes: '', includeStores: '', excludeStores: '' },
+      profitRuleNewKey: '', profitSaving: false, profitTesting: false, profitRunning: false,
+      profitState: { exists: false, ok: false, online: false, rows: 0, parsed: 0, pageTitle: '', error: '' },
+      profitSummary: { orders: 0, negative: 0, negativeSum: 0, alertedToday: 0 },
+      profitAgentOnline: false,
+      profitEvents: { rows: [], total: 0, page: 1, size: 20 },
+      profitEventKind: '',
+      profitSnapshots: [], profitOnlyNeg: true,
       // 上传
       up: { visible: false, kind: 'orders', title: '', guide: '', accept: '.xlsx,.xls', file: null, busy: false, percent: 0, msg: '', result: null },
       // 指引 / 改密
@@ -884,6 +1161,27 @@ const vm = new Vue({
       return Number(this.viewTenant) !== Number(this.me.id);
     },
     mustChangePassword() { return !!(this.me && this.me.mustChangePassword); },
+    // 把助手回的英文错误码翻成能照着做的中文（与助手面板同一套说法）
+    profitErrorText() {
+      const r = String(this.profitState.error || '');
+      if (!r) return '';
+      if (/login-required/i.test(r)) return '助手认为美团页面还没登录 —— 注意助手用的是独立登录会话（平时浏览器里登录的不算数），请在那台电脑的「1688催收助手」点「打开美团报表窗口」，在弹出的窗口里登录美团，停在毛利明细表格后再点「立即采集」';
+      if (/exec-error/i.test(r)) return '读取页面出错（多为页面正在加载或刚刷新过），稍等几秒再试；持续失败请检查美团页面能否正常显示表格';
+      if (/bad-result/i.test(r)) return '页面没返回可识别数据 —— 请确认停在「毛利明细」的订单明细列表，而不是概览/图表页';
+      if (/no-table|no-rows|页面结构/i.test(r)) return '没读到订单数据（' + r + '）—— 可能是页面未加载完、不在毛利明细页，或美团改了页面结构';
+      return r;
+    },
+    profitStatus() {
+      const st = this.profitState || {};
+      if (!this.profitRule.enabled) return { text: '已暂停', color: '#9ca3af' };
+      if (!st.exists) return { text: '等待首次上报', color: '#d97706' };
+      const at = st.lastOkAt ? new Date(String(st.lastOkAt).replace(' ', 'T')).getTime() : 0;
+      const ageMin = at ? (Date.now() - at) / 60000 : Infinity;
+      if (st.error && ageMin > 5) return { text: '采集中（有错误）', color: '#dc2626' };
+      if (ageMin > 15) return { text: '可能离线（' + Math.round(ageMin) + ' 分钟无成功上报）', color: '#dc2626' };
+      if (st.error) return { text: '采集中（最近一轮有错）', color: '#d97706' };
+      return { text: '在线', color: '#16a34a' };
+    },
     avatarText() { return (this.me && (this.me.username || '?')) ? String(this.me.username).slice(0, 1).toUpperCase() : '-'; },
     userName() { return (this.me && (this.me.displayName || this.me.username)) || '—'; },
     userRoleText() {
@@ -1057,6 +1355,7 @@ const vm = new Vue({
       this.page = p;
       if (p === 'admin') { this.loadConfigUI(); this.loadUsers(); }
       if (p === 'mapping') this.loadMapping();
+      if (p === 'profit') this.loadProfit();
     },
     // ── 看板数据 ──
     async loadData() {
@@ -1087,6 +1386,137 @@ const vm = new Vue({
       this.collectState = this.draftCollect;
       this.invoiceState = this.draftInvoice;
       this.dashPage = 1;
+    },
+    // ══════ 毛利告警 ══════
+    async loadProfit() {
+      try {
+        const d = await this.api('/api/profit/overview');
+        if (d.error) { this.$message.error('加载毛利告警失败: ' + d.error); return; }
+        const r = d.rule || {};
+        this.profitRule = Object.assign({}, this.profitRule, r);
+        this.profitRuleText = {
+          ignoreStatus: (r.ignoreStatus || []).join(','),
+          excludes: (r.excludes || []).join(','),
+          includeStores: (r.includeStores || []).join(','),
+          excludeStores: (r.excludeStores || []).join(','),
+        };
+        this.profitRuleNewKey = '';
+        this.profitState = d.state || this.profitState;
+        this.profitSummary = d.summary || this.profitSummary;
+        this.profitAgentOnline = !!d.agentOnline;
+        await this.loadProfitEvents();
+        await this.loadProfitSnapshots();
+      } catch (e) { this.$message.error('加载毛利告警失败: ' + e.message); }
+    },
+    async loadProfitEvents() {
+      try {
+        const q = '?limit=' + this.profitEvents.size + '&offset=' + ((this.profitEvents.page - 1) * this.profitEvents.size)
+          + (this.profitEventKind ? '&kind=' + encodeURIComponent(this.profitEventKind) : '');
+        const d = await this.api('/api/profit/events' + q);
+        if (d.error) return;
+        this.profitEvents = { rows: d.events || [], total: d.total || 0, page: this.profitEvents.page, size: this.profitEvents.size };
+      } catch (e) { /* 静默：记录不影响主流程 */ }
+    },
+    async loadProfitSnapshots() {
+      try {
+        const q = '?limit=200' + (this.profitOnlyNeg ? '&negative=1' : '');
+        const d = await this.api('/api/profit/snapshots' + q);
+        if (d.error) return;
+        this.profitSnapshots = d.rows || [];
+      } catch (e) { /* 同上 */ }
+    },
+    profitPayload() {
+      const t = this.profitRuleText;
+      const split = (s) => String(s || '').split(/[,，\n]/).map(x => x.trim()).filter(Boolean);
+      const p = Object.assign({}, this.profitRule, {
+        ignoreStatus: split(t.ignoreStatus),
+        excludes: split(t.excludes),
+        includeStores: split(t.includeStores),
+        excludeStores: split(t.excludeStores),
+      });
+      delete p.hasBuiltinKey; delete p.wecomKeySet; delete p.wecomKeyHint; delete p.wecomKey;
+      if (this.profitRuleNewKey.trim()) p.wecomKey = this.profitRuleNewKey.trim();
+      return p;
+    },
+    async saveProfitRule() {
+      this.profitSaving = true;
+      try {
+        const d = await this.api('/api/profit/rule', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ rule: this.profitPayload() }),
+        });
+        if (d.error) { this.$message.error('保存失败: ' + d.error); return; }
+        this.$message.success('已保存，已下发给在线助手（改间隔/阈值会立刻生效）');
+        await this.loadProfit();
+      } catch (e) { this.$message.error('保存失败: ' + e.message); }
+      finally { this.profitSaving = false; }
+    },
+    async toggleProfitEnabled() {
+      const next = !this.profitRule.enabled;
+      this.profitSaving = true;
+      try {
+        const d = await this.api('/api/profit/rule', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ rule: Object.assign(this.profitPayload(), { enabled: next }) }),
+        });
+        if (d.error) { this.$message.error(d.error); return; }
+        this.$message.success(next ? '已启用采集' : '已暂停采集');
+        await this.loadProfit();
+      } catch (e) { this.$message.error(e.message); }
+      finally { this.profitSaving = false; }
+    },
+    // 立即采集：让在线助手马上跑一轮，然后短轮询等服务端心跳更新
+    //   ① 记录点击前的 lastReportAt，② 轮询 overview 直到 lastReportAt 变新（最多 ~25 秒）
+    async runProfitNow() {
+      if (this.profitRunning) return;
+      const before = this.profitState.lastReportAt ? new Date(this.profitState.lastReportAt).getTime() : 0;
+      this.profitRunning = true;
+      try {
+        const d = await this.api('/api/profit/run-now', { method: 'POST' });
+        if (d.error) { this.$message.error(d.error); return; }
+        const t0 = Date.now();
+        let done = null;
+        while (Date.now() - t0 < 25000) {
+          await new Promise((r) => setTimeout(r, 1500));
+          let o = null;
+          try { o = await this.api('/api/profit/overview'); } catch (e) { continue; }
+          if (!o || o.error) continue;
+          const st = o.state || {};
+          this.profitAgentOnline = !!o.agentOnline;
+          const at = st.lastReportAt ? new Date(st.lastReportAt).getTime() : 0;
+          if (at > before) { done = o; break; }
+          // 助手回了但没采成（比如掉登录）——lastReportAt 也会更新，同样算「完成」
+        }
+        if (!done) {
+          this.$message.warning('已下发指令，但 25 秒内没收到助手回传。请到那台电脑上看看助手窗口是否卡住或美团掉登录了。');
+          return;
+        }
+        this.profitState = done.state || this.profitState;
+        this.profitSummary = done.summary || this.profitSummary;
+        await this.loadProfitEvents();
+        await this.loadProfitSnapshots();
+        if (this.profitState.ok) {
+          this.$message.success(`采集完成：读到 ${this.profitState.rows || 0} 行，解析 ${this.profitState.parsed || 0} 单`);
+        } else {
+          this.$message.error('采集失败：' + this.profitErrorText);
+        }
+      } catch (e) {
+        this.$message.error('立即采集失败: ' + e.message);
+      } finally {
+        this.profitRunning = false;
+      }
+    },
+    async testProfitPush() {
+      this.profitTesting = true;
+      try {
+        // 先保存（让测试用的是当前界面上的配置），再发测试
+        await this.saveProfitRule();
+        const d = await this.api('/api/profit/test-push', { method: 'POST' });
+        if (d.error) { this.$message.error('推送失败: ' + d.error); return; }
+        if (d.ok) this.$message.success('测试消息已发送，请到企业微信群查看');
+        else this.$message.error('推送失败: ' + (d.error || '未知原因'));
+      } catch (e) { this.$message.error('推送失败: ' + e.message); }
+      finally { this.profitTesting = false; }
     },
     onDashPage(p) { this.dashPage = p; },
     onDashSize(s) { this.dashSize = s; this.dashPage = 1; },
