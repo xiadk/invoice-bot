@@ -7,6 +7,13 @@
 -- 全部表名、字段均带中文注释，便于直接在看板/客户端中理解含义。
 -- 本文件使用 CREATE TABLE IF NOT EXISTS，重复执行不会删除已有数据。
 --
+-- ── 本文件只放「建表 / 建视图」语句 ──────────────────────────────────────
+--   老库增量升级（补 user_id 列、调整唯一键与索引等）已统一收敛到 db.js 的
+--   migrate()，那里用 information_schema 做守卫判断，MySQL 与 MariaDB 都能跑。
+--   原因：ADD COLUMN/ADD KEY/DROP INDEX 的 IF NOT EXISTS 是 MariaDB 专有语法，
+--   放在本文件里会让整份 schema.sql 在 MySQL 上执行失败（多语句一起中断）。
+--   本文件被手工执行或由 ensureSchema() 执行一次即可，幂等性由上句保证。
+--
 -- ── 多租户（多用户）说明 ────────────────────────────────────────────────
 --   本库采用「共享库 + user_id 列」的多租户方案：所有业务表都带 `user_id`，
 --   看板/接口一律按当前登录用户过滤，实现用户之间的数据隔离。
@@ -97,12 +104,7 @@ CREATE TABLE IF NOT EXISTS `invoice_order` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   COMMENT='1688完成订单表（源：data/users/<id>/完成订单/*.xlsx）';
 
--- 老库增量补列（新装库上面的 CREATE TABLE 已含该列）
-ALTER TABLE `invoice_order`
-  ADD COLUMN IF NOT EXISTS `user_id` INT NOT NULL DEFAULT 1
-  COMMENT '数据归属用户ID（多租户隔离键，见 app_user.id）' AFTER `order_no`;
-ALTER TABLE `invoice_order` ADD KEY IF NOT EXISTS `idx_user_id` (`user_id`);
-ALTER TABLE `invoice_order` ADD KEY IF NOT EXISTS `idx_user_seller_login` (`user_id`, `seller_login`);
+-- 老库增量升级（补 user_id / 补索引）：见文件头说明，已交给 db.js migrate()
 
 -- ----------------------------------------------------------------------------
 -- 表 2: issued_invoice —— 历史已开票数据表（税务局全量发票导出）
@@ -153,13 +155,7 @@ CREATE TABLE IF NOT EXISTS `issued_invoice` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   COMMENT='历史已开票数据表（源：data/users/<id>/已开票订单/*.xlsx）';
 
--- 老库增量升级：补 user_id 列；唯一键由「全局 row_hash」改为「(user_id,row_hash)」
-ALTER TABLE `issued_invoice`
-  ADD COLUMN IF NOT EXISTS `user_id` INT NOT NULL DEFAULT 1
-  COMMENT '数据归属用户ID（多租户隔离键，见 app_user.id）' AFTER `id`;
-ALTER TABLE `issued_invoice` DROP INDEX IF EXISTS `uk_row_hash`;
-ALTER TABLE `issued_invoice` ADD UNIQUE KEY IF NOT EXISTS `uk_user_row_hash` (`user_id`, `row_hash`);
-ALTER TABLE `issued_invoice` ADD KEY IF NOT EXISTS `idx_user_id` (`user_id`);
+-- 老库增量升级（补 user_id / uk_row_hash → uk_user_row_hash）：交给 db.js migrate()
 
 -- ----------------------------------------------------------------------------
 -- 表 3: seller_name_mapping —— 销方名称 ↔ 1688 商家名称 映射表（按用户隔离）
@@ -186,17 +182,7 @@ CREATE TABLE IF NOT EXISTS `seller_name_mapping` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   COMMENT='税务局销方名称与1688商家名称的映射表（按用户隔离；is_ignored=1 表示确认无对应商家）';
 
--- 老库增量升级
-ALTER TABLE `seller_name_mapping`
-  ADD COLUMN IF NOT EXISTS `user_id` INT NOT NULL DEFAULT 1
-  COMMENT '数据归属用户ID（多租户隔离键，见 app_user.id）' AFTER `id`;
-ALTER TABLE `seller_name_mapping`
-  ADD COLUMN IF NOT EXISTS `is_ignored` TINYINT(1) NOT NULL DEFAULT 0
-  COMMENT '是否忽略：1=该销方名称确认无对应1688商家，从待比对列表与统计中剔除（可恢复）' AFTER `is_confirmed`;
-ALTER TABLE `seller_name_mapping` DROP INDEX IF EXISTS `uk_tax_seller_name`;
-ALTER TABLE `seller_name_mapping` ADD UNIQUE KEY IF NOT EXISTS `uk_user_tax_name` (`user_id`, `tax_seller_name`);
-ALTER TABLE `seller_name_mapping` ADD KEY IF NOT EXISTS `idx_user_id` (`user_id`);
-ALTER TABLE `seller_name_mapping` ADD KEY IF NOT EXISTS `idx_is_ignored` (`is_ignored`);
+-- 老库增量升级（补 user_id / is_ignored / 唯一键与索引）：交给 db.js migrate()
 
 -- ----------------------------------------------------------------------------
 -- 表 4: send_log —— 催收消息发送记录（一行 = 一次发送尝试）
@@ -223,21 +209,7 @@ CREATE TABLE IF NOT EXISTS `send_log` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   COMMENT='催收消息发送记录（一行=一次发送，看板统计催收次数与最近催收时间）';
 
--- 老库增量补列
-ALTER TABLE `send_log`
-  ADD COLUMN IF NOT EXISTS `user_id` INT NOT NULL DEFAULT 1
-  COMMENT '数据归属用户ID（多租户隔离键，见 app_user.id）' AFTER `id`;
-ALTER TABLE `send_log`
-  ADD COLUMN IF NOT EXISTS `amount` DECIMAL(14,2) DEFAULT NULL
-  COMMENT '本次催收的待开票总金额（发送当时的快照；老记录可能为空）' AFTER `channel`;
-ALTER TABLE `send_log`
-  ADD COLUMN IF NOT EXISTS `order_nos` TEXT DEFAULT NULL
-  COMMENT '本次催收包含的订单号（多个用「；」分隔，发送当时快照）' AFTER `amount`;
-ALTER TABLE `send_log`
-  ADD COLUMN IF NOT EXISTS `error` VARCHAR(255) DEFAULT NULL
-  COMMENT '失败原因摘要（result=fail 时记录，便于排查）' AFTER `order_nos`;
-ALTER TABLE `send_log` ADD KEY IF NOT EXISTS `idx_user_id` (`user_id`);
-ALTER TABLE `send_log` ADD KEY IF NOT EXISTS `idx_user_login` (`user_id`, `seller_login`);
+-- 老库增量升级（补 user_id / amount / order_nos / error 及索引）：交给 db.js migrate()
 
 -- ----------------------------------------------------------------------------
 -- 表 5: import_log —— 数据导入日志
@@ -262,10 +234,7 @@ CREATE TABLE IF NOT EXISTS `import_log` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   COMMENT='数据导入日志';
 
-ALTER TABLE `import_log`
-  ADD COLUMN IF NOT EXISTS `user_id` INT NOT NULL DEFAULT 1
-  COMMENT '数据归属用户ID（多租户隔离键，见 app_user.id）' AFTER `id`;
-ALTER TABLE `import_log` ADD KEY IF NOT EXISTS `idx_user_id` (`user_id`);
+-- 老库增量升级（补 user_id 及索引）：交给 db.js migrate()
 
 -- ----------------------------------------------------------------------------
 -- 视图: v_unmatched_seller_name —— 待人工比对的销方名称清单（按用户分组）
@@ -345,3 +314,4 @@ CREATE TABLE IF NOT EXISTS `agent_device` (
   KEY `idx_agent_device_user` (`user_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   COMMENT='本机助手/书签的设备令牌（替代「税号当配对码」）';
+
