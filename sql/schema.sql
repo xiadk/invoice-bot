@@ -315,3 +315,27 @@ CREATE TABLE IF NOT EXISTS `agent_device` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   COMMENT='本机助手/书签的设备令牌（替代「税号当配对码」）';
 
+-- ----------------------------------------------------------------------------
+-- operation_log —— 操作日志（记录所有用户在页面上的关键操作）
+--   ⚠ 可见范围：仅超级管理员可在「操作日志」页查看，接口挂在 /api/admin/ 前缀下做 403 拦截。
+--   隐私：content 为服务端渲染的中文一句话；detail 存结构化 JSON；不记录聊天正文等敏感内容。
+--   ⚠ 注意：本表是**全局表**（不做 user_id 租户隔离），管理员需能跨用户查看，
+--      因此不要把它加进 db.js 的 tenantTables 列表，也不要在查询里带 tenant 条件。
+--   写入方式：logOp() 为旁路操作，写入失败只打日志、绝不抛错影响主流程。
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `operation_log` (
+  `id`         BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `user_id`    INT UNSIGNED NOT NULL DEFAULT 0   COMMENT '操作人（app_user.id；0=匿名，如未登录访问下载页）',
+  `username`   VARCHAR(64)  NOT NULL DEFAULT ''  COMMENT '操作人登录账号（冗余存储，列表免联表）',
+  `action`     VARCHAR(32)  NOT NULL             COMMENT '操作类型（见服务端 OP_ACTIONS 白名单）',
+  `content`    VARCHAR(512) NOT NULL DEFAULT ''  COMMENT '操作内容（面向人阅读的一句话）',
+  `detail`     VARCHAR(2048) DEFAULT NULL        COMMENT '结构化明细（JSON），供排查用',
+  `ip`         VARCHAR(64)  NOT NULL DEFAULT ''  COMMENT '来源 IP',
+  `created_at` DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '操作时间',
+  PRIMARY KEY (`id`),
+  KEY `idx_op_log_user`    (`user_id`),
+  KEY `idx_op_log_username` (`username`),
+  KEY `idx_op_log_action`  (`action`),
+  KEY `idx_op_log_created` (`created_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  COMMENT='操作日志（仅超级管理员可查看）';

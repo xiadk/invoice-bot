@@ -568,6 +568,79 @@ function serverUrlOf(req) {
   return `${proto}://${host}`;
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// 操作日志（旁路设施：任何写入失败都只打印日志，绝不影响主流程）
+//   分两种来源：
+//     · 服务端埋点：发送催收 / 导入税务发票 / 导入1688订单 / 绑定本机助手 —— 直接调 logOp
+//     · 前端埋点：  按钮点击 / 条件查询 / 点某天金额 / 下载本机助手 —— 走 POST /api/op-log
+//   安全：action 走白名单，文案一律由服务端渲染，**不接受客户端自定义的 content**，
+//         避免伪造日志内容；列表与查询接口挂在 /api/admin/ 前缀下，天然是 403 守卫。
+// ─────────────────────────────────────────────────────────────────────────
+const OP_ACTIONS = {
+  'btn.click': (d) => `点击了「${d.btn}」`,
+  'collect.send': (d) => `对 ${d.count} 家公司发送催收消息：${d.companies}`,
+  'import.invoice': (d) => `导入了税务发票数据（文件：${d.file}；新增 ${d.inserted} 行，更新 ${d.updated} 行）`,
+  'import.order': (d) => `导入了1688订单数据（文件：${d.file}；新增 ${d.inserted} 单，更新 ${d.updated} 单）`,
+  'query.filter': (d) => `根据催收状态为「${d.collect}」、开票状态为「${d.invoice}」、搜索内容为「${d.keyword}」查询`,
+  'view.day.orders': (d) => `点击了 ${d.date} 的支付订单总金额进行查看`,
+  'view.day.invoices': (d) => `点击了 ${d.date} 的每日已开票金额进行查看`,
+  'agent.download': () => '下载了本机助手',
+  'agent.bind': (d) => `绑定了本机助手${d.deviceName ? '（' + d.deviceName + '）' : ''}`,
+};
+
+// 前端下拉是「值」，日志里要显示人能看懂的「文案」，在服务端做映射，避免客户端乱传
+const OP_COLLECT_LABELS = { '': '不限', collected: '已催收', '7': '最近一周未催收', '15': '最近半个月未催收', '30': '最近一个月未催收', '90': '最近三个月未催收' };
+const OP_INVOICE_LABELS = { '': '全部', invoiced: '已开票', pending: '未开票' };
+
+/** 收口成单行、去掉换行与首尾空白、超长截断。保留中文引号（下方格式化要用） */
+function opText(v, max) {
+  return String(v == null ? '' : v).replace(/[\r\n\t]+/g, ' ').trim().slice(0, max || 30);
+}
+/**
+ * 清洗「外部传入的片段」（按钮名 / 关键词 / 日期）。
+ * 注意：只在这里剥引号，绝不能剥格式化结果里的引号 —— 否则文案会变成
+ * 「点击了发送催收消息」这种没有边界的样子，且不便于按内容检索。
+ */
+function opSafe(v, max) {
+  return opText(v, max).replace(/[「」『』<>"'`]+/g, '');
+}
+
+/**
+ * 写一条操作日志。
+ * @param {object|number} user 用户对象（含 id/username）或用户 ID（会回查账号名）
+ * @param {string} action 操作类型，必须在 OP_ACTIONS 白名单内
+ * @param {object} detail 结构化明细，用于渲染文案
+ */
+async function logOp(user, action, detail) {
+  try {
+    const fmt = OP_ACTIONS[action];
+    if (!fmt) return;                       // 不在白名单内的 action 直接丢弃
+    const d = Object.assign({}, detail || {});
+    const content = opText(fmt(d), 500);
+    if (!content) return;
+
+    let uid = 0;
+    let uname = '';
+    if (typeof user === 'number' || typeof user === 'string') {
+      uid = Number(user) || 0;
+      if (uid) {
+        const rows = await db.query('SELECT username FROM app_user WHERE id = ?', [uid]);
+        uname = (rows[0] && rows[0].username) || '';
+      }
+    } else if (user) {
+      uid = Number(user.id) || 0;
+      uname = user.username || '';
+    }
+
+    await db.exec(
+      `INSERT INTO operation_log (user_id, username, action, content, detail, ip) VALUES (?, ?, ?, ?, ?, ?)`,
+      [uid, uname.slice(0, 64), action, content, JSON.stringify(d).slice(0, 2000), opText(d.ip, 64)]
+    );
+  } catch (e) {
+    console.error('[操作日志] 写入失败（不影响主流程）:', e.message);
+  }
+}
+
 /** 签发一次性绑定令牌（看板调用；助手用它换长期设备令牌） */
 function issueBindToken(userId) {
   const now = Date.now();
@@ -977,6 +1050,14 @@ async function doClientSend(userId, loginIds, opts = {}) {
     }))), resumeOf]
   );
   const taskId = created.insertId;
+
+  // 操作日志：记录「对哪些公司发送了催收消息」（旁路，写入失败不影响发送）
+  logOp(Number(userId), 'collect.send', {
+    count: sellers.length,
+    companies: sellers.map((s) => s.company || s.sellerLogin).slice(0, 20).join('、')
+      + (sellers.length > 20 ? ` 等 ${sellers.length} 家` : ''),
+    resumeOf: resumeOf || null,
+  });
 
   Object.assign(taskState, {
     running: true, channel: 'client', type: 'send', total: sellers.length, done: 0, ok: 0, fail: 0,
@@ -1491,6 +1572,10 @@ const server = http.createServer(async (req, res) => {
         deviceName: body.deviceName, os: body.os, agentVer: body.agentVer,
         kind, ip: clientIp(req),
       });
+      // 操作日志：记录「绑定了本机助手」（书签令牌是另一种通道，不记入本机助手）
+      if (kind === 'agent') {
+        logOp(Number(uid), 'agent.bind', { deviceName: body.deviceName || '', os: body.os || '', ip: clientIp(req) });
+      }
       return sendJson(res, 200, {
         ok: true, deviceId: id, deviceToken: token,
         serverUrl: serverUrlOf(req), userId: Number(uid), kind,
@@ -1592,6 +1677,24 @@ const server = http.createServer(async (req, res) => {
     const tenantId = tenantOf(req, url, user);
     const isAdmin = user.role === 'admin';
     const writeGuard = () => assertWritable(user, tenantId);
+
+    // 操作日志上报（前端埋点）：action 必须命中白名单，文案一律由服务端渲染
+    if (method === 'POST' && p === '/api/op-log') {
+      const ob = await readBody(req);
+      const action = String(ob.action || '').trim();
+      if (!OP_ACTIONS[action]) return sendJson(res, 400, { error: '未知操作类型' });
+      const d = {};
+      if (action === 'btn.click') d.btn = opSafe(ob.btn, 40) || '按钮';
+      if (action === 'query.filter') {
+        d.collect = OP_COLLECT_LABELS[String(ob.collect || '')] || '不限';
+        d.invoice = OP_INVOICE_LABELS[String(ob.invoice || '')] || '全部';
+        d.keyword = opSafe(ob.keyword, 40) || '空';
+      }
+      if (action === 'view.day.orders' || action === 'view.day.invoices') d.date = opSafe(ob.date, 10) || '未知日期';
+      d.ip = clientIp(req);
+      await logOp(user, action, d);
+      return sendJson(res, 200, { ok: true });
+    }
 
     // ── 已废弃（2026-10-14）：浏览器扩展通道下线，统一迁移到「1688 催收助手」桌面程序 ──
     if (method === 'GET' && p === '/api/agent/my-extension-download') {
@@ -1824,6 +1927,10 @@ const server = http.createServer(async (req, res) => {
       } else {
         taskLog(t, `✓ 订单导入完成：新增 ${r.inserted} 单 · 更新 ${r.updated} 单`);
       }
+      // 操作日志：记录导入（旁路）
+      logOp(user, kind === 'invoices' ? 'import.invoice' : 'import.order', {
+        file: safeName, inserted: r.inserted || 0, updated: r.updated || 0, ip: clientIp(req),
+      });
       return sendJson(res, 200, { ok: true, kind, ...r });
     }
 
@@ -2040,6 +2147,30 @@ const server = http.createServer(async (req, res) => {
           users: rows.map((u) => ({
             id: u.id, username: u.username, role: u.role, status: u.status,
             companyName: u.company_name || '', taxNo: u.tax_no || '', email: u.email || '',
+          })),
+        });
+      }
+      // 操作日志：可按用户名筛选，固定按操作时间倒序
+      if (method === 'GET' && p === '/api/admin/op-log') {
+        const kw = (url.searchParams.get('username') || '').trim().slice(0, 64);
+        const page = Math.max(1, Number(url.searchParams.get('page')) || 1);
+        const size = Math.min(200, Math.max(1, Number(url.searchParams.get('size')) || 20));
+        const where = [];
+        const args = [];
+        if (kw) { where.push('username LIKE ?'); args.push(`%${kw}%`); }
+        const wsql = where.length ? ' WHERE ' + where.join(' AND ') : '';
+        const total = (await db.query(`SELECT COUNT(*) AS n FROM operation_log${wsql}`, args))[0].n;
+        const rows = await db.query(
+          `SELECT id, user_id, username, action, content, ip, created_at FROM operation_log${wsql}
+           ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`,
+          [...args, size, (page - 1) * size]
+        );
+        return sendJson(res, 200, {
+          total, page, size,
+          logs: rows.map((r) => ({
+            id: r.id, userId: r.user_id, username: r.username || '—',
+            action: r.action, content: r.content, ip: r.ip || '',
+            createdAt: r.created_at ? new Date(r.created_at).toLocaleString('zh-CN', { hour12: false }) : '',
           })),
         });
       }

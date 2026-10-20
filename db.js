@@ -150,6 +150,29 @@ async function migrate(conn, dbName) {
     );
   }
 
+  // ── 操作日志（全局表，不做租户隔离：管理员需跨用户查看）──
+  //    老库升级同样会走到这里，无需手工建表。
+  if (!(await tableExists('operation_log'))) {
+    await q(
+      'CREATE TABLE `operation_log` (' +
+      '  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,' +
+      '  `user_id` INT UNSIGNED NOT NULL DEFAULT 0 COMMENT \'操作人（app_user.id；0=匿名）\',' +
+      '  `username` VARCHAR(64) NOT NULL DEFAULT \'\' COMMENT \'操作人登录账号\',' +
+      '  `action` VARCHAR(32) NOT NULL COMMENT \'操作类型\',' +
+      '  `content` VARCHAR(512) NOT NULL DEFAULT \'\' COMMENT \'操作内容\',' +
+      '  `detail` VARCHAR(2048) DEFAULT NULL COMMENT \'结构化明细（JSON）\',' +
+      '  `ip` VARCHAR(64) NOT NULL DEFAULT \'\' COMMENT \'来源 IP\',' +
+      '  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT \'操作时间\',' +
+      '  PRIMARY KEY (`id`),' +
+      '  KEY `idx_op_log_user` (`user_id`),' +
+      '  KEY `idx_op_log_username` (`username`),' +
+      '  KEY `idx_op_log_action` (`action`),' +
+      '  KEY `idx_op_log_created` (`created_at`)' +
+      ') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci' +
+      '  COMMENT=\'操作日志（仅超级管理员可查看）\''
+    );
+  }
+
   // ── 各业务表补 user_id（多租户隔离键） ──
   const tenantTables = ['invoice_order', 'issued_invoice', 'seller_name_mapping', 'send_log', 'import_log'];
   for (const t of tenantTables) {

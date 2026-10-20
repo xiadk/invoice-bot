@@ -120,6 +120,7 @@
           <el-menu-item index="board">看板</el-menu-item>
           <el-menu-item index="mapping">名称映射</el-menu-item>
           <el-menu-item index="admin" v-if="isAdmin">系统管理</el-menu-item>
+          <el-menu-item index="audit" v-if="isAdmin">操作日志</el-menu-item>
         </el-menu>
         <div class="nav-right">
           <el-button size="small" plain @click="openGuideModal" title="发送只在你本机执行：装一次「1688催收助手」→ 绑定 → 在本机登录 1688">本机助手</el-button>
@@ -656,6 +657,48 @@
           <div class="form-tip" style="margin-top:8px">账号 = 公司全称（业务账号才需要抬头）。若「角色」选<b>超级管理员</b>，只需填「公司全称」与初始密码，税号 / 邮箱会被忽略。</div>
         </el-card>
       </div>
+
+      <!-- ══════════ 操作日志（仅超级管理员可见） ══════════ -->
+      <div v-show="page === 'audit'" id="page-audit">
+        <div class="page-head">
+          <h2>操作日志</h2>
+          <div class="meta-line">
+            记录全体用户在页面上的操作：按钮点击、发送催收、导入税务发票 / 1688订单、条件查询、按天查看金额、下载与绑定本机助手。
+            <b>按操作时间倒序</b>排列，可用用户名筛选。
+          </div>
+        </div>
+
+        <el-card class="section-card" shadow="never" :body-style="{ padding: '12px 14px' }">
+          <div class="toolbar">
+            <span style="font-size:12px;color:var(--sub)">用户名</span>
+            <el-input v-model="opLog.draftUsername" size="small" style="width:230px" placeholder="按用户名筛选（留空 = 全部）"
+                      clearable @keyup.enter.native="applyOpLogFilter"></el-input>
+            <el-button size="small" type="primary" plain @click="applyOpLogFilter">查询</el-button>
+            <el-button size="small" @click="loadOpLog">刷新</el-button>
+          </div>
+        </el-card>
+
+        <el-card shadow="never" class="section-card">
+          <el-table :data="opLog.rows" v-loading="opLog.loading" size="small" border stripe
+                    empty-text="暂无操作记录">
+            <el-table-column prop="username" label="用户名" width="190" show-overflow-tooltip>
+              <template slot-scope="s">
+                <span>{{ s.row.username }}</span>
+                <el-tag v-if="!s.row.userId" size="mini" type="info" style="margin-left:6px">匿名</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column prop="content" label="操作内容" min-width="380" show-overflow-tooltip></el-table-column>
+            <el-table-column prop="createdAt" label="操作时间" width="180"></el-table-column>
+          </el-table>
+          <div class="pager-wrap">
+            <el-pagination background layout="total, sizes, prev, pager, next"
+                           :current-page="opLog.page" :page-size="opLog.size"
+                           :page-sizes="[20, 50, 100]" :total="opLog.total"
+                           @current-change="onOpLogPage" @size-change="onOpLogSize"></el-pagination>
+            <span class="total">共 {{ opLog.total }} 条</span>
+          </div>
+        </el-card>
+      </div>
     </el-main>
   </el-container>
 
@@ -836,6 +879,9 @@ const UP_GUIDES = {
   },
 };
 
+// 操作日志：这些按钮文案不含有效信息（弹框的确定/取消等），不记入操作日志
+const OP_SKIP_BTN = ['确定', '取消', '确 定', '取 消', '关闭', '×', 'OK', 'Cancel', '知道了'];
+
 const vm = new Vue({
   el: '#app',
   data() {
@@ -870,6 +916,8 @@ const vm = new Vue({
       users: [], newUser: { company: '', password: '', role: 'user', taxNo: '', email: '', note: '' },
       creatingUser: false, createOk: false,
       userEdit: { visible: false, id: null, title: '', company: '', taxNo: '', email: '', note: '', hint: '', lockCompany: false, saving: false },
+      // 操作日志（仅超级管理员）
+      opLog: { draftUsername: '', username: '', page: 1, size: 20, total: 0, rows: [], loading: false },
       // 上传
       up: { visible: false, kind: 'orders', title: '', guide: '', accept: '.xlsx,.xls', file: null, busy: false, percent: 0, msg: '', result: null },
       // 指引 / 改密
@@ -1006,9 +1054,13 @@ const vm = new Vue({
   },
   mounted() {
     window.addEventListener('resize', this.onResize);
+    document.addEventListener('click', this.onDocClick);   // 全局按钮点击埋点（操作日志）
     this.boot();
   },
-  beforeDestroy() { window.removeEventListener('resize', this.onResize); },
+  beforeDestroy() {
+    window.removeEventListener('resize', this.onResize);
+    document.removeEventListener('click', this.onDocClick);
+  },
   methods: {
     esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); },
     yuan, statusText, channelText,
@@ -1054,9 +1106,11 @@ const vm = new Vue({
     // ── 页面切换 ──
     switchPage(p) {
       if (p === 'admin' && !this.isAdmin) p = 'board';
+      if (p === 'audit' && !this.isAdmin) p = 'board';
       this.page = p;
       if (p === 'admin') { this.loadConfigUI(); this.loadUsers(); }
       if (p === 'mapping') this.loadMapping();
+      if (p === 'audit') this.loadOpLog();
     },
     // ── 看板数据 ──
     async loadData() {
@@ -1087,6 +1141,7 @@ const vm = new Vue({
       this.collectState = this.draftCollect;
       this.invoiceState = this.draftInvoice;
       this.dashPage = 1;
+      this.reportOp('query.filter', { collect: this.draftCollect, invoice: this.draftInvoice, keyword: this.draftKeyword.trim() });
     },
     onDashPage(p) { this.dashPage = p; },
     onDashSize(s) { this.dashSize = s; this.dashPage = 1; },
@@ -1205,6 +1260,9 @@ const vm = new Vue({
       this.detail.page = 1; this.detail.q = '';
       this.detail.visible = true;
       this.loadDetailRows();
+      // 点趋势图某一天 → 记「点击了某一天的 XX 金额进行查看」；点统计卡（无日期）→ 只记按钮点击
+      if (date) this.reportOp(kind === 'invoices' ? 'view.day.invoices' : 'view.day.orders', { date });
+      else this.reportOp('btn.click', { btn: kind === 'invoices' ? '已开票金额（税务局）' : '订单总金额' });
     },
     async loadDetailRows() {
       const st = this.detail;
@@ -1462,7 +1520,7 @@ const vm = new Vue({
         else this.$message.error('保存失败: ' + d.error);
       } catch (e) { this.$message.error('保存失败: ' + e.message); }
     },
-    openDownload() { window.open('/download', '_blank'); },
+    openDownload() { this.reportOp('agent.download'); window.open('/download', '_blank'); },
     async loadUsers() {
       if (!this.isAdmin) return;
       try {
@@ -1559,6 +1617,56 @@ const vm = new Vue({
     },
     exitTenantView() { this.setTenantView(this.me.id, this.me.companyName || this.me.username); },
 
+    // ══════ 操作日志 ══════
+    /**
+     * 上报一次业务操作。
+     *  · 先置 _opSkip，让紧接着冒泡到 document 的按钮点击不被全局捕获重复记录。
+     *  · 只传 action + 参数，文案由服务端按白名单渲染，客户端不传正文，避免伪造日志内容。
+     */
+    async reportOp(action, payload) {
+      this._opSkip = true;
+      try {
+        await this.api('/api/op-log', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(Object.assign({ action }, payload || {})),
+        });
+      } catch (e) { /* 埋点失败绝不能影响业务操作，静默吞掉 */ }
+    },
+    // 全局按钮点击捕获：任何用户点任何按钮都记一笔。具体业务操作由 reportOp 优先，不重复记录。
+    onDocClick(e) {
+      const skip = this._opSkip;
+      this._opSkip = false;              // 无论后面走哪条分支都要消费掉，避免污染下一次点击
+      if (skip) return;
+      const el = e.target && e.target.closest ? e.target.closest('.el-button, button, .el-menu-item') : null;
+      if (!el) return;
+      const text = String(el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 40);
+      if (!text || OP_SKIP_BTN.includes(text)) return;      // 弹框的「确定/取消」这类无信息量按钮不记
+      const now = Date.now();
+      // 同一个按钮 3 秒内只记一次（防分页、展开收起这类高频点击把日志刷爆）
+      if (this._opDedup && this._opDedup.k === text && now - this._opDedup.t < 3000) return;
+      this._opDedup = { k: text, t: now };
+      this.reportOp('btn.click', { btn: text });
+    },
+    async loadOpLog() {
+      if (!this.isAdmin) return;
+      this.opLog.loading = true;
+      try {
+        const p = new URLSearchParams({ page: this.opLog.page, size: this.opLog.size });
+        if (this.opLog.username) p.set('username', this.opLog.username);
+        const d = await this.api('/api/admin/op-log?' + p.toString());
+        if (d.error) { this.$message.error(d.error); this.opLog.rows = []; this.opLog.total = 0; }
+        else { this.opLog.rows = d.logs || []; this.opLog.total = d.total || 0; }
+      } catch (e) { this.$message.error('加载操作日志失败: ' + e.message); }
+      this.opLog.loading = false;
+    },
+    applyOpLogFilter() {
+      this.opLog.username = (this.opLog.draftUsername || '').trim();
+      this.opLog.page = 1;
+      this.loadOpLog();
+    },
+    onOpLogPage(p) { this.opLog.page = p; this.loadOpLog(); },
+    onOpLogSize(s) { this.opLog.size = s; this.opLog.page = 1; this.loadOpLog(); },
+
     // ══════ 导入上传 ══════
     openUpload(kind) {
       if (this.readonly) { this.$message.warning('只读模式下不能导入'); return; }
@@ -1636,6 +1744,7 @@ const vm = new Vue({
             this.guide.msg = '✓ 绑定成功，助手已连接！';
             await this.refreshAgent();
             this.$message.success('绑定成功，助手已连接');
+            this.reportOp('agent.bind');
             return;
           }
         }
