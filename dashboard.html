@@ -1903,6 +1903,7 @@ const vm = new Vue({
       try {
         const d = await this.api('/api/qnh/logs?refundNo=' + encodeURIComponent(row.refundNo));
         this.rq.log.rows = d.logs || [];
+        if (d.route && d.route.note) this.$message({ message: d.route.note, type: 'info', duration: 4000 });
       } catch (e) {
         this.$message.error('加载日志失败：' + e.message);
       } finally {

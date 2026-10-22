@@ -2165,10 +2165,8 @@ const server = http.createServer(async (req, res) => {
       if (method === 'GET' && p === '/api/qnh/logs') {
         const refundNo = (url.searchParams.get('refundNo') || '').trim().slice(0, 64);
         if (!refundNo) return sendJson(res, 400, { error: '缺少退单号' });
-        return sendJson(res, 200, {
-          refundNo,
-          logs: await qnh.getLogs(refundNo, url.searchParams.get('type') || ''),
-        });
+        const out = await qnh.getLogsWithRoute(refundNo, url.searchParams.get('type') || '');
+        return sendJson(res, 200, { refundNo, logs: out.logs, route: out.route });
       }
 
       // 以下仅超级管理员
