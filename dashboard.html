@@ -716,6 +716,7 @@
           <h2>退单列表</h2>
           <div class="meta-line">
             数据来自美团牵牛花（qnh.meituan.com）的退单列表，每日自动增量同步，也可以随时点「立即刷新数据」。
+            牵牛花的登录由「本机助手」在<b>你本机</b>完成（服务器不打开浏览器），登录态存在数据库里。
             标记为 <el-tag size="mini" type="warning">已取货/送达</el-tag> 的退单表示商品已经出库，请重点核查。
           </div>
         </div>
@@ -725,7 +726,7 @@
           <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
             <el-button size="small" :type="rq.cookie.logined ? 'success' : 'danger'"
                        :loading="rq.cookie.loading" @click="onCookieBtn">
-              {{ rq.cookie.loading ? '检查中…' : (rq.cookie.logined ? '已登录牵牛花' : '登录牵牛花') }}
+              {{ rq.cookie.loading ? '等待本机登录…' : (rq.cookie.logined ? '已登录牵牛花' : '登录牵牛花') }}
             </el-button>
             <el-button size="small" type="primary" :loading="rq.syncing" @click="doSync">立即刷新数据</el-button>
             <el-tag v-if="rq.lastRun" size="small" type="info">
@@ -733,7 +734,7 @@
               · {{ rq.lastRun.status === 'ok' ? '成功' : '有失败项' }}
             </el-tag>
             <el-tag v-if="rq.config && rq.config.scheduleEnabled" size="small" type="success">
-              每日 {{ rq.config.scheduleTime }} 自动同步
+              每天 {{ (rq.config.scheduleTimes && rq.config.scheduleTimes.length ? rq.config.scheduleTimes : [rq.config.scheduleTime]).join(' / ') }} 自动同步
             </el-tag>
             <span style="flex:1"></span>
             <span class="loginid" v-if="rq.cookie.tenantName">租户：{{ rq.cookie.tenantName }}（{{ rq.cookie.tenantId }}）</span>
@@ -760,7 +761,7 @@
               <el-radio-button :label="90">近 90 天</el-radio-button>
             </el-radio-group>
             <span style="flex:1"></span>
-            <span class="loginid">柱状=退单数量，橙色=其中已取货/送达</span>
+            <span class="loginid">堆叠柱=按退单类型分列（整单退/部分退/克重退差/按金额退/用户拒收/申诉），点柱看当天明细</span>
           </div>
           <div id="refund-trend" style="height:200px"></div>
         </el-card>
@@ -792,6 +793,15 @@
 
           <el-table :data="rq.rows" size="small" border style="width:100%" v-loading="rq.loading"
                     empty-text="暂无退单数据" :row-class-name="refundRowClass">
+            <el-table-column label="订单号" width="180">
+              <template slot-scope="p"><span class="loginid">{{ p.row.serialNo || p.row.orderNo || '—' }}</span></template>
+            </el-table-column>
+            <el-table-column label="渠道" width="110">
+              <template slot-scope="p">{{ p.row.channelName || '—' }}</template>
+            </el-table-column>
+            <el-table-column label="已支付时间" width="150">
+              <template slot-scope="p">{{ p.row.paidTime || '—' }}</template>
+            </el-table-column>
             <el-table-column label="退单号" width="170">
               <template slot-scope="p">
                 <el-button type="text" size="mini" @click="openRefundLog(p.row)">{{ p.row.refundNo }}</el-button>
@@ -816,15 +826,21 @@
             <el-table-column label="退单状态" width="100">
               <template slot-scope="p">{{ p.row.refundStatus || '—' }}</template>
             </el-table-column>
-            <el-table-column label="配送日志" width="130">
+            <el-table-column label="配送日志" width="120">
               <template slot-scope="p">
-                <el-tag v-if="p.row.picked" size="mini" type="warning">已取货/送达</el-tag>
-                <el-tag v-else-if="p.row.hasDeliveryLog" size="mini" type="info">仅接单</el-tag>
-                <span v-else class="muted">无</span>
+                <el-tag v-if="p.row.picked" size="mini" type="warning">已取货</el-tag>
+                <el-tag v-else-if="p.row.hasDeliveryLog" size="mini" type="info">未取货</el-tag>
+                <span v-else class="muted">未取货</span>
                 <span v-if="p.row.deliveryCount" class="loginid"> · {{ p.row.deliveryCount }} 条</span>
               </template>
             </el-table-column>
-            <el-table-column label="门店" min-width="170"><template slot-scope="p">{{ p.row.storeName || '—' }}</template></el-table-column>
+            <el-table-column label="门店" min-width="150"><template slot-scope="p">{{ p.row.storeName || '—' }}</template></el-table-column>
+            <el-table-column label="顾客" width="100">
+              <template slot-scope="p">{{ p.row.receiverName || '—' }}</template>
+            </el-table-column>
+            <el-table-column label="配送地址" min-width="200" show-overflow-tooltip>
+              <template slot-scope="p"><span class="loginid">{{ p.row.receiverAddress || '—' }}</span></template>
+            </el-table-column>
             <el-table-column label="申请时间" width="150"><template slot-scope="p">{{ p.row.applyTime || '—' }}</template></el-table-column>
             <el-table-column label="操作" width="90">
               <template slot-scope="p"><el-button size="mini" @click="openRefundLog(p.row)">日志</el-button></template>
@@ -842,7 +858,7 @@
 
         <!-- 同步设置（仅超级管理员） -->
         <el-card v-if="isAdmin" class="section-card" shadow="never">
-          <div slot="header"><b>退单同步设置</b> <span class="loginid">（仅超级管理员可改）</span></div>
+          <div slot="header"><b>退单同步与提醒设置</b> <span class="loginid">（仅超级管理员可改）</span></div>
           <el-form label-position="top" size="small">
             <el-row :gutter="12">
               <el-col :xs="24" :md="6">
@@ -851,9 +867,12 @@
                 </el-form-item>
               </el-col>
               <el-col :xs="24" :md="6">
-                <el-form-item label="每天几点跑">
-                  <el-time-picker v-model="rq.config.scheduleTime" value-format="HH:mm" format="HH:mm"
-                                  placeholder="选择时间" style="width:100%" :disabled="!rq.config.scheduleEnabled"></el-time-picker>
+                <el-form-item label="同步时间点（可多个）">
+                  <el-select v-model="rq.config.scheduleTimes" multiple filterable allow-create default-first-option
+                             placeholder="如 03:00，回车添加" style="width:100%"
+                             :disabled="!rq.config.scheduleEnabled">
+                    <el-option v-for="t in timeOptions" :key="t" :label="t" :value="t"></el-option>
+                  </el-select>
                 </el-form-item>
               </el-col>
               <el-col :xs="24" :md="6">
@@ -873,15 +892,74 @@
                   </el-input>
                 </el-form-item>
               </el-col>
+              <el-col :xs="24">
+                <el-form-item label="提醒模板（新退单 / 超时提醒按此展示，用逗号分隔字段）">
+                  <el-input v-model="rq.config.remindTemplate" placeholder="订单号,渠道,退单类型">
+                    <template slot="append">可选字段：订单号 渠道 退单类型 门店 金额 收货人 地址 申请时间 退单号 退单状态</template>
+                  </el-input>
+                </el-form-item>
+              </el-col>
             </el-row>
           </el-form>
           <el-button type="primary" size="small" :loading="rq.savingCfg" @click="saveQnhConfig">保存设置</el-button>
           <el-tag v-if="rq.savedCfg" type="success" size="small" style="margin-left:10px">✓ 已保存</el-tag>
           <div class="form-tip" style="margin-top:8px">
-            定时由服务进程内的调度器触发（服务需保持运行）；也可以继续用 Windows 计划任务跑
-            <code>run_daily.bat</code>，两种方式互不影响（同日只跑一次由水位保证幂等）。
-            提醒按退单号去重，同一笔退单只推一次。
+            定时由服务进程内的调度器触发，到点自动同步<b>当天</b>的退单数据；「立即刷新数据」也只拉当天（补历史可用 API 参数 days/date）。
+            提醒按退单号去重，同一笔退单只推一次；申请超 24 小时仍未处理的退单会另外推送超时提醒。
           </div>
+        </el-card>
+
+        <!-- 实时毛利监控（仅超级管理员） -->
+        <el-card v-if="isAdmin" class="section-card" shadow="never">
+          <div slot="header" style="display:flex;align-items:center;gap:10px">
+            <b>实时毛利监控预警</b>
+            <el-switch v-model="rq.config.profitEnabled" active-text="监控开启" inactive-text="监控关闭"
+                       @change="saveQnhConfig"></el-switch>
+            <span style="flex:1"></span>
+            <span class="loginid" v-if="rq.config.profitLastPullAt">
+              最近拉取 {{ rq.config.profitLastPullAt }} · {{ rq.config.profitLastPullCount }} 条
+            </span>
+            <el-button size="mini" type="primary" :loading="rq.profit.loading" @click="pullProfit">立即拉取毛利数据</el-button>
+          </div>
+          <el-form label-position="top" size="small" inline>
+            <el-form-item label="线上毛利低于（元）告警">
+              <el-input-number v-model="rq.config.profitMinAmount" :min="0" :precision="2" :step="1"
+                               controls-position="right" style="width:140px"></el-input-number>
+            </el-form-item>
+            <el-form-item label="线上毛利率低于（%）告警">
+              <el-input-number v-model="rq.config.profitMinRate" :min="0" :max="100" :precision="2" :step="1"
+                               controls-position="right" style="width:140px"></el-input-number>
+            </el-form-item>
+            <el-form-item label=" ">
+              <el-button size="small" :loading="rq.savingCfg" @click="saveQnhConfig">保存阈值</el-button>
+            </el-form-item>
+          </el-form>
+          <div class="form-tip" style="margin-bottom:10px">
+            毛利数据来自牵牛花「订单毛利明细」，接口需要签名——由<b>本机助手</b>在你电脑的牵牛花页面里代拉
+            （监控开启后每 10 分钟自动拉一次，助手需在线）。低于阈值的订单会推送企业微信，每单只告警一次。
+          </div>
+          <el-alert v-if="rq.profit.error" type="warning" :title="rq.profit.error" :closable="false" show-icon
+                    style="margin-bottom:10px"></el-alert>
+          <el-table :data="rq.profit.rows" size="small" border max-height="360"
+                    empty-text="暂无毛利数据（点「立即拉取毛利数据」获取当天的订单毛利明细）">
+            <el-table-column label="门店" min-width="180"><template slot-scope="p">{{ p.row.storeName || '—' }}</template></el-table-column>
+            <el-table-column label="订单号" width="200"><template slot-scope="p"><span class="loginid">{{ p.row.orderNo }}</span></template></el-table-column>
+            <el-table-column label="下单时间" width="160"><template slot-scope="p">{{ p.row.orderTime || '—' }}</template></el-table-column>
+            <el-table-column label="线上毛利（元）" width="130" align="right">
+              <template slot-scope="p">
+                <span :class="p.row.alerted ? 'amount' : 'amount ok'">{{ p.row.profit == null ? '—' : p.row.profit.toFixed(2) }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="线上毛利率" width="110" align="right">
+              <template slot-scope="p">{{ p.row.profitRate == null ? '—' : p.row.profitRate.toFixed(2) + '%' }}</template>
+            </el-table-column>
+            <el-table-column label="告警" width="90">
+              <template slot-scope="p">
+                <el-tag v-if="p.row.alerted" size="mini" type="danger">已告警</el-tag>
+                <el-tag v-else size="mini" type="success">正常</el-tag>
+              </template>
+            </el-table-column>
+          </el-table>
         </el-card>
       </div>
     </el-main>
@@ -1003,6 +1081,7 @@
     <div style="display:flex;gap:8px;flex-wrap:wrap">
       <el-button type="primary" @click="openDownload">下载本机助手（Windows）</el-button>
       <el-button :loading="guide.binding" @click="bindAgent">绑定本机助手</el-button>
+      <el-button v-if="guide.deepLink" :disabled="guide.binding" @click="wakeAgent(guide.deepLink)">没反应？再唤一次助手</el-button>
       <el-button @click="guide.visible = false">知道了</el-button>
     </div>
     <div class="muted" style="font-size:12px;margin-top:10px;line-height:1.8">
@@ -1144,14 +1223,21 @@ const vm = new Vue({
         trend: [], days: 30, summary: null,
         cookie: { logined: false, loading: false, configured: false, tenantId: '', tenantName: '', message: '' },
         lastRun: null, syncing: false, syncPoll: null,
-        config: { scheduleEnabled: false, scheduleTime: '03:00', webhook: '', wecomEnabled: false, alertDelivery: true },
+        config: {
+          scheduleEnabled: false, scheduleTime: '03:00', scheduleTimes: ['03:00'],
+          webhook: '', wecomEnabled: false, alertDelivery: true,
+          remindTemplate: '订单号,渠道,退单类型',
+          profitEnabled: false, profitMinAmount: 0, profitMinRate: 0,
+          profitLastPullAt: '', profitLastPullCount: 0,
+        },
         savingCfg: false, savedCfg: false,
+        profit: { loading: false, rows: [], total: 0, alerts: 0, error: '' },
         log: { visible: false, row: {}, rows: [], tab: 'all', loading: false },
       },
       // 上传
       up: { visible: false, kind: 'orders', title: '', guide: '', accept: '.xlsx,.xls', file: null, busy: false, percent: 0, msg: '', result: null },
       // 指引 / 改密
-      guide: { visible: false, msg: '', binding: false },
+      guide: { visible: false, msg: '', binding: false, deepLink: '' },
       pwd: { visible: false, old: '', ne1: '', ne2: '', saving: false },
     };
   },
@@ -1159,6 +1245,15 @@ const vm = new Vue({
     isAdmin() { return !!(this.me && this.me.role === 'admin'); },
     // 退单列表页权限：超级管理员始终可见，普通用户由管理员在「系统管理」里开启
     canRefund() { return !!(this.me && (this.me.role === 'admin' || this.me.qnhRefundEnabled)); },
+    // 同步时间点下拉的候选（整点/半点）
+    timeOptions() {
+      const out = [];
+      for (let h = 0; h < 24; h += 1) {
+        out.push(`${String(h).padStart(2, '0')}:00`);
+        out.push(`${String(h).padStart(2, '0')}:30`);
+      }
+      return out;
+    },
     refundStats() {
       const s = this.rq.summary || {};
       return [
@@ -1367,6 +1462,7 @@ const vm = new Vue({
         this.loadRefundStatus();
         this.loadRefunds();
         this.loadRefundTrend();
+        this.loadProfit();
       }
     },
     // ── 看板数据 ──
@@ -1375,6 +1471,11 @@ const vm = new Vue({
         const d = await this.api('/api/data');
         if (d.error) { this.$message.error('加载数据失败: ' + d.error); return; }
         this.companies = d.companies || [];
+        // 列表刷新后，把已经不存在（被筛掉/数据已移除）的会员名从选择里剔除，
+        // 否则顶部「发送催收消息 (N)」会挂着一堆看不见的旧勾选。
+        const alive = new Set();
+        this.companies.forEach((c) => (c.members || []).forEach((m) => alive.add(m.loginId)));
+        for (const k of Object.keys(this.selected)) if (!alive.has(k)) this.$delete(this.selected, k);
         this.sent = {};
         for (const k of (d.sentList || [])) this.$set(this.sent, k, true);
         this.invSummary = d.invoiceSummary || null;
@@ -1398,6 +1499,8 @@ const vm = new Vue({
       this.collectState = this.draftCollect;
       this.invoiceState = this.draftInvoice;
       this.dashPage = 1;
+      // 换了筛选条件，之前勾选的会员名很可能已不在结果里 → 一并清空，避免点完查询计数还挂着
+      this.selected = {};
       this.reportOp('query.filter', { collect: this.draftCollect, invoice: this.draftInvoice, keyword: this.draftKeyword.trim() });
     },
     onDashPage(p) { this.dashPage = p; },
@@ -1590,6 +1693,9 @@ const vm = new Vue({
       try {
         const d = await this.api('/api/send', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ loginIds: ids }) });
         if (d.error) { this.$message.error('启动失败: ' + d.error); return; }
+        // 任务已交给本机助手去跑，勾选项的使命到此为止 → 立刻清空。
+        // 原来发送完列表刷新了、顶部计数却还挂着旧数字，只有按 F5 刷新页面才归零。
+        this.selected = {};
         this.pollTask();
       } catch (e) { this.$message.error('请求失败: ' + e.message); }
     },
@@ -1768,6 +1874,25 @@ const vm = new Vue({
       if (!EC || !dom) return;
       this._rqChart = this._rqChart || EC.init(dom);
       const days = this.rq.trend || [];
+      // 按退单类型堆叠：整单退/部分退/克重退差/按金额退/用户拒收 + 申诉单 + 其他
+      const TYPE_COLORS = {
+        '整单退': '#7aa7ff',
+        '部分退': '#5ecbb9',
+        '克重退差': '#b48ead',
+        '按金额退': '#f2c94c',
+        '用户拒收': '#ff9f43',
+        '申诉单': '#eb5757',
+        '其他': '#c3c8d0',
+      };
+      const seriesSpec = [
+        ['整单退', (d) => d.types && d.types['整单退']],
+        ['部分退', (d) => d.types && d.types['部分退']],
+        ['克重退差', (d) => d.types && d.types['克重退差']],
+        ['按金额退', (d) => d.types && d.types['按金额退']],
+        ['用户拒收', (d) => d.types && d.types['用户拒收']],
+        ['申诉单', (d) => d.appealed],
+        ['其他', (d) => d.types && d.types['其他']],
+      ];
       this._rqChart.setOption({
         grid: { left: 6, right: 10, top: 26, bottom: 4, containLabel: true },
         legend: { right: 0, top: 0, itemHeight: 8, itemWidth: 10, textStyle: { fontSize: 11, color: '#8a8f99' } },
@@ -1775,12 +1900,15 @@ const vm = new Vue({
           trigger: 'axis', axisPointer: { type: 'shadow' }, confine: true,
           backgroundColor: 'rgba(38,40,44,.92)', borderWidth: 0, textStyle: { color: '#fff', fontSize: 12 },
           formatter: (ps) => {
-            const p = ps && ps[0];
-            if (!p) return '';
-            const d = days[p.dataIndex] || {};
-            return `<b>${d.date || ''}</b><br/>退单数：<b>${d.count || 0}</b> 单`
+            const d = days[ps && ps[0] ? ps[0].dataIndex : 0] || {};
+            const lines = seriesSpec
+              .map(([name]) => [name, name === '申诉单' ? (d.appealed || 0) : ((d.types || {})[name] || 0)])
+              .filter(([, v]) => v > 0)
+              .map(([name, v]) => `<br/>${name}：<b>${v}</b> 单`);
+            return `<b>${d.date || ''}</b><br/>退单合计：<b>${d.count || 0}</b> 单`
               + `<br/>其中已取货/送达：${d.delivered || 0} 单`
-              + `<br/>退单金额：${yuan(d.amount || 0)}`;
+              + `<br/>退单金额：${yuan(d.amount || 0)}`
+              + lines.join('');
           },
         },
         xAxis: {
@@ -1792,16 +1920,14 @@ const vm = new Vue({
           type: 'value', minInterval: 1, splitLine: { lineStyle: { color: '#f2f3f5' } },
           axisLabel: { fontSize: 10, color: '#8a8f99' },
         },
-        series: [
-          {
-            name: '退单数量', type: 'bar', data: days.map((d) => Number(d.count) || 0),
-            barMaxWidth: 16, itemStyle: { color: '#7aa7ff', borderRadius: [3, 3, 0, 0] },
-          },
-          {
-            name: '已取货/送达', type: 'bar', data: days.map((d) => Number(d.delivered) || 0),
-            barMaxWidth: 16, itemStyle: { color: '#ff9f43', borderRadius: [3, 3, 0, 0] },
-          },
-        ],
+        series: seriesSpec.map(([name, get]) => ({
+          name,
+          type: 'bar',
+          stack: 'refund',
+          data: days.map((d) => Number(get(d)) || 0),
+          barMaxWidth: 20,
+          itemStyle: { color: TYPE_COLORS[name], borderRadius: [2, 2, 0, 0] },
+        })),
         animationDuration: 300,
       }, true);
     },
@@ -1822,23 +1948,52 @@ const vm = new Vue({
       }
       try {
         await this.$confirm(
-          '将打开一个 Chrome 窗口，请在其中登录牵牛花（最多等 3 分钟）。登录成功后 Cookie 会自动保存，之后可静默刷新。',
+          '登录在你自己的电脑上完成：点「开始登录」后，「本机助手」会在你本机弹出牵牛花窗口，'
+          + '在窗口里登录即可（最多等 5 分钟）。\n登录态回传后由服务器保管（存数据库），服务器不会代你登录。',
           '登录牵牛花',
-          { confirmButtonText: '打开登录窗口', cancelButtonText: '取消', type: 'warning' }
+          { confirmButtonText: '开始登录', cancelButtonText: '取消', type: 'warning' }
         );
       } catch (e) { return; }
 
       this.rq.cookie.loading = true;
       try {
         const d = await this.api('/api/qnh/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
-        if (d.ok && d.logined) this.$message.success('已登录牵牛花，Cookie 已更新');
-        else this.$message.error('登录未完成：' + (d.message || '未检测到登录态'));
+        if (d.needAgent) {
+          this.$message.warning(d.message || '本机助手未连接');
+          if (d.agentOutdated) this.reportOp('agent.download');
+          this.openGuideModal();
+          return;
+        }
+        if (!d.pending || !d.taskId) {
+          this.$message.error(d.message || d.error || '发起登录失败');
+          return;
+        }
+        this.$message.info(d.message || '已在你电脑上打开登录窗口，请在助手里完成登录…');
+        const r = await this.pollQnhLogin(d.taskId);
+        if (r === 'done') this.$message.success('已登录牵牛花，登录态已更新');
+        else if (r === 'failed') this.$message.error('登录未完成：' + (this._qnhLoginMsg || '未获取到登录态'));
+        else this.$message.warning('等待登录超时：请在助手窗口里登录后，再点一次「登录牵牛花」');
         await this.loadRefundStatus();
       } catch (e) {
         this.$message.error('登录失败：' + e.message);
       } finally {
         this.rq.cookie.loading = false;
       }
+    },
+    /** 轮询「登录牵牛花」任务，最多 5.5 分钟。返回 done / failed / timeout / gone */
+    async pollQnhLogin(taskId) {
+      const deadline = Date.now() + 5.5 * 60 * 1000;
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 2000));
+        let d = null;
+        try { d = await this.api('/api/qnh/login-status?taskId=' + encodeURIComponent(taskId)); } catch (e) { continue; }
+        if (!d) continue;
+        this._qnhLoginMsg = d.message || '';
+        if (d.status === 'done') return 'done';
+        if (d.status === 'failed') return 'failed';
+        if (d.error) return 'gone';
+      }
+      return 'timeout';
     },
 
     async doSync() {
@@ -1865,14 +2020,20 @@ const vm = new Vue({
       this.rq.savedCfg = false;
       try {
         const c = this.rq.config;
+        const times = (c.scheduleTimes || []).filter((t) => /^([01]\d|2[0-3]):[0-5]\d$/.test(t));
         const d = await this.api('/api/qnh/config', {
           method: 'POST', headers: { 'content-type': 'application/json' },
           body: JSON.stringify({
             scheduleEnabled: c.scheduleEnabled,
-            scheduleTime: c.scheduleTime || '03:00',
+            scheduleTime: times[0] || c.scheduleTime || '03:00',
+            scheduleTimes: times.length ? times : ['03:00'],
             webhook: c.webhook || '',
             wecomEnabled: c.wecomEnabled,
             alertDelivery: c.alertDelivery,
+            remindTemplate: c.remindTemplate || '订单号,渠道,退单类型',
+            profitEnabled: c.profitEnabled,
+            profitMinAmount: Number(c.profitMinAmount) || 0,
+            profitMinRate: Number(c.profitMinRate) || 0,
           }),
         });
         if (d.error) { this.$message.error(d.error); return; }
@@ -1883,6 +2044,39 @@ const vm = new Vue({
         this.$message.error('保存失败：' + e.message);
       } finally {
         this.rq.savingCfg = false;
+      }
+    },
+
+    /** 拉取毛利监控面板数据（与退单状态一起刷新） */
+    async loadProfit() {
+      if (!this.isAdmin) return;
+      try {
+        const d = await this.api('/api/qnh/profit?limit=100');
+        this.rq.profit.rows = d.rows || [];
+        this.rq.profit.total = d.total || 0;
+        this.rq.profit.alerts = d.alerts || 0;
+        this.rq.profit.error = '';
+      } catch (e) {
+        this.rq.profit.error = '毛利数据加载失败：' + e.message;
+      }
+    },
+    /** 立即经本机助手拉一次当天毛利明细（服务端顺带做阈值告警） */
+    async pullProfit() {
+      if (this.rq.profit.loading) return;
+      this.rq.profit.loading = true;
+      try {
+        const d = await this.api('/api/qnh/profit/pull', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+        if (d.ok) {
+          this.$message.success(d.message || '已拉取毛利明细' + (d.alerts ? `，告警 ${d.alerts} 条已推送企业微信` : ''));
+        } else {
+          this.$message.warning(d.message || '拉取失败：本机助手是否在线？');
+        }
+        await this.loadProfit();
+        await this.loadRefundStatus();
+      } catch (e) {
+        this.$message.error('拉取失败：' + e.message);
+      } finally {
+        this.rq.profit.loading = false;
       }
     },
 
@@ -2224,17 +2418,46 @@ const vm = new Vue({
       });
     },
     async agentOnline() { try { const d = await this.api('/api/agent/status'); return !!(d && d.online); } catch (e) { return false; } },
+    /**
+     * 唤起本机助手（xsh:// 深链）。
+     * ⚠ 不能用 location.href = 'xsh://…'：那会让浏览器尝试导航当前页，
+     *   首次安装的用户常被导航到一个空白页，还以为「看板没了、得退出重进」。
+     *   用隐藏 iframe 唤起，当前看板页面原封不动。
+     */
+    wakeAgent(link) {
+      try {
+        const f = document.createElement('iframe');
+        f.style.display = 'none';
+        f.src = link;
+        document.body.appendChild(f);
+        setTimeout(() => { try { f.remove(); } catch (e) { /* 已移除 */ } }, 30000);
+        return true;
+      } catch (e) {
+        try { location.href = link; } catch (e2) { /* 忽略 */ }
+        return false;
+      }
+    },
     async bindAgent() {
       this.guide.binding = true;
       this.guide.msg = '正在签发绑定令牌…';
       try {
         const r = await this.api('/api/agent/pair-code', { method: 'POST' });
         if (!r || !r.bindToken) throw new Error((r && r.error) || '签发绑定令牌失败');
-        const link = 'xsh://bind?server=' + encodeURIComponent(r.serverUrl) + '&t=' + r.bindToken;
+        const link = r.deepLink
+          || ('xsh://bind?server=' + encodeURIComponent(r.serverUrl) + '&t=' + r.bindToken);
+        this.guide.deepLink = link;
         this.guide.msg = '正在唤起本机助手…（浏览器若弹窗询问是否打开，请点「打开」）';
-        try { location.href = link; } catch (e) { try { window.open(link, '_self'); } catch (e2) { /* 忽略 */ } }
-        for (let i = 0; i < 30; i++) {
+        this.wakeAgent(link);
+        // 首次安装后助手是冷启动（要几秒才能握手连上），加上第一次唤起可能被浏览器
+        // 拦在半路——等 10 秒还没连上就再唤一次，总等待 60 秒。
+        let retried = false;
+        for (let i = 0; i < 60; i += 1) {
           await new Promise((res) => setTimeout(res, 1000));
+          if (i === 10 && !retried) {
+            retried = true;
+            this.wakeAgent(link);
+            this.guide.msg = '还没连上，再唤一次助手…（若浏览器弹出询问，请点「打开」）';
+          }
           if (await this.agentOnline()) {
             this.guide.msg = '✓ 绑定成功，助手已连接！';
             await this.refreshAgent();
@@ -2243,13 +2466,15 @@ const vm = new Vue({
             return;
           }
         }
-        this.guide.msg = '没检测到助手。可能是：尚未安装，或浏览器拦截了打开请求。请先「下载本机助手（Windows）」，安装后再点一次「绑定本机助手」。';
+        this.guide.msg = '没检测到助手。可能是：① 尚未安装（先点「下载本机助手（Windows）」）；'
+          + '② 浏览器拦截了打开请求——地址栏右侧会出现「打开 1688催收助手」的小图标，点它并允许即可。'
+          + '处理好后再点一次「绑定本机助手」。';
       } catch (e) { this.guide.msg = '绑定失败：' + e.message; }
       finally { this.guide.binding = false; }
     },
     async ensureAgentOnline() {
       if (await this.agentOnline()) return true;
-      try { location.href = 'xsh://run'; } catch (e) { /* 忽略 */ }
+      this.wakeAgent('xsh://run');
       for (let i = 0; i < 25; i++) {
         await new Promise((res) => setTimeout(res, 1000));
         if (await this.agentOnline()) { await this.refreshAgent(); return true; }

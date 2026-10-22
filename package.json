@@ -1,6 +1,6 @@
 {
   "name": "invoice-bot",
-  "version": "0.2.5",
+  "version": "0.2.7",
   "description": "1688/拼多多采购发票催收自动化",
   "main": "server.js",
   "scripts": {
@@ -30,10 +30,13 @@
   "type": "commonjs",
   "dependencies": {
     "mysql2": "^3.24.5",
-    "playwright": "^1.64.0",
     "ws": "^8.22.0",
     "xlsx": "^0.18.5"
   },
+  "optionalDependencies": {
+    "playwright": "^1.64.0"
+  },
+  "_comment": "playwright 只给「有显示器 + 有桌面」的机器用（lib/qnh-page.js 的常驻浏览器旁路）。服务器自己不再起浏览器：发送在用户本机助手执行，牵牛花登录也由本机助手完成。云部署请用 npm ci --omit=optional 跳过它（省掉几百 MB 浏览器二进制）。",
   "devDependencies": {
     "electron": "^33.0.0",
     "electron-builder": "^25.1.8"

@@ -21,6 +21,7 @@ const { createStore } = require('./store');
 const { AgentClient } = require('./agent/ws-client');
 const sender = require('./agent/sender');
 const orderExport = require('./agent/order-export');
+const qnhLogin = require('./agent/qnh-login');
 
 // 隐藏自动化特征（navigator.webdriver=false），降低 1688 风控识别 Electron 的概率。
 // 必须在 app ready 前调用，渲染进程启动后即失效。
@@ -34,6 +35,20 @@ let client = null;
 let tray = null;
 let statusWin = null;
 let quitting = false;
+let bindError = '';   // 最近一次绑定失败的原因（展示给用户，别让他干等）
+
+// 深链可能赶在 app ready / store 初始化之前到达（用户在看板点「绑定本机助手」，
+// 而助手正被唤起、还在启动中）——那时 store 还是 null，直接处理会抛异常把这次绑定丢掉，
+// 用户看到的就是「一直绑定不到，退出重进才好」。故先入队，等就绪后再统一处理。
+const pendingLinks = [];
+let appReady = false;
+
+function enqueueLink(link) {
+  if (!link) return false;
+  if (!appReady) { pendingLinks.push(link); return true; }
+  handleDeepLink(link).catch((e) => log('深链处理失败: ' + e.message));
+  return true;
+}
 
 // ── 单实例：第二次启动（多半来自深链）→ 交给已运行实例处理 ──
 const gotLock = app.requestSingleInstanceLock();
@@ -41,9 +56,8 @@ if (!gotLock) {
   app.quit();
 } else {
   app.on('second-instance', (_e, argv) => {
-    const link = extractLink(argv);
-    if (link) handleDeepLink(link).catch((e) => log('深链处理失败: ' + e.message));
-    showStatusWin();
+    enqueueLink(extractLink(argv));
+    if (appReady) showStatusWin();   // 未就绪时别碰窗口与本地存储
   });
 }
 
@@ -87,13 +101,17 @@ function pushState() {
   statusWin.webContents.send('agent:state', {
     ...s,
     version: VERSION,
-    deviceName: store.get('deviceName') || os.hostname(),
-    serverUrl: store.get('serverUrl') || '',
-    bound: store.isBound(),
+    deviceName: (store && store.get('deviceName')) || os.hostname(),
+    serverUrl: (store && store.get('serverUrl')) || '',
+    bound: !!(store && store.isBound()),
+    bindError: bindError || '',
     sendState: sender.state ? sender.state() : null,
     dataDir: app.getPath('userData'),
   });
 }
+
+/** 本地存储是不是已经可写（未就绪时一律当作「未绑定」，不报错） */
+function bound() { return !!(store && store.isBound()); }
 
 function refreshTray() {
   if (!hasTray()) return;
@@ -101,11 +119,12 @@ function refreshTray() {
   const online = !!s.ready;
   tray.setToolTip('1688 催收助手');
   tray.setContextMenu(Menu.buildFromTemplate([
-    { label: online ? '状态：已连接' : (store.isBound() ? '状态：未连接（重连中）' : '状态：未绑定'), enabled: false },
+    { label: online ? '状态：已连接' : (bound() ? '状态：未连接（重连中）' : '状态：未绑定'), enabled: false },
     { label: s.sending ? '正在发送…' : '空闲', enabled: false },
     { type: 'separator' },
     { label: '打开状态面板', click: () => showStatusWin() },
     { label: '打开 1688 登录窗口', click: () => openLogin() },
+    { label: '打开 牵牛花 登录窗口', click: () => qnhLogin.openLogin() },
     { type: 'separator' },
     { label: '开机自启', type: 'checkbox', checked: !!store.get('autoStart'), click: (mi) => setAutoStart(mi.checked) },
     { label: '退出', click: () => { quitting = true; app.quit(); } },
@@ -170,9 +189,29 @@ function openLogin() {
 }
 
 // ── 助手主体 ──
-function startAgent() {
+/**
+ * 确保长连接存在：已绑定才连；已有连接则用新凭证重连（绑定/换绑后调用）。
+ * 幂等——绑定深链可能被重复触发（用户点了不止一次），重复调用不会连出两个客户端。
+ */
+function ensureClient() {
+  if (!store) return false;
   const serverUrl = store.get('serverUrl');
   const deviceToken = store.get('deviceToken');
+  if (!serverUrl || !deviceToken) { log('尚未绑定，等待网站「绑定本机助手」深链'); return false; }
+  if (client) {
+    // 凭证变了才重连；凭证没变说明已经连着，别把好端端的连接切断
+    if (client.serverUrl !== serverUrl || client.deviceToken !== deviceToken) {
+      client.rebind({ serverUrl, deviceToken });
+    }
+    return true;
+  }
+  startAgent();
+  return true;
+}
+
+function startAgent() {
+  const serverUrl = store && store.get('serverUrl');
+  const deviceToken = store && store.get('deviceToken');
   if (!serverUrl || !deviceToken) { log('尚未绑定，等待网站「绑定本机助手」深链'); pushState(); return; }
   if (client) return;
   client = new AgentClient({
@@ -189,6 +228,16 @@ function startAgent() {
   client.setExportHandler((m, api) => orderExport.runExport(m, api, {
     serverUrl: store.get('serverUrl'),
     deviceToken: store.get('deviceToken'),
+  }));
+  // 「登录牵牛花」内核：服务器（云端）没有显示器与浏览器，登录只在本机完成，
+  // 助手弹窗让用户登录 → 把牵牛花的 Cookie 回传服务器（服务器只负责调用接口拉退单）。
+  client.setQnhLoginHandler(qnhLogin.createLoginHandler({
+    log: (m) => { log(m); pushState(); },
+  }));
+  // 「牵牛花页内签名请求」内核：配送日志 / 订单毛利明细等接口要求 mtgsig 签名，
+  // 服务器直连 403，只有真实页面环境里的 fetch 能自动带上——这个环境只有本机有。
+  client.setQnhFetchHandler(qnhLogin.createFetchHandler({
+    log: (m) => { log(m); pushState(); },
   }));
   client.on('ready', () => { log('已连接服务器'); refreshTray(); pushState(); });
   client.on('connected', () => { refreshTray(); pushState(); });
@@ -207,29 +256,40 @@ async function handleDeepLink(link) {
   log('深链: ' + action);
 
   if (action === 'bind') {
-    const server = (u.searchParams.get('server') || store.get('serverUrl') || '').replace(/\/+$/, '');
+    // 绑定令牌可能过期（用户在看板点了一次却迟迟没唤起助手）。
+    // 这时不能干等着——把结果写进状态，界面上直接告诉用户「回看板再点一次」。
+    const server = (u.searchParams.get('server') || (store ? store.get('serverUrl') : '') || '').replace(/\/+$/, '');
     const t = u.searchParams.get('t') || '';
     if (!server || !t) { log('绑定深链缺少 server 或 t'); showStatusWin(); return; }
     const r = await postJson(server + '/api/agent/bind', {
       bindToken: t, deviceName: os.hostname(), os: `${process.platform}-${os.arch()}`, agentVer: VERSION, kind: 'agent',
     });
     if (r.status !== 200 || !r.body || !r.body.deviceToken) {
-      log('绑定失败: ' + (r.body && r.body.error ? r.body.error : ('HTTP ' + r.status)));
+      const err = (r.body && r.body.error) || ('HTTP ' + r.status);
+      log('绑定失败: ' + err);
+      bindError = err;
       showStatusWin();
       return;
     }
-    store.setBinding({ deviceToken: r.body.deviceToken, serverUrl: r.body.serverUrl || server, deviceId: r.body.deviceId, userId: r.body.userId });
+    if (!store) { log('本地存储尚未就绪，绑定延后处理'); pendingLinks.push(link); return; }
+    store.setBinding({
+      deviceToken: r.body.deviceToken,
+      serverUrl: r.body.serverUrl || server,
+      deviceId: r.body.deviceId,
+      userId: r.body.userId,
+    });
+    bindError = '';
     log('绑定成功（deviceId=' + r.body.deviceId + '）');
-    if (client) client.rebind({ serverUrl: store.get('serverUrl'), deviceToken: store.get('deviceToken') });
-    else startAgent();
+    ensureClient();          // 幂等：重复的绑定深链只会刷新凭证，不会连出第二个客户端
+    refreshTray();
     showStatusWin();
     return;
   }
 
   if (action === 'run') {
     // 网站点「批量发送」但助手没在跑 → 拉起并连上；绑定信息用本地已存的
-    if (!store.isBound()) { log('尚未绑定，无法直接运行'); showStatusWin(); return; }
-    startAgent();
+    if (!bound()) { log('尚未绑定，无法直接运行'); showStatusWin(); return; }
+    ensureClient();
     refreshTray();
     pushState();
     return;
@@ -267,18 +327,35 @@ app.whenReady().then(() => {
     log('已注册协议 ' + PROTOCOL + '://');
   } catch (e) { log('注册协议失败: ' + e.message); }
 
-  // 冷启动时进程参数里可能就带着深链；连服务器放到窗口首帧之后
-  setImmediate(() => {
+  // 冷启动时进程参数里可能就带着深链（xsh://bind…），唤醒时排队的那批也在这里一起消化。
+  // 放在窗口首帧之后，保证界面先出来。
+  setImmediate(async () => {
+    appReady = true;
     const coldLink = extractLink(process.argv);
-    if (coldLink) handleDeepLink(coldLink).catch((e) => log('深链处理失败: ' + e.message));
-    else startAgent();
+    const queued = pendingLinks.splice(0, pendingLinks.length);
+    const links = (coldLink ? [coldLink] : []).concat(queued);
+    if (links.length) {
+      for (const lk of links) await handleDeepLink(lk).catch((e) => log('深链处理失败: ' + e.message));
+    } else {
+      startAgent();
+    }
+    refreshTray();
+    pushState();
   });
 });
 
 // ── IPC（状态窗 → 主进程）──
 ipcMain.handle('agent:getState', () => {
   const s = client ? client.state() : { connected: false, ready: false, sending: false, loggedIn: false };
-  return { ...s, version: VERSION, deviceName: store.get('deviceName') || os.hostname(), serverUrl: store.get('serverUrl') || '', bound: store.isBound(), dataDir: app.getPath('userData') };
+  return {
+    ...s,
+    version: VERSION,
+    deviceName: (store && store.get('deviceName')) || os.hostname(),
+    serverUrl: (store && store.get('serverUrl')) || '',
+    bound: bound(),
+    bindError: bindError || '',
+    dataDir: app.getPath('userData'),
+  };
 });
 ipcMain.handle('agent:openLoginWindow', () => { openLogin(); return true; });
 ipcMain.handle('agent:stopTask', () => {
@@ -287,6 +364,8 @@ ipcMain.handle('agent:stopTask', () => {
 });
 ipcMain.handle('agent:openDataDir', () => { shell.openPath(app.getPath('userData')); return true; });
 ipcMain.handle('agent:unbind', () => {
+  if (!store) return true;
+  bindError = '';
   store.clearBinding();
   if (client) { client.stop(); client = null; }
   refreshTray(); pushState();
