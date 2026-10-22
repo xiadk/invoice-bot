@@ -44,5 +44,10 @@
     "password": "invoice123",
     "database": "invoice_bot",
     "connectionLimit": 8
+  },
+  "qnh": {
+    "_comment5": "牵牛花退单同步工程（qnh-refund-sync，含 bridge.py）的位置与 Python 解释器。留空则自动探测：环境变量 QNH_SYNC_DIR/QNH_PYTHON > 本段 > %HOME%/WorkBuddy/*/qnh-refund-sync 取最新 > 项目同级 qnh-refund-sync；Python 回退到本机 .workbuddy venv，再回退 PATH 上的 python",
+    "syncDir": "",
+    "python": ""
   }
 }
