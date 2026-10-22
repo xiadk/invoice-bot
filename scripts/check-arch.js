@@ -4,7 +4,7 @@
  *
  * 守的是四条「一套」原则，防止新需求把系统拆成两套：
  *   R1 一套数据库配置 —— 只有 db.js 能解析 mysql 连接参数（json 的 mysql 段）
- *   R2 一套程序       —— 子进程只允许出现在 lib/qnh.js（Python 桥）；listen 只允许 server.js
+ *   R2 一套程序       —— 主进程禁用 child_process（electron/ 例外）；listen 只允许 server.js
  *   R3 一套页面       —— /api/qnh 只允许出现在 dashboard.html
  *   R4 无机器绑定     —— 源码里不许出现写死的用户目录（C:\Users\xxx、/home/xxx）
  *
@@ -75,7 +75,7 @@ const RULES = [
   },
   {
     id: 'R2',
-    title: '一套程序：子进程只在 lib/qnh.js，服务入口只在 server.js',
+    title: '一套程序：主进程禁子进程（electron 打包侧例外），服务入口只在 server.js',
     check(files) {
       const bad = [];
       for (const f of files) {
@@ -83,12 +83,14 @@ const RULES = [
         if (!r.endsWith('.js')) continue;
         const text = fs.readFileSync(f, 'utf8');
         const lines = text.split(/\r?\n/);
-        const allowProc = r === 'lib/qnh.js' || r.startsWith('electron/');
+        // v0.2.4 起 Python 桥已移除：主进程任何地方都不允许 child_process，
+        // 只有 electron/（桌面助手打包侧）保留例外
+        const allowProc = r.startsWith('electron/');
         const allowListen = r === 'server.js';
         lines.forEach((line, i) => {
           if (isComment(line)) return;
           if (!allowProc && /require\((['"])child_process\1\)/.test(line)) {
-            bad.push(`${r}:${i + 1}  引入 child_process（应改成调 lib/qnh.js 的桥接）`);
+            bad.push(`${r}:${i + 1}  引入 child_process（同步已迁入 lib/qnh-sync.js，electron/ 之外不允许子进程）`);
           }
           if (!allowListen && /\.listen\s*\(/.test(line) && !/\.on\(/.test(line)) {
             bad.push(`${r}:${i + 1}  启动监听（只允许 server.js 一个服务入口）`);

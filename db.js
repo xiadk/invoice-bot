@@ -95,9 +95,8 @@ async function transaction(fn) {
 /**
  * 牵牛花退单同步的表结构（幂等）。
  *
- * 这 6 张表由 `qnh-refund-sync` 写入，看板只读。DDL 与
- * `qnh-refund-sync/storage_mysql.py` 的 SCHEMA 保持一致；两边都是
- * `CREATE TABLE IF NOT EXISTS`，谁先跑都不会冲突。
+ * 这 6 张表由看板本体（lib/qnh.js）写入和查询——v0.2.4 起同步链路在 Node 内完成，
+ * 不再有独立的 Python 工程。保留 CREATE TABLE IF NOT EXISTS 幂等语义。
  */
 async function ensureQnhSchema(q) {
   const stmts = [
@@ -341,8 +340,8 @@ async function migrate(conn, dbName) {
   }
 
   // ── 牵牛花退单同步的表 ──
-  //    平时由 qnh-refund-sync 的 storage_mysql.py 建；这里也建一份，
-  //    保证「没跑过同步就先打开退单列表」时页面不会报 1146 表不存在。
+  //    v0.2.4 起由 lib/qnh.js 在同步时写入（原先由 qnh-refund-sync 写）；
+  //    启动时先建好，保证「没跑过同步就先打开退单列表」时页面不会报 1146 表不存在。
   await ensureQnhSchema(q, tableExists, idxExists);
 
   // 老库补列：退单日志相关标记
