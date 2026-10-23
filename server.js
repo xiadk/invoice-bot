@@ -2225,7 +2225,7 @@ const server = http.createServer(async (req, res) => {
     if (p.startsWith('/api/qnh/')) {
       const canRefund = isAdmin || !!Number(user.qnh_refund_enabled);
       const canProfit = isAdmin || !!Number(user.qnh_profit_enabled);
-      const profitApi = p === '/api/qnh/profit' || p === '/api/qnh/profit/pull';
+      const profitApi = p === '/api/qnh/profit' || p === '/api/qnh/profit/pull' || p === '/api/qnh/profit/trend';
       if (profitApi) {
         if (!canProfit) return sendJson(res, 403, { error: '未开启毛利监控权限，请联系超级管理员' });
       } else if (p === '/api/qnh/status') {
@@ -2382,14 +2382,22 @@ const server = http.createServer(async (req, res) => {
           patch[qnh.CFG.remindTemplate] = tpl || '订单号,渠道,退单类型';
         }
         if (body.profitEnabled !== undefined) patch[qnh.CFG.profitEnabled] = body.profitEnabled ? '1' : '0';
+        // 毛利告警专用机器人（与退单提醒的 webhook/总开关完全独立）
+        if (body.profitWebhook !== undefined) patch[qnh.CFG.profitWebhook] = String(body.profitWebhook).trim().slice(0, 500);
+        if (body.profitWecomEnabled !== undefined) patch[qnh.CFG.profitWecomEnabled] = body.profitWecomEnabled ? '1' : '0';
+        // 阈值允许负数（毛利为负很常见：如「毛利低于 -5 元」「毛利率低于 -10% 告警」）
         if (body.profitMinAmount !== undefined) {
           const n = Number(body.profitMinAmount);
-          if (!Number.isFinite(n) || n < 0) return sendJson(res, 400, { error: '毛利阈值应为非负数字' });
+          if (!Number.isFinite(n) || n < -1000000 || n > 1000000) {
+            return sendJson(res, 400, { error: '毛利阈值应为数字（±1000000 以内，可为负）' });
+          }
           patch[qnh.CFG.profitMinAmount] = String(n);
         }
         if (body.profitMinRate !== undefined) {
           const n = Number(body.profitMinRate);
-          if (!Number.isFinite(n) || n < 0 || n > 100) return sendJson(res, 400, { error: '毛利率阈值应为 0~100 的数字' });
+          if (!Number.isFinite(n) || n < -100 || n > 100) {
+            return sendJson(res, 400, { error: '毛利率阈值应为 -100 ~ 100 的数字' });
+          }
           patch[qnh.CFG.profitMinRate] = String(n);
         }
 
@@ -2401,19 +2409,28 @@ const server = http.createServer(async (req, res) => {
         if (patch[qnh.CFG.wecomEnabled] !== undefined) labels.push('企业微信' + (patch[qnh.CFG.wecomEnabled] === '1' ? '开启' : '关闭'));
         if (patch[qnh.CFG.alertDelivery] !== undefined) labels.push('配送日志提醒' + (patch[qnh.CFG.alertDelivery] === '1' ? '开启' : '关闭'));
         if (patch[qnh.CFG.webhook] !== undefined) labels.push('更新了机器人地址');
+        if (patch[qnh.CFG.profitWebhook] !== undefined) labels.push('更新了毛利告警机器人地址');
+        if (patch[qnh.CFG.profitWecomEnabled] !== undefined) {
+          labels.push('毛利告警机器人' + (patch[qnh.CFG.profitWecomEnabled] === '1' ? '开启' : '关闭'));
+        }
         await logOp(user, 'qnh.config', { items: labels.join('、') || '无变化' });
         return sendJson(res, 200, { ok: true, config: qnh.publicConfig(cfg) });
       }
 
       if (method === 'POST' && p === '/api/qnh/test-webhook') {
         if (!isAdmin) return sendJson(res, 403, { error: '仅超级管理员可测试机器人' });
-        return sendJson(res, 200, await qnh.testWebhook());
+        const b = await readBody(req).catch(() => ({}));
+        return sendJson(res, 200, await qnh.testWebhook(b && b.type === 'profit' ? 'profit' : 'refund'));
       }
 
       // ── 实时毛利监控 ──
       // 查看毛利数据与告警配置（有退单列表权限即可看）
       if (method === 'GET' && p === '/api/qnh/profit') {
         return sendJson(res, 200, await qnh.profitOverview({ limit: url.searchParams.get('limit') || 100 }));
+      }
+      // 每天毛利总额趋势（按日期聚合线上毛利合计）
+      if (method === 'GET' && p === '/api/qnh/profit/trend') {
+        return sendJson(res, 200, { days: await qnh.profitTrend(url.searchParams.get('days') || 30) });
       }
       // 立即拉取当天毛利明细（经本机助手页内签名接口；需毛利监控权限）
       if (method === 'POST' && p === '/api/qnh/profit/pull') {

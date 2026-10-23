@@ -378,7 +378,9 @@
               <div class="loginid" v-if="p.row.memberCount > 1">会员名：{{ p.row.members.map(m => m.sellerLogin || m.loginId).join('、') }}</div>
             </template>
           </el-table-column>
-          <el-table-column label="订单 / 金额" width="130">
+          <el-table-column prop="totalAmount" label="订单 / 金额" width="130" sortable="custom"
+                           :sort-orders="['descending', 'ascending', null]"
+                           :header-cell-style="{ cursor: 'pointer' }">
             <template slot-scope="p">{{ p.row.total }} 单<br><span class="amount">{{ yuan(p.row.totalAmount) }}</span></template>
           </el-table-column>
           <el-table-column label="已开票金额（税务局）" width="190">
@@ -891,12 +893,12 @@
                 </el-form-item>
               </el-col>
               <el-col :xs="24" :md="6">
-                <el-form-item label="机器人总开关">
+                <el-form-item label="退单提醒机器人开关（新退单 / 超时提醒）">
                   <el-switch v-model="rq.config.wecomEnabled" active-text="开启" inactive-text="关闭"></el-switch>
                 </el-form-item>
               </el-col>
               <el-col :xs="24">
-                <el-form-item label="企业微信机器人 webhook">
+                <el-form-item label="退单提醒机器人 webhook（毛利告警机器人另有独立配置，互不影响）">
                   <el-input v-model="rq.config.webhook" placeholder="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=...">
                     <el-button slot="append" size="mini" @click="testWebhook">发送测试</el-button>
                   </el-input>
@@ -933,28 +935,54 @@
         <el-card class="section-card" shadow="never">
           <div slot="header" style="display:flex;align-items:center;gap:10px">
             <b>实时毛利监控预警</b>
-            <el-switch v-if="isAdmin" v-model="rq.config.profitEnabled" active-text="监控开启" inactive-text="监控关闭"
-                       @change="saveQnhConfig"></el-switch>
+            <el-tag size="mini" :type="rq.config.profitEnabled ? 'success' : 'info'">
+              {{ rq.config.profitEnabled ? '监控运行中' : '监控已关闭' }}
+            </el-tag>
             <span style="flex:1"></span>
             <span class="loginid" v-if="rq.config.profitLastPullAt">
               最近拉取 {{ rq.config.profitLastPullAt }} · {{ rq.config.profitLastPullCount }} 条
             </span>
-            <el-button v-if="isAdmin" size="mini" @click="openChannelDlg">告警通道</el-button>
             <el-button size="mini" type="primary" :loading="rq.profit.loading" @click="pullProfit">立即拉取毛利数据</el-button>
           </div>
-          <el-form v-if="isAdmin" label-position="top" size="small" inline>
-            <el-form-item label="线上毛利低于（元）告警">
-              <el-input-number v-model="rq.config.profitMinAmount" :min="0" :precision="2" :step="1"
-                               controls-position="right" style="width:140px"></el-input-number>
-            </el-form-item>
-            <el-form-item label="线上毛利率低于（%）告警">
-              <el-input-number v-model="rq.config.profitMinRate" :min="0" :max="100" :precision="2" :step="1"
-                               controls-position="right" style="width:140px"></el-input-number>
-            </el-form-item>
-            <el-form-item label=" ">
-              <el-button size="small" :loading="rq.savingCfg" @click="saveQnhConfig">保存阈值</el-button>
-            </el-form-item>
+          <!-- 监控 / 告警设置（仅超级管理员；布局与退单页「退单同步与提醒设置」保持一致） -->
+          <el-form v-if="isAdmin" label-position="top" size="small">
+            <el-row :gutter="12">
+              <el-col :xs="24" :md="6">
+                <el-form-item label="监控开关（开启后每 10 分钟自动拉取）">
+                  <el-switch v-model="rq.config.profitEnabled" active-text="开启" inactive-text="关闭"></el-switch>
+                </el-form-item>
+              </el-col>
+              <el-col :xs="24" :md="6">
+                <el-form-item label="线上毛利低于（元）告警">
+                  <el-input-number v-model="rq.config.profitMinAmount" :min="-1000000" :max="1000000"
+                                   :precision="2" :step="1" controls-position="right"
+                                   style="width:100%"></el-input-number>
+                </el-form-item>
+              </el-col>
+              <el-col :xs="24" :md="6">
+                <el-form-item label="线上毛利率低于（%）告警">
+                  <el-input-number v-model="rq.config.profitMinRate" :min="-100" :max="100"
+                                   :precision="2" :step="1" controls-position="right"
+                                   style="width:100%"></el-input-number>
+                </el-form-item>
+              </el-col>
+              <el-col :xs="24" :md="6">
+                <el-form-item label="毛利告警机器人开关">
+                  <el-switch v-model="rq.config.profitWecomEnabled" active-text="开启" inactive-text="关闭"></el-switch>
+                </el-form-item>
+              </el-col>
+              <el-col :xs="24">
+                <el-form-item label="毛利告警机器人 webhook（与退单提醒分开配置，互不影响）">
+                  <el-input v-model="rq.config.profitWebhook"
+                            placeholder="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=...">
+                    <el-button slot="append" size="mini" @click="testProfitWebhook">发送测试</el-button>
+                  </el-input>
+                </el-form-item>
+              </el-col>
+            </el-row>
           </el-form>
+          <el-button v-if="isAdmin" type="primary" size="small" :loading="rq.savingCfg" @click="saveQnhConfig">保存设置</el-button>
+          <el-tag v-if="rq.savedCfg" type="success" size="small" style="margin-left:10px">✓ 已保存</el-tag>
           <div class="form-tip" style="margin-bottom:10px">
             低于阈值的订单会推送企业微信，每单只告警一次。<b>阈值填 0 表示不启用该条件</b>，两个都为 0 则不产生告警。
             通道与开关由超级管理员维护。
@@ -962,14 +990,14 @@
           <el-alert v-if="channelIssues.length" type="warning" :closable="false" show-icon
                     style="margin-bottom:10px"
                     title="当前不会发送毛利告警"
-                    :description="channelIssues.join('；') + (isAdmin ? '。点右上角「告警通道」补齐。' : '。请联系超级管理员处理。')"></el-alert>
+                    :description="channelIssues.join('；') + (isAdmin ? '。在下方「毛利告警机器人」设置里补齐。' : '。请联系超级管理员处理。')"></el-alert>
           <el-alert v-else-if="!rq.config.profitEnabled" type="info" :closable="false" show-icon
                     style="margin-bottom:10px"
                     title="「监控开启」未打开：不会每 10 分钟自动拉取（手动拉取仍会按阈值告警）"></el-alert>
           <div v-else class="channel-ok">
             <el-tag size="mini" type="success">告警通道已就绪</el-tag>
             <span class="loginid" style="margin-left:8px">
-              企业微信群机器人 · 总开关已开 · 触发条件：{{ channelCondText }}
+              毛利专用群机器人 · 触发条件：{{ channelCondText }}
             </span>
           </div>
           <el-alert v-if="rq.profit.error" type="warning" :title="rq.profit.error" :closable="false" show-icon
@@ -1007,32 +1035,20 @@
           </el-table>
         </el-card>
 
-        <!-- 告警通道设置：与退单页「退单同步与提醒设置」共用同一组 app_config 配置 -->
-        <el-dialog title="企业微信告警通道" :visible.sync="channelDlg.visible" width="580px" append-to-body>
-          <el-alert type="info" :closable="false" show-icon style="margin-bottom:12px"
-                    title="毛利告警、新退单提醒、超 24 小时待处理提醒共用这一个群机器人。"
-                    description="地址在企业微信群「群设置 → 群机器人」里创建后复制；未配置或总开关关闭时，所有企业微信提醒都不会发送。"></el-alert>
-          <el-form label-position="top" size="small">
-            <el-form-item label="机器人总开关">
-              <el-switch v-model="rq.config.wecomEnabled" active-text="开启" inactive-text="关闭"></el-switch>
-              <span class="loginid" style="margin-left:10px">关闭后所有企业微信提醒（含退单提醒）一律不发</span>
-            </el-form-item>
-            <el-form-item label="企业微信机器人 webhook">
-              <el-input v-model="rq.config.webhook"
-                        placeholder="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=...">
-                <el-button slot="append" size="mini" @click="testWebhook">发送测试</el-button>
-              </el-input>
-              <div class="loginid" style="margin-top:4px">「发送测试」用的是<b>已保存</b>的地址，改完请先保存再测。</div>
-            </el-form-item>
-          </el-form>
-          <div class="form-tip">
-            毛利告警还需满足：两个阈值至少有一个 &gt; 0，且「监控开启」已打开（否则只在你手动拉取时才判定）。
+        <!-- 每天毛利总额趋势 -->
+        <el-card class="section-card" shadow="never">
+          <div slot="header" style="display:flex;align-items:center;gap:10px">
+            <b>每天毛利总额趋势</b>
+            <el-radio-group v-model="rq.profitDays" size="mini" @change="loadProfitTrend">
+              <el-radio-button :label="7">近 7 天</el-radio-button>
+              <el-radio-button :label="30">近 30 天</el-radio-button>
+              <el-radio-button :label="90">近 90 天</el-radio-button>
+            </el-radio-group>
+            <span style="flex:1"></span>
+            <span class="loginid">柱子 = 当天入库订单的线上毛利合计（负值红色），无数据的日期显示 0</span>
           </div>
-          <div slot="footer">
-            <el-button size="small" @click="channelDlg.visible = false">取消</el-button>
-            <el-button size="small" type="primary" :loading="rq.savingCfg" @click="saveChannel">保存</el-button>
-          </div>
-        </el-dialog>
+          <div id="profit-trend" style="height:220px"></div>
+        </el-card>
       </div>
     </el-main>
   </el-container>
@@ -1288,7 +1304,7 @@ const vm = new Vue({
       meta: '', tenantLabel: '',
       // 筛选（草稿 vs 生效）
       draftKeyword: '', keyword: '', draftCollect: '15', collectState: '15', draftInvoice: '', invoiceState: '',
-      pendSort: '', dashPage: 1, dashSize: 20, pageSizes: [10, 20, 50, 100],
+      pendSort: '', amountSort: '', dashPage: 1, dashSize: 20, pageSizes: [10, 20, 50, 100],
       // 选择 / 展开
       selected: {}, expanded: {}, orderOpen: {}, detailCache: {},
       // 趋势
@@ -1311,8 +1327,6 @@ const vm = new Vue({
       users: [], newUser: { company: '', password: '', role: 'user', taxNo: '', email: '', note: '' },
       creatingUser: false, createOk: false,
       userEdit: { visible: false, id: null, title: '', company: '', taxNo: '', email: '', note: '', hint: '', lockCompany: false, saving: false },
-      // 告警通道弹窗（毛利页入口，配置与退单页共用）
-      channelDlg: { visible: false },
       // 菜单权限弹窗（退单列表 / 实时毛利监控）
       menuPermit: { visible: false, id: null, username: '', refund: false, profit: false, saving: false,
                     origin: { refund: false, profit: false } },
@@ -1331,10 +1345,12 @@ const vm = new Vue({
           webhook: '', wecomEnabled: false, alertDelivery: true,
           remindTemplate: '订单号,渠道,退单类型',
           profitEnabled: false, profitMinAmount: 0, profitMinRate: 0,
+          profitWebhook: '', profitWecomEnabled: false,
           profitLastPullAt: '', profitLastPullCount: 0,
         },
         savingCfg: false, savedCfg: false,
         profit: { loading: false, rows: [], total: 0, alerts: 0, error: '' },
+        profitDays: 30, profitTrend: [],
         log: { visible: false, row: {}, rows: [], tab: 'all', loading: false },
       },
       // 上传
@@ -1350,25 +1366,25 @@ const vm = new Vue({
     canRefund() { return !!(this.me && (this.me.role === 'admin' || this.me.qnhRefundEnabled)); },
     // 实时毛利监控权限（独立菜单权限）
     canProfit() { return !!(this.me && (this.me.role === 'admin' || this.me.qnhProfitEnabled)); },
-    // 毛利告警「发不出去」的阻断项（任一非空即告警不会发）
+    // 毛利告警「发不出去」的阻断项（只看毛利专用机器人，与退单提醒通道无关）
     channelIssues() {
       const c = this.rq.config || {};
       const out = [];
-      if (!String(c.webhook || '').trim()) out.push('未填写企业微信机器人 webhook');
-      if (!c.wecomEnabled) out.push('机器人总开关已关闭');
-      if (!(Number(c.profitMinAmount) > 0) && !(Number(c.profitMinRate) > 0)) {
-        out.push('两个告警阈值都是 0（0 表示该条件不启用）');
-      }
+      if (!String(c.profitWebhook || '').trim()) out.push('未填写毛利告警机器人 webhook');
+      if (!c.profitWecomEnabled) out.push('毛利告警机器人开关已关闭');
+      const a = Number(c.profitMinAmount) || 0;
+      const r = Number(c.profitMinRate) || 0;
+      if (a === 0 && r === 0) out.push('两个告警阈值都是 0（0 表示该条件不启用）');
       return out;
     },
-    // 通道就绪时展示的实际触发条件
+    // 通道就绪时展示的实际触发条件（阈值可为负）
     channelCondText() {
       const c = this.rq.config || {};
       const a = Number(c.profitMinAmount) || 0;
       const r = Number(c.profitMinRate) || 0;
       const parts = [];
-      if (a > 0) parts.push(`线上毛利 < ${a} 元`);
-      if (r > 0) parts.push(`毛利率 < ${r}%`);
+      if (a !== 0) parts.push(`线上毛利 < ${a} 元`);
+      if (r !== 0) parts.push(`毛利率 < ${r}%`);
       return parts.join(' 或 ') || '—';
     },
     // 同步时间点下拉的候选（整点/半点）
@@ -1453,6 +1469,8 @@ const vm = new Vue({
       list.sort((a, b) => {
         if (this.pendSort === 'desc') return Number(b.pendingAmount) - Number(a.pendingAmount);
         if (this.pendSort === 'asc') return Number(a.pendingAmount) - Number(b.pendingAmount);
+        if (this.amountSort === 'desc') return Number(b.totalAmount) - Number(a.totalAmount);
+        if (this.amountSort === 'asc') return Number(a.totalAmount) - Number(b.totalAmount);
         const ta = a.lastSentAt ? new Date(String(a.lastSentAt).replace(' ', 'T')).getTime() : 0;
         const tb = b.lastSentAt ? new Date(String(b.lastSentAt).replace(' ', 'T')).getTime() : 0;
         if (tb !== ta) return tb - ta;
@@ -1520,6 +1538,7 @@ const vm = new Vue({
     page(p) {
       if (p === 'board') this.$nextTick(() => this.renderTrend());
       if (p === 'refund') this.$nextTick(() => this.renderRefundTrend());
+      if (p === 'profit') this.$nextTick(() => this.renderProfitTrend());
     },
     'detail.visible'(v) { if (!v) this.detail.q = ''; },
   },
@@ -1637,11 +1656,20 @@ const vm = new Vue({
     onDashSize(s) { this.dashSize = s; this.dashPage = 1; },
     togglePendSort() {
       this.pendSort = this.pendSort === '' ? 'desc' : (this.pendSort === 'desc' ? 'asc' : '');
+      this.amountSort = '';
       this.dashPage = 1;
     },
     onSortChange({ prop, order }) {
-      if (prop !== 'pendingAmount') return;
-      this.pendSort = order === 'descending' ? 'desc' : (order === 'ascending' ? 'asc' : '');
+      const dir = order === 'descending' ? 'desc' : (order === 'ascending' ? 'asc' : '');
+      if (prop === 'pendingAmount') {
+        this.pendSort = dir;
+        this.amountSort = '';
+      } else if (prop === 'totalAmount') {
+        this.amountSort = dir;
+        this.pendSort = '';
+      } else {
+        return;
+      }
       this.dashPage = 1;
     },
     // ── 选择 ──
@@ -1883,6 +1911,7 @@ const vm = new Vue({
     onResize() {
       if (this._charts) this._charts.forEach((ch) => { try { ch.resize(); } catch (e) {} });
       if (this._rqChart) { try { this._rqChart.resize(); } catch (e) {} }
+      if (this._profitChart) { try { this._profitChart.resize(); } catch (e) {} }
     },
     renderTrend() {
       if (this.page !== 'board') return;
@@ -2145,14 +2174,6 @@ const vm = new Vue({
       }
     },
 
-    // ── 告警通道弹窗（毛利页入口；配置与退单页同源，均为 /api/qnh/config）──
-    openChannelDlg() {
-      this.channelDlg.visible = true;
-    },
-    async saveChannel() {
-      await this.saveQnhConfig();
-      if (this.rq.savedCfg) this.channelDlg.visible = false;
-    },
     async saveQnhConfig() {
       this.rq.savingCfg = true;
       this.rq.savedCfg = false;
@@ -2170,6 +2191,8 @@ const vm = new Vue({
             alertDelivery: c.alertDelivery,
             remindTemplate: c.remindTemplate || '订单号,渠道,退单类型',
             profitEnabled: c.profitEnabled,
+            profitWebhook: c.profitWebhook || '',
+            profitWecomEnabled: c.profitWecomEnabled,
             profitMinAmount: Number(c.profitMinAmount) || 0,
             profitMinRate: Number(c.profitMinRate) || 0,
           }),
@@ -2197,6 +2220,63 @@ const vm = new Vue({
       } catch (e) {
         this.rq.profit.error = '毛利数据加载失败：' + e.message;
       }
+      this.loadProfitTrend();
+    },
+    /** 每天毛利总额趋势（按 data_date 聚合） */
+    async loadProfitTrend() {
+      if (!this.canProfit) return;
+      try {
+        const d = await this.api('/api/qnh/profit/trend?days=' + this.rq.profitDays);
+        this.rq.profitTrend = (d && d.days) || [];
+      } catch (e) { this.rq.profitTrend = []; }
+      this.$nextTick(() => this.renderProfitTrend());
+    },
+    renderProfitTrend() {
+      if (this.page !== 'profit') return;
+      const EC = ecLib();
+      const dom = document.getElementById('profit-trend');
+      if (!EC || !dom) return;
+      this._profitChart = this._profitChart || EC.init(dom);
+      const days = this.rq.profitTrend || [];
+      this._profitChart.setOption({
+        grid: { left: 6, right: 10, top: 26, bottom: 4, containLabel: true },
+        tooltip: {
+          trigger: 'axis', axisPointer: { type: 'shadow' }, confine: true,
+          backgroundColor: 'rgba(38,40,44,.92)', borderWidth: 0, textStyle: { color: '#fff', fontSize: 12 },
+          formatter: (ps) => {
+            const d = days[ps && ps[0] ? ps[0].dataIndex : 0] || {};
+            const p = Number(d.profit) || 0;
+            return `<b>${d.date || ''}</b><br/>毛利合计：<b style="color:${p < 0 ? '#ff9c9c' : '#9be09b'}">`
+              + `${p < 0 ? '-' : ''}¥${Math.abs(p).toFixed(2)}</b>`
+              + `<br/>订单：${d.count || 0} 单（其中亏损 ${d.lossCount || 0} 单）`
+              + `<br/>预计收入合计：${yuan(d.income || 0)}`;
+          },
+        },
+        xAxis: {
+          type: 'category', data: days.map((d) => String(d.date).slice(5)),
+          axisTick: { show: false }, axisLine: { lineStyle: { color: '#e8e9eb' } },
+          axisLabel: { fontSize: 10, color: '#8a8f99', interval: days.length > 30 ? 8 : 2, margin: 6 },
+        },
+        yAxis: {
+          type: 'value', splitLine: { lineStyle: { color: '#f2f3f5' } },
+          axisLabel: { fontSize: 10, color: '#8a8f99', formatter: (v) => (v < 0 ? '-' : '') + '¥' + Math.abs(v) },
+        },
+        series: [{
+          type: 'bar', barMaxWidth: 22,
+          data: days.map((d) => {
+            const v = Number(d.profit) || 0;
+            return {
+              value: Number(v.toFixed(2)),
+              itemStyle: { color: v < 0 ? '#f56c6c' : '#67c23a', borderRadius: v < 0 ? [0, 0, 3, 3] : [3, 3, 0, 0] },
+            };
+          }),
+          markLine: {
+            silent: true, symbol: 'none',
+            lineStyle: { color: '#dcdfe6', type: 'dashed' },
+            data: [{ yAxis: 0 }],
+          },
+        }],
+      }, true);
     },
     /** 立即经本机助手拉一次当天毛利明细（服务端顺带做阈值告警） */
     async pullProfit() {
@@ -2223,6 +2303,17 @@ const vm = new Vue({
       }
     },
 
+    // 毛利告警机器人测试（与退单提醒机器人分开测）
+    async testProfitWebhook() {
+      try {
+        const d = await this.api('/api/qnh/test-webhook', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ type: 'profit' }),
+        });
+        if (d.ok) this.$message.success('测试消息已发到「毛利告警」群，请查看企业微信');
+        else this.$message.error('发送失败：' + (d.message || '未配置毛利告警机器人 webhook'));
+      } catch (e) { this.$message.error('发送失败：' + e.message); }
+    },
     async testWebhook() {
       try {
         const d = await this.api('/api/qnh/test-webhook', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
