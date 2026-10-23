@@ -241,11 +241,14 @@ async function ensureQnhSchema(q) {
     // 实时毛利监控：订单毛利明细（数据经「本机助手」页内签名接口拉取，见 lib/qnh.js）
     'CREATE TABLE IF NOT EXISTS `qnh_profit_order` (' +
       "  `order_no` VARCHAR(64) NOT NULL COMMENT '订单号'," +
+      "  `order_seq` VARCHAR(32) DEFAULT NULL COMMENT '订单编号/序号（页面 order_seq）'," +
+      "  `channel_name` VARCHAR(64) DEFAULT NULL COMMENT '渠道名称（美团闪购等）'," +
       "  `store_name` VARCHAR(128) DEFAULT NULL COMMENT '门店'," +
       "  `order_time` DATETIME DEFAULT NULL COMMENT '下单时间'," +
       "  `order_time_ms` BIGINT DEFAULT NULL," +
       "  `profit_online` DECIMAL(14,2) DEFAULT NULL COMMENT '线上毛利（元）'," +
       "  `profit_rate_online` DECIMAL(14,4) DEFAULT NULL COMMENT '线上毛利率（%，如 39.33）'," +
+      "  `est_income_amt` DECIMAL(14,2) DEFAULT NULL COMMENT '预计收入（元，页面 ord_est_income_amt）'," +
       "  `alerted` TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否已推送过低毛利告警'," +
       "  `data_date` DATE DEFAULT NULL COMMENT '数据归属日期（拉取批次）'," +
       "  `raw_json` LONGTEXT DEFAULT NULL," +
@@ -371,12 +374,31 @@ async function migrate(conn, dbName) {
     );
   }
 
-  // ── 账号表：退单列表权限（默认关闭，由超级管理员逐个开启）──
+  // ── 账号表：菜单权限（默认关闭，由超级管理员逐个开启；admin 恒为真）──
   if (!(await colExists('app_user', 'qnh_refund_enabled'))) {
     await q(
       'ALTER TABLE `app_user` ADD COLUMN `qnh_refund_enabled` TINYINT(1) NOT NULL DEFAULT 0 ' +
       "COMMENT '是否允许查看退单列表页（1=开启，超级管理员始终可见）'"
     );
+  }
+  if (!(await colExists('app_user', 'qnh_profit_enabled'))) {
+    await q(
+      'ALTER TABLE `app_user` ADD COLUMN `qnh_profit_enabled` TINYINT(1) NOT NULL DEFAULT 0 ' +
+      "COMMENT '是否允许查看实时毛利监控（1=开启，超级管理员始终可见）'"
+    );
+  }
+
+  // ── 毛利明细补列（老库）：订单编号 / 渠道名称 / 预计收入 ──
+  if (await tableExists('qnh_profit_order')) {
+    for (const [col, decl] of [
+      ['order_seq', "VARCHAR(32) DEFAULT NULL COMMENT '订单编号/序号（页面 order_seq）'"],
+      ['channel_name', "VARCHAR(64) DEFAULT NULL COMMENT '渠道名称（美团闪购等）'"],
+      ['est_income_amt', "DECIMAL(14,2) DEFAULT NULL COMMENT '预计收入（元，页面 ord_est_income_amt）'"],
+    ]) {
+      if (!(await colExists('qnh_profit_order', col))) {
+        await q(`ALTER TABLE \`qnh_profit_order\` ADD COLUMN \`${col}\` ${decl}`);
+      }
+    }
   }
 
   // ── 牵牛花退单同步的表 ──

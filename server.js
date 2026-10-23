@@ -173,6 +173,8 @@ function publicUser(u) {
     mustChangePassword: !!u.must_change_password,
     // 退单列表页权限（超级管理员始终可见，普通用户由管理员逐个开启）
     qnhRefundEnabled: u.role === 'admin' ? true : !!Number(u.qnh_refund_enabled),
+    // 实时毛利监控权限（同上，独立开关）
+    qnhProfitEnabled: u.role === 'admin' ? true : !!Number(u.qnh_profit_enabled),
     lastLoginAt: u.last_login_at,
     createdAt: u.created_at,
   };
@@ -1405,7 +1407,8 @@ async function setOrderState(userId, { orderNo, loginId, action }) {
 async function listUsers() {
   const users = await db.query(`
     SELECT u.id, u.username, u.role, u.status, u.company_name, u.tax_no, u.email, u.display_name, u.note,
-           u.must_change_password, u.last_login_at, u.created_at, u.updated_at, u.qnh_refund_enabled,
+           u.must_change_password, u.last_login_at, u.created_at, u.updated_at,
+           u.qnh_refund_enabled, u.qnh_profit_enabled,
            (SELECT COUNT(*) FROM invoice_order o WHERE o.user_id = u.id)              AS order_count,
            (SELECT COUNT(DISTINCT o.seller_company) FROM invoice_order o WHERE o.user_id = u.id) AS company_count,
            (SELECT COUNT(*) FROM issued_invoice i WHERE i.user_id = u.id)             AS invoice_rows,
@@ -1419,6 +1422,7 @@ async function listUsers() {
     displayName: u.display_name || '', note: u.note || '',
     mustChangePassword: !!u.must_change_password,
     qnhRefundEnabled: u.role === 'admin' ? true : !!Number(u.qnh_refund_enabled),
+    qnhProfitEnabled: u.role === 'admin' ? true : !!Number(u.qnh_profit_enabled),
     lastLoginAt: u.last_login_at, createdAt: u.created_at, updatedAt: u.updated_at,
     orderCount: Number(u.order_count) || 0,
     companyCount: Number(u.company_count) || 0,
@@ -2217,10 +2221,19 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { started: true, channel: 'client' });
     }
 
-    // ── 牵牛花退单列表（需「退单列表」权限；超级管理员始终可用）──
+    // ── 牵牛花：退单列表 / 实时毛利（按「菜单权限」分别放行；超级管理员始终可用）──
     if (p.startsWith('/api/qnh/')) {
       const canRefund = isAdmin || !!Number(user.qnh_refund_enabled);
-      if (!canRefund) return sendJson(res, 403, { error: '未开启退单列表权限，请联系超级管理员' });
+      const canProfit = isAdmin || !!Number(user.qnh_profit_enabled);
+      const profitApi = p === '/api/qnh/profit' || p === '/api/qnh/profit/pull';
+      if (profitApi) {
+        if (!canProfit) return sendJson(res, 403, { error: '未开启毛利监控权限，请联系超级管理员' });
+      } else if (p === '/api/qnh/status') {
+        // 两个面板都要用它拿配置，任一权限即可
+        if (!canRefund && !canProfit) return sendJson(res, 403, { error: '未开启菜单权限，请联系超级管理员' });
+      } else if (!canRefund) {
+        return sendJson(res, 403, { error: '未开启退单列表权限，请联系超级管理员' });
+      }
 
       if (method === 'GET' && p === '/api/qnh/status') {
         const [cookie, cfg, sum] = await Promise.all([
@@ -2230,8 +2243,11 @@ const server = http.createServer(async (req, res) => {
           cookie,
           config: qnh.publicConfig(cfg),
           sync: qnh.getSyncState(),
-          summary: sum,
+          // 退单概况只给有退单权限的人（毛利-only 用户不需要）
+          summary: canRefund ? sum : null,
           isAdmin,
+          canRefund,
+          canProfit,
         });
       }
 
@@ -2399,9 +2415,9 @@ const server = http.createServer(async (req, res) => {
       if (method === 'GET' && p === '/api/qnh/profit') {
         return sendJson(res, 200, await qnh.profitOverview({ limit: url.searchParams.get('limit') || 100 }));
       }
-      // 立即拉取当天毛利明细（经本机助手页内签名接口；仅超级管理员）
+      // 立即拉取当天毛利明细（经本机助手页内签名接口；需毛利监控权限）
       if (method === 'POST' && p === '/api/qnh/profit/pull') {
-        if (!isAdmin) return sendJson(res, 403, { error: '仅超级管理员可拉取毛利数据' });
+        if (!canProfit) return sendJson(res, 403, { error: '未开启毛利监控权限，请联系超级管理员' });
         const out = await qnh.pullProfitOrders();
         if (out.ok) await logOp(user, 'qnh.profit_pull', { rows: out.rows, alerts: out.alerts });
         return sendJson(res, 200, out);
@@ -2439,20 +2455,27 @@ const server = http.createServer(async (req, res) => {
       if (method === 'POST' && p === '/api/admin/users/delete') {
         return sendJson(res, 200, await deleteUser(await readBody(req), user));
       }
-      // 退单列表页权限：逐个账号开启/关闭
+      // 菜单权限：逐个账号开启/关闭（menu=refund|profit，缺省 refund 向后兼容）
       if (method === 'POST' && p === '/api/admin/users/qnh-refund') {
         const b = await readBody(req);
         const id = Number(b.id);
         const enabled = !!b.enabled;
+        const menu = String(b.menu || 'refund').trim().toLowerCase();
+        const MENU = {
+          refund: { col: 'qnh_refund_enabled', label: '退单列表', field: 'qnhRefundEnabled' },
+          profit: { col: 'qnh_profit_enabled', label: '实时毛利监控', field: 'qnhProfitEnabled' },
+        };
+        const m = MENU[menu];
+        if (!m) return sendJson(res, 400, { error: '未知的菜单：' + menu });
         if (!id) return sendJson(res, 400, { error: '缺少用户ID' });
         const rows = await db.query('SELECT id, username, role FROM app_user WHERE id = ?', [id]);
         if (!rows.length) return sendJson(res, 404, { error: '用户不存在' });
         if (rows[0].role === 'admin') {
-          return sendJson(res, 400, { error: '超级管理员默认拥有退单列表权限，无需开启' });
+          return sendJson(res, 400, { error: `超级管理员默认拥有${m.label}权限，无需开启` });
         }
-        await db.exec('UPDATE app_user SET qnh_refund_enabled = ? WHERE id = ?', [enabled ? 1 : 0, id]);
-        await logOp(user, 'qnh.permit', { username: rows[0].username, enabled });
-        return sendJson(res, 200, { ok: true, id, qnhRefundEnabled: enabled });
+        await db.exec(`UPDATE app_user SET ${m.col} = ? WHERE id = ?`, [enabled ? 1 : 0, id]);
+        await logOp(user, 'qnh.permit', { username: rows[0].username, menu, enabled });
+        return sendJson(res, 200, { ok: true, id, menu, enabled, [m.field]: enabled });
       }
       // 按用户名/ID 查用户概况（配合 ?tenant= 查看其看板）
       if (method === 'GET' && p === '/api/admin/user-lookup') {

@@ -80,6 +80,8 @@
   .member-line .kv-label { font-size: 11px; color: var(--sub); }
   .member-line .row-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; }
   .loginid { color: var(--sub); font-size: 11px; }
+  .menu-perm-row { display: flex; align-items: center; justify-content: space-between;
+                   padding: 10px 12px; border: 1px solid #ebeef5; border-radius: 6px; margin-bottom: 10px; }
   .amount { font-weight: 600; color: #e53935; }
   .amount.ok { color: #2e7d32; }
   .amount.zero { color: var(--sub); font-weight: 400; }
@@ -122,6 +124,7 @@
           <el-menu-item index="board">看板</el-menu-item>
           <el-menu-item index="mapping">名称映射</el-menu-item>
           <el-menu-item index="refund" v-if="canRefund">退单列表</el-menu-item>
+          <el-menu-item index="profit" v-if="canProfit">实时毛利监控</el-menu-item>
           <el-menu-item index="admin" v-if="isAdmin">系统管理</el-menu-item>
           <el-menu-item index="audit" v-if="isAdmin">操作日志</el-menu-item>
         </el-menu>
@@ -626,16 +629,20 @@
             <el-table-column label="收票邮箱" width="170"><template slot-scope="p"><span class="loginid">{{ p.row.email || '—' }}</span></template></el-table-column>
             <el-table-column label="数据量" width="130"><template slot-scope="p"><span class="loginid">{{ p.row.role === 'admin' ? '系统账号 · 不承载业务数据' : p.row.orderCount + ' 单 / ' + p.row.mappingCount + ' 映射' }}</span></template></el-table-column>
             <el-table-column label="最近登录" width="140"><template slot-scope="p"><span class="loginid">{{ fmtMinute(p.row.lastLoginAt) || '—' }}</span></template></el-table-column>
-            <el-table-column label="退单列表" width="100">
+            <el-table-column label="菜单权限" width="150">
               <template slot-scope="p">
-                <el-tag v-if="p.row.role === 'admin'" size="mini" type="success">默认开启</el-tag>
-                <el-switch v-else :value="p.row.qnhRefundEnabled" size="mini"
-                           @change="v => toggleQnhPermit(p.row, v)"></el-switch>
+                <el-tag v-if="p.row.role === 'admin'" size="mini" type="success">全部菜单</el-tag>
+                <template v-else>
+                  <el-tag size="mini" :type="p.row.qnhRefundEnabled ? 'success' : 'info'"
+                          style="margin-right:4px">退单</el-tag>
+                  <el-tag size="mini" :type="p.row.qnhProfitEnabled ? 'success' : 'info'">毛利</el-tag>
+                </template>
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="270">
+            <el-table-column label="操作" width="350">
               <template slot-scope="p">
                 <div style="display:flex;gap:6px;flex-wrap:wrap">
+                  <el-button v-if="p.row.role !== 'admin'" size="mini" type="primary" plain @click="openMenuPermit(p.row)">菜单权限</el-button>
                   <el-button v-if="p.row.role !== 'admin'" size="mini" @click="viewUserData(p.row)">查看数据</el-button>
                   <el-button v-if="p.row.role !== 'admin'" size="mini" @click="openUserEdit(p.row)">编辑</el-button>
                   <el-button size="mini" @click="resetPwd(p.row)">重置密码</el-button>
@@ -909,11 +916,21 @@
           </div>
         </el-card>
 
-        <!-- 实时毛利监控（仅超级管理员） -->
-        <el-card v-if="isAdmin" class="section-card" shadow="never">
+      </div>
+
+      <!-- ══════════ 实时毛利监控（按「菜单权限」开放） ══════════ -->
+      <div v-show="page === 'profit'" id="page-profit">
+        <div class="page-head">
+          <h2>实时毛利监控</h2>
+          <div class="meta-line">
+            数据来自牵牛花「订单毛利明细」，默认按<b>线上毛利从小到大</b>排列，亏钱/低毛利的订单排在最前面。
+            接口需要签名，由<b>本机助手</b>在你电脑的牵牛花页面里代拉（监控开启后每 10 分钟自动拉一次）。
+          </div>
+        </div>
+        <el-card class="section-card" shadow="never">
           <div slot="header" style="display:flex;align-items:center;gap:10px">
             <b>实时毛利监控预警</b>
-            <el-switch v-model="rq.config.profitEnabled" active-text="监控开启" inactive-text="监控关闭"
+            <el-switch v-if="isAdmin" v-model="rq.config.profitEnabled" active-text="监控开启" inactive-text="监控关闭"
                        @change="saveQnhConfig"></el-switch>
             <span style="flex:1"></span>
             <span class="loginid" v-if="rq.config.profitLastPullAt">
@@ -921,7 +938,7 @@
             </span>
             <el-button size="mini" type="primary" :loading="rq.profit.loading" @click="pullProfit">立即拉取毛利数据</el-button>
           </div>
-          <el-form label-position="top" size="small" inline>
+          <el-form v-if="isAdmin" label-position="top" size="small" inline>
             <el-form-item label="线上毛利低于（元）告警">
               <el-input-number v-model="rq.config.profitMinAmount" :min="0" :precision="2" :step="1"
                                controls-position="right" style="width:140px"></el-input-number>
@@ -935,20 +952,27 @@
             </el-form-item>
           </el-form>
           <div class="form-tip" style="margin-bottom:10px">
-            毛利数据来自牵牛花「订单毛利明细」，接口需要签名——由<b>本机助手</b>在你电脑的牵牛花页面里代拉
-            （监控开启后每 10 分钟自动拉一次，助手需在线）。低于阈值的订单会推送企业微信，每单只告警一次。
+            低于阈值的订单会推送企业微信，每单只告警一次。阈值与监控开关由超级管理员维护。
           </div>
           <el-alert v-if="rq.profit.error" type="warning" :title="rq.profit.error" :closable="false" show-icon
                     style="margin-bottom:10px"></el-alert>
           <el-alert v-else-if="rq.config.profitLastError" type="error" :closable="false" show-icon
                     style="margin-bottom:10px"
                     :title="'最近一次拉取失败：' + rq.config.profitLastError"></el-alert>
-          <el-table :data="rq.profit.rows" size="small" border max-height="360"
+          <el-table :data="rq.profit.rows" size="small" border max-height="440"
+                    :default-sort="{ prop: 'profit', order: 'ascending' }"
                     empty-text="暂无毛利数据（点「立即拉取毛利数据」获取当天的订单毛利明细）">
-            <el-table-column label="门店" min-width="180"><template slot-scope="p">{{ p.row.storeName || '—' }}</template></el-table-column>
+            <el-table-column label="订单编号" width="90" align="center" prop="orderSeq">
+              <template slot-scope="p"><span class="loginid">{{ p.row.orderSeq || '—' }}</span></template>
+            </el-table-column>
             <el-table-column label="订单号" width="200"><template slot-scope="p"><span class="loginid">{{ p.row.orderNo }}</span></template></el-table-column>
+            <el-table-column label="渠道" width="110"><template slot-scope="p">{{ p.row.channelName || '—' }}</template></el-table-column>
+            <el-table-column label="门店" min-width="170"><template slot-scope="p">{{ p.row.storeName || '—' }}</template></el-table-column>
             <el-table-column label="下单时间" width="160"><template slot-scope="p">{{ p.row.orderTime || '—' }}</template></el-table-column>
-            <el-table-column label="线上毛利（元）" width="130" align="right">
+            <el-table-column label="预计收入（元）" width="130" align="right">
+              <template slot-scope="p">{{ p.row.estIncome == null ? '—' : p.row.estIncome.toFixed(2) }}</template>
+            </el-table-column>
+            <el-table-column label="线上毛利（元）" width="130" align="right" prop="profit" sortable>
               <template slot-scope="p">
                 <span :class="p.row.alerted ? 'amount' : 'amount ok'">{{ p.row.profit == null ? '—' : p.row.profit.toFixed(2) }}</span>
               </template>
@@ -1067,6 +1091,32 @@
     <div slot="footer">
       <el-button @click="userEdit.visible = false">取消</el-button>
       <el-button type="primary" :loading="userEdit.saving" @click="saveUserEdit">保存</el-button>
+    </div>
+  </el-dialog>
+
+  <!-- ══════════ 菜单权限（逐用户开放功能） ══════════ -->
+  <el-dialog :title="'菜单权限 · ' + (menuPermit.username || '')" :visible.sync="menuPermit.visible"
+             width="460px" append-to-body>
+    <div class="form-tip" style="margin-bottom:12px">
+      勾选后该用户登录即可看到对应菜单；超级管理员默认拥有全部菜单，无需设置。
+    </div>
+    <div class="menu-perm-row">
+      <div>
+        <b>退单列表</b>
+        <div class="loginid">查看退单数据、订单/配送日志、发送提醒</div>
+      </div>
+      <el-switch v-model="menuPermit.refund"></el-switch>
+    </div>
+    <div class="menu-perm-row">
+      <div>
+        <b>实时毛利监控</b>
+        <div class="loginid">查看订单毛利/预计收入，手动拉取当天毛利数据</div>
+      </div>
+      <el-switch v-model="menuPermit.profit"></el-switch>
+    </div>
+    <div slot="footer">
+      <el-button @click="menuPermit.visible = false">取消</el-button>
+      <el-button type="primary" :loading="menuPermit.saving" @click="saveMenuPermit">保存</el-button>
     </div>
   </el-dialog>
 
@@ -1216,6 +1266,9 @@ const vm = new Vue({
       users: [], newUser: { company: '', password: '', role: 'user', taxNo: '', email: '', note: '' },
       creatingUser: false, createOk: false,
       userEdit: { visible: false, id: null, title: '', company: '', taxNo: '', email: '', note: '', hint: '', lockCompany: false, saving: false },
+      // 菜单权限弹窗（退单列表 / 实时毛利监控）
+      menuPermit: { visible: false, id: null, username: '', refund: false, profit: false, saving: false,
+                    origin: { refund: false, profit: false } },
       // 操作日志（仅超级管理员）
       opLog: { draftUsername: '', username: '', page: 1, size: 20, total: 0, rows: [], loading: false },
       // 退单列表（牵牛花）
@@ -1248,6 +1301,8 @@ const vm = new Vue({
     isAdmin() { return !!(this.me && this.me.role === 'admin'); },
     // 退单列表页权限：超级管理员始终可见，普通用户由管理员在「系统管理」里开启
     canRefund() { return !!(this.me && (this.me.role === 'admin' || this.me.qnhRefundEnabled)); },
+    // 实时毛利监控权限（独立菜单权限）
+    canProfit() { return !!(this.me && (this.me.role === 'admin' || this.me.qnhProfitEnabled)); },
     // 同步时间点下拉的候选（整点/半点）
     timeOptions() {
       const out = [];
@@ -1456,16 +1511,20 @@ const vm = new Vue({
       if (p === 'admin' && !this.isAdmin) p = 'board';
       if (p === 'audit' && !this.isAdmin) p = 'board';
       if (p === 'refund' && !this.canRefund) p = 'board';
+      if (p === 'profit' && !this.canProfit) p = 'board';
       this.page = p;
       if (p === 'admin') { this.loadConfigUI(); this.loadUsers(); }
       if (p === 'mapping') this.loadMapping();
       if (p === 'audit') this.loadOpLog();
+      if (p === 'profit') {
+        this.loadProfit();
+        this.loadRefundStatus();
+      }
       if (p === 'refund') {
         this.reportOp('qnh.view');
         this.loadRefundStatus();
         this.loadRefunds();
         this.loadRefundTrend();
-        this.loadProfit();
       }
     },
     // ── 看板数据 ──
@@ -2052,7 +2111,7 @@ const vm = new Vue({
 
     /** 拉取毛利监控面板数据（与退单状态一起刷新） */
     async loadProfit() {
-      if (!this.isAdmin) return;
+      if (!this.canProfit) return;
       try {
         const d = await this.api('/api/qnh/profit?limit=100');
         this.rq.profit.rows = d.rows || [];
@@ -2211,19 +2270,40 @@ const vm = new Vue({
       } catch (e) { this.$message.error('加载失败: ' + e.message); }
     },
     // 开关某个账号的「退单列表」权限
-    async toggleQnhPermit(row, enabled) {
+    /** 打开「菜单权限」弹窗（逐用户开放退单列表 / 实时毛利监控） */
+    openMenuPermit(row) {
+      this.menuPermit = {
+        visible: true, id: row.id, username: row.username,
+        refund: !!row.qnhRefundEnabled, profit: !!row.qnhProfitEnabled,
+        saving: false,
+        origin: { refund: !!row.qnhRefundEnabled, profit: !!row.qnhProfitEnabled },
+      };
+    },
+    /** 保存菜单权限：只提交发生变化的项，逐项调用（任一项失败即提示） */
+    async saveMenuPermit() {
+      const m = this.menuPermit;
+      if (!m.id) return;
+      const changes = [];
+      if (m.refund !== m.origin.refund) changes.push({ menu: 'refund', enabled: m.refund, field: 'qnhRefundEnabled', label: '退单列表' });
+      if (m.profit !== m.origin.profit) changes.push({ menu: 'profit', enabled: m.profit, field: 'qnhProfitEnabled', label: '实时毛利监控' });
+      if (!changes.length) { m.visible = false; return; }
+      m.saving = true;
+      const row = (this.users || []).find((u) => u.id === m.id);
       try {
-        const d = await this.api('/api/admin/users/qnh-refund', {
-          method: 'POST', headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ id: row.id, enabled }),
-        });
-        if (d.error) { this.$message.error(d.error); return; }
-        this.$set(row, 'qnhRefundEnabled', !!d.qnhRefundEnabled);
-        this.$message.success(
-          (d.qnhRefundEnabled ? '已开启' : '已关闭') + '「' + row.username + '」的退单列表权限'
-        );
+        for (const c of changes) {
+          const d = await this.api('/api/admin/users/qnh-refund', {
+            method: 'POST', headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ id: m.id, menu: c.menu, enabled: c.enabled }),
+          });
+          if (d.error) { this.$message.error(d.error); return; }
+          if (row) this.$set(row, c.field, !!d[c.field]);
+        }
+        this.$message.success('已更新「' + m.username + '」的菜单权限');
+        m.visible = false;
       } catch (e) {
         this.$message.error('设置失败：' + e.message);
+      } finally {
+        m.saving = false;
       }
     },
     async createUser() {
