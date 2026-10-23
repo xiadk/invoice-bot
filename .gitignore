@@ -29,3 +29,6 @@ release/
 /build.log
 /npm-install.log
 /server.log
+
+# ── 构建期代码指纹（scripts/write-build-info.js 生成，随镜像走，不入库）──
+build-info.json

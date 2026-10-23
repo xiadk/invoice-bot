@@ -18,11 +18,12 @@
     "agent:dist": "electron-builder --win nsis portable",
     "agent:dist:nsis": "electron-builder --win nsis",
     "agent:dist:portable": "electron-builder --win portable",
-    "docker:build": "docker compose build",
+    "docker:build": "node scripts/write-build-info.js && docker compose build",
     "docker:up": "docker compose up -d",
     "docker:down": "docker compose down",
-    "docker:rebuild": "docker compose build && docker compose up -d",
-    "docker:logs": "docker compose logs -f app"
+    "docker:rebuild": "node scripts/write-build-info.js && docker compose build && docker compose up -d",
+    "docker:logs": "docker compose logs -f app",
+    "build:info": "node scripts/write-build-info.js"
   },
   "keywords": [],
   "author": "",
@@ -63,8 +64,18 @@
     ],
     "win": {
       "target": [
-        { "target": "nsis", "arch": ["x64"] },
-        { "target": "portable", "arch": ["x64"] }
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
       ]
     },
     "nsis": {
