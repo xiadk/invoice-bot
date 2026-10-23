@@ -243,59 +243,197 @@ async function runFetch(task, api) {
   }
   const headers = { 'Content-Type': 'application/json', Accept: 'application/json, text/plain, */*' };
   if (pageRoute) {
-    headers['qnhReferrer'] = pageRoute;
+    // qnhReferrer 不带路由参数（与抓包一致：/data/gross-profit-warn）
+    headers['qnhReferrer'] = pageRoute.split('?')[0];
     headers['M-APPKEY'] = 'fe_recofesaascrm';
   }
   Object.assign(headers, task.headers && typeof task.headers === 'object' ? task.headers : {});
-  const payload = {
-    target,
-    method,
-    headers,
-    body: method === 'GET' || task.body == null ? null : JSON.stringify(task.body),
-  };
-  const js = `(async () => {
+  // bodyStr: 已序列化的请求体字符串（GET 或无 body 时为 null）
+  const bodyStr = method === 'GET' || task.body == null ? null : JSON.stringify(task.body);
+
+  // 3. 多策略执行 —— 不同版本的 H5guard 挂的钩子不一样：
+  //     有的只 patch XMLHttpRequest（页面自己用的 axios/XHR），此时直接 fetch 拿不到签名 → openresty 403；
+  //     有的全局 hook fetch。逐个试，谁成功用谁。
+  const attempts = [];
+  let last = null;
+  for (const kind of ['xhr', 'lib', 'fetch']) {
+    const js = buildRequestJs(kind, { target, method, headers, bodyStr });
+    if (!js) { attempts.push(`${kind}: 页面无可用请求方法`); continue; }
+    const r = await w.webContents.executeJavaScript(js, true)
+      .catch((e) => ({ error: String((e && e.message) || e) }));
+    if (!r || r.skip) { attempts.push(`${kind}: 页面无该请求方法`); continue; }
+    if (r.error) { attempts.push(`${kind}: ${r.error}`); continue; }
+    attempts.push(`${kind}: HTTP ${r.status}`);
+    if (Number(r.status) >= 200 && Number(r.status) < 300) {
+      api.report({ ok: true, status: r.status, json: r.json || null, text: String(r.text || '').slice(0, 4000), via: kind });
+      return;
+    }
+    last = r;
+  }
+
+  // 4. 仍被拒（多半是被 WAF/openresty 拦在应用层之前）：改抓「页面自己发出的数据请求」
+  //     —— 那是页面按正常流程发的、天然带签名的请求，直接把它的响应拿回来用。
+  if (pageRoute) {
+    api.log('手动请求被拒，改为捕获页面自身的数据请求…');
+    const cap = await capturePageRequest(w.webContents, {
+      url: pageUrl,
+      // 从目标路径取末段（如 queryTable）作为捕获匹配串
+      match: String(task.path || task.url || '').replace(/^https?:\/\//i, '') || 'queryTable',
+      timeoutMs: 30000, api,
+    }).catch((e) => ({ error: String((e && e.message) || e) }));
+    if (cap && !cap.error && cap.status >= 200 && cap.status < 300) {
+      let json = null;
+      try { json = JSON.parse(cap.text); } catch (e) { /* 非 JSON 保持 null */ }
+      api.report({ ok: true, status: cap.status, json, text: String(cap.text || '').slice(0, 4000), via: 'capture' });
+      return;
+    }
+    if (cap && cap.error) attempts.push(`capture: ${cap.error}`);
+    else if (cap) attempts.push(`capture: HTTP ${cap.status}`);
+    else attempts.push('capture: 未捕获到页面自身的数据请求');
+  }
+
+  const status = Number(last && last.status) || 0;
+  const snippet = String((last && last.text) || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+  // 页面自身的登录态：区分「签名被网关拦」与「窗口其实没登录」
+  let loginNote = '';
+  try {
+    const p = await probeLogin(w.webContents).catch(() => null);
+    loginNote = p && p.logined
+      ? '（助手页面内登录态正常，属网关拦请求）'
+      : '（助手页面内未登录：请点看板「登录牵牛花」重新登录）';
+  } catch (e) { /* 探活失败不影响报错 */ }
+  api.report({
+    ok: false,
+    status,
+    error: (last && [401, 403].includes(status)
+      ? '请求被牵牛花网关拦截（HTTP ' + status + '）'
+      : '接口异常（HTTP ' + status + '）')
+      + (snippet ? '。接口响应：' + snippet : '')
+      + loginNote
+      + '。尝试过的通道：' + attempts.join('；').slice(0, 300),
+  });
+}
+
+/**
+ * 生成页内请求脚本。
+ * kind: xhr=XMLHttpRequest（H5guard 常挂这里）/ lib=页面自带的请求库 / fetch=原生 fetch
+ */
+function buildRequestJs(kind, { target, method, headers, bodyStr }) {
+  const u = JSON.stringify(target);
+  const m = JSON.stringify(method);
+  const h = JSON.stringify(headers);
+  const b = bodyStr == null ? 'undefined' : JSON.stringify(bodyStr);
+
+  if (kind === 'xhr') {
+    return `(new Promise((resolve) => {
+      try {
+        const xhr = new XMLHttpRequest();
+        xhr.open(${m}, ${u}, true);
+        xhr.withCredentials = true;
+        const hs = ${h};
+        Object.keys(hs).forEach((k) => { try { xhr.setRequestHeader(k, hs[k]); } catch (e) {} });
+        xhr.onreadystatechange = () => {
+          if (xhr.readyState !== 4) return;
+          let json = null;
+          const text = String(xhr.responseText || '');
+          try { json = JSON.parse(text); } catch (e) { /* 非 JSON 保持 null */ }
+          resolve({ status: xhr.status, json, text: text.slice(0, 4000) });
+        };
+        xhr.onerror = () => resolve({ error: '网络错误' });
+        xhr.send(${b === 'undefined' ? 'null' : b});
+      } catch (e) { resolve({ error: String((e && e.message) || e) }); }
+    }))`;
+  }
+
+  if (kind === 'lib') {
+    // 页面自带的请求库（axios 等）：它们的拦截器才是签名的正主
+    const dataLiteral = bodyStr == null ? 'undefined' : JSON.stringify(JSON.parse(bodyStr));
+    return `(async () => {
+      try {
+        const http = window.axios || window.request || window.__MT_REQUEST__;
+        if (!http) return { skip: true };
+        const r = await http({
+          method: ${m}, url: ${u}, headers: ${h}, data: ${dataLiteral}, withCredentials: true,
+        });
+        const text = (r && r.request && typeof r.request.responseText === 'string')
+          ? String(r.request.responseText)
+          : String((r && (typeof r.data === 'string' ? r.data : JSON.stringify(r.data))) || '');
+        let json = null;
+        try { json = JSON.parse(text); } catch (e) { /* 非 JSON 保持 null */ }
+        return { status: (r && r.status) || 0, json, text: text.slice(0, 4000) };
+      } catch (e) { return { error: String((e && e.message) || e) }; }
+    })()`;
+  }
+
+  return `(async () => {
     try {
-      const r = await fetch(${JSON.stringify(payload.target)}, {
-        method: ${JSON.stringify(payload.method)},
-        credentials: 'include',
-        headers: ${JSON.stringify(payload.headers)},
-        body: ${payload.body == null ? 'undefined' : payload.body},
+      const r = await fetch(${u}, {
+        method: ${m}, credentials: 'include', headers: ${h},
+        body: ${b},
       });
       const text = await r.text();
       let json = null;
       try { json = JSON.parse(text); } catch (e) { /* 非 JSON 保持 null */ }
       return { status: r.status, json, text: text.slice(0, 4000) };
-    } catch (e) {
-      return { error: String((e && e.message) || e) };
-    }
+    } catch (e) { return { error: String((e && e.message) || e) }; }
   })()`;
+}
 
-  // 3. 执行；被拒（403）时把页面彻底重载一次再重试（SPA 长驻后签名上下文可能失效）
-  const exec = () => w.webContents.executeJavaScript(js, true).catch((e) => ({ error: String((e && e.message) || e) }));
-  let r = await exec();
-  if (r && [401, 403].includes(Number(r.status)) && pageRoute) {
-    api.log('页内请求被拒（HTTP ' + r.status + '），重载页面后重试…');
-    try { await w.loadURL(pageUrl); } catch (e) { /* ignore */ }
-    await sleep(4000);
-    await waitGuardReady(w.webContents, 12000);
-    r = await exec();
-  }
+/**
+ * 兜底：用 CDP 抓「页面自己发出的数据请求」的响应 —
+ * 页面按正常流程发的请求自带完整签名与全部请求头，绕过了我们自己拼请求的差异。
+ * @returns {{status:number, text:string}|null}
+ */
+async function capturePageRequest(wc, { url, match, timeoutMs = 30000, api = null } = {}) {
+  if (!wc || !wc.debugger) return null;
+  let attached = false;
+  try {
+    if (wc.debugger.isAttached && wc.debugger.isAttached()) attached = true;
+    else { wc.debugger.attach(); attached = true; }
+  } catch (e) { attached = false; }
+  const cleanup = () => {
+    try { wc.debugger.removeAllListeners('message'); } catch (e) { /* ignore */ }
+    try { if (attached && wc.debugger.isAttached()) wc.debugger.detach(); } catch (e) { /* ignore */ }
+  };
+  try {
+    await wc.debugger.sendCommand('Network.enable');
+    const hits = new Map();
+    const onMsg = (_e, method, params) => {
+      if (method === 'Network.responseReceived') {
+        const id = String((params && params.requestId) || '');
+        const res = params && params.response;
+        if (res && String(res.url || '').includes(match)) hits.set(id, { status: Number(res.status) || 0, done: false });
+      }
+      if (method === 'Network.loadingFinished') {
+        const id = String((params && params.requestId) || '');
+        if (hits.has(id)) hits.get(id).done = true;
+      }
+    };
+    wc.debugger.on('message', onMsg);
 
-  if (!r || r.error) {
-    api.report({ ok: false, error: String((r && r.error) || '页面执行失败') });
-    return;
+    // 打开目标页面，让它自己把数据请求发出去
+    await wc.loadURL(url).catch(() => {});
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const hit = [...hits.entries()].find(([, v]) => v.done);
+      if (hit) {
+        const [id, meta] = hit;
+        const body = await wc.debugger.sendCommand('Network.getResponseBody', { requestId: id }).catch(() => null);
+        cleanup();
+        if (body && typeof body.body === 'string') {
+          if (api && api.log) api.log('已捕获页面自身的数据请求');
+          return { status: meta.status, text: body.body };
+        }
+        return null;
+      }
+      await sleep(500);
+    }
+    cleanup();
+    return null;
+  } catch (e) {
+    cleanup();
+    throw e;
   }
-  if ([401, 403].includes(Number(r.status))) {
-    const snippet = String(r.text || '').replace(/\s+/g, ' ').trim().slice(0, 120);
-    api.report({
-      ok: false,
-      status: r.status,
-      error: '牵牛花登录态已失效或接口被拒（HTTP ' + r.status + '）：请点看板「登录牵牛花」重新登录'
-        + (snippet ? '。接口响应：' + snippet : ''),
-    });
-    return;
-  }
-  api.report({ ok: true, status: r.status, json: r.json || null, text: String(r.text || '').slice(0, 4000) });
 }
 
 /** 等页面里的签名脚本（H5guard）就绪，未出现则超时放行（由重试兜底） */
