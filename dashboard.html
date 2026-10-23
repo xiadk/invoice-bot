@@ -940,6 +940,9 @@
           </div>
           <el-alert v-if="rq.profit.error" type="warning" :title="rq.profit.error" :closable="false" show-icon
                     style="margin-bottom:10px"></el-alert>
+          <el-alert v-else-if="rq.config.profitLastError" type="error" :closable="false" show-icon
+                    style="margin-bottom:10px"
+                    :title="'最近一次拉取失败：' + rq.config.profitLastError"></el-alert>
           <el-table :data="rq.profit.rows" size="small" border max-height="360"
                     empty-text="暂无毛利数据（点「立即拉取毛利数据」获取当天的订单毛利明细）">
             <el-table-column label="门店" min-width="180"><template slot-scope="p">{{ p.row.storeName || '—' }}</template></el-table-column>
@@ -2069,7 +2072,12 @@ const vm = new Vue({
         if (d.ok) {
           this.$message.success(d.message || '已拉取毛利明细' + (d.alerts ? `，告警 ${d.alerts} 条已推送企业微信` : ''));
         } else {
-          this.$message.warning(d.message || '拉取失败：本机助手是否在线？');
+          const note = d.message || '拉取失败：本机助手是否在线？';
+          this.$message.warning(note.length > 120 ? note.slice(0, 120) + '…' : note);
+          await this.loadProfit();
+          await this.loadRefundStatus();
+          this.rq.profit.error = note;   // 完整原因留在卡片里，便于排查
+          return;
         }
         await this.loadProfit();
         await this.loadRefundStatus();
