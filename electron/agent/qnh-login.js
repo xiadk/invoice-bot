@@ -205,21 +205,30 @@ function createLoginHandler({ log = () => {} } = {}) {
 async function runFetch(task, api) {
   const w = getWindow();
 
-  // 1. 确保窗口页面停在牵牛花域名上（签名 JS 已注入）
+  // 0. 目标页面路由：queryTable 这类 empower 组件接口会校验 Referer / qnhReferrer
+  //    （抓包：qnhReferrer: /data/gross-profit-warn，Referer 为 home.html#/data/gross-profit-warn）。
+  //    不在对应页面上发请求，网关直接 403 —— 即使 Cookie 完全有效。
+  const pageRoute = String(task.page || '').trim().replace(/^(?!\/)/, '/');
+  const pageUrl = DEFAULT_URL + '/home.html' + (pageRoute ? '#' + pageRoute : '');
+
+  // 1. 确保窗口页面停在牵牛花域名（带 page 时要精确到对应路由，签名 JS 已注入）
   let cur = '';
   try { cur = w.webContents.getURL(); } catch (e) { /* ignore */ }
-  if (!isMeituan(cur) || !/qnh\.meituan\.com/i.test(cur)) {
+  const onRoute = /qnh\.meituan\.com/i.test(cur) && (!pageRoute || cur.includes('#' + pageRoute));
+  if (!onRoute) {
     api.log('正在准备牵牛花页面环境…');
-    await w.loadURL(DEFAULT_URL + '/').catch(() => {});
-    // 等 SPA 初始化（签名脚本注入完成），最多 ~12 秒
-    for (let i = 0; i < 8; i += 1) {
+    await w.loadURL(pageUrl).catch(() => {});
+    // 等 SPA 初始化（签名脚本注入完成），最多 ~15 秒
+    for (let i = 0; i < 10; i += 1) {
       await sleep(1500);
       try {
         const u = w.webContents.getURL();
-        if (/qnh\.meituan\.com/i.test(u)) break;
+        if (/qnh\.meituan\.com/i.test(u) && (!pageRoute || u.includes(pageRoute))) break;
       } catch (e) { /* ignore */ }
     }
   }
+  // 等签名脚本（H5guard）就绪：没就绪就 fetch 会缺 mtgsig，同样 403。最多再等 12 秒。
+  await waitGuardReady(w.webContents, 12000);
 
   // 2. 页内 fetch（H5guard 自动补 mtgsig；与服务器 qnh-page 的 inPageFetch 同构）
   const method = String(task.method || 'POST').toUpperCase();
@@ -232,9 +241,16 @@ async function runFetch(task, api) {
     api.report({ ok: false, error: '任务缺少请求地址' });
     return;
   }
+  const headers = { 'Content-Type': 'application/json', Accept: 'application/json, text/plain, */*' };
+  if (pageRoute) {
+    headers['qnhReferrer'] = pageRoute;
+    headers['M-APPKEY'] = 'fe_recofesaascrm';
+  }
+  Object.assign(headers, task.headers && typeof task.headers === 'object' ? task.headers : {});
   const payload = {
     target,
     method,
+    headers,
     body: method === 'GET' || task.body == null ? null : JSON.stringify(task.body),
   };
   const js = `(async () => {
@@ -242,7 +258,7 @@ async function runFetch(task, api) {
       const r = await fetch(${JSON.stringify(payload.target)}, {
         method: ${JSON.stringify(payload.method)},
         credentials: 'include',
-        headers: { 'Content-Type': 'application/json', Accept: 'application/json, text/plain, */*' },
+        headers: ${JSON.stringify(payload.headers)},
         body: ${payload.body == null ? 'undefined' : payload.body},
       });
       const text = await r.text();
@@ -254,16 +270,44 @@ async function runFetch(task, api) {
     }
   })()`;
 
-  const r = await w.webContents.executeJavaScript(js, true).catch((e) => ({ error: String((e && e.message) || e) }));
+  // 3. 执行；被拒（403）时把页面彻底重载一次再重试（SPA 长驻后签名上下文可能失效）
+  const exec = () => w.webContents.executeJavaScript(js, true).catch((e) => ({ error: String((e && e.message) || e) }));
+  let r = await exec();
+  if (r && [401, 403].includes(Number(r.status)) && pageRoute) {
+    api.log('页内请求被拒（HTTP ' + r.status + '），重载页面后重试…');
+    try { await w.loadURL(pageUrl); } catch (e) { /* ignore */ }
+    await sleep(4000);
+    await waitGuardReady(w.webContents, 12000);
+    r = await exec();
+  }
+
   if (!r || r.error) {
     api.report({ ok: false, error: String((r && r.error) || '页面执行失败') });
     return;
   }
   if ([401, 403].includes(Number(r.status))) {
-    api.report({ ok: false, status: r.status, error: '牵牛花登录态已失效（HTTP ' + r.status + '）：请点看板「登录牵牛花」重新登录' });
+    const snippet = String(r.text || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+    api.report({
+      ok: false,
+      status: r.status,
+      error: '牵牛花登录态已失效或接口被拒（HTTP ' + r.status + '）：请点看板「登录牵牛花」重新登录'
+        + (snippet ? '。接口响应：' + snippet : ''),
+    });
     return;
   }
   api.report({ ok: true, status: r.status, json: r.json || null, text: String(r.text || '').slice(0, 4000) });
+}
+
+/** 等页面里的签名脚本（H5guard）就绪，未出现则超时放行（由重试兜底） */
+async function waitGuardReady(wc, timeoutMs = 12000) {
+  const js = '(() => ({ g: typeof window.H5guard !== "undefined", s: typeof window.mtgsig !== "undefined" }))()';
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const r = await wc.executeJavaScript(js, true).catch(() => null);
+    if (r && (r.g || r.s)) return true;
+    await sleep(1000);
+  }
+  return false;
 }
 
 /** 供 main.js 注入：返回一个 fetch 处理器 */

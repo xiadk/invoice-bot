@@ -756,7 +756,7 @@ if (qnhLoginSweeper.unref) qnhLoginSweeper.unref();
 
 // ── 「牵牛花页内签名请求」通道：把配送日志 / 毛利明细等签名请求派给本机助手 ──
 //    服务器 Cookie 直连这些接口会被 WAF 拦（403），只有助手真实页面里的 fetch 能自动签名。
-const QNH_FETCH_MIN_AGENT = '0.2.7';
+const QNH_FETCH_MIN_AGENT = '0.2.8';
 
 /** 找一个在线且版本足够的助手（任一用户的即可——牵牛花登录态是全系统共享的） */
 function findQnhAgent() {
