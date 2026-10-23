@@ -105,6 +105,7 @@ async function ensureQnhSchema(q) {
       "  `service_id` VARCHAR(64) DEFAULT NULL," +
       "  `qnh_tenant_id` VARCHAR(32) DEFAULT NULL COMMENT '牵牛花租户ID'," +
       "  `order_no` VARCHAR(64) DEFAULT NULL COMMENT '关联订单号'," +
+      "  `serial_no` VARCHAR(64) DEFAULT NULL COMMENT '订单号（牵牛花 serialNo，展示用）'," +
       "  `channel_name` VARCHAR(64) DEFAULT NULL COMMENT '渠道'," +
       "  `channel_id` INT DEFAULT NULL," +
       "  `store_id` VARCHAR(64) DEFAULT NULL," +
@@ -132,6 +133,9 @@ async function ensureQnhSchema(q) {
       "  `finish_ts` BIGINT DEFAULT NULL," +
       "  `receiver_name` VARCHAR(64) DEFAULT NULL," +
       "  `receiver_phone` VARCHAR(32) DEFAULT NULL," +
+      "  `receiver_address` VARCHAR(255) DEFAULT NULL COMMENT '顾客配送地址'," +
+      "  `paid_time` DATETIME DEFAULT NULL COMMENT '已支付订单时间（配送日志/接口 payTime）'," +
+      "  `paid_ts` BIGINT DEFAULT NULL," +
       "  `audit_time` DATETIME DEFAULT NULL," +
       "  `audit_operator` VARCHAR(64) DEFAULT NULL," +
       "  `audit_reason` VARCHAR(512) DEFAULT NULL," +
@@ -233,6 +237,42 @@ async function ensureQnhSchema(q) {
       "  `updated_at` DATETIME DEFAULT NULL," +
       "  PRIMARY KEY (`key`)" +
       ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='牵牛花退单同步状态'",
+
+    // 实时毛利监控：订单毛利明细（数据经「本机助手」页内签名接口拉取，见 lib/qnh.js）
+    'CREATE TABLE IF NOT EXISTS `qnh_profit_order` (' +
+      "  `order_no` VARCHAR(64) NOT NULL COMMENT '订单号'," +
+      "  `store_name` VARCHAR(128) DEFAULT NULL COMMENT '门店'," +
+      "  `order_time` DATETIME DEFAULT NULL COMMENT '下单时间'," +
+      "  `order_time_ms` BIGINT DEFAULT NULL," +
+      "  `profit_online` DECIMAL(14,2) DEFAULT NULL COMMENT '线上毛利（元）'," +
+      "  `profit_rate_online` DECIMAL(14,4) DEFAULT NULL COMMENT '线上毛利率（%，如 39.33）'," +
+      "  `alerted` TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否已推送过低毛利告警'," +
+      "  `data_date` DATE DEFAULT NULL COMMENT '数据归属日期（拉取批次）'," +
+      "  `raw_json` LONGTEXT DEFAULT NULL," +
+      "  `fetched_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP," +
+      "  PRIMARY KEY (`order_no`)," +
+      "  KEY `idx_qpo_time` (`order_time`)," +
+      "  KEY `idx_qpo_alert` (`alerted`)" +
+      ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='订单毛利明细（实时毛利监控）'",
+
+    // 牵牛花登录态（Cookies）。云端部署时不能落本机文件（容器目录会随重启丢失），
+    // 故统一入库；登录态由「本机助手」采集后回传，服务器自己不再启动浏览器。
+    'CREATE TABLE IF NOT EXISTS `qnh_session` (' +
+      "  `id` INT NOT NULL AUTO_INCREMENT," +
+      "  `user_id` INT NOT NULL DEFAULT 0 COMMENT '归属用户（0=所有用户共享的一份登录态）'," +
+      "  `storage_state` MEDIUMTEXT COMMENT 'Playwright storageState 格式（cookies+origins）'," +
+      "  `cookie_count` INT NOT NULL DEFAULT 0," +
+      "  `account_name` VARCHAR(128) DEFAULT NULL," +
+      "  `tenant_id` VARCHAR(64) DEFAULT NULL," +
+      "  `source` VARCHAR(32) DEFAULT NULL COMMENT '采集来源：本机助手'," +
+      "  `agent_ver` VARCHAR(32) DEFAULT NULL," +
+      "  `earliest_expiry` DATETIME DEFAULT NULL," +
+      "  `written_at` DATETIME DEFAULT NULL," +
+      "  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP," +
+      "  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP," +
+      "  PRIMARY KEY (`id`)," +
+      "  UNIQUE KEY `uk_qs_user` (`user_id`)" +
+      ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='牵牛花登录态（入库，替代 data/qnh-state.json）'",
   ];
   for (const s of stmts) await q(s);
 }
@@ -350,6 +390,10 @@ async function migrate(conn, dbName) {
       ['has_delivery_log', "TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否有配送日志（含接单）'"],
       ['picked_log', "TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否已取货/已送达（商品离店）'"],
       ['log_synced', "TINYINT(1) NOT NULL DEFAULT 0 COMMENT '日志是否已同步'"],
+      ['serial_no', "VARCHAR(64) DEFAULT NULL COMMENT '订单号（牵牛花 serialNo，展示用）'"],
+      ['receiver_address', "VARCHAR(255) DEFAULT NULL COMMENT '顾客配送地址'"],
+      ['paid_time', "DATETIME DEFAULT NULL COMMENT '已支付订单时间（配送日志/接口 payTime）'"],
+      ['paid_ts', 'BIGINT DEFAULT NULL'],
     ]) {
       if (!(await colExists('qnh_refund_order', col))) {
         await q(`ALTER TABLE \`qnh_refund_order\` ADD COLUMN \`${col}\` ${decl}`);

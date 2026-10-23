@@ -1,55 +1,47 @@
 #!/usr/bin/env node
 /**
- * scripts/qnh-probe.js — 牵牛花接口探测（一次性工具，v0.2.3）
+ * scripts/qnh-probe.js — 牵牛花「登录态 + 接口」自检（无浏览器版，v0.2.6）
  *
- * 用途：Node 重写同步链路时，需要先知道「退单列表 / 明细 / 日志」的真实接口。
- *      本脚本复用 lib/qnh-sync.js 的登录能力打开牵牛花，记录页面自己发出的所有 /api/ 请求，
- *      只输出「路径 + 参数名 + 返回字段名与类型」，**不记录任何字段值**（避免手机号/地址外泄）。
+ * 用途：快速确认「登录态还在不在、退单接口通不通」，排障时先跑它。
+ *
+ * ⚠ 老版本要 launch 一个 Playwright 浏览器去抓包——服务器（云端）没有浏览器，
+ *   本地也常缺 Chromium 二进制。现在登录由「本机助手」完成、登录态存进数据库，
+ *   本脚本也就改成纯 HTTP 自检：**不需要浏览器、不写任何本机登录态文件**，
+ *   云端和本地都能直接跑。
  *
  * 用法：
- *   node scripts/qnh-probe.js                     # 有头登录，默认观察 240 秒
- *   node scripts/qnh-probe.js --seconds 300       # 自定义观察时长
- *   node scripts/qnh-probe.js --headless --seconds 60
+ *   node scripts/qnh-probe.js                # 默认查近 7 天
+ *   node scripts/qnh-probe.js --days 3       # 自定义区间
+ *   node scripts/qnh-probe.js --json         # 额外把结构写入 data/qnh-probe-<时间戳>.json
  *
- * 操作指引（脚本会打印）：登录后依次点开「退单列表」→ 翻一页 → 打开一条退单详情/日志。
- * 结果写入 data/qnh-probe-<时间戳>.json（data/* 已被 .gitignore 排除）。
+ * 前置：看板里已用「本机助手」登录过牵牛花（登录态在 qnh_session 表里）。
  */
 const fs = require('fs');
 const path = require('path');
 
 const ROOT = path.join(__dirname, '..');
+const qnh = require(path.join(ROOT, 'lib', 'qnh'));
 const qsync = require(path.join(ROOT, 'lib', 'qnh-sync'));
 
 function parseArgs(argv) {
-  const out = { seconds: 240, headless: false, help: false };
+  const out = { days: 7, json: false, help: false };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
-    if (a === '--seconds') { out.seconds = Math.max(20, Number(argv[i + 1]) || 240); i += 1; }
-    else if (a === '--headless') out.headless = true;
+    if (a === '--days') { out.days = Math.max(1, Math.min(90, Number(argv[i + 1]) || 7)); i += 1; }
+    else if (a === '--json') out.json = true;
     else if (a === '--help' || a === '-h') out.help = true;
   }
   return out;
 }
 
-const USAGE = `牵牛花接口探测
-  node scripts/qnh-probe.js [--seconds 240] [--headless]
+const USAGE = `牵牛花登录态 / 接口自检
+  node scripts/qnh-probe.js [--days 7] [--json]
 
-  --seconds N   观察时长（秒），默认 240
-  --headless    无窗口模式（不推荐：首次登录需要你看得见页面）
+  --days N  查询区间（天），默认 7
+  --json    把接口返回结构写入 data/qnh-probe-<时间戳>.json
+
+  只用数据库里的登录态，不需要浏览器；没有登录态时请先在看板用「本机助手」登录。
 `;
-
-function pathOf(url) {
-  try {
-    const u = new URL(url);
-    return u.pathname + (u.search ? '?<params>' : '');
-  } catch (e) {
-    return String(url).slice(0, 200);
-  }
-}
-
-function queryKeysOf(url) {
-  try { return [...new URL(url).searchParams.keys()]; } catch (e) { return []; }
-}
 
 function safeJson(text) {
   if (!text || text.length > 2 * 1024 * 1024) return null;
@@ -58,7 +50,7 @@ function safeJson(text) {
   try { return JSON.parse(t); } catch (e) { return null; }
 }
 
-/** 只描述结构（键名 + 类型），不保留任何值 */
+/** 只描述结构（键名 + 类型），不保留任何值——避免手机号/地址落盘 */
 function shape(v, depth = 0) {
   if (v === null) return 'null';
   if (Array.isArray(v)) {
@@ -68,145 +60,76 @@ function shape(v, depth = 0) {
   if (typeof v === 'object') {
     if (depth >= 3) return 'object';
     const keys = Object.keys(v).slice(0, 30);
-    const body = keys.map((k) => `${k}:${shape(v[k], depth + 1)}`).join(',');
-    return `{${body}}`;
+    return `{${keys.map((k) => `${k}:${shape(v[k], depth + 1)}`).join(',')}}`;
   }
   return typeof v;
-}
-
-function bodyKeysOf(postData) {
-  const j = safeJson(postData || '');
-  if (j && typeof j === 'object' && !Array.isArray(j)) return Object.keys(j);
-  return [];
 }
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.help) { console.log(USAGE); return 0; }
 
-  let chromium = null;
-  try { ({ chromium } = require('playwright')); } catch (e) {
-    console.error('未安装 playwright：npm i playwright');
-    return 1;
-  }
+  // 登录态来自数据库（本机助手采集后回传），脚本不再依赖任何本机文件
+  qsync.setStateProvider(qnh.loadStorageState, qnh.loadStorageMeta);
 
   console.log(`基址：${qsync.BASE_URL}`);
-  console.log(`登录态：${qsync.stateExists() ? qsync.STATE_PATH : '（无，先登录一次）'}`);
+  const cookies = await qsync.stateCookies();
+  if (!cookies.length) {
+    console.error('\n✗ 没有登录态：请先在看板点「登录牵牛花」，用「本机助手」完成登录后再跑本脚本。');
+    return 1;
+  }
+  const meta = await qnh.loadStorageMeta();
+  console.log(`登录态：${cookies.length} 个 Cookie · 来源  ${meta.source || '未知'}`
+    + ` · 写入于 ${meta.writtenAt || '未知'}`
+    + (meta.earliestExpiry ? ` · 最早过期 ${meta.earliestExpiry}` : ''));
 
-  if (!qsync.stateExists()) {
-    console.log('\n没有本地登录态，先打开窗口登录（看到「登录成功」即可，之后会另开一个观察窗口）…');
-    const r = await qsync.login({ headless: args.headless, onEvent: (m) => console.log('  · ' + m) });
-    if (!r.ok) {
-      console.error('\n登录未完成：' + r.message);
-      return 1;
+  const st = await qsync.isLogined();
+  console.log(`探活：${st.logined ? '✓ 已登录' : '✗ 登录态已失效'}${st.error ? '（' + st.error + '）' : ''}`);
+  if (st.account && Object.keys(st.account).length) console.log('  账号信息：' + shape(st.account));
+  if (!st.logined) return 1;
+
+  const now = Date.now();
+  const startMs = now - args.days * 86400000;
+  const page = await qsync.fetchRefundListPage({ page: 1, pageSize: 20, startMs, endMs: now });
+  if (!page.ok) {
+    console.error('✗ 拉取退单列表失败：' + page.message);
+    return 1;
+  }
+  const first = page.records[0] || null;
+  console.log(`\n退单列表：共 ${page.pageInfo.totalSize} 条 / ${page.pageInfo.totalPage} 页，本页 ${page.records.length} 条`);
+  if (first) console.log('  记录结构：' + shape(first));
+
+  if (first) {
+    const o = first.orderVO || {};
+    const detail = await qsync.fetchRefundDetail({
+      channelOrderId: o.channelOrderId, channelId: o.channelId, channelAfsId: first.afterSaleId,
+    });
+    if (!detail.ok) console.log('  明细：✗ ' + detail.message);
+    else {
+      console.log(`  明细：✓ ${detail.items.length} 个商品行`);
+      if (detail.items.length) console.log('    商品结构：' + shape(detail.items[0]));
     }
-    console.log('  ✓ ' + r.message + `（Cookie ${r.cookieCount} 条）`);
   }
 
-  const collected = new Map();
-  let browser = null;
-
-  const record = (rec) => {
-    const key = `${rec.method} ${rec.path}`;
-    const hit = collected.get(key);
-    if (hit) {
-      hit.count += 1;
-      if (!hit.shape && rec.shape) { hit.shape = rec.shape; hit.status = rec.status; }
-      for (const k of rec.queryKeys) if (!hit.queryKeys.includes(k)) hit.queryKeys.push(k);
-      for (const k of rec.bodyKeys) if (!hit.bodyKeys.includes(k)) hit.bodyKeys.push(k);
-      return;
-    }
-    collected.set(key, { ...rec, count: 1 });
-  };
-
-  try {
-    browser = await chromium.launch({ headless: args.headless, args: ['--disable-blink-features=AutomationControlled'] });
-    const ctx = await browser.newContext({
-      storageState: qsync.STATE_PATH,
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-      viewport: { width: 1360, height: 900 },
-      locale: 'zh-CN',
-    });
-    const page = await ctx.newPage();
-
-    page.on('response', async (res) => {
-      try {
-        const url = res.url();
-        if (!/\/api\//.test(url)) return;
-        const req = res.request();
-        const ct = String(res.headers()['content-type'] || '');
-        const rec = {
-          method: req.method(),
-          path: pathOf(url),
-          queryKeys: queryKeysOf(url),
-          bodyKeys: bodyKeysOf(req.postData()),
-          status: res.status(),
-          contentType: ct.split(';')[0],
-          shape: null,
-        };
-        if (ct.includes('json')) {
-          const txt = await res.text().catch(() => '');
-          const j = safeJson(txt);
-          if (j !== null) rec.shape = shape(j);
-        }
-        record(rec);
-      } catch (e) { /* 页面跳转中响应体可能取不到，忽略 */ }
-    });
-
-    console.log('\n正在打开牵牛花…');
-    await page.goto(qsync.BASE_URL + '/', { waitUntil: 'domcontentloaded', timeout: 60000 });
-
-    console.log([
-      '请在打开的窗口里依次操作（每步停留几秒，让请求被记录下来）：',
-      '  ① 进入「退单列表」页',
-      '  ② 翻到第 2 页（记录分页参数）',
-      '  ③ 打开一条退单的详情 / 日志',
-      `观察时长 ${args.seconds} 秒，结束后自动汇总。`,
-    ].join('\n'));
-
-    const tty = process.stdin.isTTY;
-    const manual = new Promise((resolve) => {
-      if (!tty) return;
-      process.stdin.setEncoding('utf8');
-      process.stdin.once('data', () => { console.log('\n收到回车，提前结束观察。'); resolve(); });
-    });
-    const timer = new Promise((resolve) => setTimeout(resolve, args.seconds * 1000));
-    await Promise.race([timer, manual]);
-    process.stdin.pause();
-
-    const list = [...collected.values()].sort((a, b) => b.count - a.count);
+  if (args.json) {
     const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
     const outFile = path.join(ROOT, 'data', `qnh-probe-${ts}.json`);
-    fs.mkdirSync(path.dirname(outFile), { recursive: true });
-    fs.writeFileSync(outFile, JSON.stringify({
-      baseUrl: qsync.BASE_URL,
-      capturedAt: new Date().toISOString(),
-      note: '仅记录接口路径/参数名/返回字段结构，不含字段值',
-      endpoints: list,
-    }, null, 2), 'utf8');
-
-    console.log(`\n捕获 ${list.length} 个接口：`);
-    if (!list.length) {
-      console.log('  （没有捕到 /api/ 请求：可能页面还没加载完，或登录态失效，重跑并多停留一会儿）');
+    try {
+      fs.mkdirSync(path.dirname(outFile), { recursive: true });
+      fs.writeFileSync(outFile, JSON.stringify({
+        baseUrl: qsync.BASE_URL,
+        capturedAt: new Date().toISOString(),
+        note: '仅记录返回字段结构，不含字段值',
+        logined: true,
+        list: first ? shape(first) : null,
+      }, null, 2), 'utf8');
+      console.log(`\n已写入 ${outFile}`);
+    } catch (e) {
+      console.error('写入失败：' + (e && e.message));
     }
-    for (const e of list) {
-      const q = e.queryKeys.length ? ` 入参名:${e.queryKeys.join(',')}` : '';
-      const b = e.bodyKeys.length ? ` 体字段:${e.bodyKeys.join(',')}` : '';
-      console.log(`  ${String(e.count).padStart(3)}×  ${e.method} ${e.path}  [${e.status}]${q}${b}`);
-      if (e.shape) console.log(`        返回: ${e.shape.slice(0, 400)}`);
-    }
-    console.log(`\n已写入：${outFile}`);
-    console.log('把这份文件（或上面的接口清单）给我，就能确定退单列表/明细/日志的接口契约。');
-    return 0;
-  } catch (e) {
-    console.error('探测失败：' + ((e && e.message) || e));
-    return 1;
-  } finally {
-    if (browser) await browser.close().catch(() => {});
   }
+  return 0;
 }
 
-main().then((code) => process.exit(code)).catch((e) => {
-  console.error('探测异常：' + ((e && e.stack) || e));
-  process.exit(1);
-});
+main().then((code) => { process.exit(code || 0); })
+  .catch((e) => { console.error('自检失败：' + String((e && e.message) || e)); process.exit(1); });
