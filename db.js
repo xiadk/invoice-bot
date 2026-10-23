@@ -101,7 +101,8 @@ async function transaction(fn) {
 async function ensureQnhSchema(q) {
   const stmts = [
     'CREATE TABLE IF NOT EXISTS `qnh_refund_order` (' +
-      "  `refund_no` VARCHAR(64) NOT NULL COMMENT '退单号（主键）'," +
+      "  `user_id` INT NOT NULL DEFAULT 1 COMMENT '数据归属用户（登录了哪位用户的牵牛花就是谁的数据）'," +
+      "  `refund_no` VARCHAR(64) NOT NULL COMMENT '退单号'," +
       "  `service_id` VARCHAR(64) DEFAULT NULL," +
       "  `qnh_tenant_id` VARCHAR(32) DEFAULT NULL COMMENT '牵牛花租户ID'," +
       "  `order_no` VARCHAR(64) DEFAULT NULL COMMENT '关联订单号'," +
@@ -148,7 +149,7 @@ async function ensureQnhSchema(q) {
       "  `first_seen_at` DATETIME DEFAULT NULL," +
       "  `last_seen_at` DATETIME DEFAULT NULL," +
       "  `raw_json` LONGTEXT DEFAULT NULL," +
-      "  PRIMARY KEY (`refund_no`)," +
+      "  PRIMARY KEY (`user_id`,`refund_no`)," +
       "  KEY `idx_qro_apply` (`apply_time`)," +
       "  KEY `idx_qro_status` (`refund_status`)," +
       "  KEY `idx_qro_tenant` (`qnh_tenant_id`)," +
@@ -156,6 +157,7 @@ async function ensureQnhSchema(q) {
       ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='牵牛花退单主表'",
 
     'CREATE TABLE IF NOT EXISTS `qnh_refund_item` (' +
+      "  `user_id` INT NOT NULL DEFAULT 1 COMMENT '数据归属用户'," +
       "  `id` BIGINT NOT NULL AUTO_INCREMENT," +
       "  `refund_no` VARCHAR(64) NOT NULL," +
       "  `qnh_tenant_id` VARCHAR(32) DEFAULT NULL," +
@@ -177,12 +179,13 @@ async function ensureQnhSchema(q) {
       "  `pic_url` VARCHAR(512) DEFAULT NULL," +
       "  `raw_json` LONGTEXT DEFAULT NULL," +
       "  PRIMARY KEY (`id`)," +
-      "  UNIQUE KEY `uk_qri_refund_item` (`refund_no`,`item_key`)," +
+      "  UNIQUE KEY `uk_qri_refund_item` (`user_id`,`refund_no`,`item_key`)," +
       "  KEY `idx_qri_sku` (`sku`)," +
       "  KEY `idx_qri_tenant` (`qnh_tenant_id`)" +
       ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='牵牛花退单商品明细'",
 
     'CREATE TABLE IF NOT EXISTS `qnh_refund_log` (' +
+      "  `user_id` INT NOT NULL DEFAULT 1 COMMENT '数据归属用户'," +
       "  `id` BIGINT NOT NULL AUTO_INCREMENT," +
       "  `refund_no` VARCHAR(64) NOT NULL," +
       "  `order_no` VARCHAR(64) DEFAULT NULL," +
@@ -196,13 +199,14 @@ async function ensureQnhSchema(q) {
       "  `raw_json` TEXT DEFAULT NULL," +
       "  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP," +
       "  PRIMARY KEY (`id`)," +
-      "  UNIQUE KEY `uk_qrl_item` (`refund_no`,`log_type`,`op_time_ms`,`content`)," +
+      "  UNIQUE KEY `uk_qrl_item` (`user_id`,`refund_no`,`log_type`,`op_time_ms`,`content`)," +
       "  KEY `idx_qrl_refund` (`refund_no`)," +
       "  KEY `idx_qrl_type` (`log_type`)," +
       "  KEY `idx_qrl_time` (`op_time`)" +
       ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='退单订单日志 / 配送日志'",
 
     'CREATE TABLE IF NOT EXISTS `qnh_alert_log` (' +
+      "  `user_id` INT NOT NULL DEFAULT 1 COMMENT '数据归属用户（提醒发给谁自己的机器人）'," +
       "  `id` BIGINT NOT NULL AUTO_INCREMENT," +
       "  `refund_no` VARCHAR(64) NOT NULL," +
       "  `alert_type` VARCHAR(32) NOT NULL DEFAULT 'delivery_log'," +
@@ -211,11 +215,12 @@ async function ensureQnhSchema(q) {
       "  `error` VARCHAR(255) DEFAULT NULL," +
       "  `sent_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP," +
       "  PRIMARY KEY (`id`)," +
-      "  UNIQUE KEY `uk_qal_refund` (`refund_no`,`alert_type`)," +
+      "  UNIQUE KEY `uk_qal_refund` (`user_id`,`refund_no`,`alert_type`)," +
       "  KEY `idx_qal_sent` (`sent_at`)" +
       ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='退单提醒推送记录'",
 
     'CREATE TABLE IF NOT EXISTS `qnh_sync_run` (' +
+      "  `user_id` INT NOT NULL DEFAULT 1 COMMENT '该批次同步的是谁的数据'," +
       "  `id` BIGINT NOT NULL AUTO_INCREMENT," +
       "  `started_at` DATETIME DEFAULT NULL," +
       "  `finished_at` DATETIME DEFAULT NULL," +
@@ -240,6 +245,7 @@ async function ensureQnhSchema(q) {
 
     // 实时毛利监控：订单毛利明细（数据经「本机助手」页内签名接口拉取，见 lib/qnh.js）
     'CREATE TABLE IF NOT EXISTS `qnh_profit_order` (' +
+      "  `user_id` INT NOT NULL DEFAULT 1 COMMENT '数据归属用户'," +
       "  `order_no` VARCHAR(64) NOT NULL COMMENT '订单号'," +
       "  `order_seq` VARCHAR(32) DEFAULT NULL COMMENT '订单编号/序号（页面 order_seq）'," +
       "  `channel_name` VARCHAR(64) DEFAULT NULL COMMENT '渠道名称（美团闪购等）'," +
@@ -253,7 +259,7 @@ async function ensureQnhSchema(q) {
       "  `data_date` DATE DEFAULT NULL COMMENT '数据归属日期（拉取批次）'," +
       "  `raw_json` LONGTEXT DEFAULT NULL," +
       "  `fetched_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP," +
-      "  PRIMARY KEY (`order_no`)," +
+      "  PRIMARY KEY (`user_id`,`order_no`)," +
       "  KEY `idx_qpo_time` (`order_time`)," +
       "  KEY `idx_qpo_alert` (`alerted`)" +
       ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='订单毛利明细（实时毛利监控）'",
@@ -262,7 +268,7 @@ async function ensureQnhSchema(q) {
     // 故统一入库；登录态由「本机助手」采集后回传，服务器自己不再启动浏览器。
     'CREATE TABLE IF NOT EXISTS `qnh_session` (' +
       "  `id` INT NOT NULL AUTO_INCREMENT," +
-      "  `user_id` INT NOT NULL DEFAULT 0 COMMENT '归属用户（0=所有用户共享的一份登录态）'," +
+      "  `user_id` INT NOT NULL DEFAULT 0 COMMENT '归属用户（每位登录过牵牛花的用户一行）'," +
       "  `storage_state` MEDIUMTEXT COMMENT 'Playwright storageState 格式（cookies+origins）'," +
       "  `cookie_count` INT NOT NULL DEFAULT 0," +
       "  `account_name` VARCHAR(128) DEFAULT NULL," +
@@ -276,6 +282,16 @@ async function ensureQnhSchema(q) {
       "  PRIMARY KEY (`id`)," +
       "  UNIQUE KEY `uk_qs_user` (`user_id`)" +
       ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='牵牛花登录态（入库，替代 data/qnh-state.json）'",
+
+    // 每用户自己的牵牛花配置（提醒机器人 / 告警阈值 / 门店渠道参数等）。
+    // 全局项（定时同步时间等）仍存 app_config；这里只放「跟着用户走」的键。
+    'CREATE TABLE IF NOT EXISTS `qnh_user_config` (' +
+      "  `user_id` INT NOT NULL COMMENT '归属用户（app_user.id）'," +
+      "  `key` VARCHAR(64) NOT NULL," +
+      "  `value` TEXT DEFAULT NULL," +
+      "  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP," +
+      "  PRIMARY KEY (`user_id`,`key`)" +
+      ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='牵牛花按用户配置（提醒/告警/拉取参数）'",
   ];
   for (const s of stmts) await q(s);
 }
@@ -435,6 +451,92 @@ async function migrate(conn, dbName) {
       await q(`ALTER TABLE \`${t}\` ADD KEY \`idx_user_id\` (\`user_id\`)`);
     }
   }
+
+  // ── 牵牛花数据按用户隔离（2026-10-24）：补 user_id 列 + 重建含 user_id 的主键/唯一键 ──
+  //    语义：登录了哪位用户的牵牛花，退单/毛利/告警就归谁；管理员以用户身份进入查看。
+  const qnhTenantTables = [
+    'qnh_refund_order', 'qnh_refund_item', 'qnh_refund_log', 'qnh_alert_log', 'qnh_sync_run', 'qnh_profit_order',
+  ];
+  for (const t of qnhTenantTables) {
+    if (!(await tableExists(t))) continue;
+    if (!(await colExists(t, 'user_id'))) {
+      await q(`ALTER TABLE \`${t}\` ADD COLUMN \`user_id\` INT NOT NULL DEFAULT 1
+               COMMENT '数据归属用户（登录了哪位用户的牵牛花就是谁的数据）'`);
+      if (!(await idxExists(t, 'idx_user_id'))) {
+        await q(`ALTER TABLE \`${t}\` ADD KEY \`idx_user_id\` (\`user_id\`)`);
+      }
+    }
+  }
+  // 重建主键/唯一键：把 user_id 纳入（老库这些键只含业务列，跨用户会撞键）
+  const qnhKeyRebuilds = [
+    // [表, 键名, 类型, 新列, 旧键是否为该名（PRIMARY 固定叫 PRIMARY）]
+    ['qnh_refund_order', 'PRIMARY', 'PRIMARY', ['user_id', 'refund_no']],
+    ['qnh_refund_item', 'uk_qri_refund_item', 'UNIQUE', ['user_id', 'refund_no', 'item_key']],
+    ['qnh_refund_log', 'uk_qrl_item', 'UNIQUE', ['user_id', 'refund_no', 'log_type', 'op_time_ms', 'content']],
+    ['qnh_alert_log', 'uk_qal_refund', 'UNIQUE', ['user_id', 'refund_no', 'alert_type']],
+    ['qnh_profit_order', 'PRIMARY', 'PRIMARY', ['user_id', 'order_no']],
+  ];
+  const indexCols = async (table, name) => {
+    const rows = await q(
+      `SELECT COLUMN_NAME FROM information_schema.STATISTICS
+       WHERE TABLE_SCHEMA=? AND TABLE_NAME=? AND INDEX_NAME=? ORDER BY SEQ_IN_INDEX`,
+      [dbName, table, name]
+    );
+    return rows.map((r) => r.COLUMN_NAME);
+  };
+  // 老库上 qnh_refund_item 有外键 fk_qri_refund(refund_no) → qnh_refund_order(refund_no)；
+  // 只要父表主键变了，这个 FK 就会挡住 DROP/ADD PRIMARY KEY（"needed in a foreign key constraint"）。
+  // 先临时摘掉，键重建完再按新主键重建 FK（列改成 user_id + refund_no，级联删除保留）。
+  const fkOnRefundOrder = async () => {
+    try {
+      const rows = await q(
+        `SELECT CONSTRAINT_NAME, TABLE_NAME FROM information_schema.KEY_COLUMN_USAGE
+         WHERE TABLE_SCHEMA=? AND REFERENCED_TABLE_NAME='qnh_refund_order'`,
+        [dbName]
+      );
+      return rows || [];
+    } catch (e) { return []; }
+  };
+  const droppedFks = await fkOnRefundOrder();
+  for (const fk of droppedFks) {
+    try {
+      await q(`ALTER TABLE \`${fk.TABLE_NAME}\` DROP FOREIGN KEY \`${fk.CONSTRAINT_NAME}\``);
+      console.log(`[db] 临时移除外键 ${fk.TABLE_NAME}.${fk.CONSTRAINT_NAME}（重建主键后再加回）`);
+    } catch (e) {
+      console.warn(`[db] 移除外键 ${fk.TABLE_NAME}.${fk.CONSTRAINT_NAME} 失败: ${e.message}`);
+    }
+  }
+  for (const [t, keyName, keyType, cols] of qnhKeyRebuilds) {
+    if (!(await tableExists(t))) continue;
+    try {
+      const cur = await indexCols(t, keyName);
+      if (cur.length === cols.length && cur.every((c, i) => c === cols[i])) continue; // 已是新结构
+      if (cur.length) await q(`ALTER TABLE \`${t}\` DROP INDEX \`${keyName}\``);
+      const colSql = cols.map((c) => `\`${c}\``).join(',');
+      const add = keyType === 'PRIMARY'
+        ? `ADD PRIMARY KEY (${colSql})`
+        : `ADD UNIQUE KEY \`${keyName}\` (${colSql})`;
+      await q(`ALTER TABLE \`${t}\` ${add}`);
+    } catch (e) {
+      console.warn(`[db] ${t}.${keyName} 重建失败（可忽略若已手动处理）: ${e.message}`);
+    }
+  }
+  // 外键加回：item(user_id, refund_no) → order(user_id, refund_no)，删退单时级联删明细
+  if (droppedFks.length && (await tableExists('qnh_refund_item')) && (await tableExists('qnh_refund_order'))) {
+    try {
+      const still = await fkOnRefundOrder();
+      if (!still.length) {
+        await q(
+          'ALTER TABLE `qnh_refund_item` ADD CONSTRAINT `fk_qri_refund` ' +
+          'FOREIGN KEY (`user_id`, `refund_no`) REFERENCES `qnh_refund_order` (`user_id`, `refund_no`) ON DELETE CASCADE'
+        );
+        console.log('[db] 已重建外键 qnh_refund_item.fk_qri_refund（user_id + refund_no）');
+      }
+    } catch (e) {
+      console.warn(`[db] 重建外键 fk_qri_refund 失败（可忽略，明细靠退单号自行维护）: ${e.message}`);
+    }
+  }
+
 
   // 唯一键改造：issued_invoice 行指纹、seller_name_mapping 销方名称，都要带上 user_id
   if (await idxExists('issued_invoice', 'uk_row_hash')) {
@@ -612,6 +714,25 @@ async function seedAdmin(conn, dbName) {
       }
     } catch (e) { /* 表可能不存在 */ }
   }
+
+  // 牵牛花登录态：老结构是「全系统共享一份（user_id=0）」，按用户隔离后归到 admin 名下。
+  // 注意：这里不能复用 migrate() 里的 tableExists（作用域不同，会抛 ReferenceError 被静默吞掉），
+  // 直接用 information_schema 判断。
+  try {
+    const hasTbl = (await q(
+      `SELECT COUNT(*) AS n FROM information_schema.TABLES
+       WHERE TABLE_SCHEMA=? AND TABLE_NAME='qnh_session'`,
+      [dbName]
+    ))[0].n > 0;
+    if (hasTbl) {
+      const legacy = await q('SELECT id FROM `qnh_session` WHERE user_id = 0 ORDER BY id DESC');
+      const mine = await q('SELECT id FROM `qnh_session` WHERE user_id = ? LIMIT 1', [adminId]);
+      if (legacy.length && !mine.length) {
+        await q('UPDATE `qnh_session` SET user_id = ? WHERE id = ?', [adminId, legacy[0].id]);
+        console.log(`[db] 历史牵牛花登录态（qnh_session#${legacy[0].id}）已归属 admin（id=${adminId}）`);
+      }
+    }
+  } catch (e) { /* 忽略：表不存在或已迁移 */ }
   return adminId;
 }
 
