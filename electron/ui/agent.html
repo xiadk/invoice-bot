@@ -57,6 +57,7 @@
     <div class="tip">
       尚未绑定账号。请到网站看板点「<b>绑定本机助手</b>」——浏览器会弹窗询问是否打开本助手，点「打开」即可自动完成绑定。
     </div>
+    <div class="tip" id="bindErr" style="display:none;margin-top:8px;color:var(--err)"></div>
   </div>
 
   <div class="btns">
@@ -85,6 +86,12 @@ function render(s){
   document.getElementById('login').innerHTML = S.loggedIn ? (dot('g') + '已登录') : (dot('y') + '未登录（发送前请先登录）');
   document.getElementById('server').textContent = S.serverUrl || '—';
   document.getElementById('device').textContent = S.deviceName || '—';
+  const be = document.getElementById('bindErr');
+  if (be) {
+    // 绑定令牌 2 分钟有效：过期了就明说，别让用户在看板干等「已唤起」的假象
+    be.style.display = S.bindError ? 'block' : 'none';
+    if (S.bindError) be.textContent = '上一次绑定没成功：' + S.bindError + '。多半是令牌过期了，回到看板再点一次「绑定本机助手」即可。';
+  }
   document.getElementById('unboundCard').style.display = S.bound ? 'none' : 'block';
   const st = document.getElementById('taskState');
   if (S.sending) {

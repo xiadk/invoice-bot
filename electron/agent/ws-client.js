@@ -53,6 +53,7 @@ class AgentClient extends EventEmitter {
     this._stopped = false;
     this._batchHandler = null;
     this._helloTimer = null;
+    this._qnhBusy = false;
   }
 
   /** 连接地址（供测试断言） */
@@ -170,6 +171,8 @@ class AgentClient extends EventEmitter {
     if (m.type === 'ready') { clearTimeout(this._helloTimer); this._setReady(true); this.emit('ready', m); return; }
     if (m.type === 'send_batch') { this._runBatch(m).catch((e) => this.log('批次异常: ' + e.message)); return; }
     if (m.type === 'export_orders') { this._runExport(m).catch((e) => this.log('订单导出异常: ' + e.message)); return; }
+    if (m.type === 'qnh_login') { this._runQnhLogin(m).catch((e) => this.log('牵牛花登录异常: ' + e.message)); return; }
+    if (m.type === 'qnh_fetch') { this._runQnhFetch(m).catch((e) => this.log('牵牛花页内请求异常: ' + e.message)); return; }
     if (m.type === 'stop') { this.stopFlag = true; this.log('收到停止指令：当前步骤完成后即停'); return; }
     if (m.type === 'task_progress') { this.emit('progress', m); return; }
   }
@@ -225,6 +228,84 @@ class AgentClient extends EventEmitter {
 
   /** 注册「导出1688订单」处理器（main.js 注入 order-export 模块） */
   setExportHandler(fn) { this._exportHandler = fn; }
+
+  /** 注册「登录牵牛花」处理器（main.js 注入 qnh-login 模块） */
+  setQnhLoginHandler(fn) { this._qnhLoginHandler = fn; }
+
+  /** 注册「牵牛花页内签名请求」处理器（main.js 注入 qnh-login.createFetchHandler） */
+  setQnhFetchHandler(fn) { this._qnhFetchHandler = fn; }
+
+  /**
+   * 执行一次「页内签名请求」：在牵牛花页面环境里 fetch（自动带 mtgsig），结果回传服务器。
+   * 只与登录互斥（共用同一个窗口）；发送催收消息期间照常执行，不影响发送节奏。
+   */
+  async _runQnhFetch(m) {
+    const done = (payload) => this.send(Object.assign({
+      type: 'qnh_fetch_done', taskId: m.taskId,
+    }, payload || {}));
+
+    if (this._qnhBusy) { done({ ok: false, error: '登录窗口正在使用中，请稍后再试' }); return; }
+    if (typeof this._qnhFetchHandler !== 'function') {
+      done({ ok: false, error: '助手版本过旧，不支持该能力，请重新下载安装助手' });
+      return;
+    }
+    this._qnhBusy = true;
+    const api = {
+      log: (text) => this.send({ type: 'log', text: String(text == null ? '' : text).slice(0, 200) }),
+      report: done,
+    };
+    try {
+      await this._qnhFetchHandler(m, api);
+    } catch (e) {
+      done({ ok: false, error: String((e && e.message) || e).slice(0, 200) });
+    } finally {
+      this._qnhBusy = false;
+    }
+  }
+
+  /**
+   * 执行一次「登录牵牛花」：在本机弹窗口让用户登录，完成后把 Cookie 回传服务器。
+   * 与发送互斥（别在发送时弹窗口打断节奏）。
+   */
+  async _runQnhLogin(m) {
+    const done = (payload) => this.send(Object.assign({
+      type: 'qnh_login_done', taskId: m.taskId,
+    }, payload || {}));
+
+    if (this._qnhBusy) { done({ ok: false, error: '已有登录任务在进行中' }); return; }
+    if (this.sending) {
+      done({ ok: false, error: '正在发送催收消息，请等发送完成后再登录牵牛花' });
+      return;
+    }
+    if (typeof this._qnhLoginHandler !== 'function') {
+      done({ ok: false, error: '助手版本过旧，不支持登录牵牛花，请重新下载安装助手' });
+      return;
+    }
+    this._qnhBusy = true;
+    this.stopFlag = false;
+    this.currentTaskId = m.taskId;
+    this._emitState();
+    const api = {
+      log: (text) => this.send({ type: 'log', text: String(text == null ? '' : text).slice(0, 200) }),
+      isStopped: () => this.stopFlag,
+      sleep: async (ms) => {
+        for (let waited = 0; waited < ms && !this.stopFlag; waited += 300) {
+          await new Promise((r) => setTimeout(r, Math.min(300, ms - waited)));
+        }
+      },
+      report: done,
+    };
+    try {
+      await this._qnhLoginHandler(m, api);
+    } catch (e) {
+      done({ ok: false, error: String((e && e.message) || e).slice(0, 200) });
+    } finally {
+      this._qnhBusy = false;
+      this.stopFlag = false;
+      this.currentTaskId = null;
+      this._emitState();
+    }
+  }
 
   /**
    * 执行一次「导出1688订单」任务。api 与 _runBatch 同构：

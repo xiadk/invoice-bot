@@ -86,6 +86,8 @@
         <li>在打开的窗口里正常登录 1688。</li>
         <li>登录态只保存在<b>你本机</b>的助手浏览器里，<b>不会上传服务器</b>，下次无需重复登录。</li>
       </ol>
+      <el-alert type="info" :closable="false" style="margin-top:10px"
+                title="管理员登录「牵牛花」同样在助手里完成：看板退单页点「登录牵牛花」→ 助手弹出窗口 → 登录后登录态回传服务器（存数据库）。服务器自己不打开浏览器。"></el-alert>
     </el-card>
 
     <el-card shadow="never" style="margin-bottom:16px;border-radius:12px">
@@ -108,6 +110,11 @@
         </el-collapse-item>
         <el-collapse-item title="为什么不用浏览器扩展了？" name="q3">
           <div style="font-size:13.5px">桌面助手把发送能力放进独立程序，绕开了浏览器扩展商店对「自动发送」类扩展的政策限制，同时免去「开发者模式加载已解压扩展」等繁琐步骤，对普通用户更友好。</div>
+        </el-collapse-item>
+        <el-collapse-item title="为什么服务器不自己登录 1688 / 牵牛花了？" name="q3b">
+          <div style="font-size:13.5px">因为系统部署在云端：服务器上没有显示器，也没有浏览器程序，硬要它开浏览器只会报「找不到 chrome.exe」。
+          登录这种需要人看着屏幕操作的事，只在你本机完成——消息由你本机浏览器发出，牵牛花的登录态则由助手采集后回传服务器保管。
+          服务器只负责下发任务、记录结果与调用接口。</div>
         </el-collapse-item>
         <el-collapse-item title="安全说明" name="q4">
           <div style="font-size:13.5px">发送全程在你本机浏览器执行，1688 登录凭据<b>不出本机</b>；服务器只负责下发任务、记录结果。<b>绑定不再使用税号</b>：改为一次性绑定令牌换取本机长期设备令牌，服务器仅保存令牌的 SHA-256 摘要，可在看板「本机助手」中随时查看并撤销已绑定设备。</div>

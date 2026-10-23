@@ -49,14 +49,17 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const { spawn } = require('child_process');
 const { WebSocketServer } = require('ws');
 const db = require('./db');
 const auth = require('./lib/auth');
 const tenancy = require('./lib/tenancy');
 const { runImport, importOrderUpload, importInvoiceUpload } = require('./import-to-db');
-const { loadConfig } = require('./lib/browser');
+const { loadConfig } = require('./lib/config');
 const { AgentHub } = require('./lib/agent-hub');
 const { buildMessages } = require('./lib/sender');
+const qnh = require('./lib/qnh');
+const qagent = require('./lib/qnh-agent');
 
 const PORT = Number(process.env.PORT) || 8787;
 const ROOT = __dirname;
@@ -123,15 +126,85 @@ function findAgentInstaller() {
   const dir = path.join(ROOT, 'dist');
   let names = [];
   try { names = fs.readdirSync(dir); } catch (e) { return null; }
-  const exes = names.filter((n) => /\.exe$/i.test(n)).sort((a, b) => {
-    const score = (n) => (/setup|install/i.test(n) ? 0 : (/portable/i.test(n) ? 1 : 2));
-    return score(a) - score(b) || a.localeCompare(b);
+  const exes = names.filter((n) => /\.exe$/i.test(n)).map((n) => {
+    let mtime = 0;
+    try { mtime = fs.statSync(path.join(dir, n)).mtimeMs; } catch (e) { /* 忽略 */ }
+    return { n, mtime };
   });
   if (!exes.length) return null;
-  const file = exes[0];
+  // 安装版优先；同类型里取「最新构建」的那份——不能按文件名排序，
+  // 否则 0.2.0 会永远排在 0.2.6 前面，重新打包后下载页还是旧版本
+  exes.sort((a, b) => {
+    const score = (x) => (/setup|install/i.test(x.n) ? 0 : (/portable/i.test(x.n) ? 1 : 2));
+    return score(a) - score(b) || b.mtime - a.mtime;
+  });
+  const file = exes[0].n;
   let size = 0;
-  try { size = fs.statSync(path.join(dir, file)).size; } catch (e) { size = 0; }
-  return { file, size };
+  let mtime = 0;
+  try { size = fs.statSync(path.join(dir, file)).size; mtime = fs.statSync(path.join(dir, file)).mtimeMs; } catch (e) { /* 忽略 */ }
+  return { file, size, mtime };
+}
+
+// ── 助手安装包重新打包（系统管理页一键触发）──
+//    在服务器上执行 npm run agent:dist（electron-builder），产物落到 dist/，
+//    下载接口按「最新构建时间」自动取包，打完即生效，无需改代码。
+const agentBuild = { proc: null, running: false, startedAt: null, finishedAt: null, ok: null, error: '', log: [] };
+
+function agentBuildStatus() {
+  let ins = null;
+  try { ins = findAgentInstaller(); } catch (e) { /* 忽略 */ }
+  return {
+    running: agentBuild.running,
+    ok: agentBuild.ok,
+    error: agentBuild.error || '',
+    startedAt: agentBuild.startedAt,
+    finishedAt: agentBuild.finishedAt,
+    version: (() => { try { return require('./package.json').version; } catch (e) { return ''; } })(),
+    installer: ins ? { file: ins.file, sizeBytes: ins.size, mtime: ins.mtime || 0 } : null,
+    log: agentBuild.log.slice(-80),
+  };
+}
+
+function startAgentBuild() {
+  if (agentBuild.running) return { ok: false, error: '已有打包任务在进行中，请等它结束' };
+  if (process.platform !== 'win32') {
+    return { ok: false, error: `当前服务器是 ${process.platform}，nsis 安装包只能在 Windows 上构建（在 Windows 机器上运行本服务后再试）` };
+  }
+  agentBuild.running = true;
+  agentBuild.ok = null;
+  agentBuild.error = '';
+  agentBuild.startedAt = new Date().toISOString();
+  agentBuild.finishedAt = null;
+  agentBuild.log = [`[build] ${new Date().toLocaleString('zh-CN')} 开始重新打包助手（npm run agent:dist，约 1~2 分钟）…`];
+
+  const proc = spawn('npm run agent:dist', { cwd: ROOT, shell: true, env: process.env, windowsHide: true });
+  agentBuild.proc = proc;
+  const push = (buf) => {
+    for (const line of String(buf).split(/\r?\n/)) {
+      const t = line.trim();
+      if (t) agentBuild.log.push(t);
+    }
+    if (agentBuild.log.length > 300) agentBuild.log.splice(0, agentBuild.log.length - 300);
+  };
+  proc.stdout.on('data', push);
+  proc.stderr.on('data', push);
+  proc.on('error', (e) => {
+    agentBuild.running = false;
+    agentBuild.ok = false;
+    agentBuild.error = '启动打包进程失败：' + String((e && e.message) || e).slice(0, 200);
+    agentBuild.finishedAt = new Date().toISOString();
+    agentBuild.log.push('[build] ✗ ' + agentBuild.error);
+    agentBuild.proc = null;
+  });
+  proc.on('close', (code) => {
+    agentBuild.running = false;
+    agentBuild.ok = code === 0;
+    if (code !== 0) agentBuild.error = `打包进程退出码 ${code}，请查看日志定位`;
+    agentBuild.finishedAt = new Date().toISOString();
+    agentBuild.log.push(code === 0 ? '[build] ✓ 打包完成，下载页已指向新包' : `[build] ✗ 打包失败（退出码 ${code}）`);
+    agentBuild.proc = null;
+  });
+  return { ok: true };
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -162,6 +235,10 @@ function publicUser(u) {
     email: u.email || '',
     displayName: u.display_name || '',
     mustChangePassword: !!u.must_change_password,
+    // 退单列表页权限（超级管理员始终可见，普通用户由管理员逐个开启）
+    qnhRefundEnabled: u.role === 'admin' ? true : !!Number(u.qnh_refund_enabled),
+    // 实时毛利监控权限（同上，独立开关）
+    qnhProfitEnabled: u.role === 'admin' ? true : !!Number(u.qnh_profit_enabled),
     lastLoginAt: u.last_login_at,
     createdAt: u.created_at,
   };
@@ -586,6 +663,14 @@ const OP_ACTIONS = {
   'view.day.invoices': (d) => `点击了 ${d.date} 的每日已开票金额进行查看`,
   'agent.download': () => '下载了本机助手',
   'agent.bind': (d) => `绑定了本机助手${d.deviceName ? '（' + d.deviceName + '）' : ''}`,
+  'agent.build': () => '重新打包了本机助手安装包',
+  'qnh.sync': (d) => `在退单列表点击了「立即刷新数据」${d.ok ? '（成功）' : '（失败）'}`,
+  'qnh.profit_pull': (d) => `拉取了毛利明细（${d.rows || 0} 条，告警 ${d.alerts || 0} 条）`,
+  'qnh.notify_pending': (d) => `手动触发了超时退单提醒${d.ok ? `（推送 ${d.sent || 0} 条）` : '（失败）'}`,
+  'qnh.login': (d) => `在退单列表点击了「登录牵牛花」刷新 Cookie${d.ok ? '（成功）' : '（失败）'}`,
+  'qnh.config': (d) => `修改了退单同步设置（${d.items}）`,
+  'qnh.permit': (d) => `${d.enabled ? '开启' : '关闭'}了账号「${d.username}」的退单列表权限`,
+  'qnh.view': () => '打开了退单列表页',
 };
 
 // 前端下拉是「值」，日志里要显示人能看懂的「文案」，在服务端做映射，避免客户端乱传
@@ -708,6 +793,88 @@ const agentHub = new AgentHub({
 /** 正在等待本机回执的任务：taskId -> ctx */
 const CLIENT_TASKS = new Map();
 
+// ── 「登录牵牛花」任务：本机会话采集登录态后回传 ────────────
+//   服务器自己不再启动浏览器（云端没有显示器，也没有 Playwright 浏览器二进制）。
+//   服务器只做三件事：登记任务 → 通过本机助手通道下发 → 收回助手采集的登录态入库。
+const QNH_LOGINS = new Map();                  // taskId -> ctx
+const QNH_LOGIN_TIMEOUT_MS = Number(process.env.QNH_LOGIN_TIMEOUT_MS) || 5 * 60 * 1000;
+const QNH_LOGIN_TTL_MS = QNH_LOGIN_TIMEOUT_MS + 60 * 1000;   // 任务记录在内存里的最长存活
+// 支持「登录牵牛花」的最低助手版本：旧版助手没有该能力，得让用户先升级，
+// 否则点了没反应、干等 5 分钟才超时，体验很差。
+const QNH_LOGIN_MIN_AGENT = '0.2.6';
+
+/** 语义化版本比较：a >= b ? */
+function verGte(a, b) {
+  const pa = String(a || '').split('.').map((n) => Number(n) || 0);
+  const pb = String(b || '').split('.').map((n) => Number(n) || 0);
+  for (let i = 0; i < 3; i += 1) {
+    if ((pa[i] || 0) > (pb[i] || 0)) return true;
+    if ((pa[i] || 0) < (pb[i] || 0)) return false;
+  }
+  return true;
+}
+
+/** 定期清掉没人管的登录任务（用户点了又不登录），避免内存堆积 */
+const qnhLoginSweeper = setInterval(() => {
+  const now = Date.now();
+  for (const [id, c] of QNH_LOGINS) if (now > c.expiresAt) QNH_LOGINS.delete(id);
+}, 60000);
+if (qnhLoginSweeper.unref) qnhLoginSweeper.unref();
+
+// ── 「牵牛花页内签名请求」通道：把配送日志 / 毛利明细等签名请求派给本机助手 ──
+//    服务器 Cookie 直连这些接口会被 WAF 拦（403），只有助手真实页面里的 fetch 能自动签名。
+const QNH_FETCH_MIN_AGENT = '0.2.9';
+
+/** 找一个在线且版本足够的助手（任一用户的即可——牵牛花登录态是全系统共享的） */
+function findQnhAgent() {
+  for (const [uid] of agentHub.conns) {
+    if (!agentHub.isOnline(uid)) continue;
+    const ver = agentHub.status(uid).agentVer || '';
+    if (ver && !verGte(ver, QNH_FETCH_MIN_AGENT)) continue;
+    return { uid, ver };
+  }
+  return null;
+}
+
+qagent.setTransport({
+  findAgent: findQnhAgent,
+  send: (uid, msg) => agentHub.send(uid, msg),
+});
+
+/** 助手回报登录结果：把登录态入库，并标记任务完成/失败 */
+function onQnhLoginDone(uid, msg) {
+  const ctx = QNH_LOGINS.get(String((msg && msg.taskId) || ''));
+  if (!ctx || ctx.userId !== Number(uid) || ctx.status !== 'pending') return;
+  if (!msg.ok) {
+    ctx.status = 'failed';
+    ctx.message = String(msg.error || '助手未采集到登录态').slice(0, 300);
+    logOp(Number(uid), 'qnh.login', { ok: false });
+    return;
+  }
+  qnh.saveLoginState({
+    cookies: msg.cookies,
+    account: msg.account,
+    tenantId: msg.tenantId,
+    agentVer: msg.agentVer,
+  }).then((r) => {
+    if (!r.ok) {
+      ctx.status = 'failed';
+      ctx.message = r.message || '保存登录态失败';
+      logOp(Number(uid), 'qnh.login', { ok: false });
+      return;
+    }
+    ctx.status = 'done';
+    ctx.cookieCount = r.cookieCount;
+    ctx.writtenAt = r.writtenAt;
+    ctx.message = `登录态已更新（${r.cookieCount} 个 Cookie）`;
+    logOp(Number(uid), 'qnh.login', { ok: true });
+  }).catch((e) => {
+    ctx.status = 'failed';
+    ctx.message = '保存登录态失败：' + String((e && e.message) || e).slice(0, 200);
+    logOp(Number(uid), 'qnh.login', { ok: false });
+  });
+}
+
 /**
  * 把任务进度推送给本机助手（供助手状态面板的实时发送面板渲染）
  * 推送失败（通道已断）无所谓：助手面板只是旁观，断线时看板仍能看到状态。
@@ -730,6 +897,10 @@ function pushClientProgress(uid, ctx) {
 }
 
 function handleAgentMessage(uid, msg) {
+  // 「登录牵牛花」：助手在本机开窗口让用户登录，完成后把 Cookie 回传
+  if (msg.type === 'qnh_login_done') { onQnhLoginDone(uid, msg); return; }
+  // 「牵牛花页内签名请求」：助手回传配送日志 / 毛利明细等接口结果
+  if (msg.type === 'qnh_fetch_done') { qagent.onDone(uid, msg); return; }
   if (msg.type === 'login_state') { agentHub.setLoggedIn(uid, msg.loggedIn); return; }
   if (msg.type === 'sent') { onAgentSent(uid, msg); return; }
   if (msg.type === 'log') {
@@ -1302,6 +1473,7 @@ async function listUsers() {
   const users = await db.query(`
     SELECT u.id, u.username, u.role, u.status, u.company_name, u.tax_no, u.email, u.display_name, u.note,
            u.must_change_password, u.last_login_at, u.created_at, u.updated_at,
+           u.qnh_refund_enabled, u.qnh_profit_enabled,
            (SELECT COUNT(*) FROM invoice_order o WHERE o.user_id = u.id)              AS order_count,
            (SELECT COUNT(DISTINCT o.seller_company) FROM invoice_order o WHERE o.user_id = u.id) AS company_count,
            (SELECT COUNT(*) FROM issued_invoice i WHERE i.user_id = u.id)             AS invoice_rows,
@@ -1314,6 +1486,8 @@ async function listUsers() {
     companyName: u.company_name || '', taxNo: u.tax_no || '', email: u.email || '',
     displayName: u.display_name || '', note: u.note || '',
     mustChangePassword: !!u.must_change_password,
+    qnhRefundEnabled: u.role === 'admin' ? true : !!Number(u.qnh_refund_enabled),
+    qnhProfitEnabled: u.role === 'admin' ? true : !!Number(u.qnh_profit_enabled),
     lastLoginAt: u.last_login_at, createdAt: u.created_at, updatedAt: u.updated_at,
     orderCount: Number(u.order_count) || 0,
     companyCount: Number(u.company_count) || 0,
@@ -1551,6 +1725,8 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
+    // ── 助手安装包重新打包（仅超级管理员；系统管理页一键触发）──
+    //    注意：必须放在 isAdmin 计算之后
     // ── 本机助手：用一次性绑定令牌换取长期设备令牌（**公开端点**：助手没有看板 Cookie）──
     //    · 带 bindToken → 校验令牌（绝不回退 Cookie，否则伪造/重放令牌会被静默降级成自签）
     //    · 不带 bindToken 但已登录 → 看板自签（用于签发「书签令牌」）
@@ -1677,6 +1853,21 @@ const server = http.createServer(async (req, res) => {
     const tenantId = tenantOf(req, url, user);
     const isAdmin = user.role === 'admin';
     const writeGuard = () => assertWritable(user, tenantId);
+
+    // ── 助手安装包重新打包（仅超级管理员；系统管理页一键触发）──
+    if (p === '/api/agent/build') {
+      if (method === 'GET') {
+        if (!isAdmin) return sendJson(res, 403, { error: '仅超级管理员可查看打包状态' });
+        return sendJson(res, 200, agentBuildStatus());
+      }
+      if (method === 'POST') {
+        if (!isAdmin) return sendJson(res, 403, { error: '仅超级管理员可重新打包助手' });
+        const started = startAgentBuild();
+        if (!started.ok) return sendJson(res, 409, { error: started.error });
+        await logOp(user, 'agent.build', {});
+        return sendJson(res, 200, { ok: true, message: '打包已开始，约 1~2 分钟' });
+      }
+    }
 
     // 操作日志上报（前端埋点）：action 必须命中白名单，文案一律由服务端渲染
     if (method === 'POST' && p === '/api/op-log') {
@@ -2112,6 +2303,235 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { started: true, channel: 'client' });
     }
 
+    // ── 牵牛花：退单列表 / 实时毛利（按「菜单权限」分别放行；超级管理员始终可用）──
+    if (p.startsWith('/api/qnh/')) {
+      const canRefund = isAdmin || !!Number(user.qnh_refund_enabled);
+      const canProfit = isAdmin || !!Number(user.qnh_profit_enabled);
+      const profitApi = p === '/api/qnh/profit' || p === '/api/qnh/profit/pull' || p === '/api/qnh/profit/trend';
+      if (profitApi) {
+        if (!canProfit) return sendJson(res, 403, { error: '未开启毛利监控权限，请联系超级管理员' });
+      } else if (p === '/api/qnh/status') {
+        // 两个面板都要用它拿配置，任一权限即可
+        if (!canRefund && !canProfit) return sendJson(res, 403, { error: '未开启菜单权限，请联系超级管理员' });
+      } else if (!canRefund) {
+        return sendJson(res, 403, { error: '未开启退单列表权限，请联系超级管理员' });
+      }
+
+      if (method === 'GET' && p === '/api/qnh/status') {
+        const [cookie, cfg, sum] = await Promise.all([
+          qnh.cookieStatus(), qnh.getConfig(), qnh.summary().catch(() => null),
+        ]);
+        return sendJson(res, 200, {
+          cookie,
+          config: qnh.publicConfig(cfg),
+          sync: qnh.getSyncState(),
+          // 退单概况只给有退单权限的人（毛利-only 用户不需要）
+          summary: canRefund ? sum : null,
+          isAdmin,
+          canRefund,
+          canProfit,
+        });
+      }
+
+      if (method === 'GET' && p === '/api/qnh/summary') {
+        return sendJson(res, 200, await qnh.summary());
+      }
+
+      if (method === 'GET' && p === '/api/qnh/refunds') {
+        const q = url.searchParams;
+        return sendJson(res, 200, await qnh.listRefunds({
+          from: q.get('from') || '',
+          to: q.get('to') || '',
+          keyword: q.get('keyword') || '',
+          status: q.get('status') || '',
+          type: q.get('type') || '',
+          delivery: q.get('delivery') || '',
+          sort: q.get('sort') || '',
+          page: q.get('page'),
+          size: q.get('size'),
+        }));
+      }
+
+      if (method === 'GET' && p === '/api/qnh/trend') {
+        return sendJson(res, 200, { days: await qnh.refundTrend(url.searchParams.get('days') || 30) });
+      }
+
+      if (method === 'GET' && p === '/api/qnh/logs') {
+        const refundNo = (url.searchParams.get('refundNo') || '').trim().slice(0, 64);
+        if (!refundNo) return sendJson(res, 400, { error: '缺少退单号' });
+        const out = await qnh.getLogsWithRoute(refundNo, url.searchParams.get('type') || '');
+        return sendJson(res, 200, { refundNo, logs: out.logs, route: out.route });
+      }
+
+      // 以下仅超级管理员
+      // 「登录牵牛花」：不再由服务器打开浏览器（云端没有显示器/浏览器二进制），
+      // 改为把任务下发给用户「本机助手」→ 助手弹窗让你登录 → 回传登录态入库。
+      // 返回 pending + taskId，前端轮询 /api/qnh/login-status 拿结果。
+      if (method === 'POST' && p === '/api/qnh/login') {
+        if (!isAdmin) return sendJson(res, 403, { error: '仅超级管理员可刷新牵牛花登录态' });
+        if (!agentHub.isOnline(user.id)) {
+          return sendJson(res, 200, {
+            ok: false,
+            needAgent: true,
+            message: '本机助手未连接：请先启动「1688 催收助手」并完成绑定（看板右上角「本机助手」）。'
+              + '牵牛花登录只在你本机完成，服务器不会代你登录。',
+          });
+        }
+        // 旧版助手没有这个能力：它会直接忽略指令，用户只能干等到超时
+        const agentVer = agentHub.status(user.id).agentVer || '';
+        if (agentVer && !verGte(agentVer, QNH_LOGIN_MIN_AGENT)) {
+          return sendJson(res, 200, {
+            ok: false,
+            needAgent: true,
+            agentOutdated: true,
+            message: `你的本机助手是 v${agentVer}，还不支持登录牵牛花。请下载安装 v${QNH_LOGIN_MIN_AGENT} 及以上版本。`,
+          });
+        }
+        const taskId = 'qnh-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+        const ctx = {
+          taskId, userId: Number(user.id), status: 'pending', message: '',
+          cookieCount: 0, writtenAt: null, createdAt: Date.now(),
+          expiresAt: Date.now() + QNH_LOGIN_TTL_MS,
+        };
+        const sent = agentHub.send(user.id, {
+          type: 'qnh_login',
+          taskId,
+          url: (process.env.QNH_BASE_URL || 'https://qnh.meituan.com').replace(/\/+$/, ''),
+          timeoutMs: QNH_LOGIN_TIMEOUT_MS,
+        });
+        if (!sent) {
+          return sendJson(res, 200, {
+            ok: false, needAgent: true,
+            message: '下发登录任务失败：本机助手连接已断开，请确认助手正在运行。',
+          });
+        }
+        QNH_LOGINS.set(taskId, ctx);
+        return sendJson(res, 200, {
+          ok: true, pending: true, taskId,
+          message: '已在你电脑上打开牵牛花登录窗口，请在弹出的助手窗口里完成登录。',
+        });
+      }
+
+      // 轮询「登录牵牛花」的进度（status: pending / done / failed）
+      if (method === 'GET' && p === '/api/qnh/login-status') {
+        const ctx = QNH_LOGINS.get(String(url.searchParams.get('taskId') || ''));
+        if (!ctx || ctx.userId !== Number(user.id)) return sendJson(res, 404, { error: '登录任务不存在或已结束' });
+        return sendJson(res, 200, {
+          status: ctx.status,
+          ok: ctx.status === 'done',
+          message: ctx.message || '',
+          cookieCount: ctx.cookieCount,
+          writtenAt: ctx.writtenAt,
+        });
+      }
+
+      if (method === 'POST' && p === '/api/qnh/sync') {
+        if (!isAdmin) return sendJson(res, 403, { error: '仅超级管理员可触发同步' });
+        const body = await readBody(req);
+        const out = await qnh.runSync({
+          trigger: 'manual',
+          days: Number(body.days) || null,
+          date: body.date || null,
+        });
+        await logOp(user, 'qnh.sync', { ok: !!out.ok });
+        return sendJson(res, 200, out);
+      }
+
+      if (method === 'POST' && p === '/api/qnh/config') {
+        if (!isAdmin) return sendJson(res, 403, { error: '仅超级管理员可修改退单同步设置' });
+        const body = await readBody(req);
+        const patch = {};
+        if (body.scheduleEnabled !== undefined) patch[qnh.CFG.scheduleEnabled] = body.scheduleEnabled ? '1' : '0';
+        // 多时间点（"09:00,15:00" 或数组）；旧的 scheduleTime 单字段仍兼容
+        if (body.scheduleTimes !== undefined) {
+          const arr = Array.isArray(body.scheduleTimes) ? body.scheduleTimes : String(body.scheduleTimes).split(',');
+          const times = qnh._internals.parseScheduleTimes(arr.join(','));
+          if (!times.length) return sendJson(res, 400, { error: '时间格式应为 HH:mm（多个用逗号分隔）' });
+          patch[qnh.CFG.scheduleTimes] = times.join(',');
+          patch[qnh.CFG.scheduleTime] = times[0];
+        }
+        if (body.scheduleTime !== undefined) {
+          const t = String(body.scheduleTime).trim();
+          if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(t)) return sendJson(res, 400, { error: '时间格式应为 HH:mm' });
+          patch[qnh.CFG.scheduleTime] = t;
+        }
+        if (body.webhook !== undefined) patch[qnh.CFG.webhook] = String(body.webhook).trim().slice(0, 500);
+        if (body.wecomEnabled !== undefined) patch[qnh.CFG.wecomEnabled] = body.wecomEnabled ? '1' : '0';
+        if (body.alertDelivery !== undefined) patch[qnh.CFG.alertDelivery] = body.alertDelivery ? '1' : '0';
+        if (body.remindTemplate !== undefined) {
+          // 模板只做格式约束：逗号/顿号分隔的字段名，识别不了的会在渲染时忽略
+          const tpl = String(body.remindTemplate).trim().slice(0, 200);
+          patch[qnh.CFG.remindTemplate] = tpl || '订单号,渠道,退单类型';
+        }
+        if (body.profitEnabled !== undefined) patch[qnh.CFG.profitEnabled] = body.profitEnabled ? '1' : '0';
+        // 毛利告警专用机器人（与退单提醒的 webhook/总开关完全独立）
+        if (body.profitWebhook !== undefined) patch[qnh.CFG.profitWebhook] = String(body.profitWebhook).trim().slice(0, 500);
+        if (body.profitWecomEnabled !== undefined) patch[qnh.CFG.profitWecomEnabled] = body.profitWecomEnabled ? '1' : '0';
+        // 阈值允许负数（毛利为负很常见：如「毛利低于 -5 元」「毛利率低于 -10% 告警」）
+        if (body.profitMinAmount !== undefined) {
+          const n = Number(body.profitMinAmount);
+          if (!Number.isFinite(n) || n < -1000000 || n > 1000000) {
+            return sendJson(res, 400, { error: '毛利阈值应为数字（±1000000 以内，可为负）' });
+          }
+          patch[qnh.CFG.profitMinAmount] = String(n);
+        }
+        if (body.profitMinRate !== undefined) {
+          const n = Number(body.profitMinRate);
+          if (!Number.isFinite(n) || n < -100 || n > 100) {
+            return sendJson(res, 400, { error: '毛利率阈值应为 -100 ~ 100 的数字' });
+          }
+          patch[qnh.CFG.profitMinRate] = String(n);
+        }
+
+        const cfg = await qnh.setConfig(patch);
+        const labels = [];
+        if (patch[qnh.CFG.scheduleEnabled] !== undefined) labels.push('定时' + (patch[qnh.CFG.scheduleEnabled] === '1' ? '开启' : '关闭'));
+        if (patch[qnh.CFG.scheduleTimes] !== undefined) labels.push('时间 ' + patch[qnh.CFG.scheduleTimes]);
+        if (patch[qnh.CFG.scheduleTime] !== undefined) labels.push('时间 ' + patch[qnh.CFG.scheduleTime]);
+        if (patch[qnh.CFG.wecomEnabled] !== undefined) labels.push('企业微信' + (patch[qnh.CFG.wecomEnabled] === '1' ? '开启' : '关闭'));
+        if (patch[qnh.CFG.alertDelivery] !== undefined) labels.push('配送日志提醒' + (patch[qnh.CFG.alertDelivery] === '1' ? '开启' : '关闭'));
+        if (patch[qnh.CFG.webhook] !== undefined) labels.push('更新了机器人地址');
+        if (patch[qnh.CFG.profitWebhook] !== undefined) labels.push('更新了毛利告警机器人地址');
+        if (patch[qnh.CFG.profitWecomEnabled] !== undefined) {
+          labels.push('毛利告警机器人' + (patch[qnh.CFG.profitWecomEnabled] === '1' ? '开启' : '关闭'));
+        }
+        await logOp(user, 'qnh.config', { items: labels.join('、') || '无变化' });
+        return sendJson(res, 200, { ok: true, config: qnh.publicConfig(cfg) });
+      }
+
+      if (method === 'POST' && p === '/api/qnh/test-webhook') {
+        if (!isAdmin) return sendJson(res, 403, { error: '仅超级管理员可测试机器人' });
+        const b = await readBody(req).catch(() => ({}));
+        return sendJson(res, 200, await qnh.testWebhook(b && b.type === 'profit' ? 'profit' : 'refund'));
+      }
+
+      // ── 实时毛利监控 ──
+      // 查看毛利数据与告警配置（有退单列表权限即可看）
+      if (method === 'GET' && p === '/api/qnh/profit') {
+        return sendJson(res, 200, await qnh.profitOverview({ limit: url.searchParams.get('limit') || 100 }));
+      }
+      // 每天毛利总额趋势（按日期聚合线上毛利合计）
+      if (method === 'GET' && p === '/api/qnh/profit/trend') {
+        return sendJson(res, 200, { days: await qnh.profitTrend(url.searchParams.get('days') || 30) });
+      }
+      // 立即拉取当天毛利明细（经本机助手页内签名接口；需毛利监控权限）
+      if (method === 'POST' && p === '/api/qnh/profit/pull') {
+        if (!canProfit) return sendJson(res, 403, { error: '未开启毛利监控权限，请联系超级管理员' });
+        const out = await qnh.pullProfitOrders();
+        if (out.ok) await logOp(user, 'qnh.profit_pull', { rows: out.rows, alerts: out.alerts });
+        return sendJson(res, 200, out);
+      }
+      // 手动触发一次「超24h待处理」提醒（仅超级管理员）
+      if (method === 'POST' && p === '/api/qnh/notify-pending') {
+        if (!isAdmin) return sendJson(res, 403, { error: '仅超级管理员可触发提醒' });
+        const out = await qnh.notifyPending24h({ force: true });
+        await logOp(user, 'qnh.notify_pending', { ok: !!out.ok, sent: out.sent });
+        return sendJson(res, 200, out);
+      }
+
+      return sendJson(res, 404, { error: '未知退单接口' });
+    }
+
     // ── 系统管理（仅超级管理员） ──
     if (p.startsWith('/api/admin/')) {
       if (!isAdmin) return sendJson(res, 403, { error: '仅超级管理员可访问' });
@@ -2133,6 +2553,28 @@ const server = http.createServer(async (req, res) => {
       }
       if (method === 'POST' && p === '/api/admin/users/delete') {
         return sendJson(res, 200, await deleteUser(await readBody(req), user));
+      }
+      // 菜单权限：逐个账号开启/关闭（menu=refund|profit，缺省 refund 向后兼容）
+      if (method === 'POST' && p === '/api/admin/users/qnh-refund') {
+        const b = await readBody(req);
+        const id = Number(b.id);
+        const enabled = !!b.enabled;
+        const menu = String(b.menu || 'refund').trim().toLowerCase();
+        const MENU = {
+          refund: { col: 'qnh_refund_enabled', label: '退单列表', field: 'qnhRefundEnabled' },
+          profit: { col: 'qnh_profit_enabled', label: '实时毛利监控', field: 'qnhProfitEnabled' },
+        };
+        const m = MENU[menu];
+        if (!m) return sendJson(res, 400, { error: '未知的菜单：' + menu });
+        if (!id) return sendJson(res, 400, { error: '缺少用户ID' });
+        const rows = await db.query('SELECT id, username, role FROM app_user WHERE id = ?', [id]);
+        if (!rows.length) return sendJson(res, 404, { error: '用户不存在' });
+        if (rows[0].role === 'admin') {
+          return sendJson(res, 400, { error: `超级管理员默认拥有${m.label}权限，无需开启` });
+        }
+        await db.exec(`UPDATE app_user SET ${m.col} = ? WHERE id = ?`, [enabled ? 1 : 0, id]);
+        await logOp(user, 'qnh.permit', { username: rows[0].username, menu, enabled });
+        return sendJson(res, 200, { ok: true, id, menu, enabled, [m.field]: enabled });
       }
       // 按用户名/ID 查用户概况（配合 ?tenant= 查看其看板）
       if (method === 'GET' && p === '/api/admin/user-lookup') {
@@ -2273,5 +2715,7 @@ server.listen(PORT, async () => {
     console.error('✗ 数据库初始化失败:', e.message);
     console.error('  请先启动数据库并确认 config.json 的 mysql 段（或设置 MYSQL_* 环境变量）');
   }
+  // 退单同步定时任务（到点在进程内触发，不依赖 Windows 计划任务）
+  try { qnh.startScheduler(); } catch (e) { console.error('✗ 退单定时器启动失败:', e.message); }
   console.log('Ctrl+C 停止服务器');
 });

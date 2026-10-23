@@ -93,6 +93,194 @@ async function transaction(fn) {
 }
 
 /**
+ * 牵牛花退单同步的表结构（幂等）。
+ *
+ * 这 6 张表由看板本体（lib/qnh.js）写入和查询——v0.2.4 起同步链路在 Node 内完成，
+ * 不再有独立的 Python 工程。保留 CREATE TABLE IF NOT EXISTS 幂等语义。
+ */
+async function ensureQnhSchema(q) {
+  const stmts = [
+    'CREATE TABLE IF NOT EXISTS `qnh_refund_order` (' +
+      "  `refund_no` VARCHAR(64) NOT NULL COMMENT '退单号（主键）'," +
+      "  `service_id` VARCHAR(64) DEFAULT NULL," +
+      "  `qnh_tenant_id` VARCHAR(32) DEFAULT NULL COMMENT '牵牛花租户ID'," +
+      "  `order_no` VARCHAR(64) DEFAULT NULL COMMENT '关联订单号'," +
+      "  `serial_no` VARCHAR(64) DEFAULT NULL COMMENT '订单号（牵牛花 serialNo，展示用）'," +
+      "  `channel_name` VARCHAR(64) DEFAULT NULL COMMENT '渠道'," +
+      "  `channel_id` INT DEFAULT NULL," +
+      "  `store_id` VARCHAR(64) DEFAULT NULL," +
+      "  `store_name` VARCHAR(128) DEFAULT NULL COMMENT '门店'," +
+      "  `order_status` VARCHAR(32) DEFAULT NULL COMMENT '订单状态'," +
+      "  `order_status_code` INT DEFAULT NULL," +
+      "  `refund_status` VARCHAR(32) DEFAULT NULL COMMENT '退单状态'," +
+      "  `refund_status_code` INT DEFAULT NULL," +
+      "  `refund_type` VARCHAR(64) DEFAULT NULL COMMENT '退单类型'," +
+      "  `is_appeal` TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否申诉单'," +
+      "  `apply_source` VARCHAR(32) DEFAULT NULL COMMENT '退单发起方'," +
+      "  `apply_source_code` INT DEFAULT NULL," +
+      "  `apply_reason` VARCHAR(512) DEFAULT NULL COMMENT '退单原因'," +
+      "  `refund_amount` DECIMAL(14,2) DEFAULT NULL COMMENT '退单金额（元）'," +
+      "  `goods_amount` DECIMAL(14,2) DEFAULT NULL," +
+      "  `commission` DECIMAL(14,2) DEFAULT NULL," +
+      "  `return_freight` DECIMAL(14,2) DEFAULT NULL," +
+      "  `return_freight_actual` DECIMAL(14,2) DEFAULT NULL," +
+      "  `refund_qty` DECIMAL(14,3) DEFAULT NULL COMMENT '退款件数'," +
+      "  `refund_weight` DECIMAL(14,3) DEFAULT NULL," +
+      "  `apply_time` DATETIME DEFAULT NULL COMMENT '申请时间'," +
+      "  `apply_ts` BIGINT DEFAULT NULL," +
+      "  `update_ts` BIGINT DEFAULT NULL COMMENT '接口 updateTime（增量比对用）'," +
+      "  `finish_time` DATETIME DEFAULT NULL COMMENT '退款完成时间'," +
+      "  `finish_ts` BIGINT DEFAULT NULL," +
+      "  `receiver_name` VARCHAR(64) DEFAULT NULL," +
+      "  `receiver_phone` VARCHAR(32) DEFAULT NULL," +
+      "  `receiver_address` VARCHAR(255) DEFAULT NULL COMMENT '顾客配送地址'," +
+      "  `paid_time` DATETIME DEFAULT NULL COMMENT '已支付订单时间（配送日志/接口 payTime）'," +
+      "  `paid_ts` BIGINT DEFAULT NULL," +
+      "  `audit_time` DATETIME DEFAULT NULL," +
+      "  `audit_operator` VARCHAR(64) DEFAULT NULL," +
+      "  `audit_reason` VARCHAR(512) DEFAULT NULL," +
+      "  `item_kinds` INT DEFAULT NULL COMMENT '商品行数'," +
+      "  `detail_synced` TINYINT(1) NOT NULL DEFAULT 0," +
+      "  `has_delivery_log` TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否有配送日志（含接单）'," +
+      "  `picked_log` TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否已取货/已送达（商品离店）'," +
+      "  `log_synced` TINYINT(1) NOT NULL DEFAULT 0 COMMENT '日志是否已同步'," +
+      "  `sync_batch_id` BIGINT DEFAULT NULL," +
+      "  `first_seen_at` DATETIME DEFAULT NULL," +
+      "  `last_seen_at` DATETIME DEFAULT NULL," +
+      "  `raw_json` LONGTEXT DEFAULT NULL," +
+      "  PRIMARY KEY (`refund_no`)," +
+      "  KEY `idx_qro_apply` (`apply_time`)," +
+      "  KEY `idx_qro_status` (`refund_status`)," +
+      "  KEY `idx_qro_tenant` (`qnh_tenant_id`)," +
+      "  KEY `idx_qro_delivery` (`has_delivery_log`)" +
+      ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='牵牛花退单主表'",
+
+    'CREATE TABLE IF NOT EXISTS `qnh_refund_item` (' +
+      "  `id` BIGINT NOT NULL AUTO_INCREMENT," +
+      "  `refund_no` VARCHAR(64) NOT NULL," +
+      "  `qnh_tenant_id` VARCHAR(32) DEFAULT NULL," +
+      "  `item_key` VARCHAR(160) NOT NULL," +
+      "  `line_no` INT DEFAULT NULL," +
+      "  `item_role` VARCHAR(16) NOT NULL DEFAULT 'main'," +
+      "  `parent_sku` VARCHAR(64) DEFAULT NULL," +
+      "  `sku` VARCHAR(64) DEFAULT NULL," +
+      "  `sku_name` VARCHAR(255) DEFAULT NULL," +
+      "  `upc` VARCHAR(255) DEFAULT NULL," +
+      "  `spec` VARCHAR(128) DEFAULT NULL," +
+      "  `unit` VARCHAR(32) DEFAULT NULL," +
+      "  `weight` DECIMAL(14,3) DEFAULT NULL," +
+      "  `refund_qty` DECIMAL(14,3) DEFAULT NULL," +
+      "  `order_qty` DECIMAL(14,3) DEFAULT NULL," +
+      "  `sale_price` DECIMAL(14,2) DEFAULT NULL," +
+      "  `origin_price` DECIMAL(14,2) DEFAULT NULL," +
+      "  `item_amount` DECIMAL(14,2) DEFAULT NULL," +
+      "  `pic_url` VARCHAR(512) DEFAULT NULL," +
+      "  `raw_json` LONGTEXT DEFAULT NULL," +
+      "  PRIMARY KEY (`id`)," +
+      "  UNIQUE KEY `uk_qri_refund_item` (`refund_no`,`item_key`)," +
+      "  KEY `idx_qri_sku` (`sku`)," +
+      "  KEY `idx_qri_tenant` (`qnh_tenant_id`)" +
+      ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='牵牛花退单商品明细'",
+
+    'CREATE TABLE IF NOT EXISTS `qnh_refund_log` (' +
+      "  `id` BIGINT NOT NULL AUTO_INCREMENT," +
+      "  `refund_no` VARCHAR(64) NOT NULL," +
+      "  `order_no` VARCHAR(64) DEFAULT NULL," +
+      "  `log_type` VARCHAR(16) NOT NULL DEFAULT 'order' COMMENT 'order=订单日志 delivery=配送日志'," +
+      "  `operator_name` VARCHAR(64) DEFAULT NULL," +
+      "  `op_time` DATETIME DEFAULT NULL," +
+      "  `op_time_ms` BIGINT NOT NULL DEFAULT 0," +
+      "  `content` VARCHAR(255) NOT NULL DEFAULT ''," +
+      "  `note` VARCHAR(255) DEFAULT NULL," +
+      "  `source` VARCHAR(32) DEFAULT NULL," +
+      "  `raw_json` TEXT DEFAULT NULL," +
+      "  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP," +
+      "  PRIMARY KEY (`id`)," +
+      "  UNIQUE KEY `uk_qrl_item` (`refund_no`,`log_type`,`op_time_ms`,`content`)," +
+      "  KEY `idx_qrl_refund` (`refund_no`)," +
+      "  KEY `idx_qrl_type` (`log_type`)," +
+      "  KEY `idx_qrl_time` (`op_time`)" +
+      ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='退单订单日志 / 配送日志'",
+
+    'CREATE TABLE IF NOT EXISTS `qnh_alert_log` (' +
+      "  `id` BIGINT NOT NULL AUTO_INCREMENT," +
+      "  `refund_no` VARCHAR(64) NOT NULL," +
+      "  `alert_type` VARCHAR(32) NOT NULL DEFAULT 'delivery_log'," +
+      "  `content` VARCHAR(1024) DEFAULT NULL," +
+      "  `status` VARCHAR(16) NOT NULL DEFAULT 'ok'," +
+      "  `error` VARCHAR(255) DEFAULT NULL," +
+      "  `sent_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP," +
+      "  PRIMARY KEY (`id`)," +
+      "  UNIQUE KEY `uk_qal_refund` (`refund_no`,`alert_type`)," +
+      "  KEY `idx_qal_sent` (`sent_at`)" +
+      ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='退单提醒推送记录'",
+
+    'CREATE TABLE IF NOT EXISTS `qnh_sync_run` (' +
+      "  `id` BIGINT NOT NULL AUTO_INCREMENT," +
+      "  `started_at` DATETIME DEFAULT NULL," +
+      "  `finished_at` DATETIME DEFAULT NULL," +
+      "  `window_start` DATETIME DEFAULT NULL," +
+      "  `window_end` DATETIME DEFAULT NULL," +
+      "  `refunds` INT NOT NULL DEFAULT 0," +
+      "  `new_refunds` INT NOT NULL DEFAULT 0," +
+      "  `items` INT NOT NULL DEFAULT 0," +
+      "  `failed` INT NOT NULL DEFAULT 0," +
+      "  `status` VARCHAR(32) DEFAULT NULL," +
+      "  `message` VARCHAR(512) DEFAULT NULL," +
+      "  PRIMARY KEY (`id`)," +
+      "  KEY `idx_qsr_start` (`started_at`)" +
+      ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='牵牛花退单同步批次'",
+
+    'CREATE TABLE IF NOT EXISTS `qnh_sync_state` (' +
+      "  `key` VARCHAR(64) NOT NULL," +
+      "  `value` VARCHAR(128) DEFAULT NULL," +
+      "  `updated_at` DATETIME DEFAULT NULL," +
+      "  PRIMARY KEY (`key`)" +
+      ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='牵牛花退单同步状态'",
+
+    // 实时毛利监控：订单毛利明细（数据经「本机助手」页内签名接口拉取，见 lib/qnh.js）
+    'CREATE TABLE IF NOT EXISTS `qnh_profit_order` (' +
+      "  `order_no` VARCHAR(64) NOT NULL COMMENT '订单号'," +
+      "  `order_seq` VARCHAR(32) DEFAULT NULL COMMENT '订单编号/序号（页面 order_seq）'," +
+      "  `channel_name` VARCHAR(64) DEFAULT NULL COMMENT '渠道名称（美团闪购等）'," +
+      "  `store_name` VARCHAR(128) DEFAULT NULL COMMENT '门店'," +
+      "  `order_time` DATETIME DEFAULT NULL COMMENT '下单时间'," +
+      "  `order_time_ms` BIGINT DEFAULT NULL," +
+      "  `profit_online` DECIMAL(14,2) DEFAULT NULL COMMENT '线上毛利（元）'," +
+      "  `profit_rate_online` DECIMAL(14,4) DEFAULT NULL COMMENT '线上毛利率（%，如 39.33）'," +
+      "  `est_income_amt` DECIMAL(14,2) DEFAULT NULL COMMENT '预计收入（元，页面 ord_est_income_amt）'," +
+      "  `alerted` TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否已推送过低毛利告警'," +
+      "  `data_date` DATE DEFAULT NULL COMMENT '数据归属日期（拉取批次）'," +
+      "  `raw_json` LONGTEXT DEFAULT NULL," +
+      "  `fetched_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP," +
+      "  PRIMARY KEY (`order_no`)," +
+      "  KEY `idx_qpo_time` (`order_time`)," +
+      "  KEY `idx_qpo_alert` (`alerted`)" +
+      ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='订单毛利明细（实时毛利监控）'",
+
+    // 牵牛花登录态（Cookies）。云端部署时不能落本机文件（容器目录会随重启丢失），
+    // 故统一入库；登录态由「本机助手」采集后回传，服务器自己不再启动浏览器。
+    'CREATE TABLE IF NOT EXISTS `qnh_session` (' +
+      "  `id` INT NOT NULL AUTO_INCREMENT," +
+      "  `user_id` INT NOT NULL DEFAULT 0 COMMENT '归属用户（0=所有用户共享的一份登录态）'," +
+      "  `storage_state` MEDIUMTEXT COMMENT 'Playwright storageState 格式（cookies+origins）'," +
+      "  `cookie_count` INT NOT NULL DEFAULT 0," +
+      "  `account_name` VARCHAR(128) DEFAULT NULL," +
+      "  `tenant_id` VARCHAR(64) DEFAULT NULL," +
+      "  `source` VARCHAR(32) DEFAULT NULL COMMENT '采集来源：本机助手'," +
+      "  `agent_ver` VARCHAR(32) DEFAULT NULL," +
+      "  `earliest_expiry` DATETIME DEFAULT NULL," +
+      "  `written_at` DATETIME DEFAULT NULL," +
+      "  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP," +
+      "  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP," +
+      "  PRIMARY KEY (`id`)," +
+      "  UNIQUE KEY `uk_qs_user` (`user_id`)" +
+      ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='牵牛花登录态（入库，替代 data/qnh-state.json）'",
+  ];
+  for (const s of stmts) await q(s);
+}
+
+/**
  * 结构升级（幂等）：老库自动补列 / 调整索引 / 补建多租户账号表，避免手工改库。
  * 新装环境 schema.sql 已含这些列，这里只对已存在的旧库做增量修补。
  */
@@ -171,6 +359,68 @@ async function migrate(conn, dbName) {
       ') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci' +
       '  COMMENT=\'操作日志（仅超级管理员可查看）\''
     );
+  }
+
+  // ── 全局配置（看板与牵牛花同步工具共用）──
+  if (!(await tableExists('app_config'))) {
+    await q(
+      'CREATE TABLE `app_config` (' +
+      '  `key` VARCHAR(64) NOT NULL COMMENT \'配置项\',' +
+      '  `value` TEXT DEFAULT NULL COMMENT \'配置值\',' +
+      '  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT \'更新时间\',' +
+      '  PRIMARY KEY (`key`)' +
+      ') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci' +
+      '  COMMENT=\'全局配置（看板与退单同步工具共用）\''
+    );
+  }
+
+  // ── 账号表：菜单权限（默认关闭，由超级管理员逐个开启；admin 恒为真）──
+  if (!(await colExists('app_user', 'qnh_refund_enabled'))) {
+    await q(
+      'ALTER TABLE `app_user` ADD COLUMN `qnh_refund_enabled` TINYINT(1) NOT NULL DEFAULT 0 ' +
+      "COMMENT '是否允许查看退单列表页（1=开启，超级管理员始终可见）'"
+    );
+  }
+  if (!(await colExists('app_user', 'qnh_profit_enabled'))) {
+    await q(
+      'ALTER TABLE `app_user` ADD COLUMN `qnh_profit_enabled` TINYINT(1) NOT NULL DEFAULT 0 ' +
+      "COMMENT '是否允许查看实时毛利监控（1=开启，超级管理员始终可见）'"
+    );
+  }
+
+  // ── 毛利明细补列（老库）：订单编号 / 渠道名称 / 预计收入 ──
+  if (await tableExists('qnh_profit_order')) {
+    for (const [col, decl] of [
+      ['order_seq', "VARCHAR(32) DEFAULT NULL COMMENT '订单编号/序号（页面 order_seq）'"],
+      ['channel_name', "VARCHAR(64) DEFAULT NULL COMMENT '渠道名称（美团闪购等）'"],
+      ['est_income_amt', "DECIMAL(14,2) DEFAULT NULL COMMENT '预计收入（元，页面 ord_est_income_amt）'"],
+    ]) {
+      if (!(await colExists('qnh_profit_order', col))) {
+        await q(`ALTER TABLE \`qnh_profit_order\` ADD COLUMN \`${col}\` ${decl}`);
+      }
+    }
+  }
+
+  // ── 牵牛花退单同步的表 ──
+  //    v0.2.4 起由 lib/qnh.js 在同步时写入（原先由 qnh-refund-sync 写）；
+  //    启动时先建好，保证「没跑过同步就先打开退单列表」时页面不会报 1146 表不存在。
+  await ensureQnhSchema(q, tableExists, idxExists);
+
+  // 老库补列：退单日志相关标记
+  if (await tableExists('qnh_refund_order')) {
+    for (const [col, decl] of [
+      ['has_delivery_log', "TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否有配送日志（含接单）'"],
+      ['picked_log', "TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否已取货/已送达（商品离店）'"],
+      ['log_synced', "TINYINT(1) NOT NULL DEFAULT 0 COMMENT '日志是否已同步'"],
+      ['serial_no', "VARCHAR(64) DEFAULT NULL COMMENT '订单号（牵牛花 serialNo，展示用）'"],
+      ['receiver_address', "VARCHAR(255) DEFAULT NULL COMMENT '顾客配送地址'"],
+      ['paid_time', "DATETIME DEFAULT NULL COMMENT '已支付订单时间（配送日志/接口 payTime）'"],
+      ['paid_ts', 'BIGINT DEFAULT NULL'],
+    ]) {
+      if (!(await colExists('qnh_refund_order', col))) {
+        await q(`ALTER TABLE \`qnh_refund_order\` ADD COLUMN \`${col}\` ${decl}`);
+      }
+    }
   }
 
   // ── 各业务表补 user_id（多租户隔离键） ──
