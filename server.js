@@ -66,48 +66,6 @@ const ROOT = __dirname;
 const DATA = path.join(ROOT, 'data');
 
 // ─────────────────────────────────────────────────────────────────────────
-// 构建版本标识
-//   线上出现「页面行为和代码对不上」时，第一件事就是确认跑的是不是最新提交。
-//   取值优先级：构建时注入的 APP_BUILD（Dockerfile ARG）→ 运行时读 git → unknown。
-// ─────────────────────────────────────────────────────────────────────────
-function detectBuild() {
-  const out = { commit: '', branch: '', time: '', dashboardMtime: '', dirty: false, subject: '' };
-  try {
-    out.dashboardMtime = fs.statSync(path.join(ROOT, 'dashboard.html')).mtime.toISOString().slice(0, 19).replace('T', ' ');
-  } catch (e) { /* 忽略 */ }
-  // 构建期指纹（scripts/write-build-info.js 生成；镜像里没有 .git，只能靠它）
-  try {
-    const bi = JSON.parse(fs.readFileSync(path.join(ROOT, 'build-info.json'), 'utf8'));
-    if (bi && bi.commit) {
-      out.commit = bi.commit;
-      out.branch = bi.branch || '';
-      out.time = bi.time || '';
-      out.subject = bi.subject || '';
-      out.dirty = !!bi.dirty;
-      return out;
-    }
-  } catch (e) { /* 没有这个文件就继续往下找 git */ }
-  if (process.env.APP_BUILD) {
-    const [c, b] = String(process.env.APP_BUILD).split('@');
-    out.commit = c || '';
-    out.branch = b || '';
-    out.time = process.env.APP_BUILD_TIME || '';
-    return out;
-  }
-  try {
-    const { execFileSync } = require('child_process');
-    const g = (args) => execFileSync('git', args, { cwd: ROOT, timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
-    out.commit = g(['rev-parse', '--short', 'HEAD']);
-    out.branch = g(['rev-parse', '--abbrev-ref', 'HEAD']);
-    out.time = g(['log', '-1', '--format=%cI']);
-  } catch (e) { /* 镜像里通常没有 git，属正常 */ }
-  return out;
-}
-const BUILD = detectBuild();
-console.log(`[build] ${BUILD.branch || '?'}@${BUILD.commit || 'unknown'} ${BUILD.time || '—'}`
-  + `${BUILD.dirty ? ' (构建时有未提交改动)' : ''} · dashboard.html ${BUILD.dashboardMtime || '—'}`);
-
-// ─────────────────────────────────────────────────────────────────────────
 // HTTP 工具
 // ─────────────────────────────────────────────────────────────────────────
 function sendJson(res, code, obj) {
@@ -1686,7 +1644,7 @@ const server = http.createServer(async (req, res) => {
       if (!bu) return redirect(res, '/login');
       return sendHtml(res, 'bookmarklet.html');
     }
-    if (method === 'GET' && p === '/healthz') return sendJson(res, 200, { ok: true, ts: new Date().toISOString(), build: BUILD });
+    if (method === 'GET' && p === '/healthz') return sendJson(res, 200, { ok: true, ts: new Date().toISOString() });
     // 前端本地依赖（免外网 CDN）：/vendor/vue.min.js、/vendor/echarts.min.js、/vendor/element-ui/*
     if (method === 'GET' && p.startsWith('/vendor/')) return sendVendor(res, decodeURIComponent(p.slice('/vendor/'.length)));
     if (method === 'GET' && (p === '/' || p === '/index.html')) {
@@ -1719,7 +1677,7 @@ const server = http.createServer(async (req, res) => {
     if (method === 'GET' && p === '/api/auth/me') {
       const u = await currentUser(req);
       if (!u) return sendJson(res, 401, { error: '未登录' });
-      return sendJson(res, 200, { user: publicUser(u), build: BUILD });
+      return sendJson(res, 200, { user: publicUser(u) });
     }
 
     if (method === 'POST' && p === '/api/auth/password') {
