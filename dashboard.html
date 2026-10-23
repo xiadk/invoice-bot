@@ -750,31 +750,26 @@
           <h2>退单列表</h2>
           <div class="meta-line">
             数据来自美团牵牛花（qnh.meituan.com）的退单列表，每日自动增量同步，也可以随时点「立即刷新数据」。
-            牵牛花的登录由「本机助手」在<b>你本机</b>完成（服务器不打开浏览器），登录态存在数据库里。
+            牵牛花的登录由「1688 小助手」在<b>该账号自己的电脑</b>上完成（服务器不打开浏览器），登录态存在数据库里。
             标记为 <el-tag size="mini" type="warning">已取货/送达</el-tag> 的退单表示商品已经出库，请重点核查。
           </div>
         </div>
 
-        <!-- 顶部状态条：Cookie / 立即刷新 / 定时 -->
+        <qnh-tenant-picker v-if="isAdmin" :users="qnhUsers" :value="qnhTenant"
+                           :sessions="qnhSessions" :self-id="me && me.id"
+                           @change="onQnhTenantChange"></qnh-tenant-picker>
+
+        <!-- 顶部状态条：登录 / 刷新 / 定时任务（与实时毛利监控页共用同一组件） -->
         <el-card class="section-card" shadow="never" :body-style="{ padding: '12px 14px' }">
-          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-            <el-button size="small" :type="rq.cookie.logined ? 'success' : 'danger'"
-                       :loading="rq.cookie.loading" @click="onCookieBtn">
-              {{ rq.cookie.loading ? '等待本机登录…' : (rq.cookie.logined ? '已登录牵牛花' : '登录牵牛花') }}
-            </el-button>
-            <el-button size="small" type="primary" :loading="rq.syncing" @click="doSync">立即刷新数据</el-button>
-            <el-tag v-if="rq.lastRun" size="small" type="info">
-              最近同步 {{ rq.lastRun.finishedAt || rq.lastRun.startedAt || '—' }}
-              · {{ rq.lastRun.status === 'ok' ? '成功' : '有失败项' }}
-            </el-tag>
-            <el-tag v-if="rq.config && rq.config.scheduleEnabled" size="small" type="success">
-              每天 {{ (rq.config.scheduleTimes && rq.config.scheduleTimes.length ? rq.config.scheduleTimes : [rq.config.scheduleTime]).join(' / ') }} 自动同步
-            </el-tag>
-            <span style="flex:1"></span>
-            <span class="loginid" v-if="rq.cookie.tenantName">租户：{{ rq.cookie.tenantName }}（{{ rq.cookie.tenantId }}）</span>
-            <span class="loginid" v-if="rq.cookie.message" style="color:#e6a23c">{{ rq.cookie.message }}</span>
-          </div>
+          <qnh-login-bar :cookie="rq.cookie" :last-run="rq.lastRun" :schedule="rq.config"
+                         :who-label="qnhWhoLabel" action-text="立即刷新数据"
+                         :action-loading="rq.syncing"
+                         @login="onQnhLoginBtn" @action="doSync"></qnh-login-bar>
         </el-card>
+
+        <el-alert v-if="qnhNeedPick" type="warning" :closable="false" show-icon style="margin-bottom:12px"
+                  title="请先在上方选择要以哪个账号的身份查看"
+                  description="超级管理员自己没有独立的牵牛花数据；选定账号后，退单、毛利、登录与告警配置都属于该账号。"></el-alert>
 
         <!-- 汇总 -->
         <div style="display:flex;gap:12px;margin:12px 0;flex-wrap:wrap">
@@ -890,33 +885,19 @@
           </div>
         </el-card>
 
-        <!-- 同步设置（仅超级管理员） -->
-        <el-card v-if="isAdmin" class="section-card" shadow="never">
-          <div slot="header"><b>退单同步与提醒设置</b> <span class="loginid">（仅超级管理员可改）</span></div>
+        <!-- 提醒设置（每个账号配自己的机器人与模板） -->
+        <el-card class="section-card" shadow="never">
+          <div slot="header"><b>退单提醒设置</b> <span class="loginid">（当前账号：{{ qnhConfigOwner }}）</span></div>
           <el-form label-position="top" size="small">
             <el-row :gutter="12">
               <el-col :xs="24" :md="6">
-                <el-form-item label="每日自动同步">
-                  <el-switch v-model="rq.config.scheduleEnabled" active-text="开启" inactive-text="关闭"></el-switch>
-                </el-form-item>
-              </el-col>
-              <el-col :xs="24" :md="6">
-                <el-form-item label="同步时间点（可多个）">
-                  <el-select v-model="rq.config.scheduleTimes" multiple filterable allow-create default-first-option
-                             placeholder="如 03:00，回车添加" style="width:100%"
-                             :disabled="!rq.config.scheduleEnabled">
-                    <el-option v-for="t in timeOptions" :key="t" :label="t" :value="t"></el-option>
-                  </el-select>
+                <el-form-item label="退单提醒机器人开关（新退单 / 超时提醒）">
+                  <el-switch v-model="rq.config.wecomEnabled" active-text="开启" inactive-text="关闭"></el-switch>
                 </el-form-item>
               </el-col>
               <el-col :xs="24" :md="6">
                 <el-form-item label="有配送日志时提醒企业微信">
                   <el-switch v-model="rq.config.alertDelivery" active-text="提醒" inactive-text="不提醒"></el-switch>
-                </el-form-item>
-              </el-col>
-              <el-col :xs="24" :md="6">
-                <el-form-item label="退单提醒机器人开关（新退单 / 超时提醒）">
-                  <el-switch v-model="rq.config.wecomEnabled" active-text="开启" inactive-text="关闭"></el-switch>
                 </el-form-item>
               </el-col>
               <el-col :xs="24">
@@ -938,8 +919,35 @@
           <el-button type="primary" size="small" :loading="rq.savingCfg" @click="saveQnhConfig">保存设置</el-button>
           <el-tag v-if="rq.savedCfg" type="success" size="small" style="margin-left:10px">✓ 已保存</el-tag>
           <div class="form-tip" style="margin-top:8px">
-            定时由服务进程内的调度器触发，到点自动同步<b>当天</b>的退单数据；「立即刷新数据」也只拉当天（补历史可用 API 参数 days/date）。
+            「立即刷新数据」只拉当天（补历史可用 API 参数 days/date）。
             提醒按退单号去重，同一笔退单只推一次；申请超 24 小时仍未处理的退单会另外推送超时提醒。
+          </div>
+        </el-card>
+
+        <!-- 定时同步（全局，仅超级管理员） -->
+        <el-card v-if="isAdmin" class="section-card" shadow="never">
+          <div slot="header"><b>定时同步设置</b> <span class="loginid">（全局，仅超级管理员可改）</span></div>
+          <el-form label-position="top" size="small">
+            <el-row :gutter="12">
+              <el-col :xs="24" :md="6">
+                <el-form-item label="每日自动同步">
+                  <el-switch v-model="rq.config.scheduleEnabled" active-text="开启" inactive-text="关闭"></el-switch>
+                </el-form-item>
+              </el-col>
+              <el-col :xs="24" :md="10">
+                <el-form-item label="同步时间点（可多个）">
+                  <el-select v-model="rq.config.scheduleTimes" multiple filterable allow-create default-first-option
+                             placeholder="如 03:00，回车添加" style="width:100%"
+                             :disabled="!rq.config.scheduleEnabled">
+                    <el-option v-for="t in timeOptions" :key="t" :label="t" :value="t"></el-option>
+                  </el-select>
+                </el-form-item>
+              </el-col>
+            </el-row>
+          </el-form>
+          <el-button type="primary" size="small" :loading="rq.savingCfg" @click="saveQnhConfig">保存设置</el-button>
+          <div class="form-tip" style="margin-top:8px">
+            到点后由服务进程内的调度器对<b>每个已登录牵牛花的账号</b>各跑一轮当天增量同步；普通账号看不到这一块。
           </div>
         </el-card>
 
@@ -951,23 +959,31 @@
           <h2>实时毛利监控</h2>
           <div class="meta-line">
             数据来自牵牛花「订单毛利明细」，默认按<b>线上毛利从小到大</b>排列，亏钱/低毛利的订单排在最前面。
-            接口需要签名，由<b>本机助手</b>在你电脑的牵牛花页面里代拉（监控开启后每 10 分钟自动拉一次）。
+            接口需要签名，由<b>本机助手</b>在该账号电脑的牵牛花页面里代拉（监控开启后每 10 分钟自动拉一次）。
+            登录方式与退单列表完全一致：点「登录牵牛花」，在「1688 小助手」弹出的窗口里登录。
           </div>
         </div>
+
+        <qnh-tenant-picker v-if="isAdmin" :users="qnhUsers" :value="qnhTenant"
+                           :sessions="qnhSessions" :self-id="me && me.id"
+                           @change="onQnhTenantChange"></qnh-tenant-picker>
+
+        <!-- 顶部状态条：登录 / 拉取毛利 / 定时（与退单列表页共用同一组件） -->
+        <el-card class="section-card" shadow="never" :body-style="{ padding: '12px 14px' }">
+          <qnh-login-bar :cookie="rq.cookie" :last-run="rq.lastRun" :schedule="rq.config"
+                         :who-label="qnhWhoLabel" action-text="立即拉取毛利数据"
+                         :action-loading="rq.profit.loading"
+                         @login="onQnhLoginBtn" @action="pullProfit"></qnh-login-bar>
+        </el-card>
+
+        <el-alert v-if="qnhNeedPick" type="warning" :closable="false" show-icon style="margin-bottom:12px"
+                  title="请先在上方选择要以哪个账号的身份查看"
+                  description="超级管理员自己没有独立的牵牛花数据；选定账号后，毛利数据、登录与告警配置都属于该账号。"></el-alert>
+
+        <!-- 告警配置项（每个账号配自己的机器人与阈值） -->
         <el-card class="section-card" shadow="never">
-          <div slot="header" style="display:flex;align-items:center;gap:10px">
-            <b>实时毛利监控预警</b>
-            <el-tag size="mini" :type="rq.config.profitEnabled ? 'success' : 'info'">
-              {{ rq.config.profitEnabled ? '监控运行中' : '监控已关闭' }}
-            </el-tag>
-            <span style="flex:1"></span>
-            <span class="loginid" v-if="rq.config.profitLastPullAt">
-              最近拉取 {{ rq.config.profitLastPullAt }} · {{ rq.config.profitLastPullCount }} 条
-            </span>
-            <el-button size="mini" type="primary" :loading="rq.profit.loading" @click="pullProfit">立即拉取毛利数据</el-button>
-          </div>
-          <!-- 监控 / 告警设置（仅超级管理员；布局与退单页「退单同步与提醒设置」保持一致） -->
-          <el-form v-if="isAdmin" label-position="top" size="small">
+          <div slot="header"><b>毛利告警配置项</b> <span class="loginid">（当前账号：{{ qnhConfigOwner }}）</span></div>
+          <el-form label-position="top" size="small">
             <el-row :gutter="12">
               <el-col :xs="24" :md="6">
                 <el-form-item label="监控开关（开启后每 10 分钟自动拉取）">
@@ -1003,16 +1019,28 @@
               </el-col>
             </el-row>
           </el-form>
-          <el-button v-if="isAdmin" type="primary" size="small" :loading="rq.savingCfg" @click="saveQnhConfig">保存设置</el-button>
+          <el-button type="primary" size="small" :loading="rq.savingCfg" @click="saveQnhConfig">保存设置</el-button>
           <el-tag v-if="rq.savedCfg" type="success" size="small" style="margin-left:10px">✓ 已保存</el-tag>
-          <div class="form-tip" style="margin-bottom:10px">
+          <div class="form-tip" style="margin-top:8px">
             低于阈值的订单会推送企业微信，每单只告警一次。<b>阈值填 0 表示不启用该条件</b>，两个都为 0 则不产生告警。
-            通道与开关由超级管理员维护。
+          </div>
+        </el-card>
+
+        <el-card class="section-card" shadow="never">
+          <div slot="header" style="display:flex;align-items:center;gap:10px">
+            <b>实时毛利监控预警</b>
+            <el-tag size="mini" :type="rq.config.profitEnabled ? 'success' : 'info'">
+              {{ rq.config.profitEnabled ? '监控运行中' : '监控已关闭' }}
+            </el-tag>
+            <span style="flex:1"></span>
+            <span class="loginid" v-if="rq.config.profitLastPullAt">
+              最近拉取 {{ rq.config.profitLastPullAt }} · {{ rq.config.profitLastPullCount }} 条
+            </span>
           </div>
           <el-alert v-if="channelIssues.length" type="warning" :closable="false" show-icon
                     style="margin-bottom:10px"
                     title="当前不会发送毛利告警"
-                    :description="channelIssues.join('；') + (isAdmin ? '。在下方「毛利告警机器人」设置里补齐。' : '。请联系超级管理员处理。')"></el-alert>
+                    :description="channelIssues.join('；') + '。在上方「毛利告警配置项」里补齐。'"></el-alert>
           <el-alert v-else-if="!rq.config.profitEnabled" type="info" :closable="false" show-icon
                     style="margin-bottom:10px"
                     title="「监控开启」未打开：不会每 10 分钟自动拉取（手动拉取仍会按阈值告警）"></el-alert>
@@ -1315,12 +1343,119 @@ const UP_GUIDES = {
 // 操作日志：这些按钮文案不含有效信息（弹框的确定/取消等），不记入操作日志
 const OP_SKIP_BTN = ['确定', '取消', '确 定', '取 消', '关闭', '×', 'OK', 'Cancel', '知道了'];
 
+// ════════════════════════════════════════════════════════════════════
+// 牵牛花登录状态条（退单列表 / 实时毛利监控 共用同一组件与同一套交互）
+//   · 登录按钮：未登录 → 发起登录（本机助手弹窗）；已登录 → 刷新状态
+//   · 数据按钮：文案与行为由调用方注入（退单=立即刷新数据，毛利=立即拉取毛利数据）
+//   · 状态展示：最近同步结果 / 定时任务 / 登录账号 / 失效提示
+// ════════════════════════════════════════════════════════════════════
+Vue.component('qnh-login-bar', {
+  props: {
+    cookie: { type: Object, default: () => ({}) },
+    actionText: { type: String, default: '立即刷新数据' },
+    actionLoading: { type: Boolean, default: false },
+    lastRun: { type: Object, default: null },
+    schedule: { type: Object, default: null },
+    whoLabel: { type: String, default: '' },
+  },
+  computed: {
+    logined() { return !!(this.cookie && this.cookie.logined); },
+    loading() { return !!(this.cookie && this.cookie.loading); },
+    btnText() {
+      if (this.loading) return '等待本机登录…';
+      return this.logined ? '已登录牵牛花' : '登录牵牛花';
+    },
+    btnType() { return this.logined ? 'success' : 'danger'; },
+    accountText() {
+      const c = this.cookie || {};
+      if (c.tenantName) return c.tenantName + (c.tenantId ? '（' + c.tenantId + '）' : '');
+      return c.accountName || '';
+    },
+    lastRunText() {
+      const r = this.lastRun;
+      if (!r) return '';
+      const t = r.finishedAt || r.startedAt || '';
+      const st = r.status === 'success' ? '成功'
+        : (r.status === 'failed' ? '失败' : (r.status === 'partial' ? '部分失败' : (r.status || '—')));
+      return '最近同步 ' + String(t).slice(0, 16) + ' · ' + st;
+    },
+    lastRunType() { return !this.lastRun ? 'info' : (this.lastRun.status === 'success' ? 'info' : 'warning'); },
+    lastRunTip() { return this.lastRun && this.lastRun.message ? this.lastRun.message : ''; },
+    scheduleText() {
+      const c = this.schedule || {};
+      if (!c.scheduleEnabled) return '';
+      const arr = (c.scheduleTimes && c.scheduleTimes.length) ? c.scheduleTimes : [c.scheduleTime];
+      return (arr || []).filter(Boolean).join(' / ');
+    },
+  },
+  methods: {
+    onLogin() { this.$emit('login'); },
+    onAction() { this.$emit('action'); },
+  },
+  template: `
+  <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+    <el-button size="small" :type="btnType" :loading="loading" @click="onLogin">{{ btnText }}</el-button>
+    <el-button size="small" type="primary" :loading="actionLoading" @click="onAction">{{ actionText }}</el-button>
+    <el-tag v-if="lastRunText" size="small" :type="lastRunType" :title="lastRunTip">{{ lastRunText }}</el-tag>
+    <el-tag v-if="scheduleText" size="small" type="success">每天 {{ scheduleText }} 自动同步</el-tag>
+    <el-tag v-if="logined && accountText" size="small">牵牛花 {{ accountText }}</el-tag>
+    <span style="flex:1"></span>
+    <span class="loginid" v-if="whoLabel">身份：{{ whoLabel }}</span>
+    <span class="loginid" v-if="cookie && cookie.message" style="color:#e6a23c">{{ cookie.message }}</span>
+  </div>`,
+});
+
+// ════════════════════════════════════════════════════════════════════
+// 身份切换条（仅超级管理员）
+//   管理员自己没有「自己的牵牛花数据」可看，必须选定一个用户，以该用户的身份
+//   查看退单/毛利、发起登录、同步与保存该用户的配置（服务端的写入也落到该用户名下）。
+// ════════════════════════════════════════════════════════════════════
+Vue.component('qnh-tenant-picker', {
+  props: {
+    users: { type: Array, default: () => [] },
+    value: { type: [Number, String], default: null },
+    sessions: { type: Array, default: () => [] },
+    selfId: { type: [Number, String], default: null },
+  },
+  computed: {
+    options() { return this.users || []; },
+    missing() { return this.value == null; },
+  },
+  methods: {
+    labelOf(u) {
+      const name = (u.companyName || u.username || ('#' + u.id));
+      const tags = [];
+      if (Number(u.id) === Number(this.selfId)) tags.push('我自己');
+      if ((this.sessions || []).some((s) => Number(s) === Number(u.id))) tags.push('已登录牵牛花');
+      else tags.push('未登录');
+      return name + (tags.length ? '（' + tags.join(' · ') + '）' : '');
+    },
+  },
+  template: `
+  <el-card class="section-card" shadow="never" :body-style="{ padding: '10px 14px' }">
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      <b style="font-size:13px">查看身份</b>
+      <el-select :value="value" size="small" filterable style="width:320px"
+                 placeholder="选择要以哪个账号的牵牛花身份查看"
+                 @change="(v) => $emit('change', v)">
+        <el-option v-for="u in options" :key="u.id" :label="labelOf(u)" :value="u.id"></el-option>
+      </el-select>
+      <el-tag v-if="missing" size="small" type="warning">请先选择一个账号</el-tag>
+      <span class="loginid" v-else>
+        下面所有数据、登录与设置都属于该账号（登录走该账号电脑上的「1688 小助手」）
+      </span>
+    </div>
+  </el-card>`,
+});
+
 const vm = new Vue({
   el: '#app',
   data() {
     return {
       // 账号
       me: null, page: 'board', viewTenant: null,
+      // 牵牛花：以哪个账号的身份查看（管理员必选；普通用户 = 自己）
+      qnhTenant: null, qnhUsers: [], qnhSessions: [],
       // 看板数据
       companies: [], sent: {}, invSummary: null, unmatchedCnt: 0, ignoredCnt: 0, manualCnt: 0,
       meta: '', tenantLabel: '',
@@ -1389,6 +1524,21 @@ const vm = new Vue({
     canRefund() { return !!(this.me && (this.me.role === 'admin' || this.me.qnhRefundEnabled)); },
     // 实时毛利监控权限（独立菜单权限）
     canProfit() { return !!(this.me && (this.me.role === 'admin' || this.me.qnhProfitEnabled)); },
+    // 管理员必须先选定一个账号，才能看该账号的牵牛花数据
+    qnhNeedPick() { return this.isAdmin && this.qnhTenant == null; },
+    // 当前查看的账号名（展示用）
+    qnhWhoLabel() {
+      if (!this.me) return '';
+      if (!this.isAdmin) return this.me.companyName || this.me.username || '';
+      const u = (this.qnhUsers || []).find((x) => Number(x.id) === Number(this.qnhTenant));
+      return u ? (u.companyName || u.username || ('#' + u.id)) : '';
+    },
+    // 配置归属提示
+    qnhConfigOwner() {
+      if (!this.me) return '';
+      if (!this.isAdmin) return (this.me.companyName || this.me.username) + '（我自己）';
+      return this.qnhWhoLabel || '未选择账号';
+    },
     // 毛利告警「发不出去」的阻断项（只看毛利专用机器人，与退单提醒通道无关）
     channelIssues() {
       const c = this.rq.config || {};
@@ -1600,6 +1750,15 @@ const vm = new Vue({
       }
       return r.json();
     },
+    /**
+     * 牵牛花接口专用请求：带上「以哪个账号的身份」。
+     * 普通用户 = 自己（不带 tenant）；管理员 = 顶部选择的账号（服务端按该账号读写登录态/数据/配置）。
+     */
+    qnhApi(path, opts) {
+      const t = this.qnhTenant;
+      if (t == null || t === '') return this.api(path, opts);
+      return this.api(path + (path.includes('?') ? '&' : '?') + 'tenant=' + encodeURIComponent(t), opts);
+    },
     goLogin() { location.href = '/login'; },
     async logout() { await fetch('/api/auth/logout', { method: 'POST', credentials: 'same-origin' }).catch(() => {}); this.goLogin(); },
     // ── 初始化 ──
@@ -1626,16 +1785,15 @@ const vm = new Vue({
       if (p === 'admin') { this.loadConfigUI(); this.loadUsers(); this.loadBuildStatus(); }
       if (p === 'mapping') this.loadMapping();
       if (p === 'audit') this.loadOpLog();
-      if (p === 'profit') {
-        this.loadProfit();
-        this.loadRefundStatus();
+      if (p === 'profit' || p === 'refund') {
+        if (p === 'refund') this.reportOp('qnh.view');
+        this.enterQnhPage(p);
       }
-      if (p === 'refund') {
-        this.reportOp('qnh.view');
-        this.loadRefundStatus();
-        this.loadRefunds();
-        this.loadRefundTrend();
-      }
+    },
+    /** 进入退单列表 / 实时毛利监控：先确定「以哪个账号的身份」，再拉该账号的数据 */
+    async enterQnhPage(p) {
+      await this.ensureQnhTenant();
+      this.qnhReload();
     },
     // ── 看板数据 ──
     async loadData() {
@@ -1981,10 +2139,41 @@ const vm = new Vue({
       });
     },
 
-    // ══════ 退单列表（牵牛花） ══════
+    // ══════ 牵牛花：两个页面共用（登录 / 状态 / 配置） ══════
+    /**
+     * 管理员必须先选定账号；第一次进入时自动挑一个（优先挑已登录牵牛花且开了该菜单权限的）。
+     * 返回是否已就绪（false = 还没选，页面不发起请求）。
+     */
+    async ensureQnhTenant() {
+      if (!this.isAdmin) { this.qnhTenant = null; return true; }
+      if (this.qnhTenant != null) return true;
+      if (!this.users.length) await this.loadUsers();
+      this.qnhUsers = this.users || [];
+      const pick = this.qnhUsers.find((u) => (this.qnhSessions || []).some((s) => Number(s) === Number(u.id)))
+        || this.qnhUsers.find((u) => u.role !== 'admin')
+        || this.qnhUsers[0];
+      if (pick) this.qnhTenant = pick.id;
+      return this.qnhTenant != null;
+    },
+    /** 管理员切换查看身份：清掉旧数据再按新账号重载 */
+    onQnhTenantChange(id) {
+      this.qnhTenant = id;
+      this.rq.rows = []; this.rq.total = 0; this.rq.page = 1;
+      this.rq.trend = []; this.rq.summary = null; this.rq.lastRun = null;
+      this.rq.profit = { loading: false, rows: [], total: 0, alerts: 0, error: '' };
+      this.rq.profitTrend = [];
+      this.qnhReload();
+    },
+    /** 按当前页面重载牵牛花数据（两个页面共用） */
+    qnhReload() {
+      this.loadRefundStatus();
+      if (this.page === 'refund') { this.loadRefunds(); this.loadRefundTrend(); }
+      if (this.page === 'profit') { this.loadProfit(); }
+    },
     async loadRefundStatus() {
+      if (this.qnhNeedPick) return;
       try {
-        const d = await this.api('/api/qnh/status');
+        const d = await this.qnhApi('/api/qnh/status');
         if (d.error) { this.$message.error(d.error); return; }
         const c = d.cookie || {};
         const acc = c.account || {};
@@ -2000,6 +2189,8 @@ const vm = new Vue({
         this.rq.lastRun = c.lastRun || null;
         this.rq.summary = d.summary || null;
         this.rq.syncing = !!(d.sync && d.sync.running);
+        if (Array.isArray(d.sessions)) this.qnhSessions = d.sessions.map(Number);
+        if (Array.isArray(d.users)) this.qnhUsers = d.users;
       } catch (e) {
         this.$message.error('获取牵牛花状态失败：' + e.message);
       }
@@ -2017,7 +2208,7 @@ const vm = new Vue({
         if (f.sort) q.set('sort', f.sort);
         q.set('page', this.rq.page);
         q.set('size', this.rq.size);
-        const d = await this.api('/api/qnh/refunds?' + q.toString());
+        const d = await this.qnhApi('/api/qnh/refunds?' + q.toString());
         if (d.error) { this.$message.error(d.error); return; }
         this.rq.rows = d.rows || [];
         this.rq.total = d.total || 0;
@@ -2044,7 +2235,7 @@ const vm = new Vue({
 
     async loadRefundTrend() {
       try {
-        const d = await this.api('/api/qnh/trend?days=' + this.rq.days);
+        const d = await this.qnhApi('/api/qnh/trend?days=' + this.rq.days);
         this.rq.trend = (d && d.days) || [];
       } catch (e) { this.rq.trend = []; }
       this.$nextTick(() => this.renderRefundTrend());
@@ -2114,8 +2305,10 @@ const vm = new Vue({
       }, true);
     },
 
-    async onCookieBtn() {
+    /** 「登录牵牛花」按钮（退单列表 / 实时毛利监控 共用：都是让本机助手弹窗登录，登录态归当前账号） */
+    async onQnhLoginBtn() {
       if (this.rq.cookie.loading) return;
+      if (this.qnhNeedPick) { this.$message.warning('请先选择要以哪个账号的身份登录'); return; }
       if (this.rq.cookie.logined) {
         const c = this.rq.cookie;
         this.$message.success(
@@ -2124,13 +2317,10 @@ const vm = new Vue({
         await this.loadRefundStatus();
         return;
       }
-      if (!this.isAdmin) {
-        this.$message.warning('Cookie 已失效，请联系超级管理员重新登录牵牛花');
-        return;
-      }
+      const who = this.isAdmin ? ('「' + (this.qnhWhoLabel || '所选账号') + '」') : '你';
       try {
         await this.$confirm(
-          '登录在你自己的电脑上完成：点「开始登录」后，「本机助手」会在你本机弹出牵牛花窗口，'
+          `登录在${who}的电脑上完成：点「开始登录」后，「1688 小助手」会在那台电脑上弹出牵牛花窗口，`
           + '在窗口里登录即可（最多等 5 分钟）。\n登录态回传后由服务器保管（存数据库），服务器不会代你登录。',
           '登录牵牛花',
           { confirmButtonText: '开始登录', cancelButtonText: '取消', type: 'warning' }
@@ -2139,7 +2329,7 @@ const vm = new Vue({
 
       this.rq.cookie.loading = true;
       try {
-        const d = await this.api('/api/qnh/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+        const d = await this.qnhApi('/api/qnh/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
         if (d.needAgent) {
           this.$message.warning(d.message || '本机助手未连接');
           if (d.agentOutdated) this.reportOp('agent.download');
@@ -2150,7 +2340,7 @@ const vm = new Vue({
           this.$message.error(d.message || d.error || '发起登录失败');
           return;
         }
-        this.$message.info(d.message || '已在你电脑上打开登录窗口，请在助手里完成登录…');
+        this.$message.info(d.message || '已打开登录窗口，请在助手里完成登录…');
         const r = await this.pollQnhLogin(d.taskId);
         if (r === 'done') this.$message.success('已登录牵牛花，登录态已更新');
         else if (r === 'failed') this.$message.error('登录未完成：' + (this._qnhLoginMsg || '未获取到登录态'));
@@ -2168,7 +2358,7 @@ const vm = new Vue({
       while (Date.now() < deadline) {
         await new Promise((r) => setTimeout(r, 2000));
         let d = null;
-        try { d = await this.api('/api/qnh/login-status?taskId=' + encodeURIComponent(taskId)); } catch (e) { continue; }
+        try { d = await this.qnhApi('/api/qnh/login-status?taskId=' + encodeURIComponent(taskId)); } catch (e) { continue; }
         if (!d) continue;
         this._qnhLoginMsg = d.message || '';
         if (d.status === 'done') return 'done';
@@ -2180,13 +2370,29 @@ const vm = new Vue({
 
     async doSync() {
       if (this.rq.syncing) return;
+      if (this.qnhNeedPick) { this.$message.warning('请先选择要以哪个账号的身份同步'); return; }
       this.rq.syncing = true;
       try {
         this.$message.info('已开始同步，完成后会自动刷新列表（可能需要几十秒）');
-        const d = await this.api('/api/qnh/sync', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+        const d = await this.qnhApi('/api/qnh/sync', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
         if (d.running) { this.$message.warning(d.message || '已有同步任务在运行'); return; }
-        if (d.ok) this.$message.success('同步完成');
-        else this.$message.error('同步失败：' + (d.message || '请查看 logs/sync.log'));
+        if (d.error) { this.$message.error(d.error); return; }
+        if (d.ok) {
+          const n = d.refunds || 0, nn = d.newRefunds || 0;
+          this.$message.success(`同步完成：当天 ${n} 笔（新增 ${nn} 笔）`
+            + (d.failed ? `，其中 ${d.failed} 条未成功` : ''));
+        } else {
+          // 把失败原因完整说出来（以前只显示一句「请查看 logs/sync.log」，排查全靠翻日志）
+          const msg = d.message || d.error || '未知原因（可查看 logs/sync.log 与 qnh_sync_run 表）';
+          this.$message({ message: '同步失败：' + msg, type: 'error', duration: 6000 });
+          if (/登录牵牛花|登录态/.test(msg)) {
+            try {
+              await this.$confirm(msg + '\n\n现在就去登录？', '需要登录牵牛花',
+                { confirmButtonText: '登录牵牛花', cancelButtonText: '稍后', type: 'warning' });
+              this.onQnhLoginBtn();
+            } catch (e) { /* 稍后 */ }
+          }
+        }
         await this.loadRefundStatus();
         await this.loadRefunds();
         await this.loadRefundTrend();
@@ -2198,12 +2404,13 @@ const vm = new Vue({
     },
 
     async saveQnhConfig() {
+      if (this.qnhNeedPick) { this.$message.warning('请先选择要保存哪个账号的配置'); return; }
       this.rq.savingCfg = true;
       this.rq.savedCfg = false;
       try {
         const c = this.rq.config;
         const times = (c.scheduleTimes || []).filter((t) => /^([01]\d|2[0-3]):[0-5]\d$/.test(t));
-        const d = await this.api('/api/qnh/config', {
+        const d = await this.qnhApi('/api/qnh/config', {
           method: 'POST', headers: { 'content-type': 'application/json' },
           body: JSON.stringify({
             scheduleEnabled: c.scheduleEnabled,
@@ -2234,8 +2441,9 @@ const vm = new Vue({
     /** 拉取毛利监控面板数据（与退单状态一起刷新） */
     async loadProfit() {
       if (!this.canProfit) return;
+      if (this.qnhNeedPick) return;
       try {
-        const d = await this.api('/api/qnh/profit?limit=100');
+        const d = await this.qnhApi('/api/qnh/profit?limit=100');
         this.rq.profit.rows = d.rows || [];
         this.rq.profit.total = d.total || 0;
         this.rq.profit.alerts = d.alerts || 0;
@@ -2248,8 +2456,9 @@ const vm = new Vue({
     /** 每天毛利总额趋势（按 data_date 聚合） */
     async loadProfitTrend() {
       if (!this.canProfit) return;
+      if (this.qnhNeedPick) return;
       try {
-        const d = await this.api('/api/qnh/profit/trend?days=' + this.rq.profitDays);
+        const d = await this.qnhApi('/api/qnh/profit/trend?days=' + this.rq.profitDays);
         this.rq.profitTrend = (d && d.days) || [];
       } catch (e) { this.rq.profitTrend = []; }
       this.$nextTick(() => this.renderProfitTrend());
@@ -2304,9 +2513,10 @@ const vm = new Vue({
     /** 立即经本机助手拉一次当天毛利明细（服务端顺带做阈值告警） */
     async pullProfit() {
       if (this.rq.profit.loading) return;
+      if (this.qnhNeedPick) { this.$message.warning('请先选择要以哪个账号的身份拉取'); return; }
       this.rq.profit.loading = true;
       try {
-        const d = await this.api('/api/qnh/profit/pull', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+        const d = await this.qnhApi('/api/qnh/profit/pull', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
         if (d.ok) {
           this.$message.success(d.message || '已拉取毛利明细' + (d.alerts ? `，告警 ${d.alerts} 条已推送企业微信` : ''));
         } else {
@@ -2329,7 +2539,7 @@ const vm = new Vue({
     // 毛利告警机器人测试（与退单提醒机器人分开测）
     async testProfitWebhook() {
       try {
-        const d = await this.api('/api/qnh/test-webhook', {
+        const d = await this.qnhApi('/api/qnh/test-webhook', {
           method: 'POST', headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ type: 'profit' }),
         });
@@ -2339,7 +2549,7 @@ const vm = new Vue({
     },
     async testWebhook() {
       try {
-        const d = await this.api('/api/qnh/test-webhook', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+        const d = await this.qnhApi('/api/qnh/test-webhook', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
         if (d.ok) this.$message.success('测试消息已发送，请查看企业微信群');
         else this.$message.error('发送失败：' + (d.message || '未配置 webhook'));
       } catch (e) { this.$message.error('发送失败：' + e.message); }
@@ -2352,7 +2562,7 @@ const vm = new Vue({
       this.rq.log.rows = [];
       this.rq.log.loading = true;
       try {
-        const d = await this.api('/api/qnh/logs?refundNo=' + encodeURIComponent(row.refundNo));
+        const d = await this.qnhApi('/api/qnh/logs?refundNo=' + encodeURIComponent(row.refundNo));
         this.rq.log.rows = d.logs || [];
         if (d.route && d.route.note) this.$message({ message: d.route.note, type: 'info', duration: 4000 });
       } catch (e) {
