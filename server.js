@@ -49,6 +49,7 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const { spawn } = require('child_process');
 const { WebSocketServer } = require('ws');
 const db = require('./db');
 const auth = require('./lib/auth');
@@ -139,8 +140,71 @@ function findAgentInstaller() {
   });
   const file = exes[0].n;
   let size = 0;
-  try { size = fs.statSync(path.join(dir, file)).size; } catch (e) { size = 0; }
-  return { file, size };
+  let mtime = 0;
+  try { size = fs.statSync(path.join(dir, file)).size; mtime = fs.statSync(path.join(dir, file)).mtimeMs; } catch (e) { /* 忽略 */ }
+  return { file, size, mtime };
+}
+
+// ── 助手安装包重新打包（系统管理页一键触发）──
+//    在服务器上执行 npm run agent:dist（electron-builder），产物落到 dist/，
+//    下载接口按「最新构建时间」自动取包，打完即生效，无需改代码。
+const agentBuild = { proc: null, running: false, startedAt: null, finishedAt: null, ok: null, error: '', log: [] };
+
+function agentBuildStatus() {
+  let ins = null;
+  try { ins = findAgentInstaller(); } catch (e) { /* 忽略 */ }
+  return {
+    running: agentBuild.running,
+    ok: agentBuild.ok,
+    error: agentBuild.error || '',
+    startedAt: agentBuild.startedAt,
+    finishedAt: agentBuild.finishedAt,
+    version: (() => { try { return require('./package.json').version; } catch (e) { return ''; } })(),
+    installer: ins ? { file: ins.file, sizeBytes: ins.size, mtime: ins.mtime || 0 } : null,
+    log: agentBuild.log.slice(-80),
+  };
+}
+
+function startAgentBuild() {
+  if (agentBuild.running) return { ok: false, error: '已有打包任务在进行中，请等它结束' };
+  if (process.platform !== 'win32') {
+    return { ok: false, error: `当前服务器是 ${process.platform}，nsis 安装包只能在 Windows 上构建（在 Windows 机器上运行本服务后再试）` };
+  }
+  agentBuild.running = true;
+  agentBuild.ok = null;
+  agentBuild.error = '';
+  agentBuild.startedAt = new Date().toISOString();
+  agentBuild.finishedAt = null;
+  agentBuild.log = [`[build] ${new Date().toLocaleString('zh-CN')} 开始重新打包助手（npm run agent:dist，约 1~2 分钟）…`];
+
+  const proc = spawn('npm run agent:dist', { cwd: ROOT, shell: true, env: process.env, windowsHide: true });
+  agentBuild.proc = proc;
+  const push = (buf) => {
+    for (const line of String(buf).split(/\r?\n/)) {
+      const t = line.trim();
+      if (t) agentBuild.log.push(t);
+    }
+    if (agentBuild.log.length > 300) agentBuild.log.splice(0, agentBuild.log.length - 300);
+  };
+  proc.stdout.on('data', push);
+  proc.stderr.on('data', push);
+  proc.on('error', (e) => {
+    agentBuild.running = false;
+    agentBuild.ok = false;
+    agentBuild.error = '启动打包进程失败：' + String((e && e.message) || e).slice(0, 200);
+    agentBuild.finishedAt = new Date().toISOString();
+    agentBuild.log.push('[build] ✗ ' + agentBuild.error);
+    agentBuild.proc = null;
+  });
+  proc.on('close', (code) => {
+    agentBuild.running = false;
+    agentBuild.ok = code === 0;
+    if (code !== 0) agentBuild.error = `打包进程退出码 ${code}，请查看日志定位`;
+    agentBuild.finishedAt = new Date().toISOString();
+    agentBuild.log.push(code === 0 ? '[build] ✓ 打包完成，下载页已指向新包' : `[build] ✗ 打包失败（退出码 ${code}）`);
+    agentBuild.proc = null;
+  });
+  return { ok: true };
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -599,6 +663,7 @@ const OP_ACTIONS = {
   'view.day.invoices': (d) => `点击了 ${d.date} 的每日已开票金额进行查看`,
   'agent.download': () => '下载了本机助手',
   'agent.bind': (d) => `绑定了本机助手${d.deviceName ? '（' + d.deviceName + '）' : ''}`,
+  'agent.build': () => '重新打包了本机助手安装包',
   'qnh.sync': (d) => `在退单列表点击了「立即刷新数据」${d.ok ? '（成功）' : '（失败）'}`,
   'qnh.profit_pull': (d) => `拉取了毛利明细（${d.rows || 0} 条，告警 ${d.alerts || 0} 条）`,
   'qnh.notify_pending': (d) => `手动触发了超时退单提醒${d.ok ? `（推送 ${d.sent || 0} 条）` : '（失败）'}`,
@@ -1660,6 +1725,8 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
+    // ── 助手安装包重新打包（仅超级管理员；系统管理页一键触发）──
+    //    注意：必须放在 isAdmin 计算之后
     // ── 本机助手：用一次性绑定令牌换取长期设备令牌（**公开端点**：助手没有看板 Cookie）──
     //    · 带 bindToken → 校验令牌（绝不回退 Cookie，否则伪造/重放令牌会被静默降级成自签）
     //    · 不带 bindToken 但已登录 → 看板自签（用于签发「书签令牌」）
@@ -1786,6 +1853,21 @@ const server = http.createServer(async (req, res) => {
     const tenantId = tenantOf(req, url, user);
     const isAdmin = user.role === 'admin';
     const writeGuard = () => assertWritable(user, tenantId);
+
+    // ── 助手安装包重新打包（仅超级管理员；系统管理页一键触发）──
+    if (p === '/api/agent/build') {
+      if (method === 'GET') {
+        if (!isAdmin) return sendJson(res, 403, { error: '仅超级管理员可查看打包状态' });
+        return sendJson(res, 200, agentBuildStatus());
+      }
+      if (method === 'POST') {
+        if (!isAdmin) return sendJson(res, 403, { error: '仅超级管理员可重新打包助手' });
+        const started = startAgentBuild();
+        if (!started.ok) return sendJson(res, 409, { error: started.error });
+        await logOp(user, 'agent.build', {});
+        return sendJson(res, 200, { ok: true, message: '打包已开始，约 1~2 分钟' });
+      }
+    }
 
     // 操作日志上报（前端埋点）：action 必须命中白名单，文案一律由服务端渲染
     if (method === 'POST' && p === '/api/op-log') {

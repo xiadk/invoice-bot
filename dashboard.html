@@ -586,6 +586,28 @@
                 <el-button type="primary" size="small" @click="openDownload">⬇ 下载本机助手（Windows）</el-button>
                 <span class="form-tip" style="display:inline;margin-left:8px">用户下载到的助手已内置全局地址；在本机登录看板后点「绑定本机助手」即可完成绑定（设备令牌，无需填税号）。</span>
               </div>
+
+              <el-divider style="margin:14px 0 10px"></el-divider>
+              <div style="margin-bottom:6px">
+                <b>助手安装包</b>
+                <span class="loginid" style="margin-left:6px">
+                  <template v-if="build.installer">当前：{{ build.installer.file }}（{{ (build.installer.sizeBytes / 1048576).toFixed(1) }} MB）</template>
+                  <template v-else>尚未构建（dist/ 里没有安装包）</template>
+                </span>
+              </div>
+              <div>
+                <el-button type="warning" size="small" :loading="build.running" @click="rebuildAgent">
+                  {{ build.running ? '打包中…（约 1~2 分钟）' : '🔨 重新打包最新助手' }}
+                </el-button>
+                <el-tag v-if="build.ok === true" type="success" size="small" style="margin-left:8px">✓ 打包完成</el-tag>
+                <el-tag v-else-if="build.ok === false" type="danger" size="small" style="margin-left:8px">✗ 打包失败</el-tag>
+              </div>
+              <div v-if="build.log.length" class="preview-box"
+                   style="max-height:170px;overflow:auto;font-size:11px;line-height:1.6;margin-top:8px;white-space:pre-wrap;word-break:break-all">{{ build.log.join('\n') }}</div>
+              <div class="form-tip" style="margin-top:6px">
+                在本服务所在机器上执行 <code>npm run agent:dist</code> 重新构建（需 Windows 环境）。
+                打包完成后，下载页与「下载本机助手」按钮会自动提供最新构建的安装包。
+              </div>
             </el-card>
           </el-col>
         </el-row>
@@ -1325,6 +1347,7 @@ const vm = new Vue({
       cfg: { gapMin: 15, gapMax: 30, chunkMax: 450, template: '', orderItem: '', reminder: '', serverUrl: '' },
       previewText: '', saveOk: false,
       users: [], newUser: { company: '', password: '', role: 'user', taxNo: '', email: '', note: '' },
+      build: { running: false, ok: null, error: '', version: '', installer: null, log: [] },
       creatingUser: false, createOk: false,
       userEdit: { visible: false, id: null, title: '', company: '', taxNo: '', email: '', note: '', hint: '', lockCompany: false, saving: false },
       // 菜单权限弹窗（退单列表 / 实时毛利监控）
@@ -1600,7 +1623,7 @@ const vm = new Vue({
       if (p === 'refund' && !this.canRefund) p = 'board';
       if (p === 'profit' && !this.canProfit) p = 'board';
       this.page = p;
-      if (p === 'admin') { this.loadConfigUI(); this.loadUsers(); }
+      if (p === 'admin') { this.loadConfigUI(); this.loadUsers(); this.loadBuildStatus(); }
       if (p === 'mapping') this.loadMapping();
       if (p === 'audit') this.loadOpLog();
       if (p === 'profit') {
@@ -2391,6 +2414,48 @@ const vm = new Vue({
     },
 
     // ══════ 系统管理 ══════
+    /** 查询助手打包状态；正在打包时每 3 秒轮询，结束后弹结果 */
+    async loadBuildStatus() {
+      if (!this.isAdmin) return;
+      try {
+        const d = await this.api('/api/agent/build');
+        if (d.error) return;
+        this.build = d;
+        if (d.running && !this._buildTimer) {
+          this._buildTimer = setInterval(async () => {
+            try {
+              const s = await this.api('/api/agent/build');
+              if (!s.error) this.build = s;
+              if (!s.running) {
+                clearInterval(this._buildTimer);
+                this._buildTimer = null;
+                if (s.ok) this.$message.success('助手打包完成，下载页已更新为最新包');
+                else this.$message.error('助手打包失败：' + (s.error || '详见日志'));
+              }
+            } catch (e) { /* 网络抖动，下一轮再试 */ }
+          }, 3000);
+        }
+      } catch (e) { /* 忽略 */ }
+    },
+    async rebuildAgent() {
+      try {
+        await this.$confirm(
+          '将在本服务所在机器上重新执行打包（npm run agent:dist，约 1~2 分钟），完成后下载页自动提供最新包。继续？',
+          '重新打包助手',
+          { confirmButtonText: '开始打包', cancelButtonText: '取消', type: 'warning' }
+        );
+      } catch (e) { return; }
+      try {
+        const d = await this.api('/api/agent/build', { method: 'POST' });
+        if (d.error) { this.$message.error(d.error); return; }
+        this.$message.success(d.message || '打包已开始');
+        this.build.log = ['[build] 任务已下发…'];
+        this.build.running = true;
+        this.loadBuildStatus();
+      } catch (e) {
+        this.$message.error('触发打包失败：' + e.message);
+      }
+    },
     async loadConfigUI() {
       if (!this.isAdmin) return;
       try {
