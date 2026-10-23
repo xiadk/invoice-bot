@@ -45,9 +45,6 @@
   /* 退单列表：已取货/送达的行加淡橙底，方便一眼扫到 */
   .el-table .row-picked td { background: #fff8ec !important; }
   .nav-right { display: flex; align-items: center; gap: 10px; }
-  .build-chip { font-size:11px; color:var(--sub); background:#f4f5f7; border:1px solid var(--border);
-                border-radius:10px; padding:2px 8px; font-family:ui-monospace,Consolas,monospace; cursor:default; }
-  .build-chip.dirty { color:#e6a23c; border-color:#f5dab1; background:#fdf6ec; }
   .user-chip { display: flex; align-items: center; gap: 8px; font-size: 13px; }
   .user-chip .avatar { width: 28px; height: 28px; border-radius: 50%; background: #fff1e6; color: var(--primary); display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 12px; }
   .user-chip .uname { font-size: 13px; color: var(--text); }
@@ -135,16 +132,6 @@
           <el-menu-item index="audit" v-if="isAdmin">操作日志</el-menu-item>
         </el-menu>
         <div class="nav-right">
-          <!-- 线上代码版本：排查「页面行为和代码对不上」时先看这里，确认容器是不是最新镜像 -->
-          <el-tooltip v-if="build.commit" placement="bottom" effect="light">
-            <div slot="content" style="line-height:1.7">
-              线上运行版本：{{ build.branch }}@{{ build.commit }}<br>
-              提交时间：{{ build.time || '—' }}<br>
-              dashboard.html：{{ build.dashboardMtime || '—' }}<br>
-              <span v-if="build.dirty" style="color:#e6a23c">构建时有未提交改动（未入库的代码也在镜像里）</span>
-            </div>
-            <span class="build-chip" :class="{ dirty: build.dirty }">{{ build.branch }}@{{ build.commit }}</span>
-          </el-tooltip>
           <el-button size="small" plain @click="openGuideModal" title="发送只在你本机执行：装一次「1688催收助手」→ 绑定 → 在本机登录 1688">本机助手</el-button>
           <div class="user-chip">
             <div class="avatar">{{ avatarText }}</div>
@@ -1469,8 +1456,6 @@ const vm = new Vue({
     return {
       // 账号
       me: null, page: 'board', viewTenant: null,
-      // 线上运行的代码版本（服务端回传；用于确认容器是不是最新镜像）
-      build: { commit: '', branch: '', time: '', dirty: false, dashboardMtime: '' },
       // 牵牛花：以哪个账号的身份查看（管理员必选；普通用户 = 自己）
       qnhTenant: null, qnhUsers: [], qnhSessions: [],
       // 看板数据
@@ -1784,7 +1769,6 @@ const vm = new Vue({
       try { d = await this.api('/api/auth/me'); } catch (e) { return; }
       if (!d || !d.user) { this.goLogin(); return; }
       this.me = d.user;
-      if (d.build) this.build = { commit: '', branch: '', time: '', dirty: false, dashboardMtime: '', ...d.build };
       await this.loadData();
       this.renderTrend();
       this.pollTask();
