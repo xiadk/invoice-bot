@@ -782,7 +782,7 @@
 
         <el-alert v-if="qnhNeedPick" type="warning" :closable="false" show-icon style="margin-bottom:12px"
                   title="请先在上方选择要以哪个账号的身份查看"
-                  description="选定账号后，退单、毛利、登录与告警配置都属于该账号；账号名后面的数字就是该账号名下的存量数据，历史数据挂在 admin 名下时选「我自己」即可看到。"></el-alert>
+                  description="超级管理员自己没有独立的牵牛花数据；选定账号后，退单、毛利、登录与告警配置都属于该账号。"></el-alert>
 
         <!-- 汇总 -->
         <div style="display:flex;gap:12px;margin:12px 0;flex-wrap:wrap">
@@ -991,7 +991,7 @@
 
         <el-alert v-if="qnhNeedPick" type="warning" :closable="false" show-icon style="margin-bottom:12px"
                   title="请先在上方选择要以哪个账号的身份查看"
-                  description="选定账号后，毛利数据、登录与告警配置都属于该账号；账号名后面的数字就是该账号名下的存量数据，历史数据挂在 admin 名下时选「我自己」即可看到。"></el-alert>
+                  description="超级管理员自己没有独立的牵牛花数据；选定账号后，毛利数据、登录与告警配置都属于该账号。"></el-alert>
 
         <!-- 告警配置项（每个账号配自己的机器人与阈值） -->
         <el-card class="section-card" shadow="never">
@@ -1441,8 +1441,6 @@ Vue.component('qnh-tenant-picker', {
       if (Number(u.id) === Number(this.selfId)) tags.push('我自己');
       if ((this.sessions || []).some((s) => Number(s) === Number(u.id))) tags.push('已登录牵牛花');
       else tags.push('未登录');
-      // 直接标出该账号名下的存量数据，避免选错账号误以为数据丢了
-      tags.push(`毛利 ${Number(u.profitCount) || 0} / 退单 ${Number(u.refundCount) || 0}`);
       return name + (tags.length ? '（' + tags.join(' · ') + '）' : '');
     },
   },
@@ -1457,7 +1455,7 @@ Vue.component('qnh-tenant-picker', {
       </el-select>
       <el-tag v-if="missing" size="small" type="warning">请先选择一个账号</el-tag>
       <span class="loginid" v-else>
-        下面所有数据、登录与设置都属于该账号（登录走该账号电脑上的「1688 小助手」；账号名后的数字＝该账号名下的存量 毛利/退单 条数）
+        下面所有数据、登录与设置都属于该账号（登录走该账号电脑上的「1688 小助手」）
       </span>
     </div>
   </el-card>`,
@@ -2165,27 +2163,10 @@ const vm = new Vue({
     async ensureQnhTenant() {
       if (!this.isAdmin) { this.qnhTenant = null; return true; }
       if (this.qnhTenant != null) return true;
-      // 先拿一次账号清单（服务端只在管理员调用时返回 users/sessions，且带每个账号的存量数据条数），
-      // 这样默认落点才知道该选谁；否则只能盲选，容易落在空账号上让人误以为数据丢了。
-      if (!this.qnhUsers.length || !this.qnhUsers.some((u) => u.profitCount !== undefined)) {
-        try {
-          const d = await this.qnhApi('/api/qnh/status');
-          if (d && d.users) { this.qnhUsers = d.users; this.qnhSessions = d.sessions || []; }
-        } catch (e) { /* 拿不到就走下面的兜底 */ }
-      }
-      if (!this.qnhUsers.length && !this.users.length) await this.loadUsers();
-      if (!this.qnhUsers.length) this.qnhUsers = this.users || [];
-      const selfId = Number(this.me && this.me.id);
-      const self = this.qnhUsers.find((u) => Number(u.id) === selfId);
-      const hasData = (u) => (Number(u.profitCount) || 0) + (Number(u.refundCount) || 0) > 0;
-      const hasSess = (u) => (this.qnhSessions || []).some((s) => Number(s) === Number(u.id));
-      // 默认落点：自己名下有存量数据就先落在自己身上（历史数据在 admin 名下时也要能看到），
-      // 否则优先「已登录牵牛花且有数据」的账号，再退到第一个有数据的账号。
-      const pick = (self && hasData(self) && self)
-        || this.qnhUsers.find((u) => hasSess(u) && hasData(u))
-        || this.qnhUsers.find((u) => hasData(u))
-        || this.qnhUsers.find((u) => hasSess(u))
-        || self
+      if (!this.users.length) await this.loadUsers();
+      this.qnhUsers = this.users || [];
+      const pick = this.qnhUsers.find((u) => (this.qnhSessions || []).some((s) => Number(s) === Number(u.id)))
+        || this.qnhUsers.find((u) => u.role !== 'admin')
         || this.qnhUsers[0];
       if (pick) this.qnhTenant = pick.id;
       return this.qnhTenant != null;

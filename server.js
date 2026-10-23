@@ -2385,24 +2385,13 @@ const server = http.createServer(async (req, res) => {
           canProfit,
           tenantId: qnhUid,
         };
-        // 管理员需要「以某账号身份进入」：账号列表 + 谁已登录牵牛花 + 各账号名下有多少数据
-        // （带数据量是为了避免「选错账号以为数据丢了」：一眼看得出历史数据挂在谁名下）
+        // 管理员需要「以某账号身份进入」：给它账号列表 + 哪些账号已登录牵牛花
         if (isAdmin) {
           try {
-            const [sess, users, po, ro] = await Promise.all([
-              qnh.usersWithSession(),
-              listUsers(),
-              db.query('SELECT user_id, COUNT(*) AS n FROM qnh_profit_order GROUP BY user_id').catch(() => []),
-              db.query('SELECT user_id, COUNT(*) AS n FROM qnh_refund_order GROUP BY user_id').catch(() => []),
-            ]);
-            const pmap = new Map(po.map((r) => [Number(r.user_id), Number(r.n)]));
-            const rmap = new Map(ro.map((r) => [Number(r.user_id), Number(r.n)]));
-            out.sessions = sess;
-            out.users = users.map((u) => ({
+            out.sessions = await qnh.usersWithSession();
+            out.users = (await listUsers()).map((u) => ({
               id: u.id, username: u.username, companyName: u.companyName, role: u.role,
               qnhRefundEnabled: !!u.qnhRefundEnabled, qnhProfitEnabled: !!u.qnhProfitEnabled,
-              profitCount: pmap.get(Number(u.id)) || 0,
-              refundCount: rmap.get(Number(u.id)) || 0,
             }));
           } catch (e) { /* 列表拿不到不影响主流程 */ }
         }
