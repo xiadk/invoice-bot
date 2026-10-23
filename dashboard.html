@@ -80,6 +80,9 @@
   .member-line .kv-label { font-size: 11px; color: var(--sub); }
   .member-line .row-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; }
   .loginid { color: var(--sub); font-size: 11px; }
+  /* 告警通道就绪提示条 */
+  .channel-ok { display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+                padding: 8px 12px; border: 1px solid var(--line); border-radius: 6px; margin-bottom: 10px; }
   .menu-perm-row { display: flex; align-items: center; justify-content: space-between;
                    padding: 10px 12px; border: 1px solid #ebeef5; border-radius: 6px; margin-bottom: 10px; }
   .amount { font-weight: 600; color: #e53935; }
@@ -936,6 +939,7 @@
             <span class="loginid" v-if="rq.config.profitLastPullAt">
               最近拉取 {{ rq.config.profitLastPullAt }} · {{ rq.config.profitLastPullCount }} 条
             </span>
+            <el-button v-if="isAdmin" size="mini" @click="openChannelDlg">告警通道</el-button>
             <el-button size="mini" type="primary" :loading="rq.profit.loading" @click="pullProfit">立即拉取毛利数据</el-button>
           </div>
           <el-form v-if="isAdmin" label-position="top" size="small" inline>
@@ -952,7 +956,21 @@
             </el-form-item>
           </el-form>
           <div class="form-tip" style="margin-bottom:10px">
-            低于阈值的订单会推送企业微信，每单只告警一次。阈值与监控开关由超级管理员维护。
+            低于阈值的订单会推送企业微信，每单只告警一次。<b>阈值填 0 表示不启用该条件</b>，两个都为 0 则不产生告警。
+            通道与开关由超级管理员维护。
+          </div>
+          <el-alert v-if="channelIssues.length" type="warning" :closable="false" show-icon
+                    style="margin-bottom:10px"
+                    title="当前不会发送毛利告警"
+                    :description="channelIssues.join('；') + (isAdmin ? '。点右上角「告警通道」补齐。' : '。请联系超级管理员处理。')"></el-alert>
+          <el-alert v-else-if="!rq.config.profitEnabled" type="info" :closable="false" show-icon
+                    style="margin-bottom:10px"
+                    title="「监控开启」未打开：不会每 10 分钟自动拉取（手动拉取仍会按阈值告警）"></el-alert>
+          <div v-else class="channel-ok">
+            <el-tag size="mini" type="success">告警通道已就绪</el-tag>
+            <span class="loginid" style="margin-left:8px">
+              企业微信群机器人 · 总开关已开 · 触发条件：{{ channelCondText }}
+            </span>
           </div>
           <el-alert v-if="rq.profit.error" type="warning" :title="rq.profit.error" :closable="false" show-icon
                     style="margin-bottom:10px"></el-alert>
@@ -988,6 +1006,33 @@
             </el-table-column>
           </el-table>
         </el-card>
+
+        <!-- 告警通道设置：与退单页「退单同步与提醒设置」共用同一组 app_config 配置 -->
+        <el-dialog title="企业微信告警通道" :visible.sync="channelDlg.visible" width="580px" append-to-body>
+          <el-alert type="info" :closable="false" show-icon style="margin-bottom:12px"
+                    title="毛利告警、新退单提醒、超 24 小时待处理提醒共用这一个群机器人。"
+                    description="地址在企业微信群「群设置 → 群机器人」里创建后复制；未配置或总开关关闭时，所有企业微信提醒都不会发送。"></el-alert>
+          <el-form label-position="top" size="small">
+            <el-form-item label="机器人总开关">
+              <el-switch v-model="rq.config.wecomEnabled" active-text="开启" inactive-text="关闭"></el-switch>
+              <span class="loginid" style="margin-left:10px">关闭后所有企业微信提醒（含退单提醒）一律不发</span>
+            </el-form-item>
+            <el-form-item label="企业微信机器人 webhook">
+              <el-input v-model="rq.config.webhook"
+                        placeholder="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=...">
+                <el-button slot="append" size="mini" @click="testWebhook">发送测试</el-button>
+              </el-input>
+              <div class="loginid" style="margin-top:4px">「发送测试」用的是<b>已保存</b>的地址，改完请先保存再测。</div>
+            </el-form-item>
+          </el-form>
+          <div class="form-tip">
+            毛利告警还需满足：两个阈值至少有一个 &gt; 0，且「监控开启」已打开（否则只在你手动拉取时才判定）。
+          </div>
+          <div slot="footer">
+            <el-button size="small" @click="channelDlg.visible = false">取消</el-button>
+            <el-button size="small" type="primary" :loading="rq.savingCfg" @click="saveChannel">保存</el-button>
+          </div>
+        </el-dialog>
       </div>
     </el-main>
   </el-container>
@@ -1266,6 +1311,8 @@ const vm = new Vue({
       users: [], newUser: { company: '', password: '', role: 'user', taxNo: '', email: '', note: '' },
       creatingUser: false, createOk: false,
       userEdit: { visible: false, id: null, title: '', company: '', taxNo: '', email: '', note: '', hint: '', lockCompany: false, saving: false },
+      // 告警通道弹窗（毛利页入口，配置与退单页共用）
+      channelDlg: { visible: false },
       // 菜单权限弹窗（退单列表 / 实时毛利监控）
       menuPermit: { visible: false, id: null, username: '', refund: false, profit: false, saving: false,
                     origin: { refund: false, profit: false } },
@@ -1303,6 +1350,27 @@ const vm = new Vue({
     canRefund() { return !!(this.me && (this.me.role === 'admin' || this.me.qnhRefundEnabled)); },
     // 实时毛利监控权限（独立菜单权限）
     canProfit() { return !!(this.me && (this.me.role === 'admin' || this.me.qnhProfitEnabled)); },
+    // 毛利告警「发不出去」的阻断项（任一非空即告警不会发）
+    channelIssues() {
+      const c = this.rq.config || {};
+      const out = [];
+      if (!String(c.webhook || '').trim()) out.push('未填写企业微信机器人 webhook');
+      if (!c.wecomEnabled) out.push('机器人总开关已关闭');
+      if (!(Number(c.profitMinAmount) > 0) && !(Number(c.profitMinRate) > 0)) {
+        out.push('两个告警阈值都是 0（0 表示该条件不启用）');
+      }
+      return out;
+    },
+    // 通道就绪时展示的实际触发条件
+    channelCondText() {
+      const c = this.rq.config || {};
+      const a = Number(c.profitMinAmount) || 0;
+      const r = Number(c.profitMinRate) || 0;
+      const parts = [];
+      if (a > 0) parts.push(`线上毛利 < ${a} 元`);
+      if (r > 0) parts.push(`毛利率 < ${r}%`);
+      return parts.join(' 或 ') || '—';
+    },
     // 同步时间点下拉的候选（整点/半点）
     timeOptions() {
       const out = [];
@@ -2077,6 +2145,14 @@ const vm = new Vue({
       }
     },
 
+    // ── 告警通道弹窗（毛利页入口；配置与退单页同源，均为 /api/qnh/config）──
+    openChannelDlg() {
+      this.channelDlg.visible = true;
+    },
+    async saveChannel() {
+      await this.saveQnhConfig();
+      if (this.rq.savedCfg) this.channelDlg.visible = false;
+    },
     async saveQnhConfig() {
       this.rq.savingCfg = true;
       this.rq.savedCfg = false;
