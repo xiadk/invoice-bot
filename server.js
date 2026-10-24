@@ -49,7 +49,7 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
-const { spawn } = require('child_process');
+const { spawn } = require('child_process'); // arch-allow: child_process（管理员「一键重新打包本机助手」功能使用，全项目唯一豁免）
 const { WebSocketServer } = require('ws');
 const db = require('./db');
 const auth = require('./lib/auth');
@@ -322,10 +322,10 @@ async function loadSellers(userId) {
   const invByCompany = new Map(invRows.map((r) => [r.company, r]));
 
   // 同一家公司可能对应多个会员名，发票额只挂在「主行」上避免重复计入
+  // （映射全员共享后按名称全局查，company→主会员名全局唯一）
   const ownerRows = await db.query(
-    `SELECT seller_company, seller_login FROM seller_name_mapping
-     WHERE user_id = ? AND seller_company IS NOT NULL AND seller_login IS NOT NULL`,
-    [userId]
+    `SELECT DISTINCT seller_company, seller_login FROM seller_name_mapping
+     WHERE seller_company IS NOT NULL AND seller_login IS NOT NULL`
   );
   const ownerByCompany = new Map(ownerRows.map((r) => [r.seller_company, r.seller_login]));
 
@@ -1289,38 +1289,58 @@ async function doClientSend(userId, loginIds, opts = {}) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// 名称映射维护（按用户隔离）
+// 税名核对（销方名称 ↔ 1688 商家名称；映射全员共享，user_id 仅作维护人记录）
 // ─────────────────────────────────────────────────────────────────────────
-async function loadMapping(userId) {
+async function loadMapping(userId, { allUsers = false } = {}) {
+  // 映射列表全局共享；金额/行数统计：普通用户只算自己发票行（userId=查看者），超管全局视图算所有用户
+  const scope = allUsers ? '' : 'AND i.user_id = ?';
+  const scopeArgs = allUsers ? [] : [userId, userId]; // scope 在金额与行数两个子查询里各出现一次
   const all = await db.query(`
     SELECT m.id, m.tax_seller_name, m.seller_company, m.seller_login,
            m.match_type, m.match_rule, m.is_confirmed, m.is_ignored, m.note, m.updated_at,
            (SELECT ROUND(SUM(total_amount),2) FROM issued_invoice i
-             WHERE i.user_id = m.user_id AND i.seller_name = m.tax_seller_name) AS invoice_amount,
+             WHERE i.seller_name = m.tax_seller_name ${scope}) AS invoice_amount,
            (SELECT COUNT(*) FROM issued_invoice i
-             WHERE i.user_id = m.user_id AND i.seller_name = m.tax_seller_name) AS invoice_rows
+             WHERE i.seller_name = m.tax_seller_name ${scope}) AS invoice_rows
     FROM seller_name_mapping m
-    WHERE m.user_id = ?
     ORDER BY m.is_ignored ASC, (m.seller_company IS NULL) DESC, invoice_amount DESC
-  `, [userId]);
+  `, scopeArgs);
   const mappings = all.filter((m) => !m.is_ignored);
   const ignored = all.filter((m) => m.is_ignored);
-  const unmatched = await db.query(
+  // 待人工比对：普通用户只看自己发票里的销方名称；超管看所有用户的聚合
+  const unmatched = allUsers ? await db.query(`
+    SELECT i.seller_name AS tax_seller_name,
+           COUNT(*)      AS invoice_rows,
+           ROUND(SUM(i.total_amount),2) AS invoice_amount,
+           MIN(i.invoice_date) AS first_invoice_date,
+           MAX(i.invoice_date) AS last_invoice_date,
+           MAX(i.seller_tax_no) AS seller_tax_no,
+           MAX(i.remark) AS remark
+    FROM issued_invoice i
+    LEFT JOIN seller_name_mapping m
+           ON m.tax_seller_name = i.seller_name
+          AND (m.is_ignored = 1 OR m.seller_company IS NOT NULL)
+    WHERE m.id IS NULL
+    GROUP BY i.seller_name
+    ORDER BY invoice_amount DESC
+  `) : await db.query(
     'SELECT * FROM v_unmatched_seller_name WHERE user_id = ? ORDER BY invoice_amount DESC', [userId]
   );
+  // 1688 商家候选：普通用户只列自己订单里的卖家；超管列全部用户的
   const sellers = await db.query(`
     SELECT COALESCE(NULLIF(seller_login,''), seller_company) AS loginId,
            MAX(seller_company) AS company, MAX(seller_login) AS sellerLogin
     FROM invoice_order
-    WHERE user_id = ? AND seller_company IS NOT NULL
+    WHERE ${allUsers ? '' : 'user_id = ? AND'} seller_company IS NOT NULL
     GROUP BY loginId ORDER BY company
-  `, [userId]);
-  return { mappings, ignored, unmatched, sellers, unmatchedCount: unmatched.length, ignoredCount: ignored.length };
+  `, allUsers ? [] : [userId]);
+  return { mappings, ignored, unmatched, sellers, unmatchedCount: unmatched.length, ignoredCount: ignored.length, allUsers };
 }
 
 async function saveMapping(userId, { taxSellerName, sellerLogin, sellerCompany, note }) {
   if (!taxSellerName) throw new Error('缺少 taxSellerName');
   if (!sellerCompany) throw new Error('请选择对应的1688商家');
+  // 全员共享：同名映射只存一条（全局唯一键），user_id 只在首次创建时记维护人
   await db.exec(
     `INSERT INTO seller_name_mapping (user_id, tax_seller_name, seller_company, seller_login, match_type, match_rule, is_confirmed, is_ignored, note)
      VALUES (?, ?, ?, ?, 'manual', 'manual', 1, 0, ?)
@@ -1328,9 +1348,10 @@ async function saveMapping(userId, { taxSellerName, sellerLogin, sellerCompany, 
        match_type = 'manual', match_rule = 'manual', is_confirmed = 1, is_ignored = 0, note = VALUES(note)`,
     [userId, taxSellerName, sellerCompany, sellerLogin || null, note || null]
   );
+  // 回填所有用户的同销方发票行（映射共享，B 维护后 A 的发票也自动对上）
   const r = await db.exec(
-    'UPDATE issued_invoice SET seller_company = ? WHERE user_id = ? AND seller_name = ?',
-    [sellerCompany, userId, taxSellerName]
+    'UPDATE issued_invoice SET seller_company = ? WHERE seller_name = ?',
+    [sellerCompany, taxSellerName]
   );
   return { ok: true, updatedInvoices: r.affectedRows || 0 };
 }
@@ -1356,15 +1377,16 @@ async function ignoreMapping(userId, { taxSellerName, ignored }) {
          note = '确认无对应1688商家，已忽略'`,
       [userId, taxSellerName]
     );
-    await db.exec('UPDATE issued_invoice SET seller_company = NULL WHERE user_id = ? AND seller_name = ?', [userId, taxSellerName]);
+    // 忽略同样全员生效：所有用户的该销方发票行都不再计入看板统计
+    await db.exec('UPDATE issued_invoice SET seller_company = NULL WHERE seller_name = ?', [taxSellerName]);
   } else {
     const rows = await db.query(
-      'SELECT id, seller_company FROM seller_name_mapping WHERE user_id = ? AND tax_seller_name = ?', [userId, taxSellerName]
+      'SELECT id, seller_company FROM seller_name_mapping WHERE tax_seller_name = ?', [taxSellerName]
     );
     if (rows[0] && !rows[0].seller_company) {
-      await db.exec('DELETE FROM seller_name_mapping WHERE user_id = ? AND tax_seller_name = ?', [userId, taxSellerName]);
+      await db.exec('DELETE FROM seller_name_mapping WHERE tax_seller_name = ?', [taxSellerName]);
     } else {
-      await db.exec("UPDATE seller_name_mapping SET is_ignored = 0 WHERE user_id = ? AND tax_seller_name = ?", [userId, taxSellerName]);
+      await db.exec('UPDATE seller_name_mapping SET is_ignored = 0 WHERE tax_seller_name = ?', [taxSellerName]);
     }
   }
   return { ok: true, ignored: on };
@@ -1372,8 +1394,8 @@ async function ignoreMapping(userId, { taxSellerName, ignored }) {
 
 async function deleteMapping(userId, { taxSellerName }) {
   if (!taxSellerName) throw new Error('缺少 taxSellerName');
-  await db.exec('DELETE FROM seller_name_mapping WHERE user_id = ? AND tax_seller_name = ?', [userId, taxSellerName]);
-  await db.exec('UPDATE issued_invoice SET seller_company = NULL WHERE user_id = ? AND seller_name = ?', [userId, taxSellerName]);
+  await db.exec('DELETE FROM seller_name_mapping WHERE tax_seller_name = ?', [taxSellerName]);
+  await db.exec('UPDATE issued_invoice SET seller_company = NULL WHERE seller_name = ?', [taxSellerName]);
   return { ok: true };
 }
 
@@ -1909,7 +1931,7 @@ const server = http.createServer(async (req, res) => {
       const companies = await loadCompanies(tenantId);
       const sendStats = await loadSendStats(tenantId);
       const sentList = sendStats.filter((r) => Number(r.sendCount) > 0).map((r) => r.login);
-      // 「已开票金额（税务局）」全局统计：排除「已忽略」销方名称的发票（用户点忽略后不计入看板总额）
+      // 「已开票金额（税务局）」全局统计：排除「已忽略」销方名称的发票（忽略全员共享，任何用户点忽略后都不计入）
       const invSummary = await db.query(`
         SELECT COUNT(*) AS rows_count,
                COUNT(DISTINCT COALESCE(NULLIF(e_invoice_no,''), NULLIF(invoice_no,''), i.row_hash)) AS invoice_count,
@@ -1919,11 +1941,11 @@ const server = http.createServer(async (req, res) => {
         WHERE i.user_id = ?
           AND NOT EXISTS (
             SELECT 1 FROM seller_name_mapping m
-            WHERE m.user_id = i.user_id AND m.tax_seller_name = i.seller_name AND m.is_ignored = 1
+            WHERE m.tax_seller_name = i.seller_name AND m.is_ignored = 1
           )
       `, [tenantId]);
       const unmatched = await db.query('SELECT COUNT(*) AS n FROM v_unmatched_seller_name WHERE user_id = ?', [tenantId]);
-      const ignoredCnt = await db.query('SELECT COUNT(*) AS n FROM seller_name_mapping WHERE user_id = ? AND is_ignored = 1', [tenantId]);
+      const ignoredCnt = await db.query('SELECT COUNT(*) AS n FROM seller_name_mapping WHERE is_ignored = 1');
       const manual = await db.query("SELECT COUNT(*) AS n FROM invoice_order WHERE user_id = ? AND state_source = 'manual'", [tenantId]);
       const tenant = (await db.query('SELECT id, username, company_name FROM app_user WHERE id = ?', [tenantId]))[0] || null;
       return sendJson(res, 200, {
@@ -1986,7 +2008,7 @@ const server = http.createServer(async (req, res) => {
         WHERE i.user_id = ?
           AND NOT EXISTS (
             SELECT 1 FROM seller_name_mapping m
-            WHERE m.user_id = i.user_id AND m.tax_seller_name = i.seller_name AND m.is_ignored = 1
+            WHERE m.tax_seller_name = i.seller_name AND m.is_ignored = 1
           ) ${w}`;
       const totalR = await db.query(`SELECT COUNT(*) AS n ${base}`, [tenantId, ...args]);
       const rows = await db.query(`
@@ -2012,7 +2034,7 @@ const server = http.createServer(async (req, res) => {
       const noIgnore = `
         AND NOT EXISTS (
           SELECT 1 FROM seller_name_mapping m2
-          WHERE m2.user_id = i.user_id AND m2.tax_seller_name = i.seller_name AND m2.is_ignored = 1
+          WHERE m2.tax_seller_name = i.seller_name AND m2.is_ignored = 1
         )`;
       const ordRows = await db.query(`
         SELECT DATE(pay_time) AS d, COUNT(*) AS n, ROUND(SUM(COALESCE(pay_amount,0)),2) AS amt
@@ -2155,7 +2177,11 @@ const server = http.createServer(async (req, res) => {
     }
 
     // 名称映射
-    if (method === 'GET' && p === '/api/mapping') return sendJson(res, 200, await loadMapping(tenantId));
+    if (method === 'GET' && p === '/api/mapping') {
+      // 超管看全局（所有用户的销方名称聚合 + 全部商家候选）；普通用户只看自己发票里的销方名称
+      const allUsers = user.role === 'admin';
+      return sendJson(res, 200, await loadMapping(tenantId, { allUsers }));
+    }
     if (method === 'POST' && p === '/api/mapping') { writeGuard(); return sendJson(res, 200, await saveMapping(tenantId, await readBody(req))); }
     if (method === 'POST' && p === '/api/mapping/delete') { writeGuard(); return sendJson(res, 200, await deleteMapping(tenantId, await readBody(req))); }
     if (method === 'POST' && p === '/api/mapping/ignore') { writeGuard(); return sendJson(res, 200, await ignoreMapping(tenantId, await readBody(req))); }

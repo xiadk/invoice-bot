@@ -158,12 +158,13 @@ CREATE TABLE IF NOT EXISTS `issued_invoice` (
 -- 老库增量升级（补 user_id / uk_row_hash → uk_user_row_hash）：交给 db.js migrate()
 
 -- ----------------------------------------------------------------------------
--- 表 3: seller_name_mapping —— 销方名称 ↔ 1688 商家名称 映射表（按用户隔离）
+-- 表 3: seller_name_mapping —— 销方名称 ↔ 1688 商家名称 映射表（全员共享：tax_seller_name 全局唯一）
+--   user_id 语义为「维护人」——记录这条映射最早由哪个用户建立；所有用户共用同一份映射关系
 -- ----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS `seller_name_mapping` (
   `id`              INT          NOT NULL AUTO_INCREMENT COMMENT '自增主键',
-  `user_id`         INT          NOT NULL DEFAULT 1      COMMENT '数据归属用户ID（多租户隔离键，见 app_user.id）',
-  `tax_seller_name` VARCHAR(255) NOT NULL                COMMENT '税务局销方名称（与 user_id 组成唯一键）',
+  `user_id`         INT          NOT NULL DEFAULT 1      COMMENT '维护人用户ID（谁建立的这条映射；映射全员共享，不做租户隔离）',
+  `tax_seller_name` VARCHAR(255) NOT NULL                COMMENT '税务局销方名称（全局唯一，全员共享）',
   `seller_company`  VARCHAR(255) NULL                    COMMENT '对应的1688卖家公司名',
   `seller_login`    VARCHAR(128) NULL                    COMMENT '对应的1688卖家会员名（登录ID）',
   `match_type`      VARCHAR(16)  NOT NULL DEFAULT 'manual' COMMENT '匹配方式：auto=系统自动匹配，manual=人工维护',
@@ -174,15 +175,15 @@ CREATE TABLE IF NOT EXISTS `seller_name_mapping` (
   `created_at`      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
   `updated_at`      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
   PRIMARY KEY (`id`),
-  UNIQUE KEY `uk_user_tax_name` (`user_id`, `tax_seller_name`),
+  UNIQUE KEY `uk_tax_seller_name` (`tax_seller_name`),
   KEY `idx_user_id`             (`user_id`),
   KEY `idx_seller_login`        (`seller_login`),
   KEY `idx_seller_company`      (`seller_company`),
   KEY `idx_is_ignored`          (`is_ignored`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-  COMMENT='税务局销方名称与1688商家名称的映射表（按用户隔离；is_ignored=1 表示确认无对应商家）';
+  COMMENT='税务局销方名称与1688商家名称的映射表（全员共享；is_ignored=1 表示确认无对应商家）';
 
--- 老库增量升级（补 user_id / is_ignored / 唯一键与索引）：交给 db.js migrate()
+-- 老库增量升级（user_id 语义改为维护人、唯一键改全局唯一）：交给 db.js migrate()
 
 -- ----------------------------------------------------------------------------
 -- 表 4: send_log —— 催收消息发送记录（一行 = 一次发送尝试）
@@ -253,8 +254,7 @@ SELECT
   MAX(i.`remark`)                       AS `remark`
 FROM `issued_invoice` i
 LEFT JOIN `seller_name_mapping` m
-       ON m.`user_id` = i.`user_id`
-      AND m.`tax_seller_name` = i.`seller_name`
+       ON m.`tax_seller_name` = i.`seller_name`
       AND (m.`is_ignored` = 1 OR m.`seller_company` IS NOT NULL)
 WHERE m.`id` IS NULL
 GROUP BY i.`user_id`, i.`seller_name`;

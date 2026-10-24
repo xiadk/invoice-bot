@@ -89,8 +89,10 @@ const RULES = [
         const allowListen = r === 'server.js';
         lines.forEach((line, i) => {
           if (isComment(line)) return;
-          if (!allowProc && /require\((['"])child_process\1\)/.test(line)) {
-            bad.push(`${r}:${i + 1}  引入 child_process（同步已迁入 lib/qnh-sync.js，electron/ 之外不允许子进程）`);
+          if (!allowProc && /require\((['"])child_process\1\)/.test(line)
+              && !line.includes('arch-allow: child_process')) {
+            bad.push(`${r}:${i + 1}  引入 child_process（同步已迁入 lib/qnh-sync.js，electron/ 之外不允许子进程；` +
+              `确需豁免在该行尾加注释标记 arch-allow: child_process 并说明用途）`);
           }
           if (!allowListen && /\.listen\s*\(/.test(line) && !/\.on\(/.test(line)) {
             bad.push(`${r}:${i + 1}  启动监听（只允许 server.js 一个服务入口）`);

@@ -94,6 +94,8 @@
   .muted { color: var(--sub); }
   .detail-sum { font-size: 13px; color: var(--sub); }
   .detail-sum b { color: var(--text); }
+  /* 明细弹窗兜底：窗口矮于表格高度时弹窗内容整体可滚（表格自身另有 max-height 内滚） */
+  .el-dialog__wrapper .el-dialog .el-dialog__body { max-height: 72vh; overflow-y: auto; }
   .orders-detail { margin-top: 6px; }
   .orders-detail .sec { font-size: 12px; color: var(--primary); padding: 8px 0 6px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
   .orders-detail .sec .row-actions { margin-left: auto; display: flex; gap: 8px; }
@@ -125,7 +127,7 @@
         <div class="brand">1688 发票催收</div>
         <el-menu class="nav-menu" :default-active="page" mode="horizontal" @select="switchPage">
           <el-menu-item index="board">看板</el-menu-item>
-          <el-menu-item index="mapping">名称映射</el-menu-item>
+          <el-menu-item index="mapping">税名核对</el-menu-item>
           <el-menu-item index="refund" v-if="canRefund">退单列表</el-menu-item>
           <el-menu-item index="profit" v-if="canProfit">实时毛利监控</el-menu-item>
           <el-menu-item index="admin" v-if="isAdmin">系统管理</el-menu-item>
@@ -217,8 +219,8 @@
             </el-select>
             <el-input v-model="draftKeyword" size="small" style="width:230px" placeholder="搜索卖家公司名 / 登录ID"
                       clearable @keyup.enter.native="applyFilters"></el-input>
-            <el-button size="small" type="primary" plain @click="applyFilters" title="输入名称或切换状态后，点此查询">查询</el-button>
-            <el-button size="small" @click="loadData" title="重新拉取看板数据">刷新</el-button>
+            <el-button size="small" type="primary" plain :loading="boardLoading" @click="applyFilters" title="重新请求数据并按当前条件刷新列表">查询</el-button>
+            <el-button size="small" :loading="boardLoading" @click="loadData" title="重新拉取看板数据">刷新</el-button>
             <span class="spacer"></span>
             <el-button size="small" @click="openUpload('orders')" title="上传从 1688 导出的订单 Excel 并导入（重复订单按最新数据更新）">导入1688订单数据</el-button>
             <el-button size="small" @click="openUpload('invoices')" title="上传从电子税务局导出的发票 Excel 并导入（重复发票按最新数据更新）">导入税务局发票数据</el-button>
@@ -432,17 +434,20 @@
         <div class="meta-line">{{ meta }}</div>
       </div>
 
-      <!-- ══════════ 名称映射 ══════════ -->
+      <!-- ══════════ 税名核对 ══════════ -->
       <div v-show="page === 'mapping'" id="page-mapping">
         <div class="page-head">
-          <h2>税务局销方名称 → 1688 商家名称 映射</h2>
+          <h2>税名核对：税务局销方名称 → 1688 商家名称</h2>
           <el-alert type="info" :closable="false" show-icon style="margin-top:8px"
             title="「已开票订单」里的销方名称是税务局口径，跟订单里的商家名称不一致，所以要靠这张映射表建立名称关系。">
             <div style="font-size:12px;line-height:1.8">
               导入时会自动匹配（名称完全一致 / 包含 / 登录ID / 备注线索）；自动匹配不上的会列在下面「待人工比对」，选好对应的 1688 商家保存即可。<br>
+              映射关系<b>全员共享</b>：任何用户核对过的销方名称，其他用户直接复用，无须重复匹配；「待人工比对」只显示你自己发票里的销方名称。<br>
               若某个销方名称<b>确认没有</b>对应的 1688 商家，点「忽略」把它移出列表（可在下方「已忽略」区恢复）。
             </div>
           </el-alert>
+          <el-alert v-if="map.allUsers" type="success" :closable="false" show-icon style="margin-top:8px"
+            title="超管全局视图：正在查看全体用户的税名核对信息（映射全员共享）。"></el-alert>
         </div>
         <el-alert v-if="readonly" type="warning" :closable="false" show-icon style="margin-bottom:12px" title="只读模式：正在查看他人数据，不能修改映射。"></el-alert>
 
@@ -1148,7 +1153,7 @@
                 @keyup.enter.native="detailSearch"></el-input>
       <el-button size="small" @click="detailSearch">查询</el-button>
     </div>
-    <el-table :data="detail.rows" size="mini" border max-height="56vh" style="width:100%" v-loading="detail.loading" empty-text="无数据">
+    <el-table :data="detail.rows" size="mini" border max-height="480" style="width:100%" v-loading="detail.loading" empty-text="无数据">
       <el-table-column v-if="detail.kind === 'orders'" prop="order_no" label="订单编号" min-width="190"></el-table-column>
       <el-table-column v-if="detail.kind === 'orders'" prop="seller_company" label="卖家公司" min-width="150"></el-table-column>
       <el-table-column v-if="detail.kind === 'orders'" prop="seller_login" label="会员名" width="130"></el-table-column>
@@ -1275,7 +1280,7 @@
       <el-button @click="up.visible = false" :disabled="up.busy">关闭</el-button>
       <el-button type="primary" :loading="up.busy" :disabled="!up.file" @click="doUpload">开始导入</el-button>
     </div>
-    <div class="form-tip" style="margin-top:6px">导入规则：<b>重复数据做更新</b>——订单按「订单编号」、发票按「发票号码+明细」匹配，已存在则用本次文件里的最新内容覆盖（人工维护的开票状态与名称映射不受影响）。</div>
+    <div class="form-tip" style="margin-top:6px">导入规则：<b>重复数据做更新</b>——订单按「订单编号」、发票按「发票号码+明细」匹配，已存在则用本次文件里的最新内容覆盖（人工维护的开票状态与税名核对映射不受影响）。</div>
   </el-dialog>
 
   <!-- ══════════ 修改密码 ══════════ -->
@@ -1457,7 +1462,7 @@ const vm = new Vue({
       // 牵牛花：以哪个账号的身份查看（管理员必选；普通用户 = 自己）
       qnhTenant: null, qnhUsers: [], qnhSessions: [],
       // 看板数据
-      companies: [], sent: {}, invSummary: null, unmatchedCnt: 0, ignoredCnt: 0, manualCnt: 0,
+      companies: [], sent: {}, invSummary: null, unmatchedCnt: 0, ignoredCnt: 0, manualCnt: 0, boardLoading: false,
       meta: '', tenantLabel: '',
       // 筛选（草稿 vs 生效）
       draftKeyword: '', keyword: '', draftCollect: '15', collectState: '15', draftInvoice: '', invoiceState: '',
@@ -1797,6 +1802,7 @@ const vm = new Vue({
     },
     // ── 看板数据 ──
     async loadData() {
+      this.boardLoading = true;
       try {
         const d = await this.api('/api/data');
         if (d.error) { this.$message.error('加载数据失败: ' + d.error); return; }
@@ -1823,6 +1829,7 @@ const vm = new Vue({
         this.detailCache = next;
         this.refreshOpenPanels();
       } catch (e) { this.$message.error('加载数据失败: ' + e.message); }
+      finally { this.boardLoading = false; }
     },
     applyFilters() {
       this.keyword = this.draftKeyword.trim();
@@ -1832,6 +1839,8 @@ const vm = new Vue({
       // 换了筛选条件，之前勾选的会员名很可能已不在结果里 → 一并清空，避免点完查询计数还挂着
       this.selected = {};
       this.reportOp('query.filter', { collect: this.draftCollect, invoice: this.draftInvoice, keyword: this.draftKeyword.trim() });
+      // 不管条件有没有变动，点查询都重新请求一次数据（服务端数据可能是新的）
+      this.loadData();
     },
     onDashPage(p) { this.dashPage = p; },
     onDashSize(s) { this.dashSize = s; this.dashPage = 1; },
@@ -2575,7 +2584,7 @@ const vm = new Vue({
       return (this.rq.log.rows || []).filter((r) => r.logType === type).length;
     },
 
-    // ══════ 名称映射 ══════
+    // ══════ 税名核对 ══════
     async loadMapping() {
       try { this.map = await this.api('/api/mapping'); this.mapDraft = {}; }
       catch (e) { this.$message.error('加载失败: ' + e.message); }
@@ -2914,7 +2923,7 @@ const vm = new Vue({
             const un = d.unmatched || [];
             html = `✓ 导入完成：新增 <b>${d.inserted || 0}</b> 行 · 更新 <b>${d.updated || 0}</b> 行`
               + (d.autoMapped ? ` · 自动匹配销方 <b>${d.autoMapped}</b> 个` : '')
-              + (un.length ? `<div style="margin-top:6px">⚠ 还有 ${un.length} 个销方未匹配 1688 卖家（可在「名称映射」页手动维护）：<br><span style="color:#8a8f99">${this.esc(un.slice(0, 12).join('、'))}${un.length > 12 ? ' 等' : ''}</span></div>` : '');
+              + (un.length ? `<div style="margin-top:6px">⚠ 还有 ${un.length} 个销方未匹配 1688 卖家（可在「税名核对」页手动维护）：<br><span style="color:#8a8f99">${this.esc(un.slice(0, 12).join('、'))}${un.length > 12 ? ' 等' : ''}</span></div>` : '');
           } else {
             html = `✓ 导入完成：新增 <b>${d.inserted || 0}</b> 单 · 更新 <b>${d.updated || 0}</b> 单（重复订单已用本次文件的数据更新）`;
           }

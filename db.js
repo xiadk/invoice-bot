@@ -545,15 +545,33 @@ async function migrate(conn, dbName) {
   if (!(await idxExists('issued_invoice', 'uk_user_row_hash'))) {
     await q('ALTER TABLE `issued_invoice` ADD UNIQUE KEY `uk_user_row_hash` (`user_id`, `row_hash`)');
   }
-  if (await idxExists('seller_name_mapping', 'uk_tax_seller_name')) {
-    await q('ALTER TABLE `seller_name_mapping` DROP INDEX `uk_tax_seller_name`');
-  }
-  if (!(await idxExists('seller_name_mapping', 'uk_user_tax_name'))) {
-    await q('ALTER TABLE `seller_name_mapping` ADD UNIQUE KEY `uk_user_tax_name` (`user_id`, `tax_seller_name`)');
-  }
   // 复合索引：按用户查卖家时更快
   if (!(await idxExists('send_log', 'idx_user_login'))) {
     await q('ALTER TABLE `send_log` ADD KEY `idx_user_login` (`user_id`, `seller_login`)');
+  }
+  // 唯一键改造（v0.2.15）：seller_name_mapping 改为全员共享——tax_seller_name 全局唯一，
+  // user_id 退化为「维护人」（记录这条映射最早由谁维护）。老库从 (user_id, tax_seller_name)
+  // 迁移过来时先把同一销方名称的多行合并成一行。
+  if (await idxExists('seller_name_mapping', 'uk_user_tax_name')) {
+    const dups = await q(
+      'SELECT tax_seller_name FROM seller_name_mapping GROUP BY tax_seller_name HAVING COUNT(*) > 1'
+    );
+    for (const d of dups) {
+      const rows = await q(
+        'SELECT id FROM seller_name_mapping WHERE tax_seller_name = ? ' +
+        'ORDER BY seller_company IS NULL ASC, is_confirmed DESC, updated_at DESC, id ASC LIMIT 1',
+        [d.tax_seller_name]
+      );
+      const keep = rows[0] && rows[0].id;
+      if (keep != null) {
+        await q('DELETE FROM seller_name_mapping WHERE tax_seller_name = ? AND id <> ?', [d.tax_seller_name, keep]);
+        console.log(`[db] 税名共享化：销方「${d.tax_seller_name}」的多条映射已合并保留一条`);
+      }
+    }
+    await q('ALTER TABLE `seller_name_mapping` DROP INDEX `uk_user_tax_name`');
+  }
+  if (!(await idxExists('seller_name_mapping', 'uk_tax_seller_name'))) {
+    await q('ALTER TABLE `seller_name_mapping` ADD UNIQUE KEY `uk_tax_seller_name` (`tax_seller_name`)');
   }
   if (!(await idxExists('invoice_order', 'idx_user_seller_login'))) {
     await q('ALTER TABLE `invoice_order` ADD KEY `idx_user_seller_login` (`user_id`, `seller_login`)');
@@ -635,6 +653,7 @@ async function migrate(conn, dbName) {
     await q('ALTER TABLE `seller_name_mapping` ADD KEY `idx_is_ignored` (`is_ignored`)');
   }
   // 视图重建：待比对清单需同时排除「已映射」与「已忽略」两类（老库视图定义同步），并按 user_id 分组
+  // （映射全员共享后，JOIN 只按销方名称匹配，不再按 user_id——别的用户核过的销方也算已处理）
   await q(
     'CREATE OR REPLACE VIEW `v_unmatched_seller_name` AS ' +
     'SELECT i.`user_id` AS `user_id`, i.`seller_name` AS `tax_seller_name`, COUNT(*) AS `invoice_rows`, ' +
@@ -642,7 +661,7 @@ async function migrate(conn, dbName) {
     'MAX(i.`invoice_date`) AS `last_invoice_date`, MAX(i.`seller_tax_no`) AS `seller_tax_no`, ' +
     'MAX(i.`remark`) AS `remark` ' +
     'FROM `issued_invoice` i ' +
-    'LEFT JOIN `seller_name_mapping` m ON m.`user_id` = i.`user_id` AND m.`tax_seller_name` = i.`seller_name` ' +
+    'LEFT JOIN `seller_name_mapping` m ON m.`tax_seller_name` = i.`seller_name` ' +
     'AND (m.`is_ignored` = 1 OR m.`seller_company` IS NOT NULL) ' +
     'WHERE m.`id` IS NULL GROUP BY i.`user_id`, i.`seller_name`'
   );
