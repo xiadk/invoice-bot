@@ -96,6 +96,7 @@
   .detail-sum b { color: var(--text); }
   /* 明细弹窗兜底：窗口矮于表格高度时弹窗内容整体可滚（表格自身另有 max-height 内滚） */
   .el-dialog__wrapper .el-dialog .el-dialog__body { max-height: 72vh; overflow-y: auto; }
+  .clickable-rows .el-table__row { cursor: pointer; }
   .orders-detail { margin-top: 6px; }
   .orders-detail .sec { font-size: 12px; color: var(--primary); padding: 8px 0 6px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
   .orders-detail .sec .row-actions { margin-left: auto; display: flex; gap: 8px; }
@@ -128,6 +129,8 @@
         <el-menu class="nav-menu" :default-active="page" mode="horizontal" @select="switchPage">
           <el-menu-item index="board">看板</el-menu-item>
           <el-menu-item index="mapping">税名核对</el-menu-item>
+          <el-menu-item index="product">商品列表</el-menu-item>
+          <el-menu-item index="market">交易市场</el-menu-item>
           <el-menu-item index="refund" v-if="canRefund">退单列表</el-menu-item>
           <el-menu-item index="profit" v-if="canProfit">实时毛利监控</el-menu-item>
           <el-menu-item index="admin" v-if="isAdmin">系统管理</el-menu-item>
@@ -549,6 +552,147 @@
             </el-collapse-item>
           </el-collapse>
         </el-card>
+      </div>
+
+      <!-- ══════════ 商品列表 ══════════ -->
+      <div v-show="page === 'product'" id="page-product">
+        <div class="page-head">
+          <h2>商品列表</h2>
+          <div style="display:flex;align-items:center;gap:10px;margin-top:8px;flex-wrap:wrap">
+            <el-button size="small" type="primary" plain :disabled="readonly"
+                       title="上传「前置仓补货参考批量导出」Excel（重复商品按本次文件内容更新）"
+                       @click="openUpload('products')">导入补货参考文件</el-button>
+            <span class="loginid" v-if="product.latestBatch">
+              最近导入 {{ fmtMinute(product.latestBatch.imported_at) }} · {{ product.latestBatch.item_count }} 个商品 · 总货值 {{ yuan(product.latestBatch.total_value) }}
+            </span>
+            <span style="flex:1"></span>
+            <span class="loginid">总货值 = Σ((可用库存 + 在途库存) × 采购价)</span>
+          </div>
+        </div>
+
+        <el-card shadow="never" class="section-card">
+          <div slot="header" style="display:flex;align-items:center;gap:10px">
+            <b>总货值趋势</b>
+            <span class="loginid">每次导入记一个批次点</span>
+          </div>
+          <div ref="ptrend" id="product-trend" style="height:260px;width:100%"></div>
+        </el-card>
+
+        <el-card shadow="never" class="section-card">
+          <div slot="header" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+            <b>商品</b>
+            <el-input v-model="product.draftQ" size="small" clearable placeholder="搜商品SKU / 名称" style="width:220px"
+                      @keyup.enter.native="loadProducts" @clear="loadProducts"></el-input>
+            <el-select v-model="product.status" size="small" style="width:130px" @change="loadProducts">
+              <el-option label="全部采购状态" value=""></el-option>
+              <el-option label="正常采购" value="正常采购"></el-option>
+              <el-option label="停止采购" value="停止采购"></el-option>
+            </el-select>
+            <el-button size="small" @click="togglePriceSort" title="按采购价排序（降→升→取消）">
+              采购价{{ product.priceSort === 'desc' ? ' ↓' : (product.priceSort === 'asc' ? ' ↑' : '') }}
+            </el-button>
+            <el-button size="small" type="primary" plain :loading="product.loading" @click="loadProducts">查询</el-button>
+            <span style="flex:1"></span>
+            <span class="loginid">当前筛选总货值：{{ yuan(product.filteredValue) }}</span>
+            <el-button size="small" type="success" :disabled="!product.selected.length || readonly"
+                       @click="openPublish(product.selected.map(r => r.sku))">
+              发布到交易市场({{ product.selected.length }})
+            </el-button>
+          </div>
+          <el-table :data="product.rows" size="small" border style="width:100%" v-loading="product.loading"
+                    empty-text="暂无商品（点「导入补货参考文件」上传 Excel）" @selection-change="v => product.selected = v">
+            <el-table-column type="selection" width="42"></el-table-column>
+            <el-table-column label="商品名称" min-width="260"><template slot-scope="p"><span :title="p.row.goods_name">{{ p.row.goods_name }}</span></template></el-table-column>
+            <el-table-column label="商品SKU" width="180"><template slot-scope="p"><span class="loginid" style="font-family:Consolas,monospace">{{ p.row.sku }}</span></template></el-table-column>
+            <el-table-column label="采购价" width="100"><template slot-scope="p"><span class="amount">{{ yuan(p.row.purchase_price) }}</span></template></el-table-column>
+            <el-table-column prop="available_stock" label="可用库存" width="90"></el-table-column>
+            <el-table-column prop="transit_stock" label="在途库存" width="90"></el-table-column>
+            <el-table-column label="采购状态" width="95">
+              <template slot-scope="p">
+                <el-tag size="mini" :type="p.row.purchase_status === '正常采购' ? 'success' : 'info'">{{ p.row.purchase_status || '—' }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column prop="sales_30d" label="30天总销量" width="100"></el-table-column>
+            <el-table-column label="操作" width="150">
+              <template slot-scope="p">
+                <el-button size="mini" type="success" plain :disabled="readonly" @click="openPublish([p.row.sku], p.row)">发布到交易市场</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+          <div class="pager-wrap">
+            <el-pagination background layout="sizes, prev, pager, next" :total="product.total" :page-size="product.size"
+                           :current-page="product.page" :page-sizes="pageSizes"
+                           @size-change="v => { product.size = v; product.page = 1; loadProducts(); }"
+                           @current-change="v => { product.page = v; loadProducts(); }"></el-pagination>
+          </div>
+        </el-card>
+
+        <!-- 发布到交易市场（单个 / 批量共用） -->
+        <el-dialog :title="publish.title" :visible.sync="publish.visible" width="520px" append-to-body>
+          <el-form label-position="top" size="small">
+            <el-form-item label="折扣（百分比）">
+              <el-input-number v-model="publish.discount" :min="1" :max="500" :precision="0" :step="5"
+                               controls-position="right" style="width:160px" @change="calcPublish"></el-input-number>
+              <span class="loginid" style="margin-left:10px">填 80 表示按采购价的 80% 发布</span>
+            </el-form-item>
+          </el-form>
+          <div class="detail-sum" style="margin-bottom:8px">共 <b>{{ publish.items.length }}</b> 个商品 · 数量 = 发布时可用库存</div>
+          <el-table :data="publish.items" size="mini" border max-height="260" style="width:100%">
+            <el-table-column label="商品名称" min-width="200"><template slot-scope="p">{{ p.row.goods_name }}</template></el-table-column>
+            <el-table-column label="采购价" width="90"><template slot-scope="p"><span class="amount">{{ yuan(p.row.purchase_price) }}</span></template></el-table-column>
+            <el-table-column label="发布数量" width="85"><template slot-scope="p">{{ p.row.available_stock }}</template></el-table-column>
+            <el-table-column label="折后价" width="95"><template slot-scope="p"><span class="amount ok">{{ yuan(p.row.purchase_price * publish.discount / 100) }}</span></template></el-table-column>
+          </el-table>
+          <div slot="footer">
+            <el-button size="small" @click="publish.visible = false">取消</el-button>
+            <el-button size="small" type="primary" :loading="publish.saving" @click="doPublish">确认发布</el-button>
+          </div>
+        </el-dialog>
+      </div>
+
+      <!-- ══════════ 交易市场 ══════════ -->
+      <div v-show="page === 'market'" id="page-market">
+        <div class="page-head">
+          <h2>交易市场</h2>
+          <div style="font-size:12px;color:var(--sub);line-height:1.8;margin-top:8px">
+            所有用户在「商品列表」发布的报价在此汇集；同一 SKU 去重展示一条：数量为各用户发布数量合计，价格为当前最低报价。<br>
+            点击商品行可查看该 SKU 的全部报价（价格由低到高，同价按发布时间倒序）。
+          </div>
+        </div>
+        <el-card shadow="never" class="section-card">
+          <div slot="header" style="display:flex;align-items:center;gap:10px">
+            <b>在售商品</b>
+            <span class="loginid">（{{ market.rows.length }} 个 SKU）</span>
+            <span style="flex:1"></span>
+            <el-button size="small" :loading="market.loading" @click="loadMarket">刷新</el-button>
+          </div>
+          <el-table :data="market.rows" size="small" border style="width:100%" v-loading="market.loading"
+                    empty-text="暂无商品发布（去「商品列表」把商品发布到交易市场）" highlight-current-row
+                    @row-click="openQuotes" class="clickable-rows">
+            <el-table-column label="商品名称" min-width="280"><template slot-scope="p">{{ p.row.goods_name }}</template></el-table-column>
+            <el-table-column label="商品SKU" width="180"><template slot-scope="p"><span class="loginid" style="font-family:Consolas,monospace">{{ p.row.sku }}</span></template></el-table-column>
+            <el-table-column label="数量" width="100"><template slot-scope="p">{{ p.row.total_qty }}</template></el-table-column>
+            <el-table-column label="价格（最低）" width="120"><template slot-scope="p"><span class="amount ok">{{ yuan(p.row.min_price) }}</span></template></el-table-column>
+            <el-table-column label="报价数" width="90"><template slot-scope="p"><el-tag size="mini">{{ p.row.quote_count }}</el-tag></template></el-table-column>
+            <el-table-column label="最近发布" width="150"><template slot-scope="p"><span class="loginid">{{ fmtMinute(p.row.last_published_at) }}</span></template></el-table-column>
+          </el-table>
+        </el-card>
+
+        <!-- 报价列表 -->
+        <el-dialog :title="'报价列表 · ' + (quotes.goodsName || quotes.sku)" :visible.sync="quotes.visible" width="720px" append-to-body>
+          <el-alert type="info" :closable="false" show-icon style="margin-bottom:10px"
+                    :title="'共 ' + quotes.rows.length + ' 条报价，按价格由低到高排列（同价按发布时间倒序）'"></el-alert>
+          <el-table :data="quotes.rows" size="small" border max-height="440" style="width:100%" v-loading="quotes.loading">
+            <el-table-column label="用户" min-width="180"><template slot-scope="p">{{ p.row.user_name }}</template></el-table-column>
+            <el-table-column label="数量" width="90"><template slot-scope="p">{{ p.row.quantity }}</template></el-table-column>
+            <el-table-column label="采购价" width="100"><template slot-scope="p"><span class="amount">{{ yuan(p.row.orig_price) }}</span></template></el-table-column>
+            <el-table-column label="折扣" width="80"><template slot-scope="p">{{ p.row.discount }}%</template></el-table-column>
+            <el-table-column label="报价（折后价）" width="120">
+              <template slot-scope="p"><span class="amount" :class="{ ok: p.$index === 0 }">{{ yuan(p.row.discount_price) }}</span></template>
+            </el-table-column>
+            <el-table-column label="发布时间" width="150"><template slot-scope="p"><span class="loginid">{{ fmtMinute(p.row.published_at) }}</span></template></el-table-column>
+          </el-table>
+        </el-dialog>
       </div>
 
       <!-- ══════════ 系统管理 ══════════ -->
@@ -1343,6 +1487,16 @@ const UP_GUIDES = {
       <a class="link-btn" href="https://etax.chinatax.gov.cn/" target="_blank" rel="noopener">打开电子税务局（全国统一入口）↗</a>
       <div style="margin-top:8px;color:#5a7291">第二步：把导出的 Excel 拖到下方上传区导入（系统会按「销方名称」自动匹配 1688 卖家）</div>`,
   },
+  products: {
+    title: '导入前置仓补货参考',
+    accept: '.xlsx,.xls',
+    html: `<div style="font-weight:600;margin-bottom:4px">第一步：导出「前置仓补货参考」Excel</div>
+      <ol>
+        <li>在补货系统里按需要筛选后，使用「<b>批量导出</b>」下载 Excel（文件名类似「前置仓补货参考批量导出…」）</li>
+        <li>系统会自动识别列：商品名称、商品SKU、采购单价、采购状态、可用/在途库存、30天总销量</li>
+      </ol>
+      <div style="margin-top:8px;color:#5a7291">第二步：把导出的 Excel 拖到下方上传区导入（重复商品按本次文件内容更新）</div>`,
+  },
 };
 
 // 操作日志：这些按钮文案不含有效信息（弹框的确定/取消等），不记入操作日志
@@ -1463,6 +1617,17 @@ const vm = new Vue({
       qnhTenant: null, qnhUsers: [], qnhSessions: [],
       // 看板数据
       companies: [], sent: {}, invSummary: null, unmatchedCnt: 0, ignoredCnt: 0, manualCnt: 0, boardLoading: false,
+      // 商品列表（前置仓补货参考）
+      product: {
+        loading: false, rows: [], total: 0, page: 1, size: 20,
+        draftQ: '', status: '', priceSort: '', selected: [],
+        filteredValue: 0, latestBatch: null, trend: [],
+      },
+      // 发布到交易市场（单个/批量共用弹窗）
+      publish: { visible: false, title: '', discount: 100, items: [], saving: false },
+      // 交易市场
+      market: { loading: false, rows: [] },
+      quotes: { visible: false, loading: false, sku: '', goodsName: '', rows: [] },
       meta: '', tenantLabel: '',
       // 筛选（草稿 vs 生效）
       draftKeyword: '', keyword: '', draftCollect: '15', collectState: '15', draftInvoice: '', invoiceState: '',
@@ -1717,6 +1882,8 @@ const vm = new Vue({
       if (p === 'board') this.$nextTick(() => this.renderTrend());
       if (p === 'refund') this.$nextTick(() => this.renderRefundTrend());
       if (p === 'profit') this.$nextTick(() => this.renderProfitTrend());
+      if (p === 'product') { this.loadProducts(); this.loadProductTrend(); }
+      if (p === 'market') this.loadMarket();
     },
     'detail.visible'(v) { if (!v) this.detail.q = ''; },
   },
@@ -2102,6 +2269,7 @@ const vm = new Vue({
       if (this._charts) this._charts.forEach((ch) => { try { ch.resize(); } catch (e) {} });
       if (this._rqChart) { try { this._rqChart.resize(); } catch (e) {} }
       if (this._profitChart) { try { this._profitChart.resize(); } catch (e) {} }
+      if (this._pTrendChart) { try { this._pTrendChart.resize(); } catch (e) {} }
     },
     renderTrend() {
       if (this.page !== 'board') return;
@@ -2919,7 +3087,9 @@ const vm = new Vue({
         if (okFlag) {
           const d = payload || {};
           let html = '';
-          if (kind === 'invoices') {
+          if (kind === 'products') {
+            html = `✓ 导入完成：<b>${d.total || 0}</b> 个商品（重复商品已按本次文件内容更新） · 本次总货值 <b>${this.yuan(d.totalValue)}</b>`;
+          } else if (kind === 'invoices') {
             const un = d.unmatched || [];
             html = `✓ 导入完成：新增 <b>${d.inserted || 0}</b> 行 · 更新 <b>${d.updated || 0}</b> 行`
               + (d.autoMapped ? ` · 自动匹配销方 <b>${d.autoMapped}</b> 个` : '')
@@ -2930,6 +3100,7 @@ const vm = new Vue({
           this.up.result = { ok: true, html };
           this.loadData();
           if (this.page === 'mapping') this.loadMapping();
+          if (this.page === 'product') { this.loadProducts(); this.loadProductTrend(); }
         } else {
           this.up.result = { ok: false, html: '✗ ' + this.esc((payload && payload.error) || '导入失败') };
         }
@@ -2947,6 +3118,117 @@ const vm = new Vue({
       };
       xhr.onerror = () => finish(false, { error: '网络错误：上传失败，请重试' });
       xhr.send(this.up.file);
+    },
+
+    // ══════ 商品列表（前置仓补货参考） ══════
+    async loadProducts() {
+      this.product.loading = true;
+      try {
+        const q = new URLSearchParams();
+        q.set('page', this.product.page); q.set('size', this.product.size);
+        if (this.product.draftQ.trim()) q.set('q', this.product.draftQ.trim());
+        if (this.product.status) q.set('status', this.product.status);
+        if (this.product.priceSort) q.set('sort', this.product.priceSort === 'asc' ? 'price_asc' : 'price_desc');
+        const d = await this.api('/api/products?' + q.toString());
+        this.product.rows = d.rows || [];
+        this.product.total = d.total || 0;
+        this.product.filteredValue = d.filteredValue || 0;
+        this.product.latestBatch = d.latestBatch || null;
+        // 数据刷新后，剔除已不在结果里的勾选
+        const alive = new Set((d.rows || []).map((r) => r.sku));
+        this.product.selected = (this.product.selected || []).filter((r) => alive.has(r.sku));
+      } catch (e) { this.$message.error('商品加载失败: ' + e.message); }
+      finally { this.product.loading = false; }
+    },
+    togglePriceSort() {
+      this.product.priceSort = this.product.priceSort === '' ? 'desc' : (this.product.priceSort === 'desc' ? 'asc' : '');
+      this.product.page = 1;
+      this.loadProducts();
+    },
+    async loadProductTrend() {
+      try {
+        const d = await this.api('/api/products/trend');
+        this.product.trend = d.days || [];
+        this.$nextTick(() => this.renderProductTrend());
+      } catch (e) { /* 趋势失败不阻塞列表 */ }
+    },
+    renderProductTrend() {
+      if (this.page !== 'product') return;
+      const EC = ecLib();
+      const dom = document.getElementById('product-trend');
+      if (!EC || !dom) return;
+      this._pTrendChart = this._pTrendChart || EC.init(dom);
+      const days = this.product.trend || [];
+      this._pTrendChart.setOption({
+        grid: { left: 6, right: 10, top: 26, bottom: 4, containLabel: true },
+        tooltip: {
+          trigger: 'axis', confine: true,
+          backgroundColor: 'rgba(38,40,44,.92)', borderWidth: 0, textStyle: { color: '#fff', fontSize: 12 },
+          formatter: (ps) => {
+            const d = days[ps && ps[0] ? ps[0].dataIndex : 0] || {};
+            return `<b>${String(d.imported_at || '').slice(0, 16)}</b><br/>总货值：<b style="color:#9be09b">${yuan(d.total_value)}</b>`
+              + `<br/>商品：${d.item_count || 0} 个`
+              + (d.source_file ? `<br/>文件：${this.esc(String(d.source_file).slice(0, 40))}` : '');
+          },
+        },
+        xAxis: { type: 'category', data: days.map((d) => String(d.imported_at || '').slice(5, 16)) },
+        yAxis: { type: 'value', scale: true },
+        series: [{
+          type: 'line', smooth: true, symbolSize: 7,
+          data: days.map((d) => Number(d.total_value) || 0),
+          lineStyle: { color: '#409eff' }, itemStyle: { color: '#409eff' },
+          areaStyle: { color: 'rgba(64,158,255,.12)' },
+        }],
+      }, true);
+    },
+    // 发布到交易市场：skus 传数组；单个时传 row；批量用勾选行。展示缺行也没关系——服务端按 sku 取真实数据
+    openPublish(skus, row) {
+      if (this.readonly) { this.$message.warning('只读模式下不能发布'); return; }
+      const list = (skus || []).map((s) => String(s));
+      if (!list.length) { this.$message.warning('请先勾选要发布的商品'); return; }
+      const src = (this.product.rows || []).filter((r) => list.includes(r.sku));
+      this.publish = {
+        visible: true,
+        title: list.length === 1 ? '发布到交易市场' : `批量发布到交易市场（${list.length} 个商品）`,
+        discount: 100, saving: false,
+        items: src.length === list.length ? src : [],
+        skus: list,
+      };
+    },
+    calcPublish() { /* 折后价在表格内联实时计算（purchase_price × discount / 100） */ },
+    async doPublish() {
+      const p = this.publish;
+      if (!p.skus || !p.skus.length) { this.$message.warning('没有可发布的商品'); return; }
+      if (!(p.discount > 0 && p.discount <= 500)) { this.$message.warning('折扣应为 1~500 之间的百分比'); return; }
+      p.saving = true;
+      try {
+        const d = await this.api('/api/market/publish', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ skus: p.skus, discount: p.discount }),
+        });
+        if (d.error) { this.$message.error(d.error); return; }
+        this.$message.success(`已发布 ${d.published} 个商品到交易市场${d.skipped ? `（${d.skipped} 个不在商品列表中已跳过）` : ''}`);
+        p.visible = false;
+        if (this.page === 'market') this.loadMarket();
+      } catch (e) { this.$message.error('发布失败：' + e.message); }
+      finally { p.saving = false; }
+    },
+    // ══════ 交易市场 ══════
+    async loadMarket() {
+      this.market.loading = true;
+      try {
+        const d = await this.api('/api/market');
+        this.market.rows = d.rows || [];
+      } catch (e) { this.$message.error('交易市场加载失败: ' + e.message); }
+      finally { this.market.loading = false; }
+    },
+    async openQuotes(row) {
+      this.quotes = { visible: true, loading: true, sku: row.sku, goodsName: row.goods_name || '', rows: [] };
+      try {
+        const d = await this.api('/api/market/quotes?sku=' + encodeURIComponent(row.sku));
+        this.quotes.rows = d.rows || [];
+      } catch (e) { this.$message.error('报价加载失败: ' + e.message); }
+      finally { this.quotes.loading = false; }
     },
 
     // ══════ 本机助手绑定 / 魔唤醒 ══════

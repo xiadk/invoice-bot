@@ -55,6 +55,7 @@ const db = require('./db');
 const auth = require('./lib/auth');
 const tenancy = require('./lib/tenancy');
 const { runImport, importOrderUpload, importInvoiceUpload } = require('./import-to-db');
+const products = require('./lib/products');
 const { loadConfig } = require('./lib/config');
 const { AgentHub } = require('./lib/agent-hub');
 const { buildMessages } = require('./lib/sender');
@@ -2117,26 +2118,31 @@ const server = http.createServer(async (req, res) => {
     if (method === 'POST' && p === '/api/import/upload') {
       writeGuard();
       const up = new URL(req.url, 'http://localhost');
-      const kind = up.searchParams.get('kind') === 'invoices' ? 'invoices' : 'orders';
+      const kp = up.searchParams.get('kind');
+      const kind = kp === 'invoices' ? 'invoices' : kp === 'products' ? 'products' : 'orders';
       const rawName = String(up.searchParams.get('name') || '').trim();
       const safeName = path.basename(rawName).replace(/[\\/:*?"<>|]+/g, '_').slice(-120)
-        || (kind === 'invoices' ? 'invoices.xlsx' : 'orders.xlsx');
+        || (kind === 'invoices' ? 'invoices.xlsx' : kind === 'products' ? 'products.xlsx' : 'orders.xlsx');
       if (!/\.(xlsx|xls)$/i.test(safeName)) throw new Error('只支持 .xlsx / .xls 文件（请上传从 1688 / 税务局导出的 Excel）');
       const buf = await readRawBody(req, 80e6);
       if (!buf) throw new Error('上传失败：内容过大（上限 80MB）或读取中断');
       if (!buf.length) throw new Error('上传失败：文件内容为空');
 
-      const dir = kind === 'invoices' ? tenancy.invoiceDirFor(tenantId) : tenancy.orderDirFor(tenantId);
+      const dir = kind === 'invoices' ? tenancy.invoiceDirFor(tenantId)
+        : kind === 'orders' ? tenancy.orderDirFor(tenantId)
+        : path.join(tenancy.dataDirFor(tenantId), '商品列表');
       fs.mkdirSync(dir, { recursive: true });
       const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14);
       const dest = path.join(dir, stamp + '-' + safeName);
       fs.writeFileSync(dest, buf);
 
       const t = taskFor(tenantId);
-      taskLog(t, `▶ 上传导入（${kind === 'invoices' ? '税务局发票' : '1688订单'}）：${safeName} · ${(buf.length / 1024).toFixed(0)}KB`);
+      taskLog(t, `▶ 上传导入（${kind === 'invoices' ? '税务局发票' : kind === 'orders' ? '1688订单' : '前置仓补货参考'}）：${safeName} · ${(buf.length / 1024).toFixed(0)}KB`);
       const r = kind === 'invoices'
         ? await importInvoiceUpload(tenantId, dest, safeName)
-        : await importOrderUpload(tenantId, dest, safeName);
+        : kind === 'orders'
+        ? await importOrderUpload(tenantId, dest, safeName)
+        : await products.importReplenishFile(tenantId, dest, safeName);
       if (!r.ok) {
         taskLog(t, `✗ 导入失败：${r.error}`);
         return sendJson(res, 400, { ok: false, kind, error: r.error, file: safeName });
@@ -2185,6 +2191,67 @@ const server = http.createServer(async (req, res) => {
     if (method === 'POST' && p === '/api/mapping') { writeGuard(); return sendJson(res, 200, await saveMapping(tenantId, await readBody(req))); }
     if (method === 'POST' && p === '/api/mapping/delete') { writeGuard(); return sendJson(res, 200, await deleteMapping(tenantId, await readBody(req))); }
     if (method === 'POST' && p === '/api/mapping/ignore') { writeGuard(); return sendJson(res, 200, await ignoreMapping(tenantId, await readBody(req))); }
+
+    // ── 商品列表（前置仓补货参考导入） ── 所有登录用户可用（菜单不做逐用户授权）
+    if (method === 'GET' && p === '/api/products') {
+      const page = Math.max(1, Number(url.searchParams.get('page')) || 1);
+      const size = Math.min(200, Math.max(1, Number(url.searchParams.get('size')) || 20));
+      const q = (url.searchParams.get('q') || '').trim();
+      const status = (url.searchParams.get('status') || '').trim();
+      const sort = url.searchParams.get('sort') || ''; // ''=最近更新 | price_asc | price_desc
+      const w = (q ? 'AND (sku LIKE ? OR goods_name LIKE ?) ' : '') + (status ? 'AND purchase_status = ? ' : '');
+      const args = [];
+      if (q) args.push(`%${q}%`, `%${q}%`);
+      if (status) args.push(status);
+      const order = sort === 'price_asc' ? 'purchase_price ASC, id ASC'
+        : sort === 'price_desc' ? 'purchase_price DESC, id DESC'
+        : 'updated_at DESC, id DESC';
+      const totalR = await db.query(`SELECT COUNT(*) AS n FROM product_item WHERE user_id = ? ${w}`, [tenantId, ...args]);
+      const rows = await db.query(`
+        SELECT id, sku, goods_name, purchase_price, available_stock, transit_stock, purchase_status, sales_30d,
+               source_file, updated_at
+        FROM product_item WHERE user_id = ? ${w}
+        ORDER BY ${order} LIMIT ${size} OFFSET ${(page - 1) * size}
+      `, [tenantId, ...args]);
+      // 当前筛选口径下的总货值（(可用+在途)×采购价 合计），与趋势图口径一致
+      const valueR = await db.query(`
+        SELECT ROUND(SUM((available_stock + transit_stock) * purchase_price), 2) AS v,
+               SUM(purchase_price IS NOT NULL AND purchase_price > 0) AS priced
+        FROM product_item WHERE user_id = ? ${w}`, [tenantId, ...args]);
+      const latest = await db.query(
+        'SELECT id, source_file, item_count, total_value, imported_at FROM product_import_batch WHERE user_id = ? ORDER BY imported_at DESC, id DESC LIMIT 1', [tenantId]
+      );
+      return sendJson(res, 200, {
+        total: totalR[0] ? totalR[0].n : 0, page, size, rows,
+        filteredValue: valueR[0] ? (valueR[0].v || 0) : 0,
+        latestBatch: latest[0] || null,
+      });
+    }
+
+    // 总货值趋势：按导入批次（每次导入记一个点）
+    if (method === 'GET' && p === '/api/products/trend') {
+      const rows = await db.query(`
+        SELECT id, source_file, item_count, total_value, imported_at
+        FROM product_import_batch WHERE user_id = ?
+        ORDER BY imported_at ASC, id ASC LIMIT 90
+      `, [tenantId]);
+      return sendJson(res, 200, { days: rows });
+    }
+
+    // ── 交易市场（跨用户共享） ──
+    if (method === 'GET' && p === '/api/market') {
+      return sendJson(res, 200, await products.marketOverview());
+    }
+    if (method === 'GET' && p === '/api/market/quotes') {
+      const sku = String(url.searchParams.get('sku') || '').trim();
+      if (!sku) return sendJson(res, 400, { error: '缺少 sku' });
+      return sendJson(res, 200, await products.marketQuotes(sku));
+    }
+    if (method === 'POST' && p === '/api/market/publish') {
+      writeGuard();
+      const body = await readBody(req);
+      return sendJson(res, 200, await products.publishToMarket(user.id, body.skus, body.discount));
+    }
 
     // 订单级开票状态
     if (method === 'POST' && p === '/api/order-state') { writeGuard(); return sendJson(res, 200, await setOrderState(tenantId, await readBody(req))); }
