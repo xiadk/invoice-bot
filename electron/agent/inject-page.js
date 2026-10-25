@@ -146,6 +146,10 @@
   var normText = function (s) { return String(s || '').replace(/\s+/g, ''); };
 
   /** 聊天记录区域的可见文本（不含输入框，因为输入框不在 message-list 内） */
+  // ⚠ 2026-10-26：长会话下每次都要把整个 message-list 拼串再 indexOf，是隐藏的卡顿源
+  //   （发送确认每 250ms 轮询一次，会话越长越慢）。新消息永远追加在列表尾部，
+  //   因此只保留尾部片段参与比对即可（既看得到新消息，也控住了计算量）。
+  var HISTORY_TAIL_LEN = 30000;
   function chatAreaText() {
     var sel = '.message-list, [class*="message-list"], .ww_message';
     var boxes = document.querySelectorAll(sel);
@@ -159,7 +163,8 @@
       if (isNested) continue;
       out += ' ' + (boxes[i].innerText || '');
     }
-    return normText(out);
+    out = normText(out);
+    return out.length > HISTORY_TAIL_LEN ? out.slice(-HISTORY_TAIL_LEN) : out;
   }
 
   function countOccur(hay, needle) {
@@ -322,7 +327,7 @@
   }
 
   window.__xsh = {
-    ping: ping, waitReady: waitReady, sendBatch: sendBatch,
+    ping: ping, waitReady: waitReady, sendBatch: sendBatch, sendOne: sendOne,
     isChatFrame: isChatFrame, selfTest: selfTest,
     // 只读诊断入口（不发送）：排查「发送未确认」用
     _debug: function (probeText) {

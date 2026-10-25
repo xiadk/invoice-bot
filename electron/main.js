@@ -155,7 +155,7 @@ function showStatusWin() {
   });
   statusWin.loadFile(path.join(__dirname, 'ui', 'agent.html'));
   statusWin.on('closed', () => { statusWin = null; });
-  statusWin.webContents.on('did-finish-load', () => pushState());
+  statusWin.webContents.on('did-finish-load', () => { pushState(); pushUpdate(); });
 }
 
 function pushState() {
@@ -190,6 +190,7 @@ function refreshTray() {
     { label: '打开 牵牛花 登录窗口', click: () => qnhLogin.openLogin() },
   { label: '打开 拼多多 登录窗口', click: () => pddLogin.openLogin() },
     { type: 'separator' },
+    ...(updater.info ? [{ label: `⚠ 安装助手更新 v${updater.info.latest || ''}`, click: () => { showStatusWin(); doSelfUpdate(); } }] : []),
     { label: '开机自启', type: 'checkbox', checked: !!store.get('autoStart'), click: (mi) => setAutoStart(mi.checked) },
     { label: '退出', click: () => { quitting = true; app.quit(); } },
   ]));
@@ -327,6 +328,17 @@ function startAgent() {
   client.on('disconnected', (info) => { log(`连接断开 (${info && info.code})，稍后重连`); refreshTray(); pushState(); });
   client.on('state', () => { refreshTray(); pushState(); });
   client.on('progress', () => pushState());
+  // 服务端体检结论：本版本过旧 → 记下来给面板弹更新横幅
+  client.on('require_update', (m) => {
+    updater.info = m || null;
+    updater.phase = 'idle';
+    updater.percent = 0;
+    updater.message = '';
+    updater.error = '';
+    log(`⚠ 助手版本过旧（当前 v${VERSION}，需要 v${(m && m.latest) || '?'}）：请更新`);
+    refreshTray();
+    pushUpdate();
+  });
   client.start();
 }
 
@@ -427,6 +439,128 @@ app.whenReady().then(() => {
   });
 });
 
+// ═══════════════════════════════════════════════════════════════════════════
+// 版本更新（0.2.27 起）
+//
+// 服务端在握手时会顺手做一次体检：版本低于「最低要求」就推一条 require_update，
+// 这里负责后面这一段：面板弹红色横幅 → 用户点「立即更新」→ 下载到临时目录 →
+// 拉起 NSIS 安装程序 → 退出本进程。
+//
+// 刻意**不做静默自替换**：换一个正在运行的 exe 容易被杀软拦下来，便携版也覆盖不干净。
+// 让用户走一遍安装向导反而最省事：它会沿用原安装目录、装完还会自动把新版拉起来。
+// ═══════════════════════════════════════════════════════════════════════════
+const updater = { info: null, phase: 'idle', percent: 0, message: '', error: '', file: '' };
+
+function pushUpdate() {
+  if (!statusWin || statusWin.isDestroyed()) return;
+  try {
+    statusWin.webContents.send('agent:update', {
+      ...updater,
+      currentVersion: VERSION,
+      latestVersion: (updater.info && updater.info.latest) || '',
+      blocking: !!(updater.info && updater.info.blocking),
+    });
+  } catch (e) { /* 窗口已销毁 */ }
+}
+
+/** 服务端给的可能是相对路径 /api/agent/download-exe，也可能是外部直链 */
+function updateUrlAbsolute(u) {
+  const s = String(u || '').trim();
+  if (/^https?:\/\//i.test(s)) return s;
+  const base = String((store && store.get('serverUrl')) || '').replace(/\/+$/, '');
+  if (!base) return '';
+  return base + (s.startsWith('/') ? s : '/' + s);
+}
+
+function updateFileName(msg) {
+  const named = String((msg && msg.fileName) || '').trim();
+  if (named) return named;
+  return `催收小助手-Setup-${(msg && msg.latest) || 'latest'}.exe`;
+}
+
+/** 下载安装包（跟随 3xx；流式写盘，实时回调百分比） */
+function downloadInstaller(url, dest, onProgress) {
+  return new Promise((resolve, reject) => {
+    const mod = /^https:/i.test(url) ? require('https') : require('http');
+    const req = mod.get(url, { timeout: 20000 }, (res) => {
+      const code = res.statusCode || 0;
+      if (code >= 300 && code < 400 && res.headers.location) {
+        res.resume();
+        let next = '';
+        try { next = new URL(res.headers.location, url).href; } catch (e) { next = ''; }
+        if (!next) { reject(new Error('下载失败：重定向地址无效')); return; }
+        downloadInstaller(next, dest, onProgress).then(resolve, reject);
+        return;
+      }
+      if (code !== 200) { res.resume(); reject(new Error('下载失败：HTTP ' + code)); return; }
+      const total = Number(res.headers['content-length']) || 0;
+      let got = 0;
+      const ws = fs.createWriteStream(dest);
+      res.on('data', (c) => {
+        got += c.length;
+        if (total) {
+          onProgress(Math.min(99, Math.floor((got / total) * 100)),
+            `已下载 ${(got / 1048576).toFixed(1)} / ${(total / 1048576).toFixed(1)} MB`);
+        }
+      });
+      res.on('error', (e) => { try { ws.close(); } catch (er) { /* 忽略 */ } reject(e); });
+      ws.on('error', reject);
+      ws.on('finish', () => { onProgress(100, '下载完成，正在打开安装程序…'); resolve(dest); });
+      res.pipe(ws);
+    });
+    req.on('timeout', () => { try { req.destroy(new Error('下载超时（20 秒无响应）')); } catch (e) { /* 忽略 */ } });
+    req.on('error', reject);
+  });
+}
+
+/** 面板「立即更新」按钮 */
+async function doSelfUpdate() {
+  if (!updater.info) return { ok: false, error: '当前没有可用的更新信息' };
+  if (updater.phase === 'downloading') return { ok: false, error: '正在下载中，请稍候' };
+  const url = updateUrlAbsolute(updater.info.updateUrl);
+  if (!url) {
+    updater.phase = 'error';
+    updater.error = '没有可用的下载地址（服务器未提供安装包，也没配外部直链），请联系管理员获取新版';
+    pushUpdate();
+    return { ok: false, error: updater.error };
+  }
+  try {
+    updater.phase = 'downloading';
+    updater.percent = 0;
+    updater.message = '正在连接服务器…';
+    updater.error = '';
+    pushUpdate();
+    const dest = path.join(app.getPath('temp'), updateFileName(updater.info));
+    await downloadInstaller(url, dest, (percent, message) => {
+      updater.percent = percent;
+      updater.message = message;
+      pushUpdate();
+    });
+    updater.file = dest;
+    updater.phase = 'installing';
+    updater.message = '安装程序已打开：按向导一路下一步，装完会自动拉开新版助手';
+    log('✓ 更新包已就绪：' + dest);
+    pushUpdate();
+    const err = await shell.openPath(dest);
+    if (err) {
+      updater.phase = 'error';
+      updater.error = '打开安装程序失败：' + err + '（可手动到 ' + dest + ' 安装）';
+      log('✗ ' + updater.error);
+      pushUpdate();
+      return { ok: false, error: updater.error, file: dest };
+    }
+    // 让安装向导先拉起来，再退出自己 —— 否则 NSIS 会弹「程序正在运行，要关闭吗」
+    setTimeout(() => { quitting = true; try { app.quit(); } catch (e) { /* 忽略 */ } }, 1500);
+    return { ok: true, file: dest };
+  } catch (e) {
+    updater.phase = 'error';
+    updater.error = (e && e.message) ? e.message : String(e);
+    log('✗ 助手更新失败：' + updater.error);
+    pushUpdate();
+    return { ok: false, error: updater.error };
+  }
+}
+
 // ── IPC（状态窗 → 主进程）──
 ipcMain.handle('agent:getState', () => {
   const s = client ? client.state() : { connected: false, ready: false, sending: false, loggedIn: false };
@@ -444,6 +578,14 @@ ipcMain.handle('agent:openLoginWindow', () => { openLogin(); return true; });
 /** 面板「退出」按钮：只退出本机浏览器分区里的登录态，不动服务器上的数据 */
 ipcMain.handle('agent:logout', async (_e, target) => doLocalLogout(target));
 ipcMain.handle('agent:localState', () => localLoginStates());
+/** 更新状态（面板首次加载/刷新时用；后续变化由 agent:update 推送） */
+ipcMain.handle('agent:updateState', () => ({
+  ...updater,
+  currentVersion: VERSION,
+  latestVersion: (updater.info && updater.info.latest) || '',
+  blocking: !!(updater.info && updater.info.blocking),
+}));
+ipcMain.handle('agent:update', () => doSelfUpdate());
 ipcMain.handle('agent:stopTask', () => {
   if (client) { client.stopFlag = true; if (client.currentTaskId != null) client.send({ type: 'client_stop', taskId: client.currentTaskId }); }
   return true;

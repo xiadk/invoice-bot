@@ -16,6 +16,14 @@ contextBridge.exposeInMainWorld('xsh', {
   logout: (target) => ipcRenderer.invoke('agent:logout', target),
   /** 各站点在本机的 Cookie 概况（面板显示「本机还有没有登录态」） */
   localState: () => ipcRenderer.invoke('agent:localState'),
+  /** 版本更新：updateState 拉当前状态（含有没有可更的新版），doUpdate 下载+拉起安装 */
+  updateState: () => ipcRenderer.invoke('agent:updateState'),
+  doUpdate: () => ipcRenderer.invoke('agent:update'),
+  onUpdate: (cb) => {
+    const h = (_e, s) => { try { cb(s); } catch (err) { /* 忽略 */ } };
+    ipcRenderer.on('agent:update', h);
+    return () => ipcRenderer.removeListener('agent:update', h);
+  },
   stopTask: () => ipcRenderer.invoke('agent:stopTask'),
   openDataDir: () => ipcRenderer.invoke('agent:openDataDir'),
   unbind: () => ipcRenderer.invoke('agent:unbind'),

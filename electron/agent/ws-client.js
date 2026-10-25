@@ -187,7 +187,13 @@ class AgentClient extends EventEmitter {
     if (m.type === 'pdd_apply') { this._runPddApply(m).catch((e) => this.log('拼多多申请异常: ' + e.message)); return; }
     if (m.type === 'pdd_send') { this._runPddSend(m).catch((e) => this.log('拼多多催收异常: ' + e.message)); return; }
     if (m.type === 'logout') { this._runLogout(m).catch((e) => this.log('清除登录态异常: ' + e.message)); return; }
-    if (m.type === 'stop') { this.stopFlag = true; this.log('收到停止指令：当前步骤完成后即停'); return; }
+    if (m.type === 'stop') {
+      this.stopFlag = true;
+      this.log('收到停止指令：正在中止当前步骤（不会再发新的消息）');
+      return;
+    }
+    // 服务端体检结论：本版本过旧 → 交 main.js 弹更新横幅（只是提示，拦不拦由服务端按宽限期决定）
+    if (m.type === 'require_update') { this.emit('require_update', m); return; }
     if (m.type === 'task_progress') { this.emit('progress', m); return; }
   }
 
