@@ -10,6 +10,17 @@
  *   · 页面内绝不开放 Node（nodeIntegration:false / contextIsolation:true / sandbox:true）
  *   · backgroundThrottling:false —— 否则隐藏窗口的定时器被节流，发送会卡
  *   · 聊天编辑器位于子 iframe，executeJavaScript 只在主 frame 执行 → 需递归找 frame
+ *
+ * ── 节拍与中断设计（2026-10-26 重构）──
+ *   ① 不再死等 did-finish-load：聊天页是长轮询 SPA，load 事件对「能不能发」没有指示意义，
+ *      导航发起后即返回，就绪与否交给 waitChatFrameEx / waitReady 判定。
+ *   ② 「加载下一家」与「两家之间的间隔」并行：发完这家立刻预加载下一家的会话，
+ *      这段加载时间计入 gap，只有加载得比 gap 还快时才补差额 —— 总时长下降，
+ *      而两家真实发送的间隔 = max(gap, 加载耗时)，不比原来更密。
+ *   ③ 逐条发送取代页面内的 sendBatch：每条结束都回到主进程并检查停止标记，
+ *      配合 raceStop，点停止后 <1s 退出循环（原实现要等这家发完，最坏近 8 分钟）。
+ *   ④ 「卖家间隔」配置项继续保留：它是保底下限，会话切换快起来后（如后续接入 SPA 复用）
+ *      它就是唯一的节流手段。
  */
 const { app, BrowserWindow, session } = require('electron');
 const path = require('path');
@@ -36,6 +47,34 @@ let injectSource = null;
 const st = { total: 0, done: 0, ok: 0, fail: 0, current: '' };
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// ── 停止协作（2026-10-26）──────────────────────────────────────────────
+// 旧实现里 stopFlag 只能在「每家循环的开头」被检查一次，而单家的发送是一次
+// executeJavaScript（整批 3 条在页面里跑，超时上限 240s）+ 编辑器就绪等待（最多 85s），
+// 于是点「停止」要等当前这家跑完才知道 —— 慢的时候要好几分钟。
+// 现在所有阻塞等待都套一层 raceStop：stopFlag 一置位立即抛 StopError，
+// 不再理会还没返回的页面 Promise（道具其实没有「取消 JS 执行」的 API，只能不等它）。
+class StopError extends Error {
+  constructor(msg) {
+    super(msg || '已被停止');
+    this.stopped = true;
+  }
+}
+
+/** 让任意等待可被「停止」打断；返回原结果，被停则抛 StopError */
+function raceStop(promise, isStopped, intervalMs = 200) {
+  const p = Promise.resolve(promise);
+  p.catch(() => {}); // 抢跑后迟到的 rejection 不该变成 unhandled
+  if (!isStopped) return p;
+  if (isStopped()) { p.catch(() => {}); return Promise.reject(new StopError()); }
+  let timer = null;
+  const guard = new Promise((_, reject) => {
+    timer = setInterval(() => {
+      if (isStopped()) { clearInterval(timer); timer = null; reject(new StopError()); }
+    }, intervalMs);
+  });
+  return Promise.race([p, guard]).finally(() => { if (timer) { clearInterval(timer); timer = null; } });
+}
 
 // ── 健壮性辅助 ──
 
@@ -189,30 +228,37 @@ function findChatFrame(wc) {
   return list.length ? list[0] : null;
 }
 
-/** 找到「可用于执行的聊天 frame」。
- *  优先返回已渲染出编辑器/发送按钮的 frame；编辑器可能晚于 frame 出现
- *  （实测核心框先就绪，编辑器约 20~35s 后才渲染），因此此时先返回可执行的核心框，
- *  由注入脚本的 waitReady 继续轮询，避免误报「聊天窗口未就绪」。 */
-async function waitChatFrame(wc, timeoutMs) {
+/**
+ * 同上，但额外带回「这个 frame 是否已经渲染出编辑器」。
+ * 已经出现编辑器时就不必再跑到页面里执行 waitReady 二次等待（省掉一轮 ~1~5s 的往返）。
+ * @returns {Promise<{frame:object, hadEditor:boolean}|null>}
+ */
+async function waitChatFrameEx(wc, timeoutMs) {
   const t0 = Date.now();
   let fallback = null;
   for (;;) {
     for (const f of collectChatFrames(wc)) {
       if (!frameAlive(f)) continue;
       const remain = timeoutMs - (Date.now() - t0);
-      if (remain <= 0) return fallback;
-      const ok = await frameExecutable(f, Math.min(3000, Math.max(1000, remain)));
+      if (remain <= 0) return fallback ? { frame: fallback, hadEditor: false } : null;
+      const ok = await frameExecutable(f, Math.min(1500, Math.max(400, remain)));
       if (!ok) continue;
       if (!fallback) fallback = f;
       try {
         const has = await f.executeJavaScript(
           '!!document.querySelector(\'pre.edit,[contenteditable="true"],textarea\')', false);
-        if (has) return f;
+        if (has) return { frame: f, hadEditor: true };
       } catch (e) { /* 该 frame 不可用，试下一个 */ }
     }
-    if (Date.now() - t0 >= timeoutMs) return fallback;
-    await sleep(500);
+    if (Date.now() - t0 >= timeoutMs) return fallback ? { frame: fallback, hadEditor: false } : null;
+    await sleep(300);
   }
+}
+
+/** 找到「可用于执行的聊天 frame」（兼容旧签名，只返回 frame） */
+async function waitChatFrame(wc, timeoutMs) {
+  const r = await waitChatFrameEx(wc, timeoutMs);
+  return r ? r.frame : null;
 }
 
 /** 在指定 frame 里执行「注入脚本 + 表达式」，并等待 Promise 结果 */
@@ -237,10 +283,13 @@ async function runInFrame(frame, expr, timeoutMs) {
  *  · 每次先重新定位聊天 frame（等加载稳定），避免在 iframe 导航期间执行
  *  · 探测类（waitReady/ping）失败可自动重试；发送类（sendBatch）传 retries=0 避免重复发消息
  */
-async function execInChat(win, expr, timeoutMs, retries = 1) {
+async function execInChat(win, expr, timeoutMs, retries = 1, frameHint = null) {
   let lastErr = null;
   for (let i = 0; i <= retries; i++) {
-    const frame = await waitChatFrame(win.webContents, 45000);
+    // 同一个卖家的几条消息之间 frame 不会变：直接复用上一次定位到的 frame，省掉一整轮探测
+    const frame = (frameHint && frameAlive(frameHint))
+      ? frameHint
+      : await waitChatFrame(win.webContents, 45000);
     if (!frame) {
       const cur = win.webContents.getURL();
       lastErr = new Error(/login\.1688\.com|signin/i.test(cur)
@@ -263,7 +312,16 @@ async function execInChat(win, expr, timeoutMs, retries = 1) {
   throw lastErr;
 }
 
-/** 导航并在超时内等待 did-finish-load */
+/** 发起导航。
+ *  ⚠ 不等 did-finish-load：1688 聊天页是长轮询 SPA，load 事件对「能不能发」没有指示意义，
+ *    死等它纯属浪费（原来最坏要等到 60s）。就绪与否统一由 waitChatFrameEx / waitReady 判定，
+ *    被踢到登录页的情况在定位失败时会读 URL 识别出来。 */
+function navigate(win, url) {
+  try { win.loadURL(url).catch(() => {}); } catch (e) { /* 忽略 */ }
+  return true;
+}
+
+/** 导航并在超时内等待 did-finish-load（保留给只读自测用；发送流程改走 navigate + prepareSeller） */
 function loadUrl(win, url, timeoutMs) {
   return new Promise((resolve) => {
     let done = false;
@@ -286,9 +344,78 @@ async function probeLoggedIn(win) {
 }
 
 /**
+ * 让某家的会话就绪（导航 + 等编辑器），返回可直接注入执行的 frame。
+ * 每一步都套了 raceStop：页面卡住时点停止也能立刻退出。
+ */
+async function prepareSeller(win, seller, isStopped, opts = {}) {
+  navigate(win, CHAT_URL(seller.sellerLogin));
+  const found = await raceStop(
+    waitChatFrameEx(win.webContents, opts.frameTimeoutMs || 45000), isStopped);
+  if (!found || !found.frame) {
+    const cur = win.webContents.getURL();
+    throw new Error(/login\.1688\.com|signin/i.test(cur)
+      ? '1688 未登录（已跳转登录页）：请点面板「打开 1688 登录窗口」登录后重试'
+      : '聊天窗口未就绪（可能未登录 1688，或页面结构变化）');
+  }
+  // waitChatFrameEx 是靠 querySelector 探到编辑器的；已探到就不必再进页面跑 waitReady 二次等待
+  if (found.hadEditor) return { frame: found.frame, readyMs: 0 };
+  const ready = await raceStop(
+    runInFrame(found.frame, '__xsh.waitReady(30000)', 40000), isStopped);
+  const curUrl = win.webContents.getURL();
+  if (!ready || !ready.hasEditor) {
+    const isLogin = /login\.1688\.com|signin/i.test(curUrl);
+    if (isLogin) { try { openLoginWindow(); } catch (e) { /* 忽略 */ } }
+    throw new Error(isLogin
+      ? '1688 未登录（已跳转登录页）：请点面板「打开 1688 登录窗口」登录后重试'
+      : '聊天编辑器未出现（当前页：' + curUrl.slice(0, 90) + '）。可能原因：①会员登录ID不正确/未维护（touid 无效，会话打不开）；②未登录 1688；③1688 页面改版导致选择器失效');
+  }
+  return { frame: found.frame, readyMs: 0 };
+}
+
+/** 确认 frame 里编辑器还在（预加载后到真正发送之间隔了十几秒，frame 可能被重建） */
+async function confirmReady(frame, isStopped) {
+  try {
+    const p = await raceStop(runInFrame(frame, '__xsh.ping()', 8000), isStopped);
+    return !!(p && p.hasEditor);
+  } catch (e) { return false; }
+}
+
+/**
+ * 逐条发送一家的全部消息。
+ * ⚠ 为什么不用页面里的 sendBatch：那是一次 executeJavaScript 里把 3 条全发完（上限 240s），
+ *   主进程在此期间完全无法打断 —— 点停止必须等这家发完。
+ *   拆成逐条后，每条都回到主进程一次并检查停止标记，最坏的中断延迟从「一家 4 分钟」降到「一条 ≤10s」。
+ * @param {{frame:object}} holder 该家的 frame 引用（多条之间复用，失效会自动重定位）
+ */
+async function sendMessages(win, holder, messages, isStopped) {
+  const raw = Array.isArray(messages) ? messages : [];
+  const list = raw.filter((m) => String(m == null ? '' : m).trim());
+  if (!list.length) return { ok: false, error: '消息内容为空（服务端消息模板未配置），未发送任何消息' };
+  for (let i = 0; i < list.length; i++) {
+    if (isStopped()) throw new StopError();
+    const expr = 'window.__xsh.sendOne(' + JSON.stringify(list[i]) + ')';
+    // retries=0：发送类绝不自动重试整轮，避免把同一条重复发给卖家
+    const r = await raceStop(execInChat(win, expr, 45000, 0, holder.frame), isStopped);
+    if (!r) return { ok: false, error: `第 ${i + 1}/${list.length} 条：本机页面未响应` };
+    if (!r.ok) return { ok: false, error: `第 ${i + 1}/${list.length} 条发送失败：${r.error || '未知原因'}` };
+    // 拟人停顿只保留在消息之间（最后一条发完即切换到下一家，不再空等）
+    if (i < list.length - 1) await raceStop(sleep(1200 + Math.random() * 1300), isStopped);
+  }
+  const dropped = raw.length - list.length;
+  return dropped > 0 ? { ok: true, warning: `已跳过 ${dropped} 条空消息` } : { ok: true };
+}
+
+/**
  * 生成批次处理器（交给 AgentClient.setBatchHandler）
- *   task = { taskId, sellers:[{loginId, sellerLogin, company, messages[]}], gapMs }
+ *   task = { taskId, sellers:[{loginId, sellerLogin, company, messages[]}], gapMs, prefetch }
  *   api  = { report(loginId, ok, error), log(text), isStopped(), sleep(ms), gapMs }
+ *
+ * ── 节拍设计（2026-10-26）──
+ * 两家之间的等待不再是「先空等 gap、再加载下一家」的串行。现在发完这家就立刻
+ * 预加载下一家的会话，这段加载时间直接计入 gap；加载比 gap 还慢时不额外等，
+ * 只剩差额才补。于是：
+ *   · 用户感知的总时长下降（每家少了一整段纯等待）
+ *   · 两家「真实发送动作」的间隔 = max(gap, 加载耗时)，不会小于 gap —— 不加风控风险
  */
 function createBatchHandler({ log = () => {}, onLoginState = () => {} } = {}) {
   return async function handleBatch(task, api) {
@@ -297,57 +424,91 @@ function createBatchHandler({ log = () => {}, onLoginState = () => {} } = {}) {
     const sellers = Array.isArray(task.sellers) ? task.sellers : [];
     st.total = sellers.length; st.done = 0; st.ok = 0; st.fail = 0; st.current = '';
 
-    for (let i = 0; i < sellers.length; i++) {
-      const s = sellers[i];
-      if (api.isStopped()) { api.report(s.loginId, false, '已被停止（未发送）'); s._done = true; continue; }
+    const isStopped = () => (typeof api.isStopped === 'function' ? !!api.isStopped() : false);
+    const gapMs = task.gapMs || { min: 20000, max: 35000 };
+    const prefetch = task.prefetch !== false; // 默认开：服务端可下发 false 回到「严格串行等待」
+    let prepared = null;      // 已预加载好的下一家：{ index, frame }
+    let lastSendEndAt = 0;    // 上一家最后一条消息发出的时刻（算真实间隔用）
 
-      st.current = s.company || s.sellerLogin || s.loginId;
-      api.log(`(${i + 1}/${sellers.length}) 正在发送：${st.current}`);
-      let ok = false, error = '';
-      try {
-        const loaded = await loadUrl(win, CHAT_URL(s.sellerLogin), 60000);
-        if (!loaded && !findChatFrame(win.webContents)) {
-          // 页面没加载出来（多半是被踢到登录页）
-          const cur = win.webContents.getURL();
-          throw new Error(/login\.1688\.com|signin/i.test(cur)
-            ? '1688 未登录（已跳转登录页）：请点托盘/面板的「打开 1688 登录窗口」登录后重试'
-            : '聊天页加载失败');
-        }
-        // 等编辑器出现（未登录时这里会失败，从而给出准确原因）；若页面在导航中销毁会自动重试
-        const ready = await execInChat(win, 'window.__xsh.waitReady(30000)', 40000, 1);
-        const curUrl = win.webContents.getURL();
-        if (!ready || !ready.hasEditor) {
-          const isLogin = /login\.1688\.com|signin/i.test(curUrl);
-          if (isLogin) { try { openLoginWindow(); } catch (e) { /* 忽略 */ } }
-          throw new Error(isLogin
-            ? '1688 未登录（已跳转登录页）：请点面板「打开 1688 登录窗口」登录后重试'
-            : '聊天编辑器未出现（当前页：' + curUrl.slice(0, 90) + '）。可能原因：①会员登录ID不正确/未维护（touid 无效，会话打不开）；②未登录 1688；③1688 页面改版导致选择器失效');
-        }
-        if (onLoginState) onLoginState(true, win.webContents.getURL());
+    try {
+      for (let i = 0; i < sellers.length; i++) {
+        const s = sellers[i];
+        if (isStopped()) { api.report(s.loginId, false, '已被停止（未发送）'); s._done = true; st.done++; st.fail++; continue; }
 
-        // 发送（retries=0：不自动重试，避免重复发送消息；执行前已确保 frame 存活）
-        const r = await execInChat(win, 'window.__xsh.sendBatch(' + JSON.stringify(s.messages) + ')', 240000, 0);
-        if (!r) error = '本机页面未响应';
-        else { ok = !!r.ok; error = r.error || ''; }
-      } catch (e) {
-        error = e.message || String(e);
+        st.current = s.company || s.sellerLogin || s.loginId;
+        api.log(`(${i + 1}/${sellers.length}) 正在发送：${st.current}`);
+        let ok = false;
+        let error = '';
+        let frame = null;
+        try {
+          // ① 会话就绪：上一轮预加载好了就直接复用，否则现场加载
+          frame = (prepared && prepared.index === i) ? prepared.frame : null;
+          if (frame && !(await confirmReady(frame, isStopped))) frame = null;
+          if (!frame) {
+            const p = await prepareSeller(win, s, isStopped);
+            frame = p.frame;
+          }
+          prepared = null;
+
+          // ② 保底停顿：两家真实发送之间的最短间隔。加载下一家的时间已经算在里面，
+          //    只有加载得比 gap 还快时才补差额（gap 由系统管理配置，是防风控的下限）
+          if (i > 0 && lastSendEndAt) {
+            const target = Math.round(gapMs.min + Math.random() * Math.max(0, gapMs.max - gapMs.min));
+            const elapsed = Date.now() - lastSendEndAt;
+            const rest = target - elapsed;
+            if (rest > 0) {
+              api.log(`两家发送间隔保底 ${Math.round(target / 1000)}s：切换会话用了 ${Math.round(elapsed / 1000)}s，再等 ${Math.round(rest / 1000)}s`);
+              await raceStop(api.sleep(rest), isStopped);
+            } else {
+              api.log(`两家发送间隔 ${Math.round(elapsed / 1000)}s（已超过保底 ${Math.round(target / 1000)}s），无需额外等待`);
+            }
+          }
+          if (isStopped()) throw new StopError();
+          if (onLoginState) onLoginState(true, win.webContents.getURL());
+
+          // ③ 逐条发送（每条之间回到主进程检查停止标记）
+          const holder = { frame };
+          const r = await sendMessages(win, holder, s.messages, isStopped);
+          ok = !!r.ok;
+          error = r.error || '';
+          if (r.warning) api.log('⚠ ' + r.warning);
+          if (ok) lastSendEndAt = Date.now();
+        } catch (e) {
+          if (e && e.stopped) {
+            error = '已被停止（该卖家可能只发出了部分消息）';
+            api.log('⏸ 已停止：当前步骤未完成，不再继续发送');
+          } else {
+            error = e.message || String(e);
+          }
+          try { win.webContents.stop(); } catch (e2) { /* 忽略 */ } // 停掉还在拉的页面请求
+        }
+
+        st.current = '';
+        st.done++;
+        if (ok) st.ok++; else st.fail++;
+        api.report(s.loginId, ok, error);
+        s._done = true; // 标记已回报：批次级异常时 ws-client 的兜底循环据此避免重复回报
+        if (!ok) log(`✗ ${s.company || s.sellerLogin} 失败：${error}`);
+
+        if (isStopped()) continue; // 剩余卖家在下一轮开头统一回报「已被停止（未发送）」
+
+        // ④ 预加载下一家：这段时间会计入 gap，等价于把「加载」和「等待」重叠起来做
+        if (prefetch && i < sellers.length - 1) {
+          try {
+            const p = await prepareSeller(win, sellers[i + 1], isStopped);
+            prepared = { index: i + 1, frame: p.frame };
+          } catch (e) {
+            prepared = null; // 预加载失败不算数：轮到它时会现场再加载一次
+          }
+        }
       }
-
+    } finally {
+      if (isStopped()) {
+        // 停止时不再理会还在页面里跑的脚本：窗口留着不卸，下次点发送可直接复用登录态
+        try { win.webContents.stop(); } catch (e) { /* 忽略 */ }
+      }
       st.current = '';
-      st.done++;
-      if (ok) st.ok++; else st.fail++;
-      api.report(s.loginId, ok, error);
-      s._done = true; // 标记已回报：批次级异常时 ws-client 的兜底循环据此避免重复回报
-      if (!ok) log(`✗ ${s.company || s.sellerLogin} 失败：${error}`);
-
-      if (i < sellers.length - 1 && !api.isStopped()) {
-        const g = api.gapMs || { min: 20000, max: 35000 };
-        const ms = Math.round(g.min + Math.random() * Math.max(0, g.max - g.min));
-        api.log(`等待 ${Math.round(ms / 1000)}s 后继续（拟人间隔，防限流）`);
-        await api.sleep(ms);
-      }
     }
-    st.current = '';
   };
 }
 
@@ -357,5 +518,8 @@ module.exports = {
   getSendWindow, openLoginWindow, closeSendWindow, createBatchHandler, state,
   probeLoggedIn, findChatFrame, REAL_UA, PARTITION, CHAT_URL, LOGIN_URL,
   // 仅供本机自测脚本（tmp-selftest-*.js）复用的内部件，不影响正常流程
-  _test: { collectChatFrames, waitChatFrame, execInChat, loadUrl, frameExecutable },
+  _test: {
+    collectChatFrames, waitChatFrame, waitChatFrameEx, execInChat, loadUrl, frameExecutable,
+    StopError, raceStop, navigate, prepareSeller, sendMessages, confirmReady, sleep,
+  },
 };

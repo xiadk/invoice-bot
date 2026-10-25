@@ -505,6 +505,34 @@ async function loadSellerDetail(userId, loginId) {
   return { orders, invoices, company: seller.company, sendLogs, invoiceCount, invoiceRowCount };
 }
 
+/**
+ * 批量取「这些卖家各自的待催收订单」
+ * 用于组装催收任务：原来 doClientSend 对每个卖家串行调 loadSellerDetail（每家 4 条 SQL），
+ * 选 100 家就是 400 次往返 —— 纯属浪费。这里一次查完并按 loginId 分组。
+ * @returns {Promise<Map<string, Array<{orderId:string, amount:string}>>>}
+ */
+async function loadPendingOrdersBatch(userId, loginIds) {
+  const out = new Map();
+  const ids = Array.from(new Set((loginIds || []).filter((x) => x !== '' && x != null).map(String)));
+  if (!ids.length) return out;
+  const ph = ids.map(() => '?').join(',');
+  const rows = await db.query(
+    `SELECT COALESCE(NULLIF(seller_login,''), seller_company) AS loginId,
+            order_no, pay_amount, invoice_state, pay_time
+     FROM invoice_order
+     WHERE user_id = ? AND COALESCE(NULLIF(seller_login,''), seller_company) IN (${ph})
+     ORDER BY pay_time DESC`,
+    [userId, ...ids]
+  );
+  for (const r of rows) {
+    if (String(r.invoice_state) === 'issued') continue;
+    const k = String(r.loginId);
+    if (!out.has(k)) out.set(k, []);
+    out.get(k).push({ orderId: r.order_no, amount: Number(r.pay_amount).toFixed(2) });
+  }
+  return out;
+}
+
 /** 书签工具：按卖家登录名组装该卖家的催收消息（复用看板同款逻辑，零安装方案使用） */
 async function bmComputeTask(userId, rawLogin) {
   const data = await loadSellers(userId);
@@ -670,6 +698,9 @@ const OP_ACTIONS = {
   'view.day.orders': (d) => `点击了 ${d.date} 的支付订单总金额进行查看`,
   'view.day.invoices': (d) => `点击了 ${d.date} 的每日已开票金额进行查看`,
   'agent.download': () => '下载了本机助手',
+  'agent.update.prompt': (d) => d.blocking
+    ? `打开了版本更新提示（v${d.current || '?'} 已停用，需 v${d.latest || '?'}）`
+    : `打开了版本更新提示（v${d.current || '?'}，宽限期还剩 ${d.days || 0} 天）`,
   'agent.bind': (d) => `绑定了本机助手${d.deviceName ? '（' + d.deviceName + '）' : ''}`,
   'agent.build': () => '重新打包了本机助手安装包',
   'qnh.sync': (d) => `在退单列表点击了「立即刷新数据」${d.ok ? '（成功）' : '（失败）'}`,
@@ -854,6 +885,105 @@ function verGte(a, b) {
     if ((pa[i] || 0) < (pb[i] || 0)) return false;
   }
   return true;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 助手版本策略（2026-10-26 起）
+//
+// 背景：上面那些 *_MIN_AGENT 只卡「协议能力」——旧助手不认识新指令才会被拦。
+// 像 0.2.26 这种「协议没变、只重构发送性能」的版本，老助手照样连得上、照样发，
+// 只是又慢又停不下来。所以补一条不依赖协议变化的通用版本线。
+//
+// · 版本权威 = 服务端 package.json 的 version（助手与服务端同仓同版本，既定约定）；
+//   也可用 runtime.agentMinVersion 手动钉死，紧急情况脱离代码单独划线。
+// · 宽限期：服务端升级（= 进程重启）后 agentUpdateGraceDays 天内**只提示不拦**，
+//   避免半夜部署把正在跑批量发送的用户直接打死；到期后才硬卡。
+//
+// ⚠ 硬拦截的前提是「服务端真能给出一个版本号 ≥ 最低要求的下载包」：
+//   容器里 dist/ 来自构建时 COPY，而 dist 在 .gitignore 里、git pull 拿不到，
+//   线上很可能是空的/旧的。真发生了「必须更新却下载不到」= 把所有人的活全锁死。
+//   所以拿不到合格包时一律降级为提示，绝不硬拦。
+// ═══════════════════════════════════════════════════════════════════════════
+const SERVER_VERSION = (() => {
+  try { return require('./package.json').version || '0.0.0'; } catch (e) { return '0.0.0'; }
+})();
+const BOOT_AT = Date.now();   // 进程启动 = 服务端本次升级的时刻，宽限期从这里起算
+
+/** 从安装包文件名解析版本号：催收小助手-Setup-0.2.26.exe → 0.2.26 */
+function parseVerFromName(name) {
+  const m = String(name || '').match(/(\d+)\.(\d+)\.(\d+)/);
+  return m ? `${m[1]}.${m[2]}.${m[3]}` : '';
+}
+
+/** 当前版本策略（每次调用都重读配置，改完立刻生效，无需重启） */
+function agentUpdatePolicy() {
+  const rt = (loadConfig().runtime) || {};
+  const latest = SERVER_VERSION;
+  const minCfg = String(rt.agentMinVersion || '').trim();
+  const min = /^\d+(\.\d+){0,2}$/.test(minCfg) ? minCfg : latest;
+  // 未配置 → 默认给 3 天宽限；显式配 0 → 立即硬卡
+  const graceNum = Number(rt.agentUpdateGraceDays);
+  const graceDays = Number.isFinite(graceNum) && graceNum >= 0 ? Math.min(30, Math.floor(graceNum)) : 3;
+  const graceMs = graceDays * 86400000;
+  const graceUntil = BOOT_AT + graceMs;
+  const ins = findAgentInstaller();
+  const insVer = ins ? parseVerFromName(ins.file) : '';
+  const extUrl = String(rt.agentInstallerUrl || '').trim();
+  // localOk = dist 里有一份版本合格的安装包；extUrl = 管理员配了外部直链（版本无法校验，但假定它会跟着更新）
+  const localOk = !!(ins && insVer && verGte(insVer, min));
+  const source = localOk ? 'dist' : (extUrl ? 'external' : 'none');
+  return {
+    latest, min,
+    graceDays: Math.round(graceMs / 86400000),
+    graceUntil,
+    expired: Date.now() >= graceUntil,
+    packVersion: insVer || (extUrl ? latest : ''),
+    // packOk = 「用户真的能拿到新版」——硬拦截的唯一前提
+    packOk: localOk || !!extUrl,
+    source,
+    updateUrl: extUrl || (ins ? '/api/agent/download-exe' : ''),
+    fileName: ins ? ins.file : '',
+  };
+}
+
+/** 某个用户的助手相对当前策略的状态 */
+function checkAgentVersion(uid) {
+  const pol = agentUpdatePolicy();
+  const st = agentHub.status(uid);
+  const current = String(st.agentVer || '');
+  // current 为空（老助手不上报版本）→ 不判定为过期：能力门禁那几个 *_MIN_AGENT 已经兜住了
+  const outdated = !!current && !!pol.min && !verGte(current, pol.min);
+  return {
+    ...pol,
+    online: !!st.online,
+    current,
+    outdated,
+    updateAvailable: outdated && pol.packOk,
+    blocking: outdated && pol.packOk && pol.expired,   // 该拦了：版本旧 + 能更新 + 过了宽限期
+  };
+}
+
+/**
+ * 统一版本门禁。要在执行任何「依赖助手」的操作前调用。
+ * @returns {boolean} true = 放行；false = 已写回响应并拒绝（调用方直接 return）
+ */
+function agentVersionGate(res, uid, action) {
+  const v = checkAgentVersion(uid);
+  // 拿不到新版就绝不拦人 —— 提示一下就好，别把活卡死
+  if (!v.outdated || !v.packOk || !v.expired) return true;
+  sendJson(res, 200, {
+    ok: false,
+    // needAgent=true：复用前端既有的「助手这边有问题」分流 → promptAgentIssue → 弹「去下载」
+    needAgent: true,
+    agentOutdated: true,
+    fromVersionGate: true,
+    updateUrl: v.updateUrl,
+    agentCurrent: v.current,
+    agentLatest: v.min,
+    message: `这台电脑上的催收小助手是 v${v.current}，版本过旧，${action}需要 v${v.min} 及以上。`
+      + `请先点页面右上角「下载本机助手」更新后再操作。`,
+  });
+  return false;
 }
 
 // ── 「登录拼多多」任务：与牵牛花同一套路（本机助手弹窗登录 → Cookie 回传入库）──
@@ -1524,28 +1654,33 @@ async function doClientSend(userId, loginIds, opts = {}) {
   const rt = config.runtime || {};
   const gapMin = (rt.sendGapMinSec || 15) * 1000;
   const gapMax = (rt.sendGapMaxSec || 30) * 1000;
+  // 「提前加载下一家会话」：把下一家的页面加载塞进两家之间的等待里，总时长下降但
+  // 两家真实发送动作的间隔不会小于 gap。关掉则退回「先等够 gap 再加载下一家」的旧节拍。
+  const prefetch = rt.prefetchNextSeller !== false;
   const buyer = await buyerInfoOf(userId);
   const runConfig = { ...config, buyerInfo: buyer };
   const data = await loadSellers(userId);
 
-  const sellers = [];
+  // 先筛出有效目标，再一次性把他们的待催收订单查出来（原来每家串行 4 条 SQL）
+  const targets = [];
   for (const loginId of loginIds) {
     const s = data.find((x) => x.loginId === loginId);
     if (!s || !s.sellerLogin) continue;
-    const detail = await loadSellerDetail(userId, loginId);
-    const toRemind = detail.orders.filter((o) => o.invoice_state !== 'issued');
+    targets.push({ loginId, sellerLogin: s.sellerLogin, company: s.company, amount: Number(s.pendingAmount) || 0 });
+  }
+  const pendingMap = await loadPendingOrdersBatch(userId, targets.map((t) => t.loginId));
+
+  const sellers = [];
+  for (const t of targets) {
+    const toRemind = pendingMap.get(t.loginId) || [];
     if (!toRemind.length) continue;
-    const msgSeller = {
-      loginId: s.sellerLogin,
-      amount: Number(s.pendingAmount),
-      orders: toRemind.map((o) => ({ orderId: o.order_no, amount: Number(o.pay_amount).toFixed(2) })),
-    };
+    const msgSeller = { loginId: t.sellerLogin, amount: t.amount, orders: toRemind };
     sellers.push({
-      loginId,
-      sellerLogin: s.sellerLogin,
-      company: s.company,
-      amount: Number(s.pendingAmount) || 0,
-      orderNos: msgSeller.orders.map((o) => o.orderId).join('；'),
+      loginId: t.loginId,
+      sellerLogin: t.sellerLogin,
+      company: t.company,
+      amount: t.amount,
+      orderNos: toRemind.map((o) => o.orderId).join('；'),
       messages: buildMessages(msgSeller, runConfig),
     });
   }
@@ -1585,6 +1720,9 @@ async function doClientSend(userId, loginIds, opts = {}) {
     ? `↻ 断线续跑：接续任务 #${resumeOf}，补发剩余 ${sellers.length} 家（新任务 #${taskId}）`
     : `▶ 通过「本机助手」发送催收消息：共 ${sellers.length} 家（任务 #${taskId}）`);
   taskLog(taskState, '· 发送在您本机的助手窗口里执行，服务器只下发任务并记录结果');
+  taskLog(taskState, `· 节奏：两家发送之间至少间隔 ${Math.round(gapMin / 1000)}~${Math.round(gapMax / 1000)}s`
+    + (prefetch ? '（等待期间提前打开下一家的会话，加载时间计入间隔，不额外多等）'
+      : '（严格等满间隔后再加载下一家）'));
   if (!agentHub.status(userId).loggedIn) {
     taskLog(taskState, '⚠ 本机助手尚未登录 1688：若发送失败，请在助手里登录 1688 后重试');
   }
@@ -1614,6 +1752,7 @@ async function doClientSend(userId, loginIds, opts = {}) {
       type: 'send_batch',
       taskId,
       gapMs: { min: gapMin, max: gapMax },
+      prefetch,
       sellers: sellers.map((s) => ({
         loginId: s.loginId, sellerLogin: s.sellerLogin, company: s.company, messages: s.messages,
       })),
@@ -2479,6 +2618,16 @@ const server = http.createServer(async (req, res) => {
           : pddOrders.DEFAULT_FULL_MONTHS;
       }
       merged.messages = { ...(old.messages || {}), ...(config.messages || {}) };
+      // 「提前加载下一家会话」开关：布尔，缺省 true（下次发送任务生效，无需重启）
+      if (config.runtime && config.runtime.prefetchNextSeller !== undefined) {
+        merged.runtime.prefetchNextSeller = String(config.runtime.prefetchNextSeller) !== 'false';
+      }
+      // 卖家保底间隔：夹下限到 5s，防止手滑设成极短值把整批推向风控
+      for (const k of ['sendGapMinSec', 'sendGapMaxSec']) {
+        if (!config.runtime || config.runtime[k] === undefined) continue;
+        const n = Number(config.runtime[k]);
+        merged.runtime[k] = Number.isFinite(n) && n > 0 ? Math.max(5, Math.round(n)) : (k === 'sendGapMinSec' ? 15 : 30);
+      }
       // 拼多多催收模板：单独一组配置，保存时规范化（空值回退默认，避免又出现「模板被存成空串」）
       if (config.pddMessage !== undefined) {
         const norm = pdd.getPddMessageConfig({ pddMessage: config.pddMessage });
@@ -2486,6 +2635,22 @@ const server = http.createServer(async (req, res) => {
       }
       // 全局通道服务器地址：所有用户的本机扩展共用，可由系统管理统一维护
       if (config.server_url !== undefined) merged.server_url = String(config.server_url || '').trim();
+      // ── 助手版本治理 ──
+      // 最低要求版本：留空 = 跟随服务端自身版本（推荐）；填了就以它为准（紧急划线用）
+      if (config.runtime && config.runtime.agentMinVersion !== undefined) {
+        const s = String(config.runtime.agentMinVersion || '').trim();
+        merged.runtime.agentMinVersion = /^\d+(\.\d+){0,2}$/.test(s) ? s : '';
+      }
+      // 宽限天数：0~30，空=默认 3 天（服务端升级后这段时间内只提示不拦）
+      if (config.runtime && config.runtime.agentUpdateGraceDays !== undefined) {
+        const n = Number(config.runtime.agentUpdateGraceDays);
+        merged.runtime.agentUpdateGraceDays = Number.isFinite(n) && n >= 0 ? Math.min(30, Math.round(n)) : 3;
+      }
+      // 安装包外部直链：dist/ 里没包（容器化部署常见）时用它兜底
+      if (config.runtime && config.runtime.agentInstallerUrl !== undefined) {
+        const u = String(config.runtime.agentInstallerUrl || '').trim();
+        merged.runtime.agentInstallerUrl = /^https?:\/\//i.test(u) ? u : '';
+      }
       fs.writeFileSync(filePath, JSON.stringify(merged, null, 2), 'utf-8');
       // 兼容旧调用：允许随配置一起提交本人抬头。看板已不再走这条路
       // （抬头属于用户信息，统一在「系统管理 → 用户管理」里按账号维护）
@@ -2664,7 +2829,7 @@ const server = http.createServer(async (req, res) => {
       const t = taskFor(tenantId);
       if (t.running) {
         t.stopRequested = true;
-        taskLog(t, '⏸ 收到停止请求：当前卖家发完即停（若正在等待间隔，则立即停止）');
+        taskLog(t, '⏸ 收到停止请求：立即中止当前步骤（正在发送的这一条可能已发出，无法撤回），剩余卖家记为未发送');
         if (t.channel === 'client') {
           for (const ctx of CLIENT_TASKS.values()) {
             if (ctx.userId === Number(tenantId) && !ctx.finished) {
@@ -2679,7 +2844,37 @@ const server = http.createServer(async (req, res) => {
 
     // ── 本机助手通道（方案C）：始终作用于「当前登录者本人」的本机助手 ──
     if (method === 'GET' && p === '/api/agent/status') {
-      return sendJson(res, 200, { ...agentHub.status(user.id), userId: user.id });
+      return sendJson(res, 200, { ...agentHub.status(user.id), userId: user.id, version: checkAgentVersion(user.id) });
+    }
+    // 助手版本治理（管理员）：最低要求、可分发包、每台设备的版本。普通用户只读自己那份。
+    if (method === 'GET' && p === '/api/agent/versions') {
+      const pol = agentUpdatePolicy();
+      const weAreAdmin = String(user.role) === 'admin';
+      const mine = await db.query(
+        'SELECT id, user_id, device_name, os, agent_ver, last_ip, last_seen_at, revoked_at, created_at ' +
+        'FROM agent_device WHERE revoked_at IS NULL AND user_id = ? ORDER BY id DESC',
+        [user.id]
+      );
+      const rows = weAreAdmin
+        ? await db.query(
+          'SELECT id, user_id, device_name, os, agent_ver, last_ip, last_seen_at, revoked_at, created_at ' +
+          'FROM agent_device WHERE revoked_at IS NULL ORDER BY user_id, id DESC')
+        : mine;
+      return sendJson(res, 200, {
+        ...pol,
+        scopedToSelf: !weAreAdmin,
+        devices: rows.map((r) => {
+          const uid = Number(r.user_id || 0);
+          const live = agentHub.status(uid);
+          const ver = String((live.online && live.agentVer) || r.agent_ver || '');
+          return {
+            id: Number(r.id), userId: uid, name: r.device_name || '', os: r.os || '',
+            agentVer: ver, online: !!live.online,
+            lastIp: r.last_ip || '', lastSeenAt: r.last_seen_at, createdAt: r.created_at,
+            outdated: !!ver && !verGte(ver, pol.min),
+          };
+        }),
+      });
     }
     if (method === 'POST' && p === '/api/agent/pair-code') {
       if (Number(tenantId) !== Number(user.id)) throw Object.assign(new Error('查看他人数据为只读模式，无法操作本机通道'), { code: 403 });
@@ -2797,6 +2992,12 @@ const server = http.createServer(async (req, res) => {
       if (!agentHub.isOnline(tenantId)) {
         throw new Error('本机助手未连接：请先在本机启动「催收小助手」桌面程序并完成绑定（页面右上角有「下载本机助手 / 绑定本机助手」入口）。发送只在你本机执行');
       }
+      // 版本门禁：过了宽限期且旧助手还能跑业务的，统统拦下（拿不到新版时会自动放行）
+      const vchk = checkAgentVersion(tenantId);
+      if (vchk.blocking) {
+        throw new Error(`这台电脑上的催收小助手是 v${vchk.current}，版本过旧：发送催收消息需要 v${vchk.min} 及以上。`
+          + '请先点页面右上角「下载本机助手」安装新版，新版的停止响应更快、发送也更快。');
+      }
       doClientSend(tenantId, loginIds).catch((e) => {
         const ts = taskFor(tenantId);
         ts.running = false;
@@ -2899,6 +3100,7 @@ const server = http.createServer(async (req, res) => {
           });
         }
         // 旧版助手没有这个能力：它会直接忽略指令，用户只能干等到超时
+        if (!agentVersionGate(res, aUid, '登录牵牛花')) return;
         const agentVer = agentHub.status(aUid).agentVer || '';
         if (agentVer && !verGte(agentVer, QNH_LOGIN_MIN_AGENT)) {
           return sendJson(res, 200, {
@@ -3248,6 +3450,7 @@ const server = http.createServer(async (req, res) => {
               + '拼多多登录只在本机完成，服务器不会代你登录。',
           });
         }
+        if (!agentVersionGate(res, aUid, '登录拼多多')) return;
         const agentVer = agentHub.status(aUid).agentVer || '';
         if (agentVer && !verGte(agentVer, PDD_LOGIN_MIN_AGENT)) {
           return sendJson(res, 200, {
@@ -3342,6 +3545,7 @@ const server = http.createServer(async (req, res) => {
             message: '本机助手未连接：申请发票要在本机助手里真实提交（页面生成风控签名），请先启动并绑定助手。',
           });
         }
+        if (!agentVersionGate(res, aUid, '申请发票')) return;
         const agentVer = agentHub.status(aUid).agentVer || '';
         if (agentVer && !verGte(agentVer, PDD_APPLY_MIN_AGENT)) {
           return sendJson(res, 200, {
@@ -3402,6 +3606,7 @@ const server = http.createServer(async (req, res) => {
             message: '本机助手未连接：发催收消息要在本机助手里打开真实聊天页（页面生成风控签名），请先启动并绑定助手。',
           });
         }
+        if (!agentVersionGate(res, sendUid, '发送催收消息')) return;
         const agentVer = agentHub.status(sendUid).agentVer || '';
         if (agentVer && !verGte(agentVer, PDD_SEND_MIN_AGENT)) {
           return sendJson(res, 200, {
@@ -3634,7 +3839,27 @@ wsAgent.on('connection', (ws) => {
       os: (hello && hello.os) || (hello && hello.platform) || '',
     });
     try { ws.send(JSON.stringify({ type: 'ready', uid, serverTime: Date.now() })); } catch (e) { /* 忽略 */ }
-    console.log(`[agent] uid=${uid} 本机助手已连接${hello && hello.agentVer ? ' (v' + hello.agentVer + ')' : ''}`);
+    const agentVer = (hello && hello.agentVer) || '';
+    console.log(`[agent] uid=${uid} 本机助手已连接${agentVer ? ' (v' + agentVer + ')' : ''}`);
+    // 连接建立即体检：版本过旧就主动把「去更新」推给助手，让它弹更新横幅。
+    // 注意：握手推送只按「版本够不够」判断，**不看能不能下载**——即使服务端暂时没有新版安装包，
+    // 也该让用户知道「你的助手太旧了，需要 vX」，助手那边会把按钮换成「联系管理员」而不是给个死链。
+    // 真正决定拦不拦的是业务侧的 agentVersionGate（它还要求 packOk），两层分开，互不干扰。
+    const pol = agentUpdatePolicy();
+    if (agentVer && pol.min && !verGte(agentVer, pol.min)) {
+      try {
+        ws.send(JSON.stringify({
+          type: 'require_update',
+          current: agentVer, latest: pol.min, serverVersion: pol.latest,
+          updateUrl: pol.updateUrl, fileName: pol.fileName,
+          blocking: !!pol.expired,
+          graceUntil: pol.graceUntil,
+          message: `当前助手 v${agentVer} 过旧，请更新到 v${pol.min} 及以上`
+            + (pol.expired ? '：旧版本已无法继续使用登录/发送等功能。' : '以继续使用全部功能。'),
+        }));
+      } catch (e) { /* 忽略 */ }
+      console.log(`[agent] uid=${uid} 助手版本过旧 v${agentVer} < v${pol.min} → 已推送更新提示${pol.expired ? '（已过宽限期）' : '（宽限中）'}`);
+    }
   };
   const helloTimer = setTimeout(() => { if (!bound) { try { ws.close(4003, 'hello timeout'); } catch (e) { /* 忽略 */ } } }, 15000);
   ws.on('message', (raw) => {

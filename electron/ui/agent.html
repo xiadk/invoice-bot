@@ -41,12 +41,34 @@
          border-radius:8px; padding:10px 12px; }
   .mono { font-family:ui-monospace,Consolas,monospace; font-size:11px; color:var(--mut); word-break:break-all; }
   .hide { display:none; }
+  /* 版本更新横幅 */
+  .upd { border-color:#fecaca; background:#fef2f2; }
+  .upd .k { font-size:13px !important; color:var(--err) !important; font-weight:600; }
+  .upd-desc { font-size:12px; color:#7f1d1d; line-height:1.75; margin:4px 0 0; }
+  .bar { height:6px; background:#fee2e2; border-radius:99px; overflow:hidden; margin-top:10px; display:none; }
+  .bar.on { display:block; }
+  .bar i { display:block; height:100%; width:0; background:var(--err); transition:width .25s ease; }
 </style>
 </head>
 <body>
 <div class="wrap">
   <h1>催收小助手 <span class="ver" id="ver"></span></h1>
   <p class="sub">在本机浏览器里帮你逐条发送催收消息。服务器只下发任务、记录结果。</p>
+
+  <!-- 版本更新横幅：服务器在连接建立时做体检，版本过旧才出现（默认隐藏） -->
+  <div class="card upd" id="updCard" style="display:none">
+    <div class="row" style="border-top:none;padding-top:0">
+      <span class="k">⚠ 助手版本过旧</span>
+      <span class="v" id="updVer">—</span>
+    </div>
+    <div class="upd-desc" id="updDesc">当前版本已不被支持，建议尽快更新。</div>
+    <div class="bar" id="updBarWrap"><i id="updBar"></i></div>
+    <div class="btns" style="margin-top:10px">
+      <button class="primary" id="btnUpdate">立即更新</button>
+      <button id="btnUpdateLater">稍后提醒我</button>
+    </div>
+    <div class="msg" id="updMsg"></div>
+  </div>
 
   <div class="card">
     <div class="row"><span class="k">连接状态</span><span class="v" id="conn"><i class="dot n"></i>检测中…</span></div>
@@ -206,6 +228,89 @@ document.getElementById('btnUnbind').onclick = async () => {
 refreshLocal();
 setInterval(refreshLocal, 10000);          // 网站那边点「退出账号」后，这里最多 10 秒跟着变
 window.addEventListener('focus', refreshLocal);
+
+// ── 版本更新横幅 ───────────────────────────────────────────────────
+// 服务器说版本过旧 → 这里显红色卡片。点「立即更新」由主进程下载安装包并拉起安装程序，
+// 装完自动启动新版；这个老进程会自己退出（见 main.js 的 doSelfUpdate）。
+const updEls = {
+  card: document.getElementById('updCard'),
+  ver: document.getElementById('updVer'),
+  desc: document.getElementById('updDesc'),
+  barWrap: document.getElementById('updBarWrap'),
+  bar: document.getElementById('updBar'),
+  btn: document.getElementById('btnUpdate'),
+  btnLater: document.getElementById('btnUpdateLater'),
+  msg: document.getElementById('updMsg'),
+};
+let updSnoozed = false;      // 点了「稍后」→ 这次运行不再弹，重连后会再提醒
+
+function showUpdMsg(text, ok) {
+  updEls.msg.textContent = text || '';
+  updEls.msg.className = 'msg ' + (text ? (ok ? 'ok' : 'err') : '');
+}
+
+function renderUpdate(s) {
+  if (!s) return;
+  const need = !!(s.info && s.latestVersion);
+  updEls.card.style.display = (need && !(updSnoozed && !s.blocking)) ? '' : 'none';
+  if (!need) return;
+  updEls.ver.textContent = `v${s.currentVersion || '?'} → v${s.latestVersion}`;
+
+  const busy = s.phase === 'downloading' || s.phase === 'installing';
+  const hasUrl = !!(s.info && s.info.updateUrl);
+  updEls.btn.disabled = busy || !hasUrl;
+  updEls.btn.textContent = s.phase === 'downloading' ? '正在下载…'
+    : (s.phase === 'installing' ? '安装中…' : (hasUrl ? '立即更新' : '暂无下载地址'));
+
+  let desc = '';
+  if (s.blocking) desc = '旧版本已被停用：登录、申请发票、发送消息等功能现在都用不了，必须更新后才恢复。';
+  else desc = '旧版本目前还能用，但宽限期结束后会被停用，建议尽快更新——新版停止响应更快、发送也更省时间。';
+  if (!hasUrl) desc += '⚠ 这台服务器没有提供安装包（也没配外部直链），请联系管理员索取新版。';
+  if (s.phase === 'installing') desc = '安装程序已打开：按向导一路下一步，装完会自动拉开新版助手。';
+  updEls.desc.textContent = desc;
+
+  if (s.phase === 'downloading') {
+    updEls.barWrap.className = 'bar on';
+    updEls.bar.style.width = (s.percent || 0) + '%';
+    showUpdMsg((s.percent || 0) + '% · ' + (s.message || ''), true);
+  } else if (s.phase === 'error') {
+    updEls.barWrap.className = 'bar';
+    showUpdMsg('✗ ' + (s.error || '更新失败'), false);
+  } else if (s.phase === 'installing') {
+    updEls.barWrap.className = 'bar on';
+    updEls.bar.style.width = '100%';
+    showUpdMsg(s.message || '', true);
+  } else {
+    updEls.barWrap.className = 'bar';
+    showUpdMsg('', true);
+  }
+  // 已被停用的版本不给「稍后」：躲不掉，也不该给一个会误导的按钮
+  updEls.btnLater.style.display = s.blocking ? 'none' : '';
+}
+
+updEls.btn.onclick = async () => {
+  updEls.btn.disabled = true;
+  showUpdMsg('正在连接服务器下载安装包…', true);
+  try {
+    const r = await window.xsh.doUpdate();
+    if (r && r.ok) {
+      showUpdMsg('✓ 安装程序已打开，本助手即将退出。装完会自动启动新版。', true);
+    } else {
+      showUpdMsg('✗ ' + ((r && r.error) || '更新失败'), false);
+      updEls.btn.disabled = false;
+    }
+  } catch (e) {
+    showUpdMsg('✗ ' + (e && e.message ? e.message : e), false);
+    updEls.btn.disabled = false;
+  }
+};
+updEls.btnLater.onclick = () => {
+  updSnoozed = true;
+  updEls.card.style.display = 'none';
+};
+
+window.xsh.onUpdate(renderUpdate);
+window.xsh.updateState().then(renderUpdate).catch(() => { /* 老主进程没有这个接口就跳过 */ });
 </script>
 </body>
 </html>

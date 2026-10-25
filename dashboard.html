@@ -4,6 +4,9 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>发票催收</title>
+<!-- 内联 favicon：浏览器默认会请求 /favicon.ico，本项目没这个静态文件，
+     于是每次开页面控制台都留一条 404 —— 直接给个 data URI 省掉它 -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23ff6a00'/%3E%3Ctext x='16' y='23' font-size='19' font-family='sans-serif' font-weight='700' text-anchor='middle' fill='%23fff'%3E%C2%A5%3C/text%3E%3C/svg%3E">
 <!-- Element UI 主题（本地 vendor，免外网 CDN）；须在本页自身样式之前加载，便于本页样式覆盖 -->
 <link rel="stylesheet" href="/vendor/element-ui/index.css">
 <style>
@@ -56,6 +59,9 @@
   .agent-bind-btn.is-bound.is-disabled:focus {
     color: #2e7d32; background: #f0f9eb; border-color: #c2e7b0; cursor: default;
   }
+  /* 版本更新提示：已停用的用轻微呼吸感提示——它不能像普通弹窗那样被无视 */
+  @keyframes updPulse { 0%,100% { opacity: 1; } 50% { opacity: .68; } }
+  .agent-upd-btn.is-blocking { animation: updPulse 2.4s ease-in-out infinite; font-weight: 600; }
   .el-main { padding: 18px 20px 40px; }
   .banner { margin: 0; padding: 10px 20px; font-size: 13px; }
   .section-card { margin-bottom: 14px; }
@@ -156,6 +162,13 @@
                      :type="agent.online ? 'success' : 'primary'" :plain="!agent.online"
                      :loading="guide.binding" :disabled="agent.online || guide.binding"
                      :title="agentBindTitle" @click="bindAgent">{{ agentBindText }}</el-button>
+          <!-- 版本体检不通过才出现：宽限期内橙色提醒，已停用则红色 -->
+          <el-button v-if="agentUpdate" size="small" class="agent-upd-btn"
+                     :class="{ 'is-blocking': agentUpdate.blocking }"
+                     :type="agentUpdate.blocking ? 'danger' : 'warning'"
+                     :plain="!agentUpdate.blocking" :title="agentUpdate.title" @click="promptAgentUpdate">
+            ⬆ {{ agentUpdate.text }}
+          </el-button>
           <div class="user-chip">
             <div class="avatar">{{ avatarText }}</div>
             <div>
@@ -731,10 +744,19 @@
               <div slot="header"><b>全局发送参数</b></div>
               <el-form label-position="top" size="small">
                 <el-row :gutter="12">
-                  <el-col :span="12"><el-form-item label="卖家间隔最小（秒）"><el-input-number v-model="cfg.gapMin" :min="5" :max="3600" controls-position="right" style="width:100%"></el-input-number></el-form-item></el-col>
-                  <el-col :span="12"><el-form-item label="卖家间隔最大（秒）"><el-input-number v-model="cfg.gapMax" :min="5" :max="3600" controls-position="right" style="width:100%"></el-input-number></el-form-item></el-col>
+                  <el-col :span="12"><el-form-item label="卖家发送间隔 · 最小（秒）"><el-input-number v-model="cfg.gapMin" :min="5" :max="3600" controls-position="right" style="width:100%"></el-input-number></el-form-item></el-col>
+                  <el-col :span="12"><el-form-item label="卖家发送间隔 · 最大（秒）"><el-input-number v-model="cfg.gapMax" :min="5" :max="3600" controls-position="right" style="width:100%"></el-input-number></el-form-item></el-col>
                 </el-row>
-                <div class="form-tip">两家之间的随机等待（防限流主要参数），对所有用户生效。总时长 ≈ 家数 ×（间隔均值 + 约 15 秒）。</div>
+                <div class="form-tip">
+                  <div>两家 <b>真实发送动作</b> 之间的最短停顿（防风控的下限），对所有用户生效。</div>
+                  <div style="margin-top:4px">系统会在这段时间里<b>提前打开下一家的会话</b>，加载耗时计入该间隔 ——
+                    加载比间隔慢时不额外多等，更快时才补差额。所以它是<b>保底下限，不是每家都要付的成本</b>。</div>
+                  <div v-if="gapTooSmall" style="margin-top:4px;color:#d1580a">⚠ 当前值偏低，容易被平台判定为机器群发，建议不低于 15 秒。</div>
+                </div>
+                <el-form-item label="提前加载下一家会话" style="margin-top:10px">
+                  <el-switch v-model="cfg.prefetch" active-text="开启（推荐）" inactive-text="关闭"></el-switch>
+                  <div class="form-tip">开启后会在上家的间隔等待里把下一家的会话准备好；关掉则回到「等满间隔再加载」，总时长更长、行为更保守。</div>
+                </el-form-item>
                 <el-form-item label="订单清单单条消息字数上限" style="margin-top:10px">
                   <el-input-number v-model="cfg.chunkMax" :min="100" :max="450" controls-position="right" style="width:100%"></el-input-number>
                   <div class="form-tip">平台单条消息上限 500 字，建议不超过 450</div>
@@ -777,6 +799,62 @@
                 在本服务所在机器上执行 <code>npm run agent:dist</code> 重新构建（需 Windows 环境）。
                 打包完成后，下载页与「下载本机助手」按钮会自动提供最新构建的安装包。
               </div>
+
+              <el-divider style="margin:14px 0 10px"></el-divider>
+              <div style="margin-bottom:8px">
+                <b>助手版本治理</b>
+                <span class="loginid" style="margin-left:6px">低于最低要求的助手：宽限期内只提示，到期后禁止登录 / 申请发票 / 发送消息</span>
+              </div>
+              <el-form label-position="top" size="small">
+                <el-row :gutter="10">
+                  <el-col :span="8"><el-form-item label="最低要求版本">
+                    <el-input v-model="cfg.agentMinVer" placeholder="留空 = 跟随服务端版本"></el-input>
+                  </el-form-item></el-col>
+                  <el-col :span="7"><el-form-item label="升级后宽限（天）">
+                    <el-input-number v-model="cfg.agentGraceDays" :min="0" :max="30" controls-position="right" style="width:100%"></el-input-number>
+                  </el-form-item></el-col>
+                  <el-col :span="9"><el-form-item label="安装包外部直链（dist 兜底）">
+                    <el-input v-model="cfg.agentInstallerUrl" placeholder="https://…/催收小助手-Setup.exe"></el-input>
+                  </el-form-item></el-col>
+                </el-row>
+              </el-form>
+              <div v-if="cfg.agentVerPol" class="form-tip" style="margin-top:2px">
+                服务端 v{{ cfg.agentVerPol.latest }} · 最低要求 v{{ cfg.agentVerPol.min }}
+                <template v-if="cfg.agentVerPol.packOk">
+                  · 可分发
+                  <b v-if="cfg.agentVerPol.source === 'dist'">dist 里的 v{{ cfg.agentVerPol.packVersion }}</b>
+                  <b v-else>外部直链</b>
+                  <el-tag size="mini" :type="cfg.agentVerPol.expired ? 'danger' : 'success'" style="margin-left:6px">
+                    {{ cfg.agentVerPol.expired ? '已开始拦截旧版' : '宽限中，剩 ' + verDaysLeft + ' 天' }}
+                  </el-tag>
+                </template>
+                <template v-else>
+                  <el-tag size="mini" type="warning" style="margin-left:6px">拿不到新版安装包 → 只提示、不拦截</el-tag>
+                  <div style="color:#d1580a;margin-top:4px">
+                    ⚠ 容器里 <code>dist/</code> 通常是空的（它在 .gitignore 里，<code>git pull</code> 拿不到）。
+                    要么在本处机器上重新打包，要么填一个外部直链，否则「强制更新」不会生效。
+                  </div>
+                </template>
+              </div>
+              <el-table v-if="cfg.agentVerPol && cfg.agentVerPol.devices && cfg.agentVerPol.devices.length"
+                        :data="cfg.agentVerPol.devices" size="mini" max-height="220" style="margin-top:8px">
+                <el-table-column label="设备" min-width="130">
+                  <template slot-scope="s"><span class="loginid">{{ s.row.name || '未命名' }}</span></template>
+                </el-table-column>
+                <el-table-column label="版本" width="90">
+                  <template slot-scope="s"><span :style="{ color: s.row.outdated ? '#e53935' : '', fontWeight: s.row.outdated ? '600' : '' }">v{{ s.row.agentVer || '—' }}</span></template>
+                </el-table-column>
+                <el-table-column label="状态" width="140">
+                  <template slot-scope="s">
+                    <el-tag size="mini" :type="s.row.online ? 'success' : 'info'">{{ s.row.online ? '在线' : '离线' }}</el-tag>
+                    <el-tag v-if="s.row.outdated" size="mini" type="danger" style="margin-left:4px">需更新</el-tag>
+                  </template>
+                </el-table-column>
+                <el-table-column label="最后活动" min-width="120">
+                  <template slot-scope="s"><span class="form-tip" style="display:inline">{{ s.row.lastSeenAt || '—' }}</span></template>
+                </el-table-column>
+              </el-table>
+              <div v-else-if="cfg.agentVerPol" class="form-tip" style="margin-top:6px">还没有设备绑定过本机助手。</div>
             </el-card>
           </el-col>
         </el-row>
@@ -1966,6 +2044,7 @@ const vm = new Vue({
       task: null,
       // 助手
       agent: { online: false, connected: false, loggedIn: false }, agentVer: '',
+      agentVersion: null,   // /api/agent/status.version：最低要求 / 当前可分发包 / 是否拦人
       resumable: null, resumeDismissed: 0, resumeText: '',
       // 明细弹窗
       detail: { visible: false, kind: 'orders', date: '', page: 1, size: 20, q: '', loading: false, rows: [], total: 0, amount: 0 },
@@ -1981,6 +2060,13 @@ const vm = new Vue({
         pddChat: '', pddGapSec: 4,
         // 「获取订单数据」首次全量只回溯最近 N 个月（默认 3）
         pddOrderMonths: 3,
+        // 发完一家后，是否在上家的间隔等待里提前加载下一家的会话（默认开）
+        prefetch: true,
+        // ── 助手版本治理 ──
+        agentMinVer: '',        // 最低要求版本；留空 = 跟随服务端 package.json 版本
+        agentGraceDays: 3,      // 服务端升级后的宽限天数（期内只提示不拦）
+        agentInstallerUrl: '',  // dist/ 里没安装包时的外部直链兜底
+        agentVerPol: null,      // GET /api/agent/versions：策略 + 各设备版本清单
       },
       // 系统默认拼多多话术（「恢复默认」按钮用；真实值由 /api/config 下发）
       defaultPddChat: '你好，麻烦尽快开一下发票，在平台都已经申请！！！如需线下开票，我的抬头：{companyName}，'
@@ -2031,6 +2117,19 @@ const vm = new Vue({
       if (this.agent && this.agent.online) return '✓ 已连接' + (this.agentVer ? ' · v' + this.agentVer : '');
       return '绑定本机助手';
     },
+    // 助手版本体检结果（/api/agent/status.version）
+    agentUpdate() {
+      const v = this.agentVersion;
+      if (!v || !v.outdated) return null;
+      const days = Math.max(0, Math.ceil((v.graceUntil - Date.now()) / 86400000));
+      return {
+        current: v.current, min: v.min, latest: v.latest, source: v.source,
+        blocking: !!v.blocking, canUpdate: !!v.updateAvailable, daysLeft: days,
+        text: v.blocking ? '助手需更新' : `待更新 · 剩 ${days} 天`,        title: v.blocking
+          ? `本机助手 v${v.current} 已停用：登录、申请发票、发送消息都需要 v${v.min} 及以上，请下载安装新版。`
+          : `本机助手 v${v.current} 将在 ${days} 天后停用，建议尽快更新到 v${v.min} 及以上。`,
+      };
+    },
     agentBindTitle() {
       if (this.guide.binding) return '正在唤起本机助手并等待连接（最多 1 分钟）';
       if (this.agent && this.agent.online) {
@@ -2044,6 +2143,14 @@ const vm = new Vue({
     // 实时毛利监控权限（独立菜单权限）
     canProfit() { return !!(this.me && (this.me.role === 'admin' || this.me.qnhProfitEnabled)); },
     // 拼多多发票对所有用户开放，不需要单独配置菜单权限
+    // 卖家发送间隔低于 15 秒时给个橙色警示：这个值直接决定会不会被平台判定为机器群发
+    gapTooSmall() { return Number(this.cfg.gapMin) < 15 || Number(this.cfg.gapMax) < 15; },
+    // 助手版本宽限期还剩几天（系统管理「助手版本治理」卡片里显示）
+    verDaysLeft() {
+      const p = this.cfg && this.cfg.agentVerPol;
+      if (!p || !p.graceUntil) return 0;
+      return Math.max(0, Math.ceil((p.graceUntil - Date.now()) / 86400000));
+    },
     // 管理员必须先选定一个账号，才能看该账号的牵牛花数据
     qnhNeedPick() { return this.isAdmin && this.qnhTenant == null; },
     // 拼多多催收话术预览：用当前查看账号的抬头填充（「1688发票」页里各账号抬头不同）
@@ -2401,7 +2508,7 @@ const vm = new Vue({
       if (p === 'refund' && !this.canRefund) p = 'board';
       if (p === 'profit' && !this.canProfit) p = 'board';
       this.page = p;
-      if (p === 'admin') { this.loadConfigUI(); this.loadUsers(); this.loadBuildStatus(); }
+      if (p === 'admin') { this.loadConfigUI(); this.loadUsers(); this.loadBuildStatus(); this.loadAgentVersions(); }
       if (p === 'mapping') this.loadMapping();
       if (p === 'audit') this.loadOpLog();
       if (p === 'profit' || p === 'refund' || p === 'pdd') {
@@ -2619,8 +2726,18 @@ const vm = new Vue({
       } catch (e) { /* 忽略 */ }
     },
     async stopTask() {
-      try { await this.$confirm('确认停止？当前卖家发完后停止', '停止任务', { type: 'warning' }); } catch (e) { return; }
-      await this.api('/api/task/stop', { method: 'POST' });
+      try {
+        await this.$confirm(
+          '立即停止发送：未发出的消息不会再发，剩余卖家记为「未发送」，之后可点「继续发送未完成」续跑。\n\n'
+          + '注意：正在发送的这一条可能已经点出去了，已发出的消息无法撤回。',
+          '停止任务', { type: 'warning', confirmButtonText: '立即停止', cancelButtonText: '继续发送' });
+      } catch (e) { return; }
+      try {
+        await this.api('/api/task/stop', { method: 'POST' });
+        this.$message.success('已下发停止指令');
+        // 立刻拉一次任务状态：等 2s 轮询才看到 running=false，按钮迟迟不能点（原来要干等）
+        await this.pollTask();
+      } catch (e) { this.$message.error('停止失败：' + e.message); }
     },
     // ── 发送 ──
     async sendOne(loginId) { if (this.readonly) return; await this.doSend([loginId]); },
@@ -2638,8 +2755,12 @@ const vm = new Vue({
         const d = await this.api('/api/config');
         const rt = (d.config && d.config.runtime) || {};
         const lo = Number(rt.sendGapMinSec) || 15, hi = Number(rt.sendGapMaxSec) || 30;
-        const perSeller = (lo + hi) / 2 + 15;
-        return `${lo}~${hi}秒，预计总时长约${Math.round(this.selectedCount * perSeller / 60)}分钟`;
+        const prefetch = String(rt.prefetchNextSeller) !== 'false';
+        // 保底间隔与「下一家会话加载」并行计时：加载通常 20~35s，比间隔还慢时不必额外等，
+        // 所以按 max(间隔均值, 典型加载) 估算，再加上每条消息的发送耗时（约 15s）。
+        const between = Math.max((lo + hi) / 2, prefetch ? 25 : 0) + (prefetch ? 0 : lo);
+        const perSeller = between + 15;
+        return `${lo}~${hi}秒（已提前加载下一家，通常不再额外等待），预计总时长约${Math.round(this.selectedCount * perSeller / 60)}分钟`;
       } catch (e) { return '15~30秒'; }
     },
     async doSend(ids) {
@@ -2666,6 +2787,8 @@ const vm = new Vue({
       try {
         const d = await this.api('/api/agent/status');
         if (d && !d.error) { this.agent = d; this.agentVer = d.agentVer || d.extVer || ''; }
+        // 版本体检结果（新版服务端才有；没有该字段时下面所有 v-if 自动失效）
+        if (d && d.version) this.agentVersion = d.version;
       } catch (e) { /* 忽略 */ }
       const now = !!(this.agent && this.agent.online);
       this._resumeTick = (this._resumeTick || 0) + 1;
@@ -3831,6 +3954,19 @@ const vm = new Vue({
 
     // ══════ 系统管理 ══════
     /** 查询助手打包状态；正在打包时每 3 秒轮询，结束后弹结果 */
+    /** 助手版本治理：当前策略（最低要求 / 可分发包 / 是否已硬拦）+ 各设备的版本清单 */
+    async loadAgentVersions() {
+      if (!this.isAdmin) return;
+      try {
+        const d = await this.api('/api/agent/versions');
+        if (d && !d.error) {
+          this.cfg.agentVerPol = d;
+          if (this.cfg.agentGraceDays == null || this.cfg.agentGraceDays === '') {
+            this.cfg.agentGraceDays = Number(d.graceDays);
+          }
+        }
+      } catch (e) { /* 忽略：老服务端没有这个接口 */ }
+    },
     async loadBuildStatus() {
       if (!this.isAdmin) return;
       try {
@@ -3894,6 +4030,14 @@ const vm = new Vue({
           pddGapSec: Math.max(2, Math.round((Number(pm.gapMs) || Number(dpm.gapMs) || 4000) / 1000)),
           // 订单同步：首次全量回溯月数（空/非法 → 回退 3）
           pddOrderMonths: Math.min(36, Math.max(1, Number(rt.pddOrdersFullMonths) || 3)),
+          // 「提前加载下一家会话」：缺省 true（没配过就是开）
+          prefetch: String(rt.prefetchNextSeller) !== 'false',
+          // 助手版本治理：最低要求留空=跟随服务端；宽限天数默认 3 天
+          agentMinVer: String(rt.agentMinVersion || ''),
+          agentGraceDays: (rt.agentUpdateGraceDays === 0 || rt.agentUpdateGraceDays === '0')
+            ? 0 : (Number(rt.agentUpdateGraceDays) || 3),
+          agentInstallerUrl: String(rt.agentInstallerUrl || ''),
+          agentVerPol: this.cfg.agentVerPol || null,   // loadAgentVersions 会补上
         };
         if (dpm.chat) this.defaultPddChat = dpm.chat;
         this.saveOk = false;
@@ -3918,6 +4062,13 @@ const vm = new Vue({
             sendGapMaxSec: Number(this.cfg.gapMax) || 30,
             // 拼多多「获取订单数据」首次全量的回溯月数（保存后下次同步即生效，无需重启）
             pddOrdersFullMonths: Math.min(36, Math.max(1, Number(this.cfg.pddOrderMonths) || 3)),
+            // 「提前加载下一家会话」开关（下次发送任务生效，无需重启）
+            prefetchNextSeller: this.cfg.prefetch !== false,
+            // 助手版本治理：最低要求留空=跟随服务端版本；宽限天数 0~30；外部直链兜底
+            agentMinVersion: (this.cfg.agentMinVer || '').trim(),
+            agentUpdateGraceDays: (this.cfg.agentGraceDays === '' || this.cfg.agentGraceDays == null)
+              ? 3 : Math.max(0, Math.min(30, Math.round(Number(this.cfg.agentGraceDays) || 0))),
+            agentInstallerUrl: (this.cfg.agentInstallerUrl || '').trim(),
           },
           messages: { template: this.cfg.template, orderItem: this.cfg.orderItem, orderChunkMax: Number(this.cfg.chunkMax) || 450, reminder: this.cfg.reminder },
           pddMessage: { chat: this.cfg.pddChat, gapMs: Math.max(1500, Math.round((Number(this.cfg.pddGapSec) || 4) * 1000)) },
@@ -4325,6 +4476,31 @@ const vm = new Vue({
         return;
       }
       await this.promptAgentBind(msg);
+    },
+    /**
+     * 顶栏「待更新 / 助手需更新」被点击：说清为什么要更新，再给下载按钮。
+     * 拿不到安装包（服务器 dist 里没构建）时不说「去下载」，改让他们找管理员 —— 别让人点了个空。
+     */
+    async promptAgentUpdate() {
+      const u = this.agentUpdate;
+      if (!u) return;
+      this.reportOp('agent.update.prompt', {
+        current: u.current, latest: u.min, days: u.daysLeft, blocking: !!u.blocking,
+      });
+      const head = u.blocking
+        ? `本机助手 v${u.current} 已被停用：登录、申请发票、发送消息都用不了，需要 v${u.min} 及以上。`
+        : `本机助手 v${u.current} 将在 ${u.daysLeft} 天后停用，现在还能用，建议抽空更新到 v${u.min}。`;
+      const body = u.canUpdate
+        ? '点「下载新版」获取安装包，双击运行即可覆盖安装（不用卸载旧版，登录态和绑定关系都还在）。'
+        : '服务器上还没有构建好的安装包，请让管理员先在系统管理里点「重新打包本机助手」，或手动向管理员索取新版。';
+      if (!u.canUpdate) {
+        return this.$alert(head + '\n\n' + body, '催收小助手需要更新', { type: 'warning', confirmButtonText: '知道了' });
+      }
+      try {
+        await this.$confirm(head + '\n\n' + body, '催收小助手需要更新',
+          { confirmButtonText: '下载新版', cancelButtonText: '稍后', type: 'warning' });
+      } catch (e) { return; }
+      this.openDownload();
     },
     async agentOnline() { try { const d = await this.api('/api/agent/status'); return !!(d && d.online); } catch (e) { return false; } },
     /**
