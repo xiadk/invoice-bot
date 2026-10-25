@@ -49,17 +49,19 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
-const { spawn } = require('child_process');
+const { spawn } = require('child_process'); // arch-allow: child_process（管理员「一键重新打包本机助手」功能使用，全项目唯一豁免）
 const { WebSocketServer } = require('ws');
 const db = require('./db');
 const auth = require('./lib/auth');
 const tenancy = require('./lib/tenancy');
 const { runImport, importOrderUpload, importInvoiceUpload } = require('./import-to-db');
+const products = require('./lib/products');
 const { loadConfig } = require('./lib/config');
 const { AgentHub } = require('./lib/agent-hub');
 const { buildMessages } = require('./lib/sender');
 const qnh = require('./lib/qnh');
 const qagent = require('./lib/qnh-agent');
+const pdd = require('./lib/pdd');
 
 const PORT = Number(process.env.PORT) || 8787;
 const ROOT = __dirname;
@@ -239,6 +241,8 @@ function publicUser(u) {
     qnhRefundEnabled: u.role === 'admin' ? true : !!Number(u.qnh_refund_enabled),
     // 实时毛利监控权限（同上，独立开关）
     qnhProfitEnabled: u.role === 'admin' ? true : !!Number(u.qnh_profit_enabled),
+    // 拼多多发票页权限（同上，独立开关）
+    pddEnabled: u.role === 'admin' ? true : !!Number(u.pdd_enabled),
     lastLoginAt: u.last_login_at,
     createdAt: u.created_at,
   };
@@ -322,10 +326,10 @@ async function loadSellers(userId) {
   const invByCompany = new Map(invRows.map((r) => [r.company, r]));
 
   // 同一家公司可能对应多个会员名，发票额只挂在「主行」上避免重复计入
+  // （映射全员共享后按名称全局查，company→主会员名全局唯一）
   const ownerRows = await db.query(
-    `SELECT seller_company, seller_login FROM seller_name_mapping
-     WHERE user_id = ? AND seller_company IS NOT NULL AND seller_login IS NOT NULL`,
-    [userId]
+    `SELECT DISTINCT seller_company, seller_login FROM seller_name_mapping
+     WHERE seller_company IS NOT NULL AND seller_login IS NOT NULL`
   );
   const ownerByCompany = new Map(ownerRows.map((r) => [r.seller_company, r.seller_login]));
 
@@ -672,11 +676,33 @@ const OP_ACTIONS = {
   'qnh.config': (d) => `修改了退单同步设置（${d.items}）`,
   'qnh.permit': (d) => `${d.enabled ? '开启' : '关闭'}了账号「${d.username}」的退单列表权限`,
   'qnh.view': () => '打开了退单列表页',
+  'pdd.apply.start': (d) => `发起了批量申请发票任务（${d.total || 0} 单${d.invalid ? `，跳过 ${d.invalid} 单` : ''}）`,
+  'pdd.apply': (d) => d.ok === false
+    ? `批量申请发票失败${d.reason ? '：' + d.reason : ''}`
+    : `批量申请发票完成（成功 ${d.okCount || 0} 单、失败 ${d.failCount || 0} 单）`,
+  'pdd.send.start': (d) => `发起了拼多多批量催商家开票（${d.total || 0} 个商家${d.invalid ? `，跳过 ${d.invalid} 单` : ''}）`,
+  'pdd.send': (d) => d.ok === false
+    ? `拼多多批量催收失败${d.reason ? '：' + d.reason : ''}`
+    : `拼多多批量催收完成（成功 ${d.okCount || 0} 个商家、失败 ${d.failCount || 0} 个）`,
 };
 
 // 前端下拉是「值」，日志里要显示人能看懂的「文案」，在服务端做映射，避免客户端乱传
 const OP_COLLECT_LABELS = { '': '不限', collected: '已催收', '7': '最近一周未催收', '15': '最近半个月未催收', '30': '最近一个月未催收', '90': '最近三个月未催收' };
 const OP_INVOICE_LABELS = { '': '全部', invoiced: '已开票', pending: '未开票' };
+
+/**
+ * 页脚版权文案。
+ * 归属主体写在 config.json 的 `copyright` 里（系统级设置，多租户共用一套），
+ * 不写死在本文件里——换主体/换年度都不用改代码；没配就用系统名兜底。
+ */
+function copyrightText() {
+  let owner = '';
+  try {
+    const c = loadConfig();
+    owner = String((c && c.copyright) || '').trim();
+  } catch (e) { /* 配置读不到不影响页面渲染 */ }
+  return '© ' + new Date().getFullYear() + ' ' + (owner || '1688 发票催收系统') + ' · 保留所有权利';
+}
 
 /** 收口成单行、去掉换行与首尾空白、超长截断。保留中文引号（下方格式化要用） */
 function opText(v, max) {
@@ -815,10 +841,29 @@ function verGte(a, b) {
   return true;
 }
 
+// ── 「登录拼多多」任务：与牵牛花同一套路（本机助手弹窗登录 → Cookie 回传入库）──
+const PDD_LOGINS = new Map();                  // taskId -> ctx
+const PDD_LOGIN_TIMEOUT_MS = Number(process.env.PDD_LOGIN_TIMEOUT_MS) || 5 * 60 * 1000;
+const PDD_LOGIN_TTL_MS = PDD_LOGIN_TIMEOUT_MS + 60 * 1000;
+// 支持「登录拼多多」的最低助手版本
+const PDD_LOGIN_MIN_AGENT = '0.2.18';
+
+// ── 拼多多「页内操作」任务：助手加载真实页面执行（anti-content 由页面风控 SDK 生成）──
+//    kind='apply' 申请发票（开票页点提交） / kind='send' 催商家开票（聊天页发消息）
+const PDD_TASKS = new Map();                   // taskId -> ctx
+const PDD_APPLY_TIMEOUT_MS = Number(process.env.PDD_APPLY_TIMEOUT_MS) || 10 * 60 * 1000;
+const PDD_APPLY_TTL_MS = PDD_APPLY_TIMEOUT_MS + 5 * 60 * 1000;
+// 支持「申请发票」的最低助手版本
+const PDD_APPLY_MIN_AGENT = '0.2.21';   // 0.2.21 起：CDP 抓包判成败 + 页面就绪再点（修「等待结果超时」）
+// 支持「催商家开票」的最低助手版本（0.2.23 起才有 pdd_send 内核）
+const PDD_SEND_MIN_AGENT = '0.2.23';
+
 /** 定期清掉没人管的登录任务（用户点了又不登录），避免内存堆积 */
 const qnhLoginSweeper = setInterval(() => {
   const now = Date.now();
   for (const [id, c] of QNH_LOGINS) if (now > c.expiresAt) QNH_LOGINS.delete(id);
+  for (const [id, c] of PDD_LOGINS) if (now > c.expiresAt) PDD_LOGINS.delete(id);
+  for (const [id, c] of PDD_TASKS) if (now > c.expiresAt && c.status !== 'pending') PDD_TASKS.delete(id);
 }, 60000);
 if (qnhLoginSweeper.unref) qnhLoginSweeper.unref();
 
@@ -884,6 +929,145 @@ function onQnhLoginDone(uid, msg) {
 }
 
 /**
+ * 助手回报「登录拼多多」结果：Cookie 串入库（pdd_session），并标记任务完成/失败。
+ * 与牵牛花的差别：牵牛花存结构化 cookies 数组，拼多多只需要一整条 Cookie 串 + pdduid。
+ */
+function onPddLoginDone(uid, msg) {
+  const ctx = PDD_LOGINS.get(String((msg && msg.taskId) || ''));
+  if (!ctx || ctx.userId !== Number(uid) || ctx.status !== 'pending') return;
+  if (!msg.ok) {
+    ctx.status = 'failed';
+    ctx.message = String(msg.error || '助手未采集到登录态').slice(0, 300);
+    logOp(Number(uid), 'pdd.login', { ok: false });
+    return;
+  }
+  const cookie = String(msg.cookie || '').trim();
+  if (!cookie) {
+    ctx.status = 'failed';
+    ctx.message = '助手回传的登录态为空，请重新登录';
+    logOp(Number(uid), 'pdd.login', { ok: false });
+    return;
+  }
+  pdd.saveSession({
+    userId: ctx.userId,
+    cookie,
+    pdduid: msg.pdduid,
+    accountName: msg.account || msg.accountName || '',
+    source: 'agent',
+    agentVer: msg.agentVer,
+  }).then(() => {
+    ctx.status = 'done';
+    ctx.cookieCount = String(cookie).split(';').filter((s) => s.trim()).length;
+    ctx.writtenAt = new Date();
+    ctx.message = `登录态已更新（${ctx.cookieCount} 个 Cookie）`;
+    logOp(Number(uid), 'pdd.login', { ok: true });
+  }).catch((e) => {
+    ctx.status = 'failed';
+    ctx.message = '保存登录态失败：' + String((e && e.message) || e).slice(0, 200);
+    logOp(Number(uid), 'pdd.login', { ok: false });
+  });
+}
+
+/**
+ * 助手回报「批量申请发票」结果：逐条落 pdd_apply_log，并标记任务完成。
+ */
+function onPddApplyDone(uid, msg) {
+  const ctx = PDD_TASKS.get(String((msg && msg.taskId) || ''));
+  if (!ctx || ctx.kind !== 'apply' || ctx.userId !== Number(uid) || ctx.status !== 'pending') return;
+  const results = Array.isArray(msg.results) ? msg.results : [];
+  ctx.results = results;
+  ctx.okCount = Number(msg.okCount) || results.filter((r) => r.ok).length;
+  ctx.failCount = Number(msg.failCount) || (results.length - ctx.okCount);
+
+  // 无论整体成败，先把每一条结果落库（不吞错：写失败只告警，不影响任务状态）
+  pdd.logApply(ctx.userId, results);
+
+  // 提交成功的订单打「已申请(8)」中间态：不可再勾选申请，等下次同步被真实状态覆盖
+  const okSns = results.filter((r) => r.ok).map((r) => r.order_sn);
+  if (okSns.length) {
+    pdd.markApplied(ctx.userId, okSns).then((n) => {
+      if (n) console.log(`[pdd] 已把 ${n} 单标记为「已申请」（user ${ctx.userId}）`);
+    });
+  }
+
+  if (!msg.ok && !results.length) {
+    ctx.status = 'failed';
+    ctx.message = String(msg.error || '助手执行申请失败').slice(0, 300);
+    ctx.finishedAt = new Date();
+    logOp(Number(uid), 'pdd.apply', { ok: false, tenantId: ctx.userId, reason: ctx.message });
+    return;
+  }
+  ctx.status = 'done';
+  ctx.finishedAt = new Date();
+  ctx.message = `申请提交完成：成功 ${ctx.okCount} 单、失败 ${ctx.failCount} 单`
+    + (msg.stopped ? '（中途停止）' : '');
+  logOp(Number(uid), 'pdd.apply', { ok: ctx.okCount > 0, okCount: ctx.okCount, failCount: ctx.failCount, tenantId: ctx.userId });
+}
+
+/**
+ * 助手逐单上报「页内任务」进度（index/total/order_sn/ok/detail）：
+ * 记进任务上下文供 task-status 轮询返回；同时打到服务端控制台留排查痕迹。
+ */
+function onPddApplyProgress(uid, msg) {
+  const ctx = PDD_TASKS.get(String((msg && msg.taskId) || ''));
+  if (!ctx || ctx.userId !== Number(uid) || ctx.status !== 'pending') return;
+  const isSend = ctx.kind === 'send';
+  const idx = Number(msg.index) || 0;
+  const total = Number(msg.total) || ctx.total;
+  ctx.progress = {
+    index: idx, total,
+    current: String(msg.order_sn || ''),
+    okCount: Number(msg.okCount) || 0,
+    failCount: Number(msg.failCount) || 0,
+    lastOk: !!msg.ok,
+    lastDetail: String(msg.detail || '').slice(0, 200),
+    updatedAt: Date.now(),
+  };
+  if (msg.order_sn) {
+    ctx.progressLog = ctx.progressLog || [];
+    ctx.progressLog.push({
+      t: new Date().toISOString().slice(11, 19),
+      text: `[${idx}/${total}] ${msg.order_sn} → ${msg.ok
+        ? (isSend ? '✓ 已发送' : '✓ 已提交')
+        : '✗ ' + (msg.detail || '失败')}`,
+    });
+    if (ctx.progressLog.length > 300) ctx.progressLog.splice(0, ctx.progressLog.length - 300);
+  }
+  console.log(`[pdd-${ctx.kind}] user=${uid} task=${ctx.taskId} [${idx}/${total}] ${msg.order_sn || ''} `
+    + `${msg.ok ? 'OK' : 'FAIL ' + (msg.detail || '')}`);
+}
+
+/**
+ * 助手回报「催商家开票」结果：逐条落 pdd_msg_log，并标记任务完成。
+ * 与申请的区别：发消息不改变订单状态（只是提醒），所以不写 pdd_order。
+ */
+function onPddSendDone(uid, msg) {
+  const ctx = PDD_TASKS.get(String((msg && msg.taskId) || ''));
+  if (!ctx || ctx.kind !== 'send' || ctx.userId !== Number(uid) || ctx.status !== 'pending') return;
+  const results = Array.isArray(msg.results) ? msg.results : [];
+  ctx.results = results;
+  ctx.okCount = Number(msg.okCount) || results.filter((r) => r.ok).length;
+  ctx.failCount = Number(msg.failCount) || (results.length - ctx.okCount);
+
+  pdd.logMsg(ctx.userId, results);
+
+  if (!msg.ok && !results.length) {
+    ctx.status = 'failed';
+    ctx.message = String(msg.error || '助手执行催收失败').slice(0, 300);
+    ctx.finishedAt = new Date();
+    logOp(Number(uid), 'pdd.send', { ok: false, tenantId: ctx.userId, reason: ctx.message });
+    return;
+  }
+  ctx.status = 'done';
+  ctx.finishedAt = new Date();
+  ctx.message = `催收消息发送完成：成功 ${ctx.okCount} 个商家、失败 ${ctx.failCount} 个`
+    + (msg.stopped ? '（中途停止）' : '');
+  logOp(Number(uid), 'pdd.send', {
+    ok: ctx.okCount > 0, okCount: ctx.okCount, failCount: ctx.failCount, tenantId: ctx.userId,
+  });
+}
+
+/**
  * 把任务进度推送给本机助手（供助手状态面板的实时发送面板渲染）
  * 推送失败（通道已断）无所谓：助手面板只是旁观，断线时看板仍能看到状态。
  */
@@ -907,6 +1091,11 @@ function pushClientProgress(uid, ctx) {
 function handleAgentMessage(uid, msg) {
   // 「登录牵牛花」：助手在本机开窗口让用户登录，完成后把 Cookie 回传
   if (msg.type === 'qnh_login_done') { onQnhLoginDone(uid, msg); return; }
+  if (msg.type === 'pdd_login_done') { onPddLoginDone(uid, msg); return; }
+  if (msg.type === 'pdd_apply_done') { onPddApplyDone(uid, msg); return; }
+  if (msg.type === 'pdd_apply_progress') { onPddApplyProgress(uid, msg); return; }
+  if (msg.type === 'pdd_send_done') { onPddSendDone(uid, msg); return; }
+  if (msg.type === 'pdd_send_progress') { onPddApplyProgress(uid, msg); return; }
   // 「牵牛花页内签名请求」：助手回传配送日志 / 毛利明细等接口结果
   if (msg.type === 'qnh_fetch_done') { qagent.onDone(uid, msg); return; }
   if (msg.type === 'login_state') { agentHub.setLoggedIn(uid, msg.loggedIn); return; }
@@ -919,6 +1108,17 @@ function handleAgentMessage(uid, msg) {
       for (const c of CLIENT_TASKS.values()) {
         if (c.userId === Number(uid) && !c.finished && typeof c.armTimer === 'function') { c.armTimer(); break; }
       }
+    } else {
+      // 不在催收任务上下文里的助手日志（如申请发票 / 发催收消息）：既打控制台，也并入该任务的进度面板
+      const pctx = [...PDD_TASKS.values()]
+        .filter((c) => c.userId === Number(uid) && c.status === 'pending')
+        .sort((a, b) => b.createdAt - a.createdAt)[0];
+      if (pctx) {
+        pctx.progressLog = pctx.progressLog || [];
+        pctx.progressLog.push({ t: new Date().toISOString().slice(11, 19), text: String(msg.text || '').slice(0, 200) });
+        if (pctx.progressLog.length > 300) pctx.progressLog.splice(0, pctx.progressLog.length - 300);
+      }
+      console.log(`[agent] uid=${uid} · ${String(msg.text || '').slice(0, 200)}`);
     }
     return;
   }
@@ -1222,6 +1422,15 @@ async function doClientSend(userId, loginIds, opts = {}) {
   }
   if (!sellers.length) throw new Error('没有可发送的卖家（可能都已开票或缺少卖家会员名）');
 
+  // 消息内容为空就别派单：助手在 1688 里会「输入空内容→点发送→找不到聊天记录」，
+  // 一路重试后报「发送未确认」，看不出真实原因。这里直接给出可操作提示。
+  const emptyMsg = sellers.find((s) => !Array.isArray(s.messages) || !s.messages.length
+    || s.messages.every((m) => !String(m || '').trim()));
+  if (emptyMsg) {
+    throw new Error('催收消息模板为空，已取消发送。请到「配置」页填写消息模板（消息①模板 / 消息②订单清单 / 消息③提醒）后重试'
+      + '（当前 config.json 里这三项是空字符串，会覆盖系统默认文案）');
+  }
+
   const created = await db.exec(
     "INSERT INTO agent_task (user_id, status, total, items, resume_of, started_at) VALUES (?, 'running', ?, ?, ?, NOW())",
     [userId, sellers.length, JSON.stringify(sellers.map((s) => ({
@@ -1289,38 +1498,58 @@ async function doClientSend(userId, loginIds, opts = {}) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// 名称映射维护（按用户隔离）
+// 税名核对（销方名称 ↔ 1688 商家名称；映射全员共享，user_id 仅作维护人记录）
 // ─────────────────────────────────────────────────────────────────────────
-async function loadMapping(userId) {
+async function loadMapping(userId, { allUsers = false } = {}) {
+  // 映射列表全局共享；金额/行数统计：普通用户只算自己发票行（userId=查看者），超管全局视图算所有用户
+  const scope = allUsers ? '' : 'AND i.user_id = ?';
+  const scopeArgs = allUsers ? [] : [userId, userId]; // scope 在金额与行数两个子查询里各出现一次
   const all = await db.query(`
     SELECT m.id, m.tax_seller_name, m.seller_company, m.seller_login,
            m.match_type, m.match_rule, m.is_confirmed, m.is_ignored, m.note, m.updated_at,
            (SELECT ROUND(SUM(total_amount),2) FROM issued_invoice i
-             WHERE i.user_id = m.user_id AND i.seller_name = m.tax_seller_name) AS invoice_amount,
+             WHERE i.seller_name = m.tax_seller_name ${scope}) AS invoice_amount,
            (SELECT COUNT(*) FROM issued_invoice i
-             WHERE i.user_id = m.user_id AND i.seller_name = m.tax_seller_name) AS invoice_rows
+             WHERE i.seller_name = m.tax_seller_name ${scope}) AS invoice_rows
     FROM seller_name_mapping m
-    WHERE m.user_id = ?
     ORDER BY m.is_ignored ASC, (m.seller_company IS NULL) DESC, invoice_amount DESC
-  `, [userId]);
+  `, scopeArgs);
   const mappings = all.filter((m) => !m.is_ignored);
   const ignored = all.filter((m) => m.is_ignored);
-  const unmatched = await db.query(
+  // 待人工比对：普通用户只看自己发票里的销方名称；超管看所有用户的聚合
+  const unmatched = allUsers ? await db.query(`
+    SELECT i.seller_name AS tax_seller_name,
+           COUNT(*)      AS invoice_rows,
+           ROUND(SUM(i.total_amount),2) AS invoice_amount,
+           MIN(i.invoice_date) AS first_invoice_date,
+           MAX(i.invoice_date) AS last_invoice_date,
+           MAX(i.seller_tax_no) AS seller_tax_no,
+           MAX(i.remark) AS remark
+    FROM issued_invoice i
+    LEFT JOIN seller_name_mapping m
+           ON m.tax_seller_name = i.seller_name
+          AND (m.is_ignored = 1 OR m.seller_company IS NOT NULL)
+    WHERE m.id IS NULL
+    GROUP BY i.seller_name
+    ORDER BY invoice_amount DESC
+  `) : await db.query(
     'SELECT * FROM v_unmatched_seller_name WHERE user_id = ? ORDER BY invoice_amount DESC', [userId]
   );
+  // 1688 商家候选：普通用户只列自己订单里的卖家；超管列全部用户的
   const sellers = await db.query(`
     SELECT COALESCE(NULLIF(seller_login,''), seller_company) AS loginId,
            MAX(seller_company) AS company, MAX(seller_login) AS sellerLogin
     FROM invoice_order
-    WHERE user_id = ? AND seller_company IS NOT NULL
+    WHERE ${allUsers ? '' : 'user_id = ? AND'} seller_company IS NOT NULL
     GROUP BY loginId ORDER BY company
-  `, [userId]);
-  return { mappings, ignored, unmatched, sellers, unmatchedCount: unmatched.length, ignoredCount: ignored.length };
+  `, allUsers ? [] : [userId]);
+  return { mappings, ignored, unmatched, sellers, unmatchedCount: unmatched.length, ignoredCount: ignored.length, allUsers };
 }
 
 async function saveMapping(userId, { taxSellerName, sellerLogin, sellerCompany, note }) {
   if (!taxSellerName) throw new Error('缺少 taxSellerName');
   if (!sellerCompany) throw new Error('请选择对应的1688商家');
+  // 全员共享：同名映射只存一条（全局唯一键），user_id 只在首次创建时记维护人
   await db.exec(
     `INSERT INTO seller_name_mapping (user_id, tax_seller_name, seller_company, seller_login, match_type, match_rule, is_confirmed, is_ignored, note)
      VALUES (?, ?, ?, ?, 'manual', 'manual', 1, 0, ?)
@@ -1328,9 +1557,10 @@ async function saveMapping(userId, { taxSellerName, sellerLogin, sellerCompany, 
        match_type = 'manual', match_rule = 'manual', is_confirmed = 1, is_ignored = 0, note = VALUES(note)`,
     [userId, taxSellerName, sellerCompany, sellerLogin || null, note || null]
   );
+  // 回填所有用户的同销方发票行（映射共享，B 维护后 A 的发票也自动对上）
   const r = await db.exec(
-    'UPDATE issued_invoice SET seller_company = ? WHERE user_id = ? AND seller_name = ?',
-    [sellerCompany, userId, taxSellerName]
+    'UPDATE issued_invoice SET seller_company = ? WHERE seller_name = ?',
+    [sellerCompany, taxSellerName]
   );
   return { ok: true, updatedInvoices: r.affectedRows || 0 };
 }
@@ -1356,15 +1586,16 @@ async function ignoreMapping(userId, { taxSellerName, ignored }) {
          note = '确认无对应1688商家，已忽略'`,
       [userId, taxSellerName]
     );
-    await db.exec('UPDATE issued_invoice SET seller_company = NULL WHERE user_id = ? AND seller_name = ?', [userId, taxSellerName]);
+    // 忽略同样全员生效：所有用户的该销方发票行都不再计入看板统计
+    await db.exec('UPDATE issued_invoice SET seller_company = NULL WHERE seller_name = ?', [taxSellerName]);
   } else {
     const rows = await db.query(
-      'SELECT id, seller_company FROM seller_name_mapping WHERE user_id = ? AND tax_seller_name = ?', [userId, taxSellerName]
+      'SELECT id, seller_company FROM seller_name_mapping WHERE tax_seller_name = ?', [taxSellerName]
     );
     if (rows[0] && !rows[0].seller_company) {
-      await db.exec('DELETE FROM seller_name_mapping WHERE user_id = ? AND tax_seller_name = ?', [userId, taxSellerName]);
+      await db.exec('DELETE FROM seller_name_mapping WHERE tax_seller_name = ?', [taxSellerName]);
     } else {
-      await db.exec("UPDATE seller_name_mapping SET is_ignored = 0 WHERE user_id = ? AND tax_seller_name = ?", [userId, taxSellerName]);
+      await db.exec('UPDATE seller_name_mapping SET is_ignored = 0 WHERE tax_seller_name = ?', [taxSellerName]);
     }
   }
   return { ok: true, ignored: on };
@@ -1372,8 +1603,8 @@ async function ignoreMapping(userId, { taxSellerName, ignored }) {
 
 async function deleteMapping(userId, { taxSellerName }) {
   if (!taxSellerName) throw new Error('缺少 taxSellerName');
-  await db.exec('DELETE FROM seller_name_mapping WHERE user_id = ? AND tax_seller_name = ?', [userId, taxSellerName]);
-  await db.exec('UPDATE issued_invoice SET seller_company = NULL WHERE user_id = ? AND seller_name = ?', [userId, taxSellerName]);
+  await db.exec('DELETE FROM seller_name_mapping WHERE tax_seller_name = ?', [taxSellerName]);
+  await db.exec('UPDATE issued_invoice SET seller_company = NULL WHERE seller_name = ?', [taxSellerName]);
   return { ok: true };
 }
 
@@ -1496,6 +1727,7 @@ async function listUsers() {
     mustChangePassword: !!u.must_change_password,
     qnhRefundEnabled: u.role === 'admin' ? true : !!Number(u.qnh_refund_enabled),
     qnhProfitEnabled: u.role === 'admin' ? true : !!Number(u.qnh_profit_enabled),
+    pddEnabled: u.role === 'admin' ? true : !!Number(u.pdd_enabled),
     lastLoginAt: u.last_login_at, createdAt: u.created_at, updatedAt: u.updated_at,
     orderCount: Number(u.order_count) || 0,
     companyCount: Number(u.company_count) || 0,
@@ -1677,7 +1909,7 @@ const server = http.createServer(async (req, res) => {
     if (method === 'GET' && p === '/api/auth/me') {
       const u = await currentUser(req);
       if (!u) return sendJson(res, 401, { error: '未登录' });
-      return sendJson(res, 200, { user: publicUser(u) });
+      return sendJson(res, 200, { user: publicUser(u), copyright: copyrightText() });
     }
 
     if (method === 'POST' && p === '/api/auth/password') {
@@ -1909,7 +2141,7 @@ const server = http.createServer(async (req, res) => {
       const companies = await loadCompanies(tenantId);
       const sendStats = await loadSendStats(tenantId);
       const sentList = sendStats.filter((r) => Number(r.sendCount) > 0).map((r) => r.login);
-      // 「已开票金额（税务局）」全局统计：排除「已忽略」销方名称的发票（用户点忽略后不计入看板总额）
+      // 「已开票金额（税务局）」全局统计：排除「已忽略」销方名称的发票（忽略全员共享，任何用户点忽略后都不计入）
       const invSummary = await db.query(`
         SELECT COUNT(*) AS rows_count,
                COUNT(DISTINCT COALESCE(NULLIF(e_invoice_no,''), NULLIF(invoice_no,''), i.row_hash)) AS invoice_count,
@@ -1919,11 +2151,11 @@ const server = http.createServer(async (req, res) => {
         WHERE i.user_id = ?
           AND NOT EXISTS (
             SELECT 1 FROM seller_name_mapping m
-            WHERE m.user_id = i.user_id AND m.tax_seller_name = i.seller_name AND m.is_ignored = 1
+            WHERE m.tax_seller_name = i.seller_name AND m.is_ignored = 1
           )
       `, [tenantId]);
       const unmatched = await db.query('SELECT COUNT(*) AS n FROM v_unmatched_seller_name WHERE user_id = ?', [tenantId]);
-      const ignoredCnt = await db.query('SELECT COUNT(*) AS n FROM seller_name_mapping WHERE user_id = ? AND is_ignored = 1', [tenantId]);
+      const ignoredCnt = await db.query('SELECT COUNT(*) AS n FROM seller_name_mapping WHERE is_ignored = 1');
       const manual = await db.query("SELECT COUNT(*) AS n FROM invoice_order WHERE user_id = ? AND state_source = 'manual'", [tenantId]);
       const tenant = (await db.query('SELECT id, username, company_name FROM app_user WHERE id = ?', [tenantId]))[0] || null;
       return sendJson(res, 200, {
@@ -1986,7 +2218,7 @@ const server = http.createServer(async (req, res) => {
         WHERE i.user_id = ?
           AND NOT EXISTS (
             SELECT 1 FROM seller_name_mapping m
-            WHERE m.user_id = i.user_id AND m.tax_seller_name = i.seller_name AND m.is_ignored = 1
+            WHERE m.tax_seller_name = i.seller_name AND m.is_ignored = 1
           ) ${w}`;
       const totalR = await db.query(`SELECT COUNT(*) AS n ${base}`, [tenantId, ...args]);
       const rows = await db.query(`
@@ -2012,7 +2244,7 @@ const server = http.createServer(async (req, res) => {
       const noIgnore = `
         AND NOT EXISTS (
           SELECT 1 FROM seller_name_mapping m2
-          WHERE m2.user_id = i.user_id AND m2.tax_seller_name = i.seller_name AND m2.is_ignored = 1
+          WHERE m2.tax_seller_name = i.seller_name AND m2.is_ignored = 1
         )`;
       const ordRows = await db.query(`
         SELECT DATE(pay_time) AS d, COUNT(*) AS n, ROUND(SUM(COALESCE(pay_amount,0)),2) AS amt
@@ -2060,10 +2292,17 @@ const server = http.createServer(async (req, res) => {
     if (method === 'GET' && p === '/api/config') {
       const config = loadConfig();
       const { DEFAULT_MESSAGES } = require('./lib/sender');
-      const safe = { runtime: config.runtime || {}, messages: config.messages || {}, serverUrl: (config.server_url || '').trim() };
+      const safe = {
+        runtime: config.runtime || {},
+        messages: config.messages || {},
+        // 拼多多催收模板与 1688 的 messages 完全分开（只有一条话术）
+        pddMessage: pdd.getPddMessageConfig(config),
+        serverUrl: (config.server_url || '').trim(),
+      };
       return sendJson(res, 200, {
         config: { ...safe, buyerInfo: await buyerInfoOf(user.id) },
         defaultMessages: DEFAULT_MESSAGES,
+        defaultPddMessage: pdd.DEFAULT_PDD_MESSAGE,
         canEdit: isAdmin,
       });
     }
@@ -2076,6 +2315,11 @@ const server = http.createServer(async (req, res) => {
       const merged = { ...old };
       merged.runtime = { ...(old.runtime || {}), ...(config.runtime || {}) };
       merged.messages = { ...(old.messages || {}), ...(config.messages || {}) };
+      // 拼多多催收模板：单独一组配置，保存时规范化（空值回退默认，避免又出现「模板被存成空串」）
+      if (config.pddMessage !== undefined) {
+        const norm = pdd.getPddMessageConfig({ pddMessage: config.pddMessage });
+        merged.pddMessage = { chat: norm.chat, gapMs: norm.gapMs };
+      }
       // 全局通道服务器地址：所有用户的本机扩展共用，可由系统管理统一维护
       if (config.server_url !== undefined) merged.server_url = String(config.server_url || '').trim();
       fs.writeFileSync(filePath, JSON.stringify(merged, null, 2), 'utf-8');
@@ -2095,26 +2339,31 @@ const server = http.createServer(async (req, res) => {
     if (method === 'POST' && p === '/api/import/upload') {
       writeGuard();
       const up = new URL(req.url, 'http://localhost');
-      const kind = up.searchParams.get('kind') === 'invoices' ? 'invoices' : 'orders';
+      const kp = up.searchParams.get('kind');
+      const kind = kp === 'invoices' ? 'invoices' : kp === 'products' ? 'products' : 'orders';
       const rawName = String(up.searchParams.get('name') || '').trim();
       const safeName = path.basename(rawName).replace(/[\\/:*?"<>|]+/g, '_').slice(-120)
-        || (kind === 'invoices' ? 'invoices.xlsx' : 'orders.xlsx');
+        || (kind === 'invoices' ? 'invoices.xlsx' : kind === 'products' ? 'products.xlsx' : 'orders.xlsx');
       if (!/\.(xlsx|xls)$/i.test(safeName)) throw new Error('只支持 .xlsx / .xls 文件（请上传从 1688 / 税务局导出的 Excel）');
       const buf = await readRawBody(req, 80e6);
       if (!buf) throw new Error('上传失败：内容过大（上限 80MB）或读取中断');
       if (!buf.length) throw new Error('上传失败：文件内容为空');
 
-      const dir = kind === 'invoices' ? tenancy.invoiceDirFor(tenantId) : tenancy.orderDirFor(tenantId);
+      const dir = kind === 'invoices' ? tenancy.invoiceDirFor(tenantId)
+        : kind === 'orders' ? tenancy.orderDirFor(tenantId)
+        : path.join(tenancy.dataDirFor(tenantId), '商品列表');
       fs.mkdirSync(dir, { recursive: true });
       const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14);
       const dest = path.join(dir, stamp + '-' + safeName);
       fs.writeFileSync(dest, buf);
 
       const t = taskFor(tenantId);
-      taskLog(t, `▶ 上传导入（${kind === 'invoices' ? '税务局发票' : '1688订单'}）：${safeName} · ${(buf.length / 1024).toFixed(0)}KB`);
+      taskLog(t, `▶ 上传导入（${kind === 'invoices' ? '税务局发票' : kind === 'orders' ? '1688订单' : '前置仓补货参考'}）：${safeName} · ${(buf.length / 1024).toFixed(0)}KB`);
       const r = kind === 'invoices'
         ? await importInvoiceUpload(tenantId, dest, safeName)
-        : await importOrderUpload(tenantId, dest, safeName);
+        : kind === 'orders'
+        ? await importOrderUpload(tenantId, dest, safeName)
+        : await products.importReplenishFile(tenantId, dest, safeName);
       if (!r.ok) {
         taskLog(t, `✗ 导入失败：${r.error}`);
         return sendJson(res, 400, { ok: false, kind, error: r.error, file: safeName });
@@ -2155,10 +2404,75 @@ const server = http.createServer(async (req, res) => {
     }
 
     // 名称映射
-    if (method === 'GET' && p === '/api/mapping') return sendJson(res, 200, await loadMapping(tenantId));
+    if (method === 'GET' && p === '/api/mapping') {
+      // 超管看全局（所有用户的销方名称聚合 + 全部商家候选）；普通用户只看自己发票里的销方名称
+      const allUsers = user.role === 'admin';
+      return sendJson(res, 200, await loadMapping(tenantId, { allUsers }));
+    }
     if (method === 'POST' && p === '/api/mapping') { writeGuard(); return sendJson(res, 200, await saveMapping(tenantId, await readBody(req))); }
     if (method === 'POST' && p === '/api/mapping/delete') { writeGuard(); return sendJson(res, 200, await deleteMapping(tenantId, await readBody(req))); }
     if (method === 'POST' && p === '/api/mapping/ignore') { writeGuard(); return sendJson(res, 200, await ignoreMapping(tenantId, await readBody(req))); }
+
+    // ── 商品列表（前置仓补货参考导入） ── 所有登录用户可用（菜单不做逐用户授权）
+    if (method === 'GET' && p === '/api/products') {
+      const page = Math.max(1, Number(url.searchParams.get('page')) || 1);
+      const size = Math.min(200, Math.max(1, Number(url.searchParams.get('size')) || 20));
+      const q = (url.searchParams.get('q') || '').trim();
+      const status = (url.searchParams.get('status') || '').trim();
+      const sort = url.searchParams.get('sort') || ''; // ''=最近更新 | price_asc | price_desc
+      const w = (q ? 'AND (sku LIKE ? OR goods_name LIKE ?) ' : '') + (status ? 'AND purchase_status = ? ' : '');
+      const args = [];
+      if (q) args.push(`%${q}%`, `%${q}%`);
+      if (status) args.push(status);
+      const order = sort === 'price_asc' ? 'purchase_price ASC, id ASC'
+        : sort === 'price_desc' ? 'purchase_price DESC, id DESC'
+        : 'updated_at DESC, id DESC';
+      const totalR = await db.query(`SELECT COUNT(*) AS n FROM product_item WHERE user_id = ? ${w}`, [tenantId, ...args]);
+      const rows = await db.query(`
+        SELECT id, sku, goods_name, purchase_price, available_stock, transit_stock, purchase_status, sales_30d,
+               source_file, updated_at
+        FROM product_item WHERE user_id = ? ${w}
+        ORDER BY ${order} LIMIT ${size} OFFSET ${(page - 1) * size}
+      `, [tenantId, ...args]);
+      // 当前筛选口径下的总货值（(可用+在途)×采购价 合计），与趋势图口径一致
+      const valueR = await db.query(`
+        SELECT ROUND(SUM((available_stock + transit_stock) * purchase_price), 2) AS v,
+               SUM(purchase_price IS NOT NULL AND purchase_price > 0) AS priced
+        FROM product_item WHERE user_id = ? ${w}`, [tenantId, ...args]);
+      const latest = await db.query(
+        'SELECT id, source_file, item_count, total_value, imported_at FROM product_import_batch WHERE user_id = ? ORDER BY imported_at DESC, id DESC LIMIT 1', [tenantId]
+      );
+      return sendJson(res, 200, {
+        total: totalR[0] ? totalR[0].n : 0, page, size, rows,
+        filteredValue: valueR[0] ? (valueR[0].v || 0) : 0,
+        latestBatch: latest[0] || null,
+      });
+    }
+
+    // 总货值趋势：按导入批次（每次导入记一个点）
+    if (method === 'GET' && p === '/api/products/trend') {
+      const rows = await db.query(`
+        SELECT id, source_file, item_count, total_value, imported_at
+        FROM product_import_batch WHERE user_id = ?
+        ORDER BY imported_at ASC, id ASC LIMIT 90
+      `, [tenantId]);
+      return sendJson(res, 200, { days: rows });
+    }
+
+    // ── 交易市场（跨用户共享） ──
+    if (method === 'GET' && p === '/api/market') {
+      return sendJson(res, 200, await products.marketOverview());
+    }
+    if (method === 'GET' && p === '/api/market/quotes') {
+      const sku = String(url.searchParams.get('sku') || '').trim();
+      if (!sku) return sendJson(res, 400, { error: '缺少 sku' });
+      return sendJson(res, 200, await products.marketQuotes(sku));
+    }
+    if (method === 'POST' && p === '/api/market/publish') {
+      writeGuard();
+      const body = await readBody(req);
+      return sendJson(res, 200, await products.publishToMarket(user.id, body.skus, body.discount));
+    }
 
     // 订单级开票状态
     if (method === 'POST' && p === '/api/order-state') { writeGuard(); return sendJson(res, 200, await setOrderState(tenantId, await readBody(req))); }
@@ -2570,6 +2884,309 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 404, { error: '未知退单接口' });
     }
 
+    // ── 拼多多发票看板（对所有登录用户开放，不需要菜单权限）────────────────
+    //    多租户规则与牵牛花一致：数据归属 tenantOf(req, url, user)。
+    //    差别：列表接口不需要风控签名，**服务器可直连拉取**；
+    //          只有「登录拼多多」要本机助手（服务器没有浏览器，登录只在本机完成）。
+    if (p.startsWith('/api/pdd/')) {
+      const pddUid = tenantId;   // 本块所有读写的「数据归属用户」
+
+      // 概况：登录态 + 状态汇总 + 状态字典；管理员额外拿到账号列表以便「代入」
+      if (method === 'GET' && p === '/api/pdd/status') {
+        const [cookie, sum] = await Promise.all([
+          pdd.cookieStatus(pddUid).catch(() => ({ ok: false, logined: false, message: '登录态读取失败' })),
+          pdd.summary(pddUid).catch(() => null),
+        ]);
+        const out = {
+          cookie,
+          summary: sum,
+          statusText: pdd.STATUS_TEXT,
+          isAdmin,
+          tenantId: pddUid,
+        };
+        // 管理员需要「以某账号身份进入」：给它账号列表 + 哪些账号已登录拼多多
+        if (isAdmin) {
+          try {
+            out.sessions = await pdd.usersWithSession();
+            out.users = (await listUsers()).map((u) => ({
+              id: u.id, username: u.username, companyName: u.companyName, role: u.role,
+              pddEnabled: !!u.pddEnabled,
+            }));
+          } catch (e) { /* 列表拿不到不影响主流程 */ }
+        }
+        return sendJson(res, 200, out);
+      }
+
+      // 订单列表（已完成订单：待申请 / 开票中 / 已开票 / 商家处理中 / 暂不可开票）
+      if (method === 'GET' && p === '/api/pdd/orders') {
+        const q = url.searchParams;
+        const status = q.get('status');
+        return sendJson(res, 200, await pdd.list({
+          status: (status === null || status === 'all') ? '' : status,
+          keyword: q.get('keyword') || '',
+          sort: q.get('sort') || '',
+          page: q.get('page'),
+          size: q.get('size'),
+          userId: pddUid,
+        }));
+      }
+
+      if (method === 'GET' && p === '/api/pdd/summary') {
+        return sendJson(res, 200, await pdd.summary(pddUid));
+      }
+
+      // 「立即刷新数据」：服务器直连拼多多接口，不需要助手在线
+      if (method === 'POST' && p === '/api/pdd/sync') {
+        const out = await pdd.sync({ userId: pddUid, trigger: 'manual' });
+        await logOp(user, 'pdd.sync', { ok: !!out.ok, pending: out.pending, invoiced: out.invoiced, tenantId: pddUid });
+        return sendJson(res, 200, out);
+      }
+
+      // 「登录拼多多」：把任务下发给该用户的本机助手 → 助手弹窗让用户登录 → Cookie 回传入库
+      if (method === 'POST' && p === '/api/pdd/login') {
+        if (!agentHub.isOnline(pddUid)) {
+          return sendJson(res, 200, {
+            ok: false,
+            needAgent: true,
+            message: '本机助手未连接：请先在该用户的电脑上启动「1688 催收助手」并完成绑定（看板右上角「本机助手」）。'
+              + '拼多多登录只在本机完成，服务器不会代你登录。',
+          });
+        }
+        const agentVer = agentHub.status(pddUid).agentVer || '';
+        if (agentVer && !verGte(agentVer, PDD_LOGIN_MIN_AGENT)) {
+          return sendJson(res, 200, {
+            ok: false,
+            needAgent: true,
+            agentOutdated: true,
+            message: `该用户的本机助手是 v${agentVer}，还不支持登录拼多多。请下载安装 v${PDD_LOGIN_MIN_AGENT} 及以上版本。`,
+          });
+        }
+        const taskId = 'pdd-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+        const ctx = {
+          taskId, userId: Number(pddUid), status: 'pending', message: '',
+          cookieCount: 0, writtenAt: null, createdAt: Date.now(),
+          expiresAt: Date.now() + PDD_LOGIN_TTL_MS,
+        };
+        const sent = agentHub.send(pddUid, {
+          type: 'pdd_login',
+          taskId,
+          // 发票助手页：未登录会自动跳登录，登录完正好停在订单页，方便确认身份
+          url: (process.env.PDD_LOGIN_URL || 'https://mobile.yangkeduo.com/commercial_pre_orders.html'),
+          timeoutMs: PDD_LOGIN_TIMEOUT_MS,
+        });
+        if (!sent) {
+          return sendJson(res, 200, {
+            ok: false, needAgent: true,
+            message: '下发登录任务失败：本机助手连接已断开，请确认助手正在运行。',
+          });
+        }
+        PDD_LOGINS.set(taskId, ctx);
+        await logOp(user, 'pdd.login.start', { tenantId: pddUid });
+        return sendJson(res, 200, {
+          ok: true, pending: true, taskId,
+          message: '已在该用户电脑上打开拼多多登录窗口，请在弹出的助手窗口里完成登录（支持扫码/短信验证）。',
+        });
+      }
+
+      // 轮询「登录拼多多」进度（status: pending / done / failed）
+      if (method === 'GET' && p === '/api/pdd/login-status') {
+        const ctx = PDD_LOGINS.get(String(url.searchParams.get('taskId') || ''));
+        const mine = ctx && (ctx.userId === Number(user.id) || (isAdmin && ctx.userId === Number(pddUid)));
+        if (!mine) return sendJson(res, 404, { error: '登录任务不存在或已结束' });
+        return sendJson(res, 200, {
+          status: ctx.status,
+          ok: ctx.status === 'done',
+          message: ctx.message || '',
+          cookieCount: ctx.cookieCount,
+          writtenAt: ctx.writtenAt,
+        });
+      }
+
+      // 退出登录：清掉该用户的拼多多 Cookie（登录态失效/换账号时用）
+      if (method === 'POST' && p === '/api/pdd/logout') {
+        await pdd.clearSession(pddUid);
+        await logOp(user, 'pdd.logout', { tenantId: pddUid });
+        return sendJson(res, 200, { ok: true, message: '已清除该账号的拼多多登录态' });
+      }
+
+      // 「申请发票」：校验订单归属与状态 → 派给该用户的本机助手 → 助手加载真实开票页逐单提交
+      // （anti-content 必须由页面风控 SDK 生成，服务器无法复刻，所以必须走助手）
+      if (method === 'POST' && p === '/api/pdd/apply') {
+        const b = await readBody(req);
+        const sns = Array.isArray(b.orderSns) ? b.orderSns : [];
+        if (!sns.length) return sendJson(res, 200, { ok: false, message: '请先勾选要申请发票的订单' });
+
+        if (!(await pdd.cookieStatus(pddUid).catch(() => null) || {}).logined) {
+          return sendJson(res, 200, { ok: false, loginish: true, message: '尚未登录拼多多或登录态已失效，请先登录' });
+        }
+        if (!agentHub.isOnline(pddUid)) {
+          return sendJson(res, 200, {
+            ok: false, needAgent: true,
+            message: '本机助手未连接：申请发票要在该用户电脑的助手里真实提交（页面生成风控签名），请先启动助手。',
+          });
+        }
+        const agentVer = agentHub.status(pddUid).agentVer || '';
+        if (agentVer && !verGte(agentVer, PDD_APPLY_MIN_AGENT)) {
+          return sendJson(res, 200, {
+            ok: false, needAgent: true, agentOutdated: true,
+            message: `该用户的本机助手是 v${agentVer}，还不支持申请发票。请升级到 v${PDD_APPLY_MIN_AGENT} 及以上。`,
+          });
+        }
+
+        const { orders, invalid } = await pdd.getApplyableOrders(pddUid, sns);
+        if (!orders.length) {
+          return sendJson(res, 200, {
+            ok: false,
+            message: '没有可申请的订单：勾选的订单不属于该账号，或状态不是「待申请」'
+              + (invalid.length ? `（无效：${invalid.slice(0, 3).join('、')}${invalid.length > 3 ? ' 等' : ''}）` : ''),
+          });
+        }
+
+        const taskId = 'pdda-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+        const ctx = {
+          taskId, kind: 'apply', userId: Number(pddUid), status: 'pending', message: '',
+          total: orders.length, results: [], okCount: 0, failCount: 0,
+          createdAt: Date.now(), expiresAt: Date.now() + PDD_APPLY_TTL_MS,
+        };
+        const sent = agentHub.send(pddUid, {
+          type: 'pdd_apply',
+          taskId,
+          orders: orders.map((o) => ({ order_sn: o.order_sn, mall_id: o.mall_id })),
+          gapMs: 3000,          // 每单间隔，控制频率别惊动风控
+          timeoutMs: 30000,     // 单单超时
+        });
+        if (!sent) {
+          return sendJson(res, 200, { ok: false, needAgent: true, message: '下发申请任务失败：本机助手连接已断开。' });
+        }
+        PDD_TASKS.set(taskId, ctx);
+        await logOp(user, 'pdd.apply.start', { tenantId: pddUid, total: orders.length, invalid: invalid.length });
+        return sendJson(res, 200, {
+          ok: true, pending: true, taskId,
+          total: orders.length,
+          skipped: invalid,
+          message: `已下发申请任务（${orders.length} 单），正在该用户电脑的助手里逐单提交…`,
+        });
+      }
+
+      // 「催商家开票」：给「商家处理中」的订单发一条催收消息 → 派给该用户的本机助手
+      // 助手加载真实聊天页打字点发送（anti-content 必须由页面风控 SDK 生成，服务器无法复刻）
+      if (method === 'POST' && p === '/api/pdd/send') {
+        const b = await readBody(req);
+        const sns = Array.isArray(b.orderSns) ? b.orderSns : [];
+        if (!sns.length) return sendJson(res, 200, { ok: false, message: '请先勾选要催收的订单' });
+
+        if (!(await pdd.cookieStatus(pddUid).catch(() => null) || {}).logined) {
+          return sendJson(res, 200, { ok: false, loginish: true, message: '尚未登录拼多多或登录态已失效，请先登录' });
+        }
+        if (!agentHub.isOnline(pddUid)) {
+          return sendJson(res, 200, {
+            ok: false, needAgent: true,
+            message: '本机助手未连接：发催收消息要在该用户电脑的助手里打开真实聊天页（页面生成风控签名），请先启动助手。',
+          });
+        }
+        const agentVer = agentHub.status(pddUid).agentVer || '';
+        if (agentVer && !verGte(agentVer, PDD_SEND_MIN_AGENT)) {
+          return sendJson(res, 200, {
+            ok: false, needAgent: true, agentOutdated: true,
+            message: `该用户的本机助手是 v${agentVer}，还不支持发送催收消息。请升级到 v${PDD_SEND_MIN_AGENT} 及以上。`,
+          });
+        }
+
+        const { orders, invalid } = await pdd.getChatableOrders(pddUid, sns);
+        if (!orders.length) {
+          return sendJson(res, 200, {
+            ok: false,
+            message: '没有可催收的订单：只能对「商家处理中」的订单催开票'
+              + (invalid.length ? `（跳过：${invalid.slice(0, 3).join('、')}${invalid.length > 3 ? ' 等' : ''}）` : ''),
+          });
+        }
+
+        // 同一条话术发给同一个商家只需要一次（多个订单同一商家 = 同一会话）。
+        // 但如果模板里用了 {orderSn}，说明用户想逐单说明，就按订单逐条发。
+        const cfg = loadConfig();
+        const msgCfg = pdd.getPddMessageConfig(cfg);
+        const buyer = await buyerInfoOf(Number(pddUid));
+        const perOrder = /\{orderSn\}/.test(msgCfg.chat);
+        const items = [];
+        const seenMall = new Set();
+        for (const o of orders) {
+          const content = pdd.buildPddMessage(cfg, buyer, {
+            order_sn: o.order_sn, invoice_amount: o.invoice_amount,
+          });
+          if (!content.trim()) continue;   // 模板为空绝不发空消息（1688 已经踩过这个坑）
+          if (!perOrder && seenMall.has(String(o.mall_id))) continue;
+          seenMall.add(String(o.mall_id));
+          items.push({ order_sn: o.order_sn, mall_id: o.mall_id, content });
+        }
+        if (!items.length) {
+          return sendJson(res, 200, { ok: false, message: '催收消息内容为空：请到「系统管理 → 拼多多催收消息」配置模板' });
+        }
+
+        const taskId = 'pddm-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+        const ctx = {
+          taskId, kind: 'send', userId: Number(pddUid), status: 'pending', message: '',
+          total: items.length, results: [], okCount: 0, failCount: 0,
+          createdAt: Date.now(), expiresAt: Date.now() + PDD_APPLY_TTL_MS,
+        };
+        const sent = agentHub.send(pddUid, {
+          type: 'pdd_send',
+          taskId,
+          items,
+          gapMs: msgCfg.gapMs,  // 每个商家之间的间隔，控制频率别惊动风控
+          timeoutMs: 40000,     // 单个会话超时
+        });
+        if (!sent) {
+          return sendJson(res, 200, { ok: false, needAgent: true, message: '下发催收任务失败：本机助手连接已断开。' });
+        }
+        PDD_TASKS.set(taskId, ctx);
+        await logOp(user, 'pdd.send.start', { tenantId: pddUid, total: items.length, invalid: invalid.length });
+        return sendJson(res, 200, {
+          ok: true, pending: true, taskId,
+          total: items.length,
+          merged: orders.length - items.length,   // 同商家合并掉的单数
+          skipped: invalid,
+          preview: items[0] ? items[0].content : '',
+          message: `已下发催收任务（${items.length} 个商家${orders.length > items.length ? `，${orders.length - items.length} 单同商家已合并` : ''}），正在该用户电脑的助手里逐条发送…`,
+        });
+      }
+
+      // 停止「页内任务」（申请发票 / 催收消息通用）：已完成的不会撤回，当前这一单处理完就停
+      if (method === 'POST' && (p === '/api/pdd/apply-stop' || p === '/api/pdd/task-stop')) {
+        const b = await readBody(req);
+        const ctx = PDD_TASKS.get(String(b.taskId || ''));
+        const mine = ctx && (ctx.userId === Number(user.id) || (isAdmin && ctx.userId === Number(pddUid)));
+        if (!mine) return sendJson(res, 404, { error: '任务不存在或已结束' });
+        if (ctx.status !== 'pending') return sendJson(res, 200, { ok: false, message: '任务已结束，无需停止' });
+        ctx.stopping = true;
+        const sent = agentHub.send(ctx.userId, { type: 'stop' });
+        return sendJson(res, 200, {
+          ok: true,
+          message: sent ? '已发送停止指令：当前这一单处理完就停' : '助手连接已断开，任务会随连接中断结束',
+        });
+      }
+
+      // 轮询「页内任务」进度（status: pending / done / failed）——申请发票与催收消息共用
+      if (method === 'GET' && (p === '/api/pdd/apply-status' || p === '/api/pdd/task-status')) {
+        const ctx = PDD_TASKS.get(String(url.searchParams.get('taskId') || ''));
+        const mine = ctx && (ctx.userId === Number(user.id) || (isAdmin && ctx.userId === Number(pddUid)));
+        if (!mine) return sendJson(res, 404, { error: '任务不存在或已结束' });
+        return sendJson(res, 200, {
+          kind: ctx.kind || 'apply',
+          status: ctx.status,
+          ok: ctx.status === 'done',
+          message: ctx.message || '',
+          total: ctx.total,
+          results: ctx.results,
+          okCount: ctx.okCount,
+          failCount: ctx.failCount,
+          progress: ctx.progress || null,
+          progressLog: ctx.progressLog || [],
+        });
+      }
+
+      return sendJson(res, 404, { error: '未知拼多多接口' });
+    }
+
     // ── 系统管理（仅超级管理员） ──
     if (p.startsWith('/api/admin/')) {
       if (!isAdmin) return sendJson(res, 403, { error: '仅超级管理员可访问' });
@@ -2592,7 +3209,8 @@ const server = http.createServer(async (req, res) => {
       if (method === 'POST' && p === '/api/admin/users/delete') {
         return sendJson(res, 200, await deleteUser(await readBody(req), user));
       }
-      // 菜单权限：逐个账号开启/关闭（menu=refund|profit，缺省 refund 向后兼容）
+      // 菜单权限：逐个账号开启/关闭（menu=refund|profit，缺省 refund 向后兼容；
+      // 拼多多发票对所有用户开放，不再走这里）
       if (method === 'POST' && p === '/api/admin/users/qnh-refund') {
         const b = await readBody(req);
         const id = Number(b.id);

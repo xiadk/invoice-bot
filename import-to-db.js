@@ -15,12 +15,12 @@
  *
  * 映射表维护:
  *   自动匹配规则（精确 / 规范化 / 包含 / 登录ID / 备注线索），命中即写入 seller_name_mapping；
- *   匹配不上的看板「名称映射」页会列出来，人工比对后保存。再次导入不会覆盖人工维护的结果。
+ *   匹配不上的看板「税名核对」页会列出来，人工比对后保存。再次导入不会覆盖人工维护的结果。
  *
  * 导入语义（增量去重，2026-10-13 起）:
  *   按「订单号 / 行哈希」判断——数据库里已有的行直接跳过，只插入新行；不删表、不更新已有行。
  *   · invoice_order   ：订单号已存在 → 跳过（该行的开票状态、人工确认原样保留）
- *   · issued_invoice  ：row_hash 已存在 → 跳过；另外把「后来新建的名称映射」回填到已有发票行
+ *   · issued_invoice  ：row_hash 已存在 → 跳过；另外把「后来新建的税名核对映射」回填到已有发票行
  *   · 注意：已导入过的订单即使从 Excel 里删掉，也不会从看板消失（只进不出）
  */
 const fs = require('fs');
@@ -316,9 +316,9 @@ function matchSeller(taxName, remark, sellers) {
   return null;
 }
 
-/** 对「未映射的销方名称」做自动匹配并写入映射表（按用户） */
+/** 对「未映射的销方名称」做自动匹配并写入映射表（映射全员共享：读全局已有映射，user_id 记维护人） */
 async function autoMapSellers(sellers, taxNames, userId) {
-  const existing = await db.query('SELECT tax_seller_name, seller_company, is_ignored FROM seller_name_mapping WHERE user_id = ?', [userId]);
+  const existing = await db.query('SELECT tax_seller_name, seller_company, is_ignored FROM seller_name_mapping');
   const mapped = new Set(existing.filter((r) => r.seller_company).map((r) => r.tax_seller_name));
   const ignored = new Set(existing.filter((r) => r.is_ignored).map((r) => r.tax_seller_name));
 
@@ -555,7 +555,7 @@ async function importInvoices(userId) {
 
   // 2) 依据映射表（含人工维护）回填 seller_company
   const mapRows = await db.query(
-    'SELECT tax_seller_name, seller_company FROM seller_name_mapping WHERE user_id = ? AND seller_company IS NOT NULL',
+    'SELECT tax_seller_name, seller_company FROM seller_name_mapping WHERE seller_company IS NOT NULL',
     [userId]
   );
   const nameMap = new Map(mapRows.map((r) => [r.tax_seller_name, r.seller_company]));
@@ -575,12 +575,12 @@ async function importInvoices(userId) {
   }
   const inserted = await bulkInsert('issued_invoice', INVOICE_FIELDS, fresh);
 
-  // 4) 映射回填：后来新建/自动匹配上的名称映射，同步回填到已有发票行。
+  // 4) 映射回填：后来新建/自动匹配上的税名映射，同步回填到已有发票行。
   //    （增量为不删表，旧行不会像全量重建那样自动带上新映射，这里显式补上；
   //      人工维护映射时 saveMapping/ignoreMapping 也会各自回填，两路保持一致。）
   const backfilled = await db.exec(
     `UPDATE issued_invoice i JOIN seller_name_mapping m
-       ON m.user_id = i.user_id AND m.tax_seller_name = i.seller_name AND m.seller_company IS NOT NULL
+       ON m.tax_seller_name = i.seller_name AND m.seller_company IS NOT NULL
      SET i.seller_company = m.seller_company
      WHERE i.user_id = ? AND (i.seller_company IS NULL OR i.seller_company <> m.seller_company)`,
     [userId]
@@ -681,7 +681,7 @@ async function importInvoiceUpload(userId, filePath, displayName) {
 
   // 2) 依据映射表（含人工维护）回填 seller_company
   const mapRows = await db.query(
-    'SELECT tax_seller_name, seller_company FROM seller_name_mapping WHERE user_id = ? AND seller_company IS NOT NULL',
+    'SELECT tax_seller_name, seller_company FROM seller_name_mapping WHERE seller_company IS NOT NULL',
     [userId]
   );
   const nameMap = new Map(mapRows.map((r) => [r.tax_seller_name, r.seller_company]));
@@ -707,7 +707,7 @@ async function importInvoiceUpload(userId, filePath, displayName) {
   // 5) 映射回填：自动匹配/人工维护的映射同步到已有发票行
   const backfilled = await db.exec(
     `UPDATE issued_invoice i JOIN seller_name_mapping m
-       ON m.user_id = i.user_id AND m.tax_seller_name = i.seller_name AND m.seller_company IS NOT NULL
+       ON m.tax_seller_name = i.seller_name AND m.seller_company IS NOT NULL
      SET i.seller_company = m.seller_company
      WHERE i.user_id = ? AND (i.seller_company IS NULL OR i.seller_company <> m.seller_company)`,
     [userId]
@@ -792,7 +792,7 @@ async function runImport(opts) {
     out.steps.push(`已开票订单：${r.files} 个文件，新写入 ${r.inserted} 行明细`
       + (r.skippedExisting ? `，跳过 ${r.skippedExisting} 行（数据库已有，按行去重）` : ''));
     out.steps.push(`销方名称自动匹配 ${r.autoMapped ? r.autoMapped.length : 0} 个，待人工比对 ${r.unmatchedNames ? r.unmatchedNames.length : 0} 个`);
-    if (r.backfilled) out.steps.push(`名称映射回填：更新 ${r.backfilled} 行已有发票的商家关联`);
+    if (r.backfilled) out.steps.push(`税名映射回填：更新 ${r.backfilled} 行已有发票的商家关联`);
   }
 
   const legacy = await migrateLegacySentLog(userId);
@@ -821,7 +821,7 @@ if (require.main === module) {
     .then((r) => {
       for (const s of r.steps) console.log('  ' + s);
       if (r.invoices && r.invoices.unmatchedNames && r.invoices.unmatchedNames.length) {
-        console.log('\n以下销方名称未能自动匹配，请在看板「名称映射」页人工维护：');
+        console.log('\n以下销方名称未能自动匹配，请在看板「税名核对」页人工维护：');
         for (const n of r.invoices.unmatchedNames) console.log('  - ' + n);
       }
       console.log(`\n[完成] 耗时 ${(r.elapsedMs / 1000).toFixed(1)}s`);

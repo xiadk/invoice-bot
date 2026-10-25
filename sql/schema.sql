@@ -158,12 +158,13 @@ CREATE TABLE IF NOT EXISTS `issued_invoice` (
 -- 老库增量升级（补 user_id / uk_row_hash → uk_user_row_hash）：交给 db.js migrate()
 
 -- ----------------------------------------------------------------------------
--- 表 3: seller_name_mapping —— 销方名称 ↔ 1688 商家名称 映射表（按用户隔离）
+-- 表 3: seller_name_mapping —— 销方名称 ↔ 1688 商家名称 映射表（全员共享：tax_seller_name 全局唯一）
+--   user_id 语义为「维护人」——记录这条映射最早由哪个用户建立；所有用户共用同一份映射关系
 -- ----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS `seller_name_mapping` (
   `id`              INT          NOT NULL AUTO_INCREMENT COMMENT '自增主键',
-  `user_id`         INT          NOT NULL DEFAULT 1      COMMENT '数据归属用户ID（多租户隔离键，见 app_user.id）',
-  `tax_seller_name` VARCHAR(255) NOT NULL                COMMENT '税务局销方名称（与 user_id 组成唯一键）',
+  `user_id`         INT          NOT NULL DEFAULT 1      COMMENT '维护人用户ID（谁建立的这条映射；映射全员共享，不做租户隔离）',
+  `tax_seller_name` VARCHAR(255) NOT NULL                COMMENT '税务局销方名称（全局唯一，全员共享）',
   `seller_company`  VARCHAR(255) NULL                    COMMENT '对应的1688卖家公司名',
   `seller_login`    VARCHAR(128) NULL                    COMMENT '对应的1688卖家会员名（登录ID）',
   `match_type`      VARCHAR(16)  NOT NULL DEFAULT 'manual' COMMENT '匹配方式：auto=系统自动匹配，manual=人工维护',
@@ -174,15 +175,15 @@ CREATE TABLE IF NOT EXISTS `seller_name_mapping` (
   `created_at`      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
   `updated_at`      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
   PRIMARY KEY (`id`),
-  UNIQUE KEY `uk_user_tax_name` (`user_id`, `tax_seller_name`),
+  UNIQUE KEY `uk_tax_seller_name` (`tax_seller_name`),
   KEY `idx_user_id`             (`user_id`),
   KEY `idx_seller_login`        (`seller_login`),
   KEY `idx_seller_company`      (`seller_company`),
   KEY `idx_is_ignored`          (`is_ignored`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-  COMMENT='税务局销方名称与1688商家名称的映射表（按用户隔离；is_ignored=1 表示确认无对应商家）';
+  COMMENT='税务局销方名称与1688商家名称的映射表（全员共享；is_ignored=1 表示确认无对应商家）';
 
--- 老库增量升级（补 user_id / is_ignored / 唯一键与索引）：交给 db.js migrate()
+-- 老库增量升级（user_id 语义改为维护人、唯一键改全局唯一）：交给 db.js migrate()
 
 -- ----------------------------------------------------------------------------
 -- 表 4: send_log —— 催收消息发送记录（一行 = 一次发送尝试）
@@ -253,8 +254,7 @@ SELECT
   MAX(i.`remark`)                       AS `remark`
 FROM `issued_invoice` i
 LEFT JOIN `seller_name_mapping` m
-       ON m.`user_id` = i.`user_id`
-      AND m.`tax_seller_name` = i.`seller_name`
+       ON m.`tax_seller_name` = i.`seller_name`
       AND (m.`is_ignored` = 1 OR m.`seller_company` IS NOT NULL)
 WHERE m.`id` IS NULL
 GROUP BY i.`user_id`, i.`seller_name`;
@@ -339,3 +339,68 @@ CREATE TABLE IF NOT EXISTS `operation_log` (
   KEY `idx_op_log_created` (`created_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   COMMENT='操作日志（仅超级管理员可查看）';
+
+-- ----------------------------------------------------------------------------
+-- product_item —— 商品列表（前置仓补货参考批量导出导入；按用户隔离）
+--   商品SKU 为 19 位长数字，按 VARCHAR 文本存储（禁止数值类型，防精度丢失）
+--   重复导入按 (user_id, sku) 覆盖更新（与发票/订单导入同一惯例）
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `product_item` (
+  `id`              BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `user_id`         INT           NOT NULL              COMMENT '数据归属用户ID（app_user.id）',
+  `sku`             VARCHAR(64)   NOT NULL              COMMENT '商品SKU（文本存储）',
+  `goods_name`      VARCHAR(512)  NOT NULL DEFAULT ''   COMMENT '商品名称',
+  `purchase_price`  DECIMAL(12,2) NOT NULL DEFAULT 0    COMMENT '商品采购价（元，取「采购单价(基础单位)」）',
+  `available_stock` INT           NOT NULL DEFAULT 0    COMMENT '可用库存（门店仓口径）',
+  `transit_stock`   INT           NOT NULL DEFAULT 0    COMMENT '在途库存（门店仓口径）',
+  `purchase_status` VARCHAR(16)   NOT NULL DEFAULT ''   COMMENT '采购状态（正常采购/停止采购，原样存导出文件的值）',
+  `sales_30d`       INT           NOT NULL DEFAULT 0    COMMENT '30天总销量',
+  `batch_id`        BIGINT UNSIGNED NULL                COMMENT '最近一次导入批次（product_import_batch.id）',
+  `source_file`     VARCHAR(255)  DEFAULT NULL          COMMENT '来源文件名',
+  `created_at`      DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '首次导入时间',
+  `updated_at`      DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '最近更新时间',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_user_sku` (`user_id`, `sku`),
+  KEY `idx_pi_user_status` (`user_id`, `purchase_status`),
+  KEY `idx_pi_sku` (`sku`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  COMMENT='商品列表（前置仓补货参考导入；按用户隔离）';
+
+-- ----------------------------------------------------------------------------
+-- product_import_batch —— 商品导入批次快照（总货值趋势图的数据点）
+--   总货值 = Σ((可用库存 + 在途库存) × 采购价)
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `product_import_batch` (
+  `id`          BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `user_id`     INT           NOT NULL              COMMENT '导入用户（app_user.id）',
+  `source_file` VARCHAR(255)  NOT NULL DEFAULT ''   COMMENT '来源文件名',
+  `item_count`  INT           NOT NULL DEFAULT 0    COMMENT '本次导入商品行数',
+  `total_value` DECIMAL(14,2) NOT NULL DEFAULT 0    COMMENT '总货值=Σ((可用库存+在途库存)×采购价)',
+  `imported_at` DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '导入时间',
+  PRIMARY KEY (`id`),
+  KEY `idx_pib_user_time` (`user_id`, `imported_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  COMMENT='商品导入批次快照（总货值趋势数据点）';
+
+-- ----------------------------------------------------------------------------
+-- market_listing —— 交易市场发布记录（⚠ 全局共享表：所有用户的报价在此汇集）
+--   同人同 SKU 重复发布 = 更新价格/数量并刷新发布时间（唯一键 user_id+sku）
+--   主列表按 sku GROUP BY 去重：数量=SUM(quantity)，价格=MIN(discount_price)
+--   报价列表排序：价格升序、同价发布时间倒序（服务端 SQL 已排序）
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `market_listing` (
+  `id`             BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `user_id`        INT           NOT NULL              COMMENT '发布人（app_user.id）',
+  `sku`            VARCHAR(64)   NOT NULL              COMMENT '商品SKU',
+  `goods_name`     VARCHAR(512)  NOT NULL DEFAULT ''   COMMENT '商品名称（发布时快照）',
+  `orig_price`     DECIMAL(12,2) NOT NULL DEFAULT 0    COMMENT '发布时的商品采购价',
+  `quantity`       INT           NOT NULL DEFAULT 0    COMMENT '发布数量（发布时可用库存快照）',
+  `discount`       DECIMAL(6,2)  NOT NULL DEFAULT 100  COMMENT '折扣（百分比，80=按采购价80%）',
+  `discount_price` DECIMAL(12,2) NOT NULL DEFAULT 0    COMMENT '折后价=采购价×折扣%',
+  `published_at`   DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '发布时间（重复发布即刷新）',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_ml_user_sku` (`user_id`, `sku`),
+  KEY `idx_ml_sku` (`sku`),
+  KEY `idx_ml_price` (`sku`, `discount_price`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  COMMENT='交易市场发布记录（跨用户共享，报价汇集）';

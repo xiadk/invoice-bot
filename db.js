@@ -264,6 +264,86 @@ async function ensureQnhSchema(q) {
       "  KEY `idx_qpo_alert` (`alerted`)" +
       ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='订单毛利明细（实时毛利监控）'",
 
+    // ── 拼多多：已完成订单 / 发票申请 ────────────────────────────────
+    // 数据来源两个接口（都不需要风控签名，服务器可直连）：
+    //   · 待申请订单 list_invoice_order   → invoice_status = 7
+    //   · 已申请发票 list_invoice         → invoice_status = 0/1/2/6
+    // 状态语义（实测）：7待申请 0暂不可开票（如全额退款）1开票中 2已开票 6商家处理中
+    // 登录态（Cookie）由「本机助手」采集回传，存数据库不落文件（容器重启不丢）。
+    'CREATE TABLE IF NOT EXISTS `pdd_order` (' +
+      "  `user_id` INT NOT NULL DEFAULT 1 COMMENT '数据归属用户'," +
+      "  `order_sn` VARCHAR(64) NOT NULL COMMENT '订单号'," +
+      "  `mall_id` BIGINT DEFAULT NULL COMMENT '店铺 ID'," +
+      "  `goods_name` VARCHAR(255) DEFAULT NULL COMMENT '商品名'," +
+      "  `spec` VARCHAR(255) DEFAULT NULL COMMENT '规格'," +
+      "  `thumb_url` VARCHAR(512) DEFAULT NULL COMMENT '商品图'," +
+      "  `order_time` DATETIME DEFAULT NULL COMMENT '下单时间'," +
+      "  `invoice_amount` DECIMAL(14,2) DEFAULT NULL COMMENT '可开票金额'," +
+      "  `invoice_status` TINYINT NOT NULL DEFAULT 0 COMMENT '开票状态 7待申请 0暂不可开票 1开票中 2已开票 6商家处理中'," +
+      "  `invoice_time_str` VARCHAR(255) DEFAULT NULL COMMENT '开票进度说明（如「预计订单确认收货后10日之内开票」）'," +
+      "  `reject_reason` VARCHAR(512) DEFAULT NULL COMMENT '驳回原因'," +
+      "  `business_type` TINYINT DEFAULT NULL COMMENT '业务类型（页面 business_type）'," +
+      "  `invoice_kind` TINYINT DEFAULT NULL COMMENT '发票类型（页面 invoice_kind）'," +
+      "  `payer_name` VARCHAR(128) DEFAULT NULL COMMENT '发票抬头（付款方名称）'," +
+      "  `can_reapply` TINYINT(1) DEFAULT NULL COMMENT '是否可重新申请'," +
+      "  `paper_shipping_id` BIGINT DEFAULT NULL COMMENT '纸质发票物流 ID'," +
+      "  `paper_tracking_number` VARCHAR(128) DEFAULT NULL COMMENT '纸质发票快递单号'," +
+      "  `is_full_refund` TINYINT(1) DEFAULT NULL COMMENT '是否全额退款'," +
+      "  `is_mall_close` TINYINT(1) DEFAULT NULL COMMENT '店铺是否已关闭'," +
+      "  `raw_json` LONGTEXT DEFAULT NULL," +
+      "  `synced_at` DATETIME DEFAULT NULL COMMENT '本轮同步时间'," +
+      "  `fetched_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP," +
+      "  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP," +
+      "  PRIMARY KEY (`user_id`,`order_sn`)," +
+      "  KEY `idx_pdo_status` (`user_id`,`invoice_status`)," +
+      "  KEY `idx_pdo_time` (`order_time`)" +
+      ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='拼多多已完成订单与开票状态'",
+
+    // 拼多多登录态（Cookie 串）。与 qnh_session 同样的思路：入库不落盘。
+    // 只需要 Cookie 头，不需要 Playwright storageState（接口是纯 HTTP 调用）。
+    'CREATE TABLE IF NOT EXISTS `pdd_session` (' +
+      "  `user_id` INT NOT NULL COMMENT '归属用户（每位登录过拼多多的用户一行）'," +
+      "  `cookie` MEDIUMTEXT COMMENT 'Cookie 请求头原串'," +
+      "  `pdduid` VARCHAR(32) DEFAULT NULL COMMENT '拼多多用户 ID（Cookie 里的 pdd_user_id）'," +
+      "  `account_name` VARCHAR(128) DEFAULT NULL COMMENT '账号昵称/手机号（若页面能取到）'," +
+      "  `cookie_count` INT NOT NULL DEFAULT 0," +
+      "  `source` VARCHAR(32) DEFAULT NULL COMMENT '采集来源：本机助手'," +
+      "  `agent_ver` VARCHAR(32) DEFAULT NULL," +
+      "  `written_at` DATETIME DEFAULT NULL," +
+      "  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP," +
+      "  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP," +
+      "  PRIMARY KEY (`user_id`)" +
+      ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='拼多多登录态（入库，替代本机文件）'",
+
+    // 拼多多开票申请日志（每单一条）。申请是真实写操作（页面会真的提交开票申请），
+    // 必须落库留痕：成功与否、失败原因、助手回传的接口响应摘要。
+    'CREATE TABLE IF NOT EXISTS `pdd_apply_log` (' +
+      "  `id` INT NOT NULL AUTO_INCREMENT," +
+      "  `user_id` INT NOT NULL COMMENT '归属用户（app_user.id）'," +
+      "  `order_sn` VARCHAR(64) NOT NULL COMMENT '拼多多订单号'," +
+      "  `ok` TINYINT NOT NULL DEFAULT 0 COMMENT '是否提交成功 1是 0否'," +
+      "  `detail` VARCHAR(255) DEFAULT NULL COMMENT '结果说明（成功/失败原因）'," +
+      "  `resp` VARCHAR(500) DEFAULT NULL COMMENT '助手回传的接口响应摘要'," +
+      "  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP," +
+      "  PRIMARY KEY (`id`)," +
+      "  KEY `idx_pal_user_sn` (`user_id`,`order_sn`)" +
+      ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='拼多多开票申请日志'",
+
+    // 拼多多催收消息发送日志（每单一条）。发消息也是真实外发动作（商家真的会收到），
+    // 必须落库留痕：发没发出去、失败原因、发的内容、接口响应摘要。
+    'CREATE TABLE IF NOT EXISTS `pdd_msg_log` (' +
+      "  `id` INT NOT NULL AUTO_INCREMENT," +
+      "  `user_id` INT NOT NULL COMMENT '归属用户（app_user.id）'," +
+      "  `order_sn` VARCHAR(64) NOT NULL COMMENT '拼多多订单号'," +
+      "  `ok` TINYINT NOT NULL DEFAULT 0 COMMENT '是否发送成功 1是 0否'," +
+      "  `detail` VARCHAR(255) DEFAULT NULL COMMENT '结果说明（成功/失败原因）'," +
+      "  `content` VARCHAR(500) DEFAULT NULL COMMENT '实际发送的消息内容'," +
+      "  `resp` VARCHAR(500) DEFAULT NULL COMMENT '助手回传的接口响应摘要'," +
+      "  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP," +
+      "  PRIMARY KEY (`id`)," +
+      "  KEY `idx_pml_user_sn` (`user_id`,`order_sn`)" +
+      ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='拼多多催收消息发送日志'",
+
     // 牵牛花登录态（Cookies）。云端部署时不能落本机文件（容器目录会随重启丢失），
     // 故统一入库；登录态由「本机助手」采集后回传，服务器自己不再启动浏览器。
     'CREATE TABLE IF NOT EXISTS `qnh_session` (' +
@@ -401,6 +481,12 @@ async function migrate(conn, dbName) {
     await q(
       'ALTER TABLE `app_user` ADD COLUMN `qnh_profit_enabled` TINYINT(1) NOT NULL DEFAULT 0 ' +
       "COMMENT '是否允许查看实时毛利监控（1=开启，超级管理员始终可见）'"
+    );
+  }
+  if (!(await colExists('app_user', 'pdd_enabled'))) {
+    await q(
+      'ALTER TABLE `app_user` ADD COLUMN `pdd_enabled` TINYINT(1) NOT NULL DEFAULT 0 ' +
+      "COMMENT '是否允许查看拼多多发票页（1=开启，超级管理员始终可见）'"
     );
   }
 
@@ -545,15 +631,33 @@ async function migrate(conn, dbName) {
   if (!(await idxExists('issued_invoice', 'uk_user_row_hash'))) {
     await q('ALTER TABLE `issued_invoice` ADD UNIQUE KEY `uk_user_row_hash` (`user_id`, `row_hash`)');
   }
-  if (await idxExists('seller_name_mapping', 'uk_tax_seller_name')) {
-    await q('ALTER TABLE `seller_name_mapping` DROP INDEX `uk_tax_seller_name`');
-  }
-  if (!(await idxExists('seller_name_mapping', 'uk_user_tax_name'))) {
-    await q('ALTER TABLE `seller_name_mapping` ADD UNIQUE KEY `uk_user_tax_name` (`user_id`, `tax_seller_name`)');
-  }
   // 复合索引：按用户查卖家时更快
   if (!(await idxExists('send_log', 'idx_user_login'))) {
     await q('ALTER TABLE `send_log` ADD KEY `idx_user_login` (`user_id`, `seller_login`)');
+  }
+  // 唯一键改造（v0.2.15）：seller_name_mapping 改为全员共享——tax_seller_name 全局唯一，
+  // user_id 退化为「维护人」（记录这条映射最早由谁维护）。老库从 (user_id, tax_seller_name)
+  // 迁移过来时先把同一销方名称的多行合并成一行。
+  if (await idxExists('seller_name_mapping', 'uk_user_tax_name')) {
+    const dups = await q(
+      'SELECT tax_seller_name FROM seller_name_mapping GROUP BY tax_seller_name HAVING COUNT(*) > 1'
+    );
+    for (const d of dups) {
+      const rows = await q(
+        'SELECT id FROM seller_name_mapping WHERE tax_seller_name = ? ' +
+        'ORDER BY seller_company IS NULL ASC, is_confirmed DESC, updated_at DESC, id ASC LIMIT 1',
+        [d.tax_seller_name]
+      );
+      const keep = rows[0] && rows[0].id;
+      if (keep != null) {
+        await q('DELETE FROM seller_name_mapping WHERE tax_seller_name = ? AND id <> ?', [d.tax_seller_name, keep]);
+        console.log(`[db] 税名共享化：销方「${d.tax_seller_name}」的多条映射已合并保留一条`);
+      }
+    }
+    await q('ALTER TABLE `seller_name_mapping` DROP INDEX `uk_user_tax_name`');
+  }
+  if (!(await idxExists('seller_name_mapping', 'uk_tax_seller_name'))) {
+    await q('ALTER TABLE `seller_name_mapping` ADD UNIQUE KEY `uk_tax_seller_name` (`tax_seller_name`)');
   }
   if (!(await idxExists('invoice_order', 'idx_user_seller_login'))) {
     await q('ALTER TABLE `invoice_order` ADD KEY `idx_user_seller_login` (`user_id`, `seller_login`)');
@@ -635,6 +739,7 @@ async function migrate(conn, dbName) {
     await q('ALTER TABLE `seller_name_mapping` ADD KEY `idx_is_ignored` (`is_ignored`)');
   }
   // 视图重建：待比对清单需同时排除「已映射」与「已忽略」两类（老库视图定义同步），并按 user_id 分组
+  // （映射全员共享后，JOIN 只按销方名称匹配，不再按 user_id——别的用户核过的销方也算已处理）
   await q(
     'CREATE OR REPLACE VIEW `v_unmatched_seller_name` AS ' +
     'SELECT i.`user_id` AS `user_id`, i.`seller_name` AS `tax_seller_name`, COUNT(*) AS `invoice_rows`, ' +
@@ -642,7 +747,7 @@ async function migrate(conn, dbName) {
     'MAX(i.`invoice_date`) AS `last_invoice_date`, MAX(i.`seller_tax_no`) AS `seller_tax_no`, ' +
     'MAX(i.`remark`) AS `remark` ' +
     'FROM `issued_invoice` i ' +
-    'LEFT JOIN `seller_name_mapping` m ON m.`user_id` = i.`user_id` AND m.`tax_seller_name` = i.`seller_name` ' +
+    'LEFT JOIN `seller_name_mapping` m ON m.`tax_seller_name` = i.`seller_name` ' +
     'AND (m.`is_ignored` = 1 OR m.`seller_company` IS NOT NULL) ' +
     'WHERE m.`id` IS NULL GROUP BY i.`user_id`, i.`seller_name`'
   );

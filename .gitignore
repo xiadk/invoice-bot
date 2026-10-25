@@ -29,3 +29,5 @@ release/
 /build.log
 /npm-install.log
 /server.log
+# logs/ 是开发时 `node server.js >> logs/dev-8787.log` 的运行日志目录；容器里日志走 docker logs
+/logs/
