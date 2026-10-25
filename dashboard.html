@@ -49,6 +49,18 @@
   .user-chip .avatar { width: 28px; height: 28px; border-radius: 50%; background: #fff1e6; color: var(--primary); display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 12px; }
   .user-chip .uname { font-size: 13px; color: var(--text); }
   .user-chip .urole { font-size: 11px; color: var(--sub); }
+  /* 绑定本机助手：已连接时是「状态」不是「按钮」→ 保持绿色、hover 无反馈、光标默认 */
+  .agent-bind-btn.is-bound,
+  .agent-bind-btn.is-bound.is-disabled,
+  .agent-bind-btn.is-bound.is-disabled:hover,
+  .agent-bind-btn.is-bound.is-disabled:focus {
+    color: #2e7d32; background: #f0f9eb; border-color: #c2e7b0; cursor: default;
+  }
+  /* 连接指引弹框里的当前状态行 */
+  .agent-state-line { display: flex; align-items: center; gap: 8px; margin: 0 0 12px; padding: 9px 12px;
+    background: #f7f8fa; border: 1px solid var(--border); border-radius: 6px; font-size: 12px; color: var(--sub); }
+  .agent-state-line .dot { width: 8px; height: 8px; border-radius: 50%; background: #c9ccd1; flex: none; }
+  .agent-state-line .dot.on { background: #2e7d32; }
   .el-main { padding: 18px 20px 40px; }
   .banner { margin: 0; padding: 10px 20px; font-size: 13px; }
   .section-card { margin-bottom: 14px; }
@@ -143,10 +155,13 @@
           <el-menu-item index="audit" v-if="isAdmin">操作日志</el-menu-item>
         </el-menu>
         <div class="nav-right">
-          <el-button size="small" plain @click="openGuideModal" title="发送只在你本机执行：装一次「1688催收助手」→ 绑定 → 在本机登录 1688">本机助手</el-button>
-          <el-tag v-if="agent.online" size="mini" type="success" style="margin-left:6px;cursor:default"
-                  :title="'1688 ' + (agent.loggedIn ? '已登录' : '未登录')">已连接{{ agentVer ? ' · v' + agentVer : '' }}</el-tag>
-          <el-tag v-else size="mini" type="info" style="margin-left:6px;cursor:default" title="助手未运行，发送/登录/申请时会自动唤起">未连接</el-tag>
+          <el-button size="small" plain @click="openDownload"
+                     title="下载 Windows 版本机助手（已内置服务器地址），下载后双击运行">⬇ 下载本机助手</el-button>
+          <!-- 绑定按钮与连接状态合一：未连接可点、已连接变绿色状态且不可点 -->
+          <el-button size="small" :class="['agent-bind-btn', { 'is-bound': agent.online }]"
+                     :type="agent.online ? 'success' : 'primary'" :plain="!agent.online"
+                     :loading="guide.binding" :disabled="agent.online || guide.binding"
+                     :title="agentBindTitle" @click="bindAgent">{{ agentBindText }}</el-button>
           <div class="user-chip">
             <div class="avatar">{{ avatarText }}</div>
             <div>
@@ -744,7 +759,7 @@
               </el-form>
               <div style="margin-top:6px">
                 <el-button type="primary" size="small" @click="openDownload">⬇ 下载本机助手（Windows）</el-button>
-                <span class="form-tip" style="display:inline;margin-left:8px">用户下载到的助手已内置全局地址；在网页登录后点「绑定本机助手」即可完成绑定（设备令牌，无需填税号）。</span>
+                <span class="form-tip" style="display:inline;margin-left:8px">用户下载到的助手已内置全局地址；在网页登录后点右上角「绑定本机助手」即可完成绑定（设备令牌，无需填税号）。</span>
               </div>
 
               <el-divider style="margin:14px 0 10px"></el-divider>
@@ -1335,8 +1350,8 @@
         <el-card class="section-card" shadow="never" :body-style="{ padding: '12px 14px' }">
           <qnh-login-bar service="拼多多" :cookie="pd.cookie" :last-run="pd.lastRun"
                          :who-label="qnhWhoLabel" action-text="刷新发票状态"
-                         :action-loading="pd.syncing"
-                         @login="onPddLoginBtn" @action="doPddSync">
+                         :action-loading="pd.syncing" :can-logout="true"
+                         @login="onPddLoginBtn" @logout="logoutPdd" @action="doPddSync">
             <template slot="actions">
               <el-button size="small" type="success" plain :loading="pd.orderSyncing"
                          @click="syncPddOrders"
@@ -1672,24 +1687,25 @@
     </div>
   </el-dialog>
 
-  <!-- ══════════ 本机助手 · 绑定指引 ══════════ -->
-  <el-dialog title="本机助手 · 连接指引" :visible.sync="guide.visible" width="620px" append-to-body>
+  <!-- ══════════ 本机助手 · 下载指引（只保留下载按钮，发起下载即自动关闭） ══════════ -->
+  <el-dialog title="下载本机助手" :visible.sync="guide.visible" width="560px" append-to-body>
     <el-alert type="warning" :closable="false" show-icon style="margin-bottom:12px"
               title="催收消息只在你自己电脑上发送：服务器不保存你的 1688 登录态、也不用服务器浏览器代发，全程接触不到你的账号密码。"></el-alert>
+    <div class="agent-state-line">
+      <span class="dot" :class="{ on: agent.online }"></span>
+      <span v-if="agent.online">已连接<template v-if="agentVer"> · v{{ agentVer }}</template>，无需再下载；绑定与登录状态见页面右上角。</span>
+      <span v-else>当前未连接：装好并运行助手后，回到本页右上角点「绑定本机助手」即可。</span>
+    </div>
     <ol class="steps">
-      <li><b>装一次</b>：点下方「<b>下载本机助手（Windows）</b>」，下载并安装（绿色便携版双击即可，无需安装）。</li>
-      <li><b>绑一次</b>：回到本页点「<b>绑定本机助手</b>」——浏览器会弹窗问是否打开「1688催收助手」，点「打开」即可自动完成绑定。若没装，会提示你先下载。</li>
+      <li><b>装一次</b>：点下方「<b>下载本机助手（Windows）</b>」，下载后双击运行（绿色便携版，免安装）。</li>
+      <li><b>绑一次</b>：回到本页<b>右上角</b>点「<b>绑定本机助手</b>」——浏览器会弹窗问是否打开「1688催收助手」，点「打开」自动完成绑定；连上后该按钮会变成绿色的「已连接」。</li>
       <li><b>登一次</b>：在助手面板里点「<b>打开 1688 登录窗口</b>」登录你的 1688（登录态只存在你本机，不经过服务器）。</li>
       <li>之后回到「<b>1688发票</b>」页点「<b>发送催收消息</b>」：助手会自己打开 1688 聊天页逐家发送，并在面板里显示实时进度，可随时停止。</li>
     </ol>
-    <div class="muted" style="font-size:12px;margin-bottom:10px" v-html="guide.msg"></div>
-    <div style="display:flex;gap:8px;flex-wrap:wrap">
+    <div slot="footer">
       <el-button type="primary" @click="openDownload">下载本机助手（Windows）</el-button>
-      <el-button :loading="guide.binding" @click="bindAgent">绑定本机助手</el-button>
-      <el-button v-if="guide.deepLink" :disabled="guide.binding" @click="wakeAgent(guide.deepLink)">没反应？再唤一次助手</el-button>
-      <el-button @click="guide.visible = false">知道了</el-button>
     </div>
-    <div class="muted" style="font-size:12px;margin-top:10px;line-height:1.8">
+    <div class="muted" style="font-size:12px;line-height:1.8">
       断线了？助手正常是托盘常驻的；若已退出，再点一次「批量发送」页面会自动把它唤起来。发送中断后，页面会出现「继续发送未完成」——已成功的不会重发。
     </div>
   </el-dialog>
@@ -1812,19 +1828,33 @@ Vue.component('qnh-login-bar', {
     schedule: { type: Object, default: null },
     whoLabel: { type: String, default: '' },
     service: { type: String, default: '牵牛花' },
+    // true=已登录时按钮变成「退出X账号」（点击触发 logout 事件）；false=保持原来的「已登录X」
+    canLogout: { type: Boolean, default: false },
   },
   computed: {
     logined() { return !!(this.cookie && this.cookie.logined); },
     loading() { return !!(this.cookie && this.cookie.loading); },
     btnText() {
-      if (this.loading) return '等待本机登录…';
-      return this.logined ? ('已登录' + this.service) : ('登录' + this.service);
+      if (this.loading) return (this.canLogout && this.logined) ? '退出中…' : '等待本机登录…';
+      if (!this.logined) return '登录' + this.service;
+      return this.canLogout ? ('退出' + this.service + '账号') : ('已登录' + this.service);
     },
-    btnType() { return this.logined ? 'success' : 'danger'; },
+    btnType() {
+      if (!this.logined) return 'danger';
+      return this.canLogout ? 'info' : 'success';
+    },
     accountText() {
       const c = this.cookie || {};
       if (c.tenantName) return c.tenantName + (c.tenantId ? '（' + c.tenantId + '）' : '');
       return c.accountName || '';
+    },
+    accountTip() {
+      const c = this.cookie || {};
+      const bits = [];
+      if (c.accountName) bits.push('账号：' + c.accountName);
+      if (c.pdduid) bits.push('账号 ID：' + c.pdduid);
+      if (c.writtenAt) bits.push('登录时间：' + String(c.writtenAt).slice(0, 16));
+      return bits.join('｜');
     },
     lastRunText() {
       const r = this.lastRun;
@@ -1844,17 +1874,22 @@ Vue.component('qnh-login-bar', {
     },
   },
   methods: {
-    onLogin() { this.$emit('login'); },
+    onLogin() {
+      if (this.logined && this.canLogout) { this.$emit('logout'); return; }
+      this.$emit('login');
+    },
     onAction() { this.$emit('action'); },
   },
   template: `
   <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-    <el-button size="small" :type="btnType" :loading="loading" @click="onLogin">{{ btnText }}</el-button>
+    <el-button size="small" :type="btnType" :plain="logined && canLogout" :loading="loading" @click="onLogin">{{ btnText }}</el-button>
     <el-button size="small" type="primary" :loading="actionLoading" @click="onAction">{{ actionText }}</el-button>
     <slot name="actions"></slot>
     <el-tag v-if="lastRunText" size="small" :type="lastRunType" :title="lastRunTip">{{ lastRunText }}</el-tag>
     <el-tag v-if="scheduleText" size="small" type="success">每天 {{ scheduleText }} 自动同步</el-tag>
-    <el-tag v-if="logined && accountText" size="small">{{ service }} {{ accountText }}</el-tag>
+    <el-tag v-if="logined && accountText" size="small" :title="accountTip">
+      <i class="el-icon-user-solid" style="margin-right:3px"></i>{{ service }} {{ accountText }}
+    </el-tag>
     <span style="flex:1"></span>
     <span class="loginid" v-if="whoLabel">身份：{{ whoLabel }}</span>
     <span class="loginid" v-if="cookie && cookie.message" style="color:#e6a23c">{{ cookie.message }}</span>
@@ -1923,7 +1958,7 @@ const vm = new Vue({
         loading: false, rows: [], total: 0, page: 1, size: 20,
         filter: { status: '', keyword: '', sort: 'time_desc' },
         summary: null, lastRun: null, syncing: false,
-        cookie: { logined: false, loading: false, message: '' },
+        cookie: { logined: false, loading: false, message: '', accountName: '', pdduid: '', writtenAt: null },
         // 「获取订单数据」（订单列表接口）：首次全量、之后增量；orderSync 来自 /api/pdd/status
         // orderMonths = 首次全量只回溯最近几个月（系统管理可配，默认 3）
         orderSyncing: false, orderTaskId: '', orderSync: null, orderMonths: 3,
@@ -2009,12 +2044,26 @@ const vm = new Vue({
       // 上传
       up: { visible: false, kind: 'orders', title: '', guide: '', accept: '.xlsx,.xls', file: null, busy: false, percent: 0, msg: '', result: null },
       // 指引 / 改密
-      guide: { visible: false, msg: '', binding: false, deepLink: '' },
+      guide: { visible: false, binding: false, deepLink: '' },
       pwd: { visible: false, old: '', ne1: '', ne2: '', saving: false },
     };
   },
   computed: {
     isAdmin() { return !!(this.me && this.me.role === 'admin'); },
+    // 顶栏「绑定本机助手」按钮：未连接=动作，已连接=状态（文案与提示都跟着切）
+    agentBindText() {
+      if (this.guide.binding) return '正在绑定…';
+      if (this.agent && this.agent.online) return '✓ 已连接' + (this.agentVer ? ' · v' + this.agentVer : '');
+      return '绑定本机助手';
+    },
+    agentBindTitle() {
+      if (this.guide.binding) return '正在唤起本机助手并等待连接（最多 1 分钟）';
+      if (this.agent && this.agent.online) {
+        return '本机助手已连接' + (this.agent.loggedIn ? '（1688 已登录）' : '（1688 未登录，需在本机助手里登录）')
+          + '，无需重复绑定';
+      }
+      return '点击唤起并绑定本机助手（浏览器会问是否打开「1688催收助手」，点「打开」即可）';
+    },
     // 退单列表页权限：超级管理员始终可见，普通用户由管理员在「系统管理」里开启
     canRefund() { return !!(this.me && (this.me.role === 'admin' || this.me.qnhRefundEnabled)); },
     // 实时毛利监控权限（独立菜单权限）
@@ -2623,7 +2672,7 @@ const vm = new Vue({
         this.$message.info('正在启动本机助手…');
         const ok = await this.ensureAgentOnline();
         if (!ok) {
-          this.$alert('未检测到本机助手。\n\n请先点右上角「本机助手」下载并安装（Windows），安装后再点「绑定本机助手」完成连接。\n发送只在你自己电脑上执行，服务器不代发。', '未连接本机助手', { type: 'warning' });
+          this.$alert('未检测到本机助手。\n\n请先点右上角「下载本机助手」下载并安装（Windows），装好后再点旁边的「绑定本机助手」完成连接。\n发送只在你自己电脑上执行，服务器不代发。', '未连接本机助手', { type: 'warning' });
           this.openGuideModal();
           return;
         }
@@ -2980,11 +3029,6 @@ const vm = new Vue({
     async onPddLoginBtn() {
       if (this.pd.cookie.loading) return;
       if (this.qnhNeedPick) { this.$message.warning('请先选择要以哪个账号的身份登录'); return; }
-      if (this.pd.cookie.logined) {
-        this.$message.success('拼多多已登录，Cookie 有效');
-        await this.loadPddStatus();
-        return;
-      }
       const who = this.isAdmin ? ('「' + (this.qnhWhoLabel || '所选账号') + '」') : '你';
       try {
         await this.$confirm(
@@ -3010,12 +3054,53 @@ const vm = new Vue({
         }
         this.$message.info(d.message || '已打开登录窗口，请在助手里完成登录…');
         const r = await this.pollPddLogin(d.taskId);
-        if (r === 'done') this.$message.success('已登录拼多多，登录态已更新');
-        else if (r === 'failed') this.$message.error('登录未完成：' + (this._pddLoginMsg || '未获取到登录态'));
+        if (r === 'done') {
+          await this.loadPddStatus();
+          const acc = this.pd.cookie.accountName;
+          this.$message.success(acc ? ('已登录拼多多：' + acc) : '已登录拼多多，登录态已更新');
+          return;
+        }
+        if (r === 'failed') this.$message.error('登录未完成：' + (this._pddLoginMsg || '未获取到登录态'));
         else this.$message.warning('等待登录超时：请在助手窗口里登录后，再点一次「登录拼多多」');
         await this.loadPddStatus();
       } catch (e) {
         this.$message.error('登录失败：' + e.message);
+      } finally {
+        this.pd.cookie.loading = false;
+      }
+    },
+
+    /** 「退出拼多多账号」：清掉服务器保存的 Cookie，页面回到未登录状态（已同步的数据不受影响） */
+    async logoutPdd() {
+      if (this.pd.cookie.loading) return;
+      if (this.qnhNeedPick) { this.$message.warning('请先选择要以哪个账号的身份操作'); return; }
+      const acc = this.pd.cookie.accountName || '';
+      const uid = this.pd.cookie.pdduid || '';
+      const accTxt = '拼多多账号' + (acc ? '「' + acc + '」' : '') + (uid ? '（ID ' + uid + '）' : '');
+      const who = this.isAdmin
+        ? ('该身份（' + (this.qnhWhoLabel || '所选账号') + '）下的')
+        : '你当前登录的';
+      try {
+        await this.$confirm(
+          `退出后服务器会清除${who}${accTxt}的登录态，之后刷新发票状态、获取订单数据都需要重新登录。`
+          + '\n已同步的订单与发票数据不受影响，不会被删除。',
+          '退出拼多多账号',
+          { confirmButtonText: '退出登录', cancelButtonText: '取消', type: 'warning' }
+        );
+      } catch (e) { return; }
+
+      this.pd.cookie.loading = true;
+      try {
+        const d = await this.pddApi('/api/pdd/logout', {
+          method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+        });
+        if (d && d.error) { this.$message.error(d.error); return; }
+        // 立即把按钮切回「登录拼多多」，不等下一次轮询
+        this.pd.cookie = { logined: false, loading: false, message: '', accountName: '', pdduid: '', writtenAt: null };
+        this.$message.success((d && d.message) || ('已退出拼多多账号' + (acc ? '「' + acc + '」' : '')));
+        await this.loadPddStatus();
+      } catch (e) {
+        this.$message.error('退出失败：' + e.message);
       } finally {
         this.pd.cookie.loading = false;
       }
@@ -3045,7 +3130,10 @@ const vm = new Vue({
           logined: !!c.logined,
           loading: false,
           message: c.ok ? '' : (c.message || ''),
-          accountName: c.accountName || (c.pdduid ? ('用户 ' + c.pdduid) : ''),
+          // 昵称优先（服务器从身份接口补的），取不到才退回「拼多多用户 <id>」
+          accountName: c.accountName || (c.pdduid ? ('拼多多用户 ' + c.pdduid) : ''),
+          pdduid: c.pdduid || '',
+          writtenAt: c.writtenAt || null,
         };
         this.pd.summary = d.summary || null;
         this.pd.orderSync = d.orderSync || null;
@@ -3813,7 +3901,12 @@ const vm = new Vue({
         else this.$message.error('保存失败: ' + d.error);
       } catch (e) { this.$message.error('保存失败: ' + e.message); }
     },
-    openDownload() { this.reportOp('agent.download'); window.open('/download', '_blank'); },
+    openDownload() {
+      this.reportOp('agent.download');
+      // 已经发起下载就把指引弹框收起来：别挡着用户，也不用再点一次「关闭」
+      this.guide.visible = false;
+      window.open('/download', '_blank');
+    },
     async loadUsers() {
       if (!this.isAdmin) return;
       try {
@@ -4167,10 +4260,8 @@ const vm = new Vue({
 
     // ══════ 本机助手绑定 / 魔唤醒 ══════
     openGuideModal() {
-      this.guide.visible = true; this.guide.msg = '';
-      this.refreshAgent().then(() => {
-        this.guide.msg = (this.agent && this.agent.online) ? '✓ 助手已连接，可以发送了。' : '尚未检测到助手。请先下载安装，再点「绑定本机助手」。';
-      });
+      this.guide.visible = true;
+      this.refreshAgent();
     },
     async agentOnline() { try { const d = await this.api('/api/agent/status'); return !!(d && d.online); } catch (e) { return false; } },
     /**
@@ -4192,40 +4283,66 @@ const vm = new Vue({
         return false;
       }
     },
+    /**
+     * 「绑定本机助手」按钮（顶栏）：未连接时可点；连上后按钮变成绿色的「已连接」且不可点。
+     * 现在没有弹框承载过程提示，所以用一条常驻 toast 说明进度，失败时给「重新绑定 / 去下载」两条出路。
+     */
     async bindAgent() {
+      if (this.agent && this.agent.online) { this.$message.success('本机助手已连接，无需重复绑定'); return; }
+      if (this.guide.binding) return;
       this.guide.binding = true;
-      this.guide.msg = '正在签发绑定令牌…';
+      const tip = this.$message({
+        type: 'info', duration: 0, showClose: false,
+        message: '正在唤起本机助手…若浏览器询问是否打开「1688催收助手」，请点「打开」',
+      });
+      const closeTip = () => { try { tip && tip.close(); } catch (e) { /* 已关闭 */ } };
+      let linked = false;
+      let errText = '';
       try {
         const r = await this.api('/api/agent/pair-code', { method: 'POST' });
         if (!r || !r.bindToken) throw new Error((r && r.error) || '签发绑定令牌失败');
         const link = r.deepLink
           || ('xsh://bind?server=' + encodeURIComponent(r.serverUrl) + '&t=' + r.bindToken);
         this.guide.deepLink = link;
-        this.guide.msg = '正在唤起本机助手…（浏览器若弹窗询问是否打开，请点「打开」）';
         this.wakeAgent(link);
         // 首次安装后助手是冷启动（要几秒才能握手连上），加上第一次唤起可能被浏览器
         // 拦在半路——等 10 秒还没连上就再唤一次，总等待 60 秒。
-        let retried = false;
         for (let i = 0; i < 60; i += 1) {
           await new Promise((res) => setTimeout(res, 1000));
-          if (i === 10 && !retried) {
-            retried = true;
-            this.wakeAgent(link);
-            this.guide.msg = '还没连上，再唤一次助手…（若浏览器弹出询问，请点「打开」）';
-          }
-          if (await this.agentOnline()) {
-            this.guide.msg = '✓ 绑定成功，助手已连接！';
-            await this.refreshAgent();
-            this.$message.success('绑定成功，助手已连接');
-            this.reportOp('agent.bind');
-            return;
-          }
+          if (i === 10) this.wakeAgent(link);
+          if (await this.agentOnline()) { linked = true; break; }
         }
-        this.guide.msg = '没检测到助手。可能是：① 尚未安装（先点「下载本机助手（Windows）」）；'
-          + '② 浏览器拦截了打开请求——地址栏右侧会出现「打开 1688催收助手」的小图标，点它并允许即可。'
-          + '处理好后再点一次「绑定本机助手」。';
-      } catch (e) { this.guide.msg = '绑定失败：' + e.message; }
-      finally { this.guide.binding = false; }
+      } catch (e) { errText = e.message; }
+      this.guide.binding = false;
+      closeTip();
+      if (linked) {
+        // 先把按钮切成「已连接」（避免 refreshAgent 那一两百毫秒里又变回可点的「绑定」）
+        this.agent.online = true;
+        await this.refreshAgent();
+        this.$message.success('绑定成功，本机助手已连接');
+        this.reportOp('agent.bind');
+        return;
+      }
+      // 没连上：说清三种常见原因，并直接给两个动作
+      const esc = (s) => String(s).replace(/[&<>"]/g,
+        (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+      try {
+        await this.$confirm(
+          (errText ? '<p style="margin:0 0 8px;color:#f56c6c">' + esc(errText) + '</p>' : '')
+          + '<p style="margin:0 0 6px">没检测到本机助手，常见原因：</p>'
+          + '<p style="margin:0;line-height:1.9">'
+          + '① 还没安装 —— 先点「下载本机助手」装好，双击运行起来；<br>'
+          + '② 浏览器拦截了打开请求 —— 地址栏右侧会出现「打开 1688催收助手」的小图标，点它并允许；<br>'
+          + '③ 助手已在运行但没响应 —— 从托盘退出后重新打开再试。'
+          + '</p>',
+          '暂未检测到本机助手',
+          {
+            confirmButtonText: '重新绑定', cancelButtonText: '去下载',
+            type: 'warning', dangerouslyUseHTMLString: true,
+          }
+        );
+        this.bindAgent();
+      } catch (e) { this.openDownload(); }
     },
     async ensureAgentOnline() {
       if (await this.agentOnline()) return true;
