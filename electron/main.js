@@ -1,5 +1,5 @@
 /**
- * electron/main.js — 「1688 催收助手」桌面程序主进程
+ * electron/main.js — 「催收小助手」桌面程序主进程
  *
  * 职责：
  *   · 单实例锁 + 自定义协议 xsh://（深链：网站点「批量发送」可唤醒本程序）
@@ -12,7 +12,7 @@
  *   · 1688 窗口 nodeIntegration:false + contextIsolation:true + sandbox:true
  *   · 除「连接你自己的服务器」外不发起任何网络请求
  */
-const { app, BrowserWindow, Tray, Menu, ipcMain, shell, nativeImage } = require('electron');
+const { app, BrowserWindow, Tray, Menu, ipcMain, shell, nativeImage, session } = require('electron');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
@@ -25,6 +25,7 @@ const qnhLogin = require('./agent/qnh-login');
 const pddLogin = require('./agent/pdd-login');
 const pddApply = require('./agent/pdd-apply');
 const pddSend = require('./agent/pdd-send');
+const logoutKernel = require('./agent/logout');
 
 // 隐藏自动化特征（navigator.webdriver=false），降低 1688 风控识别 Electron 的概率。
 // 必须在 app ready 前调用，渲染进程启动后即失效。
@@ -32,6 +33,16 @@ try { app.commandLine.appendSwitch('disable-blink-features', 'AutomationControll
 
 const PROTOCOL = 'xsh';
 const VERSION = (() => { try { return require('../package.json').version; } catch (e) { return '0.1.0'; } })();
+
+// 程序已改名「催收小助手」，Electron 默认的 userData 目录会跟着产品名走
+// （%APPDATA%\催收小助手），老用户升级上来会丢掉设备令牌和本机登录态 ——
+// 表现就是「又让我重新绑定、拼多多/牵牛花还要重扫一遍」。
+// 所以：老目录在就继续用它（升级不搬数据）；新装的机器才用新目录。
+try {
+  const appData = app.getPath('appData');
+  const legacyDir = path.join(appData, '1688催收助手');
+  if (fs.existsSync(legacyDir)) app.setPath('userData', legacyDir);
+} catch (e) { /* 拿不到路径就用默认目录，不影响启动 */ }
 
 let store = null;
 let client = null;
@@ -81,11 +92,60 @@ async function postJson(url, obj) {
 }
 function hasTray() { return !!tray && !tray.isDestroyed(); }
 
+// ── 退出本机登录态 ───────────────────────────────────────────────
+// 各站点登录窗口用的 Electron 持久分区（与 agent/*.js 里的 PARTITION 一一对应）。
+// 看板点「退出账号」时服务器会下发 logout 指令，把这里的分区一起清掉 ——
+// 否则库里删了 Cookie、用户本机还留着，下次点「登录」会直接免登录进去（换号换不了）。
+const LOGOUT_WINDOWS = {
+  pdd: [() => pddLogin.peekWindow(), () => pddApply.peekWindow(), () => pddSend.peekWindow()],
+  qnh: [() => qnhLogin.peekWindow()],
+  // 1688 的发送窗没有 peek（getSendWindow 会懒创建），直接调 closeSendWindow 关掉
+  1688: [() => { try { sender.closeSendWindow(); } catch (e) { /* 忽略 */ } return null; }],
+};
+
+/**
+ * 清掉某个站点在本机的登录态（面板按钮与服务器指令共用）。
+ * @param {string} target pdd / qnh / 1688
+ */
+async function doLocalLogout(target) {
+  // 任务进行中不动手：清登录态要关掉该站点的窗口，会把正在跑的发送/申请/登录打断
+  const busy = client && client.busy ? client.busy() : { any: false };
+  if (busy.any) {
+    return {
+      ok: false,
+      error: '助手正在执行任务（' + (busy.sending ? '发送催收消息' : (busy.pdd ? '拼多多任务' : '牵牛花任务'))
+        + '），请等任务结束后再退出登录态',
+    };
+  }
+  const key = logoutKernel.normalizeTarget(target);
+  const r = await logoutKernel.clearLoginState(key, { windows: LOGOUT_WINDOWS[key] || [] });
+  // 1688 的登录态是助手自己上报的：清完顺手置为未登录，看板右上角立刻变
+  if (r.ok && key === '1688' && client) client.reportLoginState(false, '');
+  log(r.ok
+    ? `已退出本机${r.label}账号（关窗 ${r.closedWindows} 个）`
+    : `退出本机账号失败（${r.label || target}）：${r.error || ('仍有 ' + r.remain + ' 个 Cookie')}`);
+  refreshTray();
+  pushState();
+  return r;
+}
+
+/** 各站点在本机的登录态（Cookie 数量），供状态面板显示「本机还有没有登录态」 */
+async function localLoginStates() {
+  const out = {};
+  for (const key of Object.keys(logoutKernel.TARGETS)) {
+    const t = logoutKernel.TARGETS[key];
+    let n = -1;
+    try { n = (await session.fromPartition(t.partition).cookies.get({})).length; } catch (e) { n = -1; }
+    out[key] = { label: t.label, cookies: n, loggedIn: n > 0 };
+  }
+  return out;
+}
+
 // ── 状态窗口 ──
 function showStatusWin() {
   if (statusWin && !statusWin.isDestroyed()) { statusWin.show(); statusWin.focus(); return; }
   statusWin = new BrowserWindow({
-    width: 460, height: 620, resizable: false, title: '1688 催收助手',
+    width: 460, height: 620, resizable: false, title: '催收小助手',
     autoHideMenuBar: true,
     backgroundColor: '#f5f6f8', // 立即绘制底色，避免启动/加载时闪白
     webPreferences: {
@@ -120,7 +180,7 @@ function refreshTray() {
   if (!hasTray()) return;
   const s = client ? client.state() : {};
   const online = !!s.ready;
-  tray.setToolTip('1688 催收助手');
+  tray.setToolTip('催收小助手');
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: online ? '状态：已连接' : (bound() ? '状态：未连接（重连中）' : '状态：未绑定'), enabled: false },
     { label: s.sending ? '正在发送…' : '空闲', enabled: false },
@@ -256,6 +316,12 @@ function startAgent() {
   client.setPddSendHandler(pddSend.createSendHandler({
     log: (m) => { log(m); pushState(); },
   }));
+  // 「清除本机登录态」内核：看板点「退出拼多多 / 退出牵牛花账号」时，
+  // 服务器删库里的 Cookie 之后还要把本机分区里的 Cookie 一起清掉。
+  client.setLogoutHandler(logoutKernel.createLogoutHandler({
+    log: (m) => { log(m); pushState(); },
+    windows: LOGOUT_WINDOWS,
+  }));
   client.on('ready', () => { log('已连接服务器'); refreshTray(); pushState(); });
   client.on('connected', () => { refreshTray(); pushState(); });
   client.on('disconnected', (info) => { log(`连接断开 (${info && info.code})，稍后重连`); refreshTray(); pushState(); });
@@ -375,6 +441,9 @@ ipcMain.handle('agent:getState', () => {
   };
 });
 ipcMain.handle('agent:openLoginWindow', () => { openLogin(); return true; });
+/** 面板「退出」按钮：只退出本机浏览器分区里的登录态，不动服务器上的数据 */
+ipcMain.handle('agent:logout', async (_e, target) => doLocalLogout(target));
+ipcMain.handle('agent:localState', () => localLoginStates());
 ipcMain.handle('agent:stopTask', () => {
   if (client) { client.stopFlag = true; if (client.currentTaskId != null) client.send({ type: 'client_stop', taskId: client.currentTaskId }); }
   return true;

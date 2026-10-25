@@ -45,10 +45,10 @@
       <div class="card-title"><span class="n">⬇</span> 获取安装包</div>
       <div style="margin-top:12px">
         <div class="download-row">
-          <el-button v-if="dl.available" type="primary" size="medium" @click="goDownload">⬇ 下载 1688催收助手（Windows）</el-button>
+          <el-button v-if="dl.available" type="primary" size="medium" @click="goDownload">⬇ 下载 催收小助手（Windows）</el-button>
           <el-button v-else type="primary" size="medium" disabled>⬇ 安装包尚未就绪</el-button>
           <span class="muted" v-if="dl.available && dl.fileName">{{ dl.fileName }}<span v-if="dl.sizeBytes"> · {{ fmtSize(dl.sizeBytes) }}</span></span>
-          <span class="muted" v-else>管理员需先在本机构建安装包（<code>npm run agent:dist</code>），或直接向管理员索取「1688催收助手」安装包。</span>
+          <span class="muted" v-else>管理员需先在本机构建安装包（<code>npm run agent:dist</code>），或直接向管理员索取「催收小助手」安装包。</span>
         </div>
         <div class="muted" style="margin-top:10px" v-if="me">
           当前账号：<b>{{ who }}</b><span v-if="me.taxNo">（税号 {{ maskTax(me.taxNo) }}，仅作抬头展示，不再用于绑定）</span> · 下载后回到「1688发票」页点「绑定本机助手」即可完成绑定。
@@ -62,7 +62,7 @@
     <el-card shadow="never" style="margin-bottom:16px;border-radius:12px">
       <div class="card-title"><span class="n">1</span> 下载并安装</div>
       <ol style="margin-top:10px">
-        <li>点上方「<b>下载 1688催收助手（Windows）</b>」，得到安装包（<code>.exe</code>）。</li>
+        <li>点上方「<b>下载 催收小助手（Windows）</b>」，得到安装包（<code>.exe</code>）。</li>
         <li>双击运行：安装版按向导一路「下一步」即可；绿色便携版双击直接启动。</li>
         <li>首次运行 Windows 可能提示「<b>未知发布者</b>」——这是未签名程序的正常提示，点「<b>更多信息 → 仍要运行</b>」即可。</li>
       </ol>
@@ -73,7 +73,7 @@
       <div class="card-title"><span class="n">2</span> 绑定到你的账号</div>
       <ol style="margin-top:10px">
         <li>回到「<b>1688发票</b>」页，点右上角「<b>本机助手</b>」→ 弹窗里点「<b>绑定本机助手</b>」。</li>
-        <li>浏览器会弹窗询问是否打开「<b>1688催收助手</b>」，点「<b>打开</b>」。</li>
+        <li>浏览器会弹窗询问是否打开「<b>催收小助手</b>」，点「<b>打开</b>」。</li>
         <li>助手自动完成绑定（用一次性令牌换取本机长期<b>设备令牌</b>），页面显示「<b>助手已连接</b>」即成功。</li>
       </ol>
       <el-alert type="success" :closable="false" style="margin-top:10px" title="全程不需要手填服务器地址或税号：安装包已内置服务器地址，绑定令牌由系统自动签发。"></el-alert>
@@ -103,7 +103,7 @@
       <div class="card-title">常见问题</div>
       <el-collapse style="margin-top:10px">
         <el-collapse-item title="点了「绑定本机助手」没反应？" name="q1">
-          <div style="font-size:13.5px">两个常见原因：① 还没安装助手——先完成上方第 1 步；② 浏览器拦截了打开外部程序（<code>xsh://</code>）的请求——地址栏右侧通常会出现一个「打开 1688催收助手」的小图标，点它并允许即可。Edge/Chrome 首次都会询问一次，允许后不再打扰。</div>
+          <div style="font-size:13.5px">两个常见原因：① 还没安装助手——先完成上方第 1 步；② 浏览器拦截了打开外部程序（<code>xsh://</code>）的请求——地址栏右侧通常会出现一个「打开 催收小助手」的小图标，点它并允许即可。Edge/Chrome 首次都会询问一次，允许后不再打扰。</div>
         </el-collapse-item>
         <el-collapse-item title="运行时提示「未知发布者 / 已保护你的电脑」？" name="q2">
           <div style="font-size:13.5px">这是未签名程序的常规提示，并非病毒。点「更多信息」→「仍要运行」即可。若被 360/火绒等拦截，选择「允许本次运行 / 信任此程序」。正式对外发售的版本会购买代码签名证书以消除该类提示。</div>

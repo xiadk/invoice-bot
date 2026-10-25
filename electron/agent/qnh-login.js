@@ -50,6 +50,9 @@ function isMeituan(url) {
 }
 
 /** 登录窗口（懒创建 + 复用；登录态存 persist:qnh 分区，下次免登录） */
+/** 当前登录窗口（没有就返回 null，绝不懒创建——退出登录时要「关掉已存在的窗口」而不是新开一个） */
+function peekWindow() { return (win && !win.isDestroyed()) ? win : null; }
+
 function getWindow() {
   if (win && !win.isDestroyed()) return win;
   const part = session.fromPartition(PARTITION);
@@ -460,4 +463,4 @@ function createFetchHandler({ log = () => {} } = {}) {
   };
 }
 
-module.exports = { createLoginHandler, createFetchHandler, runLogin, runFetch, openLogin, getWindow, PARTITION };
+module.exports = { createLoginHandler, createFetchHandler, runLogin, runFetch, openLogin, getWindow, peekWindow, PARTITION };

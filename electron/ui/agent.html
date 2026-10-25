@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<title>1688 催收助手</title>
+<title>催收小助手</title>
 <style>
   :root { --brand:#2563eb; --brand-d:#1d4ed8; --ok:#16a34a; --warn:#d97706; --err:#dc2626;
           --bg:#f5f7fb; --card:#fff; --line:#e5e9f2; --ink:#1f2937; --mut:#6b7280; }
@@ -27,6 +27,16 @@
   button.primary:hover { background:var(--brand-d); }
   button.danger { color:var(--err); border-color:#fecaca; }
   .btns { display:flex; flex-wrap:wrap; gap:8px; }
+  button.mini { padding:4px 10px; font-size:12px; border-radius:6px; }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  button:disabled:hover { border-color:var(--line); background:#fff; }
+  .hint { font-weight:400; font-size:11px; color:var(--mut); }
+  .st { font-size:12px; font-weight:600; }
+  .st.on { color:var(--ok); }
+  .st.off { color:var(--mut); }
+  .msg { font-size:12px; margin-top:8px; display:none; }
+  .msg.ok { display:block; color:var(--ok); }
+  .msg.err { display:block; color:var(--err); }
   .tip { font-size:12px; color:var(--mut); background:#fff; border:1px dashed var(--line);
          border-radius:8px; padding:10px 12px; }
   .mono { font-family:ui-monospace,Consolas,monospace; font-size:11px; color:var(--mut); word-break:break-all; }
@@ -35,7 +45,7 @@
 </head>
 <body>
 <div class="wrap">
-  <h1>1688 催收助手 <span class="ver" id="ver"></span></h1>
+  <h1>催收小助手 <span class="ver" id="ver"></span></h1>
   <p class="sub">在本机浏览器里帮你逐条发送催收消息。服务器只下发任务、记录结果。</p>
 
   <div class="card">
@@ -51,6 +61,28 @@
       <button class="primary" id="btnLogin">打开 1688 登录窗口</button>
       <button class="danger hide" id="btnStop">停止发送</button>
     </div>
+  </div>
+
+  <!-- 本机登录态：网站点「退出账号」时服务器会下发指令清掉这里；
+       助手当时不在线、或想把本机残留清干净时，就在这里手动点「退出」。 -->
+  <div class="card" id="localCard">
+    <div class="row">
+      <span class="k">本机登录态 <span class="hint">（站点上点「退出账号」会自动退出这里）</span></span>
+      <span class="v"></span>
+    </div>
+    <div class="row">
+      <span class="k">拼多多</span>
+      <span class="v"><span class="st off" id="st-pdd">…</span> <button class="mini" data-target="pdd">退出</button></span>
+    </div>
+    <div class="row">
+      <span class="k">牵牛花</span>
+      <span class="v"><span class="st off" id="st-qnh">…</span> <button class="mini" data-target="qnh">退出</button></span>
+    </div>
+    <div class="row">
+      <span class="k">1688</span>
+      <span class="v"><span class="st off" id="st-1688">…</span> <button class="mini" data-target="1688">退出</button></span>
+    </div>
+    <div class="msg" id="logoutMsg"></div>
   </div>
 
   <div class="card" id="unboundCard" style="display:none">
@@ -102,14 +134,78 @@ function render(s){
 }
 document.getElementById('btnLogin').onclick = () => window.xsh.openLoginWindow();
 document.getElementById('btnStop').onclick = () => window.xsh.stopTask();
+
+// ── 本机登录态：只区分「已登录 / 未登录」，并支持手动退出 ──
+const TARGET_NAME = { pdd: '拼多多', qnh: '牵牛花', '1688': '1688' };
+function renderLocal(map) {
+  Object.keys(TARGET_NAME).forEach((k) => {
+    const el = document.getElementById('st-' + k);
+    if (!el) return;
+    const v = (map || {})[k] || {};
+    const n = Number(v.cookies);
+    const btn = document.querySelector('button[data-target="' + k + '"]');
+    if (!(n >= 0)) {
+      el.className = 'st off'; el.textContent = '状态未知';
+      if (btn) btn.disabled = false;
+      return;
+    }
+    // 用户只关心「登没登录」，不关心攒了多少个 Cookie
+    el.className = n ? 'st on' : 'st off';
+    el.textContent = n ? '已登录' : '未登录';
+    // 没登录就没有可退的，按钮置灰（读不到状态时仍允许手动退）
+    if (btn) btn.disabled = !n;
+  });
+}
+async function refreshLocal() {
+  try { renderLocal(await window.xsh.localState()); } catch (e) { /* 忽略 */ }
+}
+function showLogoutMsg(text, ok) {
+  const el = document.getElementById('logoutMsg');
+  if (!el) return;
+  el.className = 'msg ' + (ok ? 'ok' : 'err');
+  el.textContent = text;
+  clearTimeout(showLogoutMsg._t);
+  showLogoutMsg._t = setTimeout(() => { el.className = 'msg'; }, 8000);
+}
+Array.prototype.forEach.call(document.querySelectorAll('button[data-target]'), (btn) => {
+  btn.onclick = async () => {
+    const target = btn.getAttribute('data-target');
+    const name = TARGET_NAME[target] || target;
+    const ok = confirm(
+      '退出本机「' + name + '」账号？\n\n'
+      + '退出后下次登录需要重新扫码 / 短信验证；已同步到服务器的数据不受影响。\n'
+      + '（同一台电脑上多个账号共用这一个登录窗口，退出的是这台机器上最后登录的那个账号。）'
+    );
+    if (!ok) return;
+    btn.disabled = true;
+    try {
+      const r = await window.xsh.logout(target);
+      if (r && r.ok) {
+        showLogoutMsg('✓ 已退出本机「' + name + '」账号'
+          + ((r.closedWindows || 0) > 0 ? '（关闭 ' + r.closedWindows + ' 个窗口）' : ''), true);
+      } else {
+        showLogoutMsg('✗ 退出失败：' + ((r && (r.error || ('仍有 ' + r.remain + ' 个 Cookie'))) || '未知错误'), false);
+      }
+    } catch (e) {
+      showLogoutMsg('✗ 退出失败：' + (e && e.message ? e.message : e), false);
+    } finally {
+      btn.disabled = false;
+      await refreshLocal();
+    }
+  };
+});
+
+window.xsh.onState(render);
+window.xsh.getState().then(render);
 document.getElementById('btnData').onclick = () => window.xsh.openDataDir();
 document.getElementById('btnQuit').onclick = () => window.xsh.quit();
 document.getElementById('btnUnbind').onclick = async () => {
   if (!confirm('解绑后本机将断开与服务器的连接，需要重新到网站绑定。确定解绑？')) return;
   await window.xsh.unbind();
 };
-window.xsh.onState(render);
-window.xsh.getState().then(render);
+refreshLocal();
+setInterval(refreshLocal, 10000);          // 网站那边点「退出账号」后，这里最多 10 秒跟着变
+window.addEventListener('focus', refreshLocal);
 </script>
 </body>
 </html>

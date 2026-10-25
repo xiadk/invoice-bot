@@ -6,7 +6,7 @@
 >
 > **2026-10-13 架构重大调整（必读）**：① **服务器不再保存 1688 登录态、不再启动服务端浏览器** —— 发送只剩「本机浏览器通道」（方案C）：用户本机 Chrome/Edge 装 `extension/` 扩展，配对码连 `/ws/agent`，服务器只编排任务、扩展在本机浏览器逐家发送并回执；`lib/state-store.js`、`/api/state/*`、`login.js`、`refresh-status.js`、`send-messages.js`、`fetch-invoices.js`、`login_state` 表**已全部删除/废弃**。② 「重新导入数据」由**全量重建**改为**增量去重导入**（按订单号/行哈希，已有跳过、只插新行 + 映射回填 JOIN UPDATE）。历史方案见 `docs/方案B_服务端浏览器池.md`（已废弃）与 `docs/方案调整_登录态入库.md`（已废弃）。
 >
-> **2026-10-16 更新（仓库清理）**：浏览器扩展发送通道已于 2026-10-14 下线，发送逻辑整体迁移到桌面助手 `electron/agent/`；`extension/`、`lib/zip.js`、`parse-orders.js` 已从仓库删除。下文凡出现「装 `extension/` 扩展 / 加载已解压的扩展程序 / 扩展弹窗」等旧步骤，均以「安装 1688 催收助手（Windows 桌面程序）」取代，详见 `docs/助手安装与迁移指引.md`；涉及发送实现的位置一律对应 `electron/agent/`。
+> **2026-10-16 更新（仓库清理）**：浏览器扩展发送通道已于 2026-10-14 下线，发送逻辑整体迁移到桌面助手 `electron/agent/`；`extension/`、`lib/zip.js`、`parse-orders.js` 已从仓库删除。下文凡出现「装 `extension/` 扩展 / 加载已解压的扩展程序 / 扩展弹窗」等旧步骤，均以「安装 催收小助手（Windows 桌面程序）」取代，详见 `docs/助手安装与迁移指引.md`；涉及发送实现的位置一律对应 `electron/agent/`。
 >
 > **代码仓库**：https://github.com/xiadk/invoice-bot.git （远程 `origin`，分支 `main`；`data/` 下真实业务数据与 `config.json` 不入库）
 
@@ -46,7 +46,7 @@ invoice-bot/
 ├── lib/tenancy.js       # 多租户目录 data/users/<id>/…；statusFileFor(invoice-status.json 快照路径)
 ├── lib/agent-hub.js     # ★唯一发送通道：配对码/WS注册表/心跳/收发（isOnline/send）
 ├── lib/sender.js        # buildMessages(模板渲染，服务器与本机助手共用)；sendToSeller 已退役(选择器参考)
-├── electron/            # ★本机桌面助手「1688催收助手」：内置浏览器发送（2026-10-15 取代旧浏览器扩展通道）
+├── electron/            # ★本机桌面助手「催收小助手」：内置浏览器发送（2026-10-15 取代旧浏览器扩展通道）
 │   ├── main.js          # 主进程：窗口/托盘/单实例/深链绑定
 │   ├── agent/ws-client.js   # 与服务器 /ws/agent 长连接（心跳/收发/重连）
 │   ├── agent/sender.js      # 发送内核：内置 1688 发送窗 → 注入脚本逐家发送

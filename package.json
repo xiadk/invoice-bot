@@ -1,6 +1,6 @@
 {
   "name": "invoice-bot",
-  "version": "0.2.23",
+  "version": "0.2.25",
   "description": "1688/拼多多采购发票催收自动化",
   "main": "server.js",
   "scripts": {
@@ -43,7 +43,7 @@
   },
   "build": {
     "appId": "com.xsh.invoicebot",
-    "productName": "1688催收助手",
+    "productName": "催收小助手",
     "copyright": "Copyright © 2026",
     "directories": {
       "output": "dist"
@@ -83,7 +83,7 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "1688催收助手",
+      "shortcutName": "催收小助手",
       "deleteAppDataOnUninstall": false,
       "artifactName": "${productName}-Setup-${version}.${ext}"
     },
@@ -92,7 +92,7 @@
     },
     "protocols": [
       {
-        "name": "1688催收助手",
+        "name": "催收小助手",
         "schemes": [
           "xsh"
         ]

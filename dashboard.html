@@ -56,11 +56,6 @@
   .agent-bind-btn.is-bound.is-disabled:focus {
     color: #2e7d32; background: #f0f9eb; border-color: #c2e7b0; cursor: default;
   }
-  /* 连接指引弹框里的当前状态行 */
-  .agent-state-line { display: flex; align-items: center; gap: 8px; margin: 0 0 12px; padding: 9px 12px;
-    background: #f7f8fa; border: 1px solid var(--border); border-radius: 6px; font-size: 12px; color: var(--sub); }
-  .agent-state-line .dot { width: 8px; height: 8px; border-radius: 50%; background: #c9ccd1; flex: none; }
-  .agent-state-line .dot.on { background: #2e7d32; }
   .el-main { padding: 18px 20px 40px; }
   .banner { margin: 0; padding: 10px 20px; font-size: 13px; }
   .section-card { margin-bottom: 14px; }
@@ -117,7 +112,6 @@
   .up-guide ol { margin: 6px 0 8px 18px; }
   .up-guide .link-btn { display: inline-flex; align-items: center; gap: 6px; background: #fff; border: 1px solid #ff6a00; color: #d1580a; font-weight: 600; border-radius: 6px; padding: 6px 12px; text-decoration: none; font-size: 13px; }
   .up-guide .link-btn:hover { background: #fff4ec; }
-  .steps { margin: 0 0 12px; padding-left: 20px; font-size: 13px; line-height: 1.95; }
   .form-tip { font-size: 11px; color: var(--sub); line-height: 1.7; margin-top: 4px; }
   .preview-box { background: #fafbfc; border: 1px dashed var(--border); border-radius: 6px; padding: 12px; font-size: 12px; line-height: 1.7; white-space: pre-wrap; word-break: break-all; }
   .pager-wrap { margin-top: 10px; display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
@@ -977,7 +971,7 @@
           <h2>退单列表</h2>
           <div class="meta-line">
             数据来自美团牵牛花（qnh.meituan.com）的退单列表，每日自动增量同步，也可以随时点「立即刷新数据」。
-            牵牛花的登录由「1688 小助手」在<b>该账号自己的电脑</b>上完成（服务器不打开浏览器），登录态存在数据库里。
+            牵牛花的登录由「催收小助手」在<b>该账号自己的电脑</b>上完成（服务器不打开浏览器），登录态存在数据库里。
             标记为 <el-tag size="mini" type="warning">已取货/送达</el-tag> 的退单表示商品已经出库，请重点核查。
           </div>
         </div>
@@ -990,8 +984,8 @@
         <el-card class="section-card" shadow="never" :body-style="{ padding: '12px 14px' }">
           <qnh-login-bar :cookie="rq.cookie" :last-run="rq.lastRun" :schedule="rq.config"
                          :who-label="qnhWhoLabel" action-text="立即刷新数据"
-                         :action-loading="rq.syncing"
-                         @login="onQnhLoginBtn" @action="doSync"></qnh-login-bar>
+                         :action-loading="rq.syncing" :can-logout="true"
+                         @login="onQnhLoginBtn" @logout="logoutQnh" @action="doSync"></qnh-login-bar>
         </el-card>
 
         <el-alert v-if="qnhNeedPick" type="warning" :closable="false" show-icon style="margin-bottom:12px"
@@ -1187,7 +1181,7 @@
           <div class="meta-line">
             数据来自牵牛花「订单毛利明细」，默认按<b>线上毛利从小到大</b>排列，亏钱/低毛利的订单排在最前面。
             接口需要签名，由<b>本机助手</b>在该账号电脑的牵牛花页面里代拉（监控开启后每 10 分钟自动拉一次）。
-            登录方式与退单列表完全一致：点「登录牵牛花」，在「1688 小助手」弹出的窗口里登录。
+            登录方式与退单列表完全一致：点「登录牵牛花」，在「催收小助手」弹出的窗口里登录。
           </div>
         </div>
 
@@ -1199,8 +1193,8 @@
         <el-card class="section-card" shadow="never" :body-style="{ padding: '12px 14px' }">
           <qnh-login-bar :cookie="rq.cookie" :last-run="rq.lastRun" :schedule="rq.config"
                          :who-label="qnhWhoLabel" action-text="立即拉取毛利数据"
-                         :action-loading="rq.profit.loading"
-                         @login="onQnhLoginBtn" @action="pullProfit"></qnh-login-bar>
+                         :action-loading="rq.profit.loading" :can-logout="true"
+                         @login="onQnhLoginBtn" @logout="logoutQnh" @action="pullProfit"></qnh-login-bar>
         </el-card>
 
         <el-alert v-if="qnhNeedPick" type="warning" :closable="false" show-icon style="margin-bottom:12px"
@@ -1333,8 +1327,8 @@
         <div class="page-head">
           <h2>拼多多发票</h2>
           <div class="meta-line">
-            该页面需要在小助手登录拼多多后使用：先确认已下载并启动<b>本机助手</b>，再点下方「登录拼多多」按钮，
-            在「1688 小助手」弹出的手机端窗口里扫码或短信验证。
+            该页面需要先在催收小助手登录拼多多后使用：先确认已下载并启动<b>本机助手</b>，再点下方「登录拼多多」按钮，
+            在「催收小助手」弹出的手机端窗口里扫码或短信验证。
           </div>
           <div class="pdd-warn">
             <i class="el-icon-warning"></i>
@@ -1687,28 +1681,9 @@
     </div>
   </el-dialog>
 
-  <!-- ══════════ 本机助手 · 下载指引（只保留下载按钮，发起下载即自动关闭） ══════════ -->
-  <el-dialog title="下载本机助手" :visible.sync="guide.visible" width="560px" append-to-body>
-    <el-alert type="warning" :closable="false" show-icon style="margin-bottom:12px"
-              title="催收消息只在你自己电脑上发送：服务器不保存你的 1688 登录态、也不用服务器浏览器代发，全程接触不到你的账号密码。"></el-alert>
-    <div class="agent-state-line">
-      <span class="dot" :class="{ on: agent.online }"></span>
-      <span v-if="agent.online">已连接<template v-if="agentVer"> · v{{ agentVer }}</template>，无需再下载；绑定与登录状态见页面右上角。</span>
-      <span v-else>当前未连接：装好并运行助手后，回到本页右上角点「绑定本机助手」即可。</span>
-    </div>
-    <ol class="steps">
-      <li><b>装一次</b>：点下方「<b>下载本机助手（Windows）</b>」，下载后双击运行（绿色便携版，免安装）。</li>
-      <li><b>绑一次</b>：回到本页<b>右上角</b>点「<b>绑定本机助手</b>」——浏览器会弹窗问是否打开「1688催收助手」，点「打开」自动完成绑定；连上后该按钮会变成绿色的「已连接」。</li>
-      <li><b>登一次</b>：在助手面板里点「<b>打开 1688 登录窗口</b>」登录你的 1688（登录态只存在你本机，不经过服务器）。</li>
-      <li>之后回到「<b>1688发票</b>」页点「<b>发送催收消息</b>」：助手会自己打开 1688 聊天页逐家发送，并在面板里显示实时进度，可随时停止。</li>
-    </ol>
-    <div slot="footer">
-      <el-button type="primary" @click="openDownload">下载本机助手（Windows）</el-button>
-    </div>
-    <div class="muted" style="font-size:12px;line-height:1.8">
-      断线了？助手正常是托盘常驻的；若已退出，再点一次「批量发送」页面会自动把它唤起来。发送中断后，页面会出现「继续发送未完成」——已成功的不会重发。
-    </div>
-  </el-dialog>
+  <!-- 原「下载本机助手」指引弹框已下线：它只剩下载按钮、没有绑定入口，
+       未连接时弹出来只会让人找不到下一步。现在未连接一律指向右上角「绑定本机助手」，
+       安装步骤见 /download 下载页。 -->
 
   <!-- ══════════ 导入数据（拖拽上传） ══════════ -->
   <el-dialog :title="up.title" :visible.sync="up.visible" width="640px" append-to-body :close-on-click-modal="!up.busy">
@@ -1934,7 +1909,7 @@ Vue.component('qnh-tenant-picker', {
       </el-select>
       <el-tag v-if="missing" size="small" type="warning">请先选择一个账号</el-tag>
       <span class="loginid" v-else>
-        下面所有数据、登录与设置都属于该账号（登录走该账号电脑上的「1688 小助手」）
+        下面所有数据、登录与设置都属于该账号（登录走该账号电脑上的「催收小助手」）
       </span>
     </div>
   </el-card>`,
@@ -2044,7 +2019,7 @@ const vm = new Vue({
       // 上传
       up: { visible: false, kind: 'orders', title: '', guide: '', accept: '.xlsx,.xls', file: null, busy: false, percent: 0, msg: '', result: null },
       // 指引 / 改密
-      guide: { visible: false, binding: false, deepLink: '' },
+      guide: { binding: false, deepLink: '' },
       pwd: { visible: false, old: '', ne1: '', ne2: '', saving: false },
     };
   },
@@ -2062,7 +2037,7 @@ const vm = new Vue({
         return '本机助手已连接' + (this.agent.loggedIn ? '（1688 已登录）' : '（1688 未登录，需在本机助手里登录）')
           + '，无需重复绑定';
       }
-      return '点击唤起并绑定本机助手（浏览器会问是否打开「1688催收助手」，点「打开」即可）';
+      return '点击唤起并绑定本机助手（浏览器会问是否打开「催收小助手」，点「打开」即可）';
     },
     // 退单列表页权限：超级管理员始终可见，普通用户由管理员在「系统管理」里开启
     canRefund() { return !!(this.me && (this.me.role === 'admin' || this.me.qnhRefundEnabled)); },
@@ -2672,8 +2647,7 @@ const vm = new Vue({
         this.$message.info('正在启动本机助手…');
         const ok = await this.ensureAgentOnline();
         if (!ok) {
-          this.$alert('未检测到本机助手。\n\n请先点右上角「下载本机助手」下载并安装（Windows），装好后再点旁边的「绑定本机助手」完成连接。\n发送只在你自己电脑上执行，服务器不代发。', '未连接本机助手', { type: 'warning' });
-          this.openGuideModal();
+          this.promptAgentBind('未检测到本机助手，没法开始发送（发送只在你本机执行，服务器不代发）。');
           return;
         }
       }
@@ -2976,7 +2950,7 @@ const vm = new Vue({
       const who = this.isAdmin ? ('「' + (this.qnhWhoLabel || '所选账号') + '」') : '你';
       try {
         await this.$confirm(
-          `登录在${who}的电脑上完成：点「开始登录」后，「1688 小助手」会在那台电脑上弹出牵牛花窗口，`
+          `登录在${who}的电脑上完成：点「开始登录」后，「催收小助手」会在那台电脑上弹出牵牛花窗口，`
           + '在窗口里登录即可（最多等 5 分钟）。\n登录态回传后由服务器保管（存数据库），服务器不会代你登录。',
           '登录牵牛花',
           { confirmButtonText: '开始登录', cancelButtonText: '取消', type: 'warning' }
@@ -2987,9 +2961,8 @@ const vm = new Vue({
       try {
         const d = await this.qnhApi('/api/qnh/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
         if (d.needAgent) {
-          this.$message.warning(d.message || '本机助手未连接');
-          if (d.agentOutdated) this.reportOp('agent.download');
-          this.openGuideModal();
+          // 不再弹「下载本机助手」指引（那里已经没有绑定入口了）：直接指向右上角绑定按钮
+          this.promptAgentIssue(d);
           return;
         }
         if (!d.pending || !d.taskId) {
@@ -3006,6 +2979,49 @@ const vm = new Vue({
         this.$message.error('登录失败：' + e.message);
       } finally {
         this.rq.cookie.loading = false;
+      }
+    },
+    /**
+     * 「退出牵牛花账号」：退单列表与实时毛利监控共用同一个登录态，一处退出两处都回到未登录。
+     * 服务器除了删库里的 Cookie，还会让本机助手把浏览器分区里的 Cookie 一起清掉 ——
+     * 只删库的话，本机还留着旧账号，下次点「登录」会直接免登录进去（看起来像没退掉）。
+     */
+    async logoutQnh() {
+      if (this.rq.cookie.loading) return;
+      if (this.qnhNeedPick) { this.$message.warning('请先选择要以哪个账号的身份操作'); return; }
+      const c = this.rq.cookie || {};
+      const acc = c.tenantName || (c.account && (c.account.tenantName || c.account.accountName)) || '';
+      const accTxt = acc ? '「' + acc + '」' : '';
+      const who = this.isAdmin ? ('该身份（' + (this.qnhWhoLabel || '所选账号') + '）下的') : '你当前登录的';
+      try {
+        await this.$confirm(
+          `退出后服务器会清除${who}牵牛花账号${accTxt}的登录态，退单列表与实时毛利监控都会回到未登录。`
+          + '\n本机助手里的牵牛花登录态会一并清除；助手不在线时，请到助手面板「本机登录态」里手动清除。'
+          + '\n已同步的退单与毛利数据不受影响，不会被删除。',
+          '退出牵牛花账号',
+          { confirmButtonText: '退出登录', cancelButtonText: '取消', type: 'warning' }
+        );
+      } catch (e) { return; }
+
+      this.rq.cookie.loading = true;
+      try {
+        const d = await this.qnhApi('/api/qnh/logout', {
+          method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+        });
+        if (d && d.error) { this.$message.error(d.error); return; }
+        // 立即把按钮切回「登录牵牛花」，不等下次轮询
+        this.rq.cookie = { logined: false, loading: false, message: '', accountName: '', cookieCount: 0 };
+        if (d && d.agentCleared) {
+          this.$message.success((d && d.message) || '已退出牵牛花账号');
+        } else {
+          // 本机登录态没清掉：必须让用户看见，否则下次点登录还是旧账号
+          this.$alert((d && d.message) || '已退出牵牛花账号', '已退出，但本机登录态可能还在', { type: 'warning' });
+        }
+        await this.loadRefundStatus();
+      } catch (e) {
+        this.$message.error('退出失败：' + e.message);
+      } finally {
+        if (this.rq.cookie) this.rq.cookie.loading = false;
       }
     },
     /** 轮询「登录牵牛花」任务，最多 5.5 分钟。返回 done / failed / timeout / gone */
@@ -3032,7 +3048,7 @@ const vm = new Vue({
       const who = this.isAdmin ? ('「' + (this.qnhWhoLabel || '所选账号') + '」') : '你';
       try {
         await this.$confirm(
-          `登录在${who}的电脑上完成：点「开始登录」后，「1688 小助手」会在那台电脑上弹出拼多多（手机端）窗口，`
+          `登录在${who}的电脑上完成：点「开始登录」后，「催收小助手」会在那台电脑上弹出拼多多（手机端）窗口，`
           + '在窗口里扫码或短信验证即可（最多等 5 分钟）。\n登录态回传后由服务器保管（存数据库），服务器不会代你登录。',
           '登录拼多多',
           { confirmButtonText: '开始登录', cancelButtonText: '取消', type: 'warning' }
@@ -3043,9 +3059,8 @@ const vm = new Vue({
       try {
         const d = await this.pddApi('/api/pdd/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
         if (d.needAgent) {
-          this.$message.warning(d.message || '本机助手未连接');
-          if (d.agentOutdated) this.reportOp('agent.download');
-          this.openGuideModal();
+          // 不再弹「下载本机助手」指引（那里已经没有绑定入口了）：直接指向右上角绑定按钮
+          this.promptAgentIssue(d);
           return;
         }
         if (!d.pending || !d.taskId) {
@@ -3083,6 +3098,7 @@ const vm = new Vue({
       try {
         await this.$confirm(
           `退出后服务器会清除${who}${accTxt}的登录态，之后刷新发票状态、获取订单数据都需要重新登录。`
+          + '\n本机助手里的拼多多登录态会一并清除；助手不在线时，请到助手面板「本机登录态」里手动清除。'
           + '\n已同步的订单与发票数据不受影响，不会被删除。',
           '退出拼多多账号',
           { confirmButtonText: '退出登录', cancelButtonText: '取消', type: 'warning' }
@@ -3097,7 +3113,16 @@ const vm = new Vue({
         if (d && d.error) { this.$message.error(d.error); return; }
         // 立即把按钮切回「登录拼多多」，不等下一次轮询
         this.pd.cookie = { logined: false, loading: false, message: '', accountName: '', pdduid: '', writtenAt: null };
-        this.$message.success((d && d.message) || ('已退出拼多多账号' + (acc ? '「' + acc + '」' : '')));
+        if (d && d.agentCleared) {
+          this.$message.success((d && d.message) || ('已退出拼多多账号' + (acc ? '「' + acc + '」' : '')));
+        } else {
+          // 本机登录态没清掉：必须让用户看见，否则下次点登录还是旧账号
+          this.$alert(
+            (d && d.message) || ('已退出拼多多账号' + (acc ? '「' + acc + '」' : '')),
+            '已退出，但本机登录态可能还在',
+            { type: 'warning' }
+          );
+        }
         await this.loadPddStatus();
       } catch (e) {
         this.$message.error('退出失败：' + e.message);
@@ -3360,7 +3385,7 @@ const vm = new Vue({
           this.$message.info('本机助手未连接，正在自动唤起…（浏览器若弹窗询问是否打开，请点「打开」）');
           const up = await this.ensureAgentOnline();
           if (!up) {
-            this.$message.error('无法唤起本机助手：请确认已安装助手并在本机运行后重试');
+            this.promptAgentBind('没能唤起本机助手，请确认已安装并在本机运行。');
             return;
           }
           this.$message.success('助手已连接，继续提交申请');
@@ -3416,7 +3441,7 @@ const vm = new Vue({
           this.$message.info('本机助手未连接，正在自动唤起…（浏览器若弹窗询问是否打开，请点「打开」）');
           const up = await this.ensureAgentOnline();
           if (!up) {
-            this.$message.error('无法唤起本机助手：请确认已安装助手并在本机运行后重试');
+            this.promptAgentBind('没能唤起本机助手，请确认已安装并在本机运行。');
             return;
           }
           this.$message.success('助手已连接，继续发送');
@@ -3903,8 +3928,6 @@ const vm = new Vue({
     },
     openDownload() {
       this.reportOp('agent.download');
-      // 已经发起下载就把指引弹框收起来：别挡着用户，也不用再点一次「关闭」
-      this.guide.visible = false;
       window.open('/download', '_blank');
     },
     async loadUsers() {
@@ -4259,9 +4282,49 @@ const vm = new Vue({
     },
 
     // ══════ 本机助手绑定 / 魔唤醒 ══════
-    openGuideModal() {
-      this.guide.visible = true;
-      this.refreshAgent();
+    /**
+     * 助手没连上时的统一提示。
+     * 以前这里会弹「下载本机助手」指引弹框，但那个弹框里已经没有绑定按钮了 ——
+     * 用户看完也找不到下一步。现在一律把视线引到右上角的「绑定本机助手」：
+     * 没连上就直接问「要不要现在绑定」，点一下就能唤起助手。
+     */
+    async promptAgentBind(msg) {
+      await this.refreshAgent();
+      if (this.agent && this.agent.online) {
+        // 本机是连着的，但这次操作要落到「另一个账号」的电脑上（管理员代入他人时）
+        this.$alert(
+          (msg || '这个账号的本机助手没有连接。') + '\n\n请让该账号的电脑启动「催收小助手」并完成绑定后再试。',
+          '该账号的本机助手未连接',
+          { type: 'warning', confirmButtonText: '知道了' }
+        );
+        return;
+      }
+      let go = false;
+      try {
+        await this.$confirm(
+          (msg ? msg + '\n\n' : '')
+          + '点「立即绑定」唤起本机助手；如果浏览器问是否打开「催收小助手」，点「打开」即可。\n'
+          + '还没装？先点右上角「下载本机助手」。',
+          '未连接本机助手',
+          { confirmButtonText: '立即绑定', cancelButtonText: '稍后', type: 'warning' }
+        );
+        go = true;
+      } catch (e) { return; }
+      if (go) await this.bindAgent();
+    },
+    /** 服务端返回 needAgent 时用它分流：版本太旧 → 去下载；单纯没连接 → 去绑定 */
+    async promptAgentIssue(d) {
+      const msg = (d && d.message) || '本机助手未连接';
+      if (d && d.agentOutdated) {
+        this.reportOp('agent.download');
+        try {
+          await this.$confirm(msg + '\n\n点「去下载」获取最新版安装包；装好后助手会自动重连。', '需要升级催收小助手',
+            { confirmButtonText: '去下载', cancelButtonText: '稍后', type: 'warning' });
+        } catch (e) { return; }
+        this.openDownload();
+        return;
+      }
+      await this.promptAgentBind(msg);
     },
     async agentOnline() { try { const d = await this.api('/api/agent/status'); return !!(d && d.online); } catch (e) { return false; } },
     /**
@@ -4293,7 +4356,7 @@ const vm = new Vue({
       this.guide.binding = true;
       const tip = this.$message({
         type: 'info', duration: 0, showClose: false,
-        message: '正在唤起本机助手…若浏览器询问是否打开「1688催收助手」，请点「打开」',
+        message: '正在唤起本机助手…若浏览器询问是否打开「催收小助手」，请点「打开」',
       });
       const closeTip = () => { try { tip && tip.close(); } catch (e) { /* 已关闭 */ } };
       let linked = false;
@@ -4332,7 +4395,7 @@ const vm = new Vue({
           + '<p style="margin:0 0 6px">没检测到本机助手，常见原因：</p>'
           + '<p style="margin:0;line-height:1.9">'
           + '① 还没安装 —— 先点「下载本机助手」装好，双击运行起来；<br>'
-          + '② 浏览器拦截了打开请求 —— 地址栏右侧会出现「打开 1688催收助手」的小图标，点它并允许；<br>'
+          + '② 浏览器拦截了打开请求 —— 地址栏右侧会出现「打开 催收小助手」的小图标，点它并允许；<br>'
           + '③ 助手已在运行但没响应 —— 从托盘退出后重新打开再试。'
           + '</p>',
           '暂未检测到本机助手',
