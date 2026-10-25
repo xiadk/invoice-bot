@@ -823,6 +823,32 @@
 
         <el-card shadow="never" class="section-card">
           <div slot="header">
+            <b>拼多多订单数据 · 拉取范围</b>
+            <span class="loginid">（拼多多发票页「获取订单数据」按钮）</span>
+          </div>
+          <el-form label-position="top" size="small">
+            <el-row :gutter="12">
+              <el-col :xs="24" :md="12">
+                <el-form-item label="首次全量只拉取最近（月）">
+                  <el-input-number v-model="cfg.pddOrderMonths" :min="1" :max="36" :step="1"
+                                   controls-position="right" style="width:100%"></el-input-number>
+                </el-form-item>
+              </el-col>
+            </el-row>
+            <div class="form-tip">
+              只影响<b>每个账号第一次</b>点「获取订单数据」时的回溯范围（默认 <b>3</b> 个月），更早的订单不拉取、也不入库；
+              拼多多发票页的列表、订单状态与实付金额也只会有这个范围内的数据。<br>
+              <b>增量拉取不受此限制</b>：某个账号首次同步过之后，再点按钮只从最新订单往前补齐新数据，翻到「整页都已入库」就停。<br>
+              保存后<b>立即生效</b>（下一次点「获取订单数据」就按新值计算），不需要重启服务。
+            </div>
+          </el-form>
+          <el-button type="primary" size="small" @click="saveConfig">保存配置</el-button>
+          <el-button size="small" @click="loadConfigUI">放弃修改</el-button>
+          <el-tag v-if="saveOk" type="success" size="small" style="margin-left:10px">✓ 已保存</el-tag>
+        </el-card>
+
+        <el-card shadow="never" class="section-card">
+          <div slot="header">
             <b>用户管理</b> <span class="loginid">（{{ users.length }} 个账号）</span>
             <el-button size="mini" style="margin-left:10px" @click="loadUsers">刷新</el-button>
           </div>
@@ -1315,8 +1341,8 @@
               <el-button size="small" type="success" plain :loading="pd.orderSyncing"
                          @click="syncPddOrders"
                          :title="pd.orderSync && pd.orderSync.synced
-                           ? '从最新订单往前增量拉取，追平即停'
-                           : '首次同步：全量拉取全部订单（待付款/待发货/待收货/已完成/已退款）'">
+                           ? '从最新订单往前增量拉取，追平即停（增量不受时间范围限制）'
+                           : ('首次同步：只拉取最近 ' + pd.orderMonths + ' 个月的订单（可在「系统管理」调整）')">
                 {{ pd.orderSync && pd.orderSync.synced ? '获取订单数据' : '获取订单数据（首次全量）' }}
               </el-button>
               <el-tag v-if="pd.orderSync && pd.orderSync.lastAt" size="small" type="info">
@@ -1324,6 +1350,19 @@
               </el-tag>
             </template>
           </qnh-login-bar>
+          <!-- 拉取范围说明：新手最容易误以为「点了就能看到全部历史」，这里写清楚 -->
+          <div class="form-tip" style="margin-top:8px">
+            <i class="el-icon-info"></i>
+            <template v-if="pd.orderSync && pd.orderSync.synced">
+              订单数据已同步过：点「获取订单数据」为<b>增量拉取</b>，只补新订单，<b>不受时间范围限制</b>
+              （该账号首次全量时只回溯了最近 {{ pd.orderMonths }} 个月，更早的订单不会出现在列表里）。
+            </template>
+            <template v-else>
+              首次点「获取订单数据」<b>只拉取最近 {{ pd.orderMonths }} 个月</b>的订单，更早的不拉取、也不入库；
+              之后再点按钮为<b>增量拉取</b>，不受时间范围限制。
+            </template>
+            切换账号后，每个账号各自首次全量。
+          </div>
         </el-card>
 
         <el-alert v-if="qnhNeedPick" type="warning" :closable="false" show-icon style="margin-bottom:12px"
@@ -1886,7 +1925,8 @@ const vm = new Vue({
         summary: null, lastRun: null, syncing: false,
         cookie: { logined: false, loading: false, message: '' },
         // 「获取订单数据」（订单列表接口）：首次全量、之后增量；orderSync 来自 /api/pdd/status
-        orderSyncing: false, orderTaskId: '', orderSync: null,
+        // orderMonths = 首次全量只回溯最近几个月（系统管理可配，默认 3）
+        orderSyncing: false, orderTaskId: '', orderSync: null, orderMonths: 3,
         // 批量申请发票
         selected: [], applying: false, applyTaskId: '',
         applyDialog: { visible: false, running: false, kind: '', status: '', message: '', progress: null, log: [], startedAt: 0 },
@@ -1929,6 +1969,8 @@ const vm = new Vue({
         gapMin: 15, gapMax: 30, chunkMax: 450, template: '', orderItem: '', reminder: '', serverUrl: '',
         // 拼多多催收话术（与 1688 的 templates 完全分开，只有一条）
         pddChat: '', pddGapSec: 4,
+        // 「获取订单数据」首次全量只回溯最近 N 个月（默认 3）
+        pddOrderMonths: 3,
       },
       // 系统默认拼多多话术（「恢复默认」按钮用；真实值由 /api/config 下发）
       defaultPddChat: '你好，麻烦尽快开一下发票，在平台都已经申请！！！如需线下开票，我的抬头：{companyName}，'
@@ -2027,6 +2069,9 @@ const vm = new Vue({
         s = (ad.running ? name + '：' : name + '（已结束）：')
           + '第 ' + (Number(p && p.page) || 0) + ' 页 · 已拉 ' + (Number(p && p.fetched) || 0) + ' 单'
           + ' · 入库 ' + (Number(p && p.saved) || 0) + ' 条（新增 ' + (Number(p && p.newCount) || 0) + '）';
+        // 全量有时间窗口，写在进度标题上，避免用户以为「怎么只有这些订单」
+        if (ad.full) s += ' · 仅最近 ' + (Number(ad.months) || this.pd.orderMonths) + ' 个月';
+        else if (ad.running) s += ' · 增量（不限时间范围）';
       } else {
         s = (ad.running ? name + '：' : name + '（已结束）：') + done + '/' + total;
         if (ad.running && p && p.current) s += ' · 当前: ' + p.current;
@@ -3004,6 +3049,7 @@ const vm = new Vue({
         };
         this.pd.summary = d.summary || null;
         this.pd.orderSync = d.orderSync || null;
+        this.pd.orderMonths = Number(d.orderMonths) > 0 ? Number(d.orderMonths) : 3;
         if (Array.isArray(d.sessions)) this.pddSessions = d.sessions.map(Number);
         if (Array.isArray(d.users)) {
           this.pddUsers = d.users;
@@ -3100,6 +3146,19 @@ const vm = new Vue({
     async syncPddOrders() {
       if (this.pd.orderSyncing) { this.$message.info('正在同步中，请看下方进度'); return; }
       if (this.qnhNeedPick) { this.$message.warning('请先选择要以哪个账号的身份同步'); return; }
+      // 首次全量有时间窗口，先讲清楚范围再动手（增量不限范围，不用打扰）
+      const first = !(this.pd.orderSync && this.pd.orderSync.synced);
+      if (first) {
+        try {
+          await this.$confirm(
+            `首次同步只拉取最近 ${this.pd.orderMonths} 个月的订单，更早的订单不会拉取、也不会出现在列表里。`
+            + `\n\n之后再点「获取订单数据」为增量拉取（只补新订单，不受时间范围限制）。`
+            + `\n\n范围可在「系统管理 → 拼多多订单数据 · 拉取范围」调整。`,
+            '首次同步 · 拉取范围',
+            { confirmButtonText: '开始拉取', cancelButtonText: '取消', type: 'info' }
+          );
+        } catch (e) { return; }
+      }
       try {
         const d = await this.pddApi('/api/pdd/orders-sync', {
           method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
@@ -3113,6 +3172,7 @@ const vm = new Vue({
         this.pd.orderTaskId = d.taskId || '';
         this.pd.applyDialog = {
           visible: true, running: true, kind: 'orders', status: '', message: '',
+          full: !!d.full, months: Number(d.months) || this.pd.orderMonths,
           progress: { page: 0, fetched: 0, rows: 0, saved: 0, newCount: 0 }, log: [],
           startedAt: Date.now(),
         };
@@ -3146,6 +3206,8 @@ const vm = new Vue({
           d = null;
         }
         if (d && !d.error) {
+          if (d.months) this.pd.applyDialog.months = d.months;
+          if (d.full !== undefined) this.pd.applyDialog.full = !!d.full;
           if (d.progress) this.pd.applyDialog.progress = d.progress;
           if (Array.isArray(d.progressLog)) this.pd.applyDialog.log = d.progressLog;
           if (d.status !== 'pending') {
@@ -3717,6 +3779,8 @@ const vm = new Vue({
           // 拼多多话术：同样做字段级回退，避免把空值存回去
           pddChat: (typeof pm.chat === 'string' && pm.chat.trim()) ? pm.chat : (dpm.chat || this.defaultPddChat),
           pddGapSec: Math.max(2, Math.round((Number(pm.gapMs) || Number(dpm.gapMs) || 4000) / 1000)),
+          // 订单同步：首次全量回溯月数（空/非法 → 回退 3）
+          pddOrderMonths: Math.min(36, Math.max(1, Number(rt.pddOrdersFullMonths) || 3)),
         };
         if (dpm.chat) this.defaultPddChat = dpm.chat;
         this.saveOk = false;
@@ -3736,7 +3800,12 @@ const vm = new Vue({
       try {
         const d = await this.api('/api/config', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ config: {
           server_url: (this.cfg.serverUrl || '').trim(),
-          runtime: { sendGapMinSec: Number(this.cfg.gapMin) || 15, sendGapMaxSec: Number(this.cfg.gapMax) || 30 },
+          runtime: {
+            sendGapMinSec: Number(this.cfg.gapMin) || 15,
+            sendGapMaxSec: Number(this.cfg.gapMax) || 30,
+            // 拼多多「获取订单数据」首次全量的回溯月数（保存后下次同步即生效，无需重启）
+            pddOrdersFullMonths: Math.min(36, Math.max(1, Number(this.cfg.pddOrderMonths) || 3)),
+          },
           messages: { template: this.cfg.template, orderItem: this.cfg.orderItem, orderChunkMax: Number(this.cfg.chunkMax) || 450, reminder: this.cfg.reminder },
           pddMessage: { chat: this.cfg.pddChat, gapMs: Math.max(1500, Math.round((Number(this.cfg.pddGapSec) || 4) * 1000)) },
         } }) });

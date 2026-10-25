@@ -2348,6 +2348,13 @@ const server = http.createServer(async (req, res) => {
       const old = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
       const merged = { ...old };
       merged.runtime = { ...(old.runtime || {}), ...(config.runtime || {}) };
+      // 拼多多「首次全量」回溯月数：夹在 1~36，非法值回默认 3（改完下次同步即生效，无需重启）
+      if (config.runtime && config.runtime.pddOrdersFullMonths !== undefined) {
+        const n = Number(config.runtime.pddOrdersFullMonths);
+        merged.runtime.pddOrdersFullMonths = Number.isFinite(n) && n > 0
+          ? Math.min(pddOrders.MAX_FULL_MONTHS, Math.max(pddOrders.MIN_FULL_MONTHS, Math.round(n)))
+          : pddOrders.DEFAULT_FULL_MONTHS;
+      }
       merged.messages = { ...(old.messages || {}), ...(config.messages || {}) };
       // 拼多多催收模板：单独一组配置，保存时规范化（空值回退默认，避免又出现「模板被存成空串」）
       if (config.pddMessage !== undefined) {
@@ -2952,6 +2959,8 @@ const server = http.createServer(async (req, res) => {
           cookie,
           summary: sum,
           orderSync,
+          // 「获取订单数据」首次全量的时间窗口（月），页面上的说明文案用它，改配置后刷新即变
+          orderMonths: pddOrders.getFullMonths(),
           statusText: pdd.STATUS_TEXT,
           isAdmin,
           tenantId: pddUid,
@@ -3011,10 +3020,13 @@ const server = http.createServer(async (req, res) => {
         // 首次（库里还没有订单列表同步过的数据）自动全量；之后默认增量
         let full = b.full === true || b.full === 'true';
         if (!(await pddOrders.hasOrderData(pddUid))) full = true;
+        // 全量只回溯最近 N 个月（系统管理可配，默认 3）；增量不受限制
+        const months = pddOrders.getFullMonths();
+        const cutoff = full ? pddOrders.cutoffOf(months).slice(0, 10) : null;
 
         const taskId = 'pddord-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
         const ctx = {
-          taskId, kind: 'orders', full, userId: Number(pddUid), status: 'pending', message: '',
+          taskId, kind: 'orders', full, months, cutoff, userId: Number(pddUid), status: 'pending', message: '',
           total: 0, results: [], okCount: 0, failCount: 0,
           progress: { page: 0, fetched: 0, rows: 0, saved: 0, newCount: 0, current: '' },
           progressLog: [], createdAt: Date.now(), expiresAt: Date.now() + 30 * 60 * 1000,
@@ -3026,12 +3038,14 @@ const server = http.createServer(async (req, res) => {
           if (ctx.progressLog.length > 300) ctx.progressLog.shift();
         };
         PDD_TASKS.set(taskId, ctx);
-        pushLog(full ? '开始全量拉取订单（首次同步，会翻到最后一页）…'
-          : '开始增量拉取订单（从最新往前翻，追平即停）…');
+        pushLog(full
+          ? `开始全量拉取订单（只回溯最近 ${months} 个月：${cutoff} 起，更早的不拉取、不入库）…`
+          : '开始增量拉取订单（从最新往前翻，追平即停；不受时间范围限制）…');
 
         pddOrders.syncOrders({
           userId: pddUid,
           full,
+          months,
           onProgress: (pr) => {
             ctx.progress = Object.assign({}, ctx.progress, pr);
             ctx.total = pr.fetched || 0;
@@ -3041,6 +3055,7 @@ const server = http.createServer(async (req, res) => {
         }).then((out) => {
           ctx.status = out.ok ? 'done' : 'failed';
           ctx.message = out.message || '';
+          ctx.reachedCutoff = !!out.reachedCutoff;
           ctx.progress = Object.assign({}, ctx.progress, {
             page: out.pages || ctx.progress.page,
             fetched: out.fetched || 0, rows: out.rows || 0,
@@ -3049,6 +3064,7 @@ const server = http.createServer(async (req, res) => {
           ctx.total = out.fetched || ctx.total;
           ctx.finishedAt = Date.now();
           ctx.expiresAt = Date.now() + PDD_APPLY_TTL_MS;
+          if (ctx.reachedCutoff) pushLog(`已到时间窗口下限（${cutoff} 之前的不再拉取）`);
           pushLog((out.ok ? '✓ ' : '✗ ') + (out.message || ''));
         }).catch((e) => {
           ctx.status = 'failed';
@@ -3057,10 +3073,12 @@ const server = http.createServer(async (req, res) => {
           pushLog('✗ 同步异常：' + ctx.message);
         });
 
-        await logOp(user, 'pdd.orders.sync', { tenantId: pddUid, full });
+        await logOp(user, 'pdd.orders.sync', { tenantId: pddUid, full, months });
         return sendJson(res, 200, {
-          ok: true, pending: true, taskId, full,
-          message: full ? '已开始全量拉取全部订单，进度见下方…' : '已开始增量拉取订单，进度见下方…',
+          ok: true, pending: true, taskId, full, months, cutoff,
+          message: full
+            ? `已开始全量拉取订单（只回溯最近 ${months} 个月：${cutoff} 起），进度见下方…`
+            : '已开始增量拉取订单（不受时间范围限制），进度见下方…',
         });
       }
 
@@ -3302,6 +3320,9 @@ const server = http.createServer(async (req, res) => {
           ok: ctx.status === 'done',
           message: ctx.message || '',
           full: !!ctx.full,
+          months: ctx.months || null,
+          cutoff: ctx.cutoff || null,
+          reachedCutoff: !!ctx.reachedCutoff,
           total: ctx.total,
           results: ctx.results,
           okCount: ctx.okCount,
