@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>1688 发票催收控制台</title>
+<title>发票催收</title>
 <!-- Element UI 主题（本地 vendor，免外网 CDN）；须在本页自身样式之前加载，便于本页样式覆盖 -->
 <link rel="stylesheet" href="/vendor/element-ui/index.css">
 <style>
@@ -66,10 +66,6 @@
   .trend-tip { font-size: 11px; color: var(--sub); }
   .toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
   .toolbar .spacer { flex: 1; }
-  .agent-bar { display: flex; align-items: center; gap: 10px; margin: 10px 0 12px; padding: 9px 12px; background: #fff; border: 1px solid var(--border); border-radius: 8px; font-size: 12px; color: var(--sub); }
-  .agent-dot { width: 8px; height: 8px; border-radius: 50%; background: #c9ccd1; flex: none; }
-  .agent-dot.on { background: #2e7d32; }
-  .agent-dot.warn { background: #ef9f27; }
   .members-box { padding: 2px 0 6px; }
   .members-head { font-size: 11px; color: var(--sub); margin-bottom: 8px; line-height: 1.7; }
   .member { background: #fff; border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; margin-bottom: 8px; }
@@ -134,9 +130,9 @@
   <el-container>
     <el-header class="app-header" height="auto">
       <div class="nav-bar">
-        <div class="brand">1688 发票催收</div>
+        <div class="brand">发票催收</div>
         <el-menu class="nav-menu" :default-active="page" mode="horizontal" @select="switchPage">
-          <el-menu-item index="board">看板</el-menu-item>
+          <el-menu-item index="board">1688发票</el-menu-item>
           <el-menu-item index="pdd">拼多多发票</el-menu-item>
           <el-menu-item index="mapping">税名核对</el-menu-item>
           <el-menu-item index="product">商品列表</el-menu-item>
@@ -165,7 +161,7 @@
     </el-header>
 
     <div class="banner" v-if="readonly" style="background:#e3f2fd;color:#0d47a1;border-bottom:1px solid #bbdefb">
-      👁 正在以超级管理员身份查看 <b>{{ tenantLabel }}</b> 的看板与映射数据（<b>只读</b>，不能发送/修改）。
+      👁 正在以超级管理员身份查看 <b>{{ tenantLabel }}</b> 的「1688发票」数据（<b>只读</b>，不能发送/修改）。
       <el-button size="mini" style="margin-left:12px" @click="exitTenantView">退出查看</el-button>
     </div>
     <div class="banner" v-if="mustChangePassword" style="background:#fff8e1;color:#8d6e00;border-bottom:1px solid #ffe082">
@@ -174,7 +170,7 @@
     </div>
 
     <el-main>
-      <!-- ══════════ 看板 ══════════ -->
+      <!-- ══════════ 1688发票 ══════════ -->
       <div v-show="page === 'board'" id="page-board">
         <!-- 统计卡 -->
         <el-row :gutter="12" class="section-card">
@@ -236,20 +232,13 @@
             <el-input v-model="draftKeyword" size="small" style="width:230px" placeholder="搜索卖家公司名 / 登录ID"
                       clearable @keyup.enter.native="applyFilters"></el-input>
             <el-button size="small" type="primary" plain :loading="boardLoading" @click="applyFilters" title="重新请求数据并按当前条件刷新列表">查询</el-button>
-            <el-button size="small" :loading="boardLoading" @click="loadData" title="重新拉取看板数据">刷新</el-button>
+            <el-button size="small" :loading="boardLoading" @click="loadData" title="重新拉取发票数据">刷新</el-button>
             <span class="spacer"></span>
             <el-button size="small" @click="openUpload('orders')" title="上传从 1688 导出的订单 Excel 并导入（重复订单按最新数据更新）">导入1688订单数据</el-button>
             <el-button size="small" @click="openUpload('invoices')" title="上传从电子税务局导出的发票 Excel 并导入（重复发票按最新数据更新）">导入税务局发票数据</el-button>
             <el-button size="small" type="primary" :disabled="readonly" @click="batchSend">发送催收消息 ({{ selectedCount }})</el-button>
           </div>
         </el-card>
-
-        <!-- 本机助手状态 -->
-        <div class="agent-bar">
-          <span class="agent-dot" :class="agent.online ? (agent.loggedIn ? 'on' : 'warn') : ''"></span>
-          <span v-if="agent.online">本机助手：<b :style="{color: agent.loggedIn ? '#2e7d32' : '#b26a00'}">已连接</b>（1688 {{ agent.loggedIn ? '已登录' : '未登录' }}）<span v-if="agentVer"> · 助手 v{{ agentVer }}</span></span>
-          <span v-else>本机助手：未连接（点右上角「本机助手」下载安装并绑定）</span>
-        </div>
 
         <!-- 断线续跑 -->
         <div v-if="resumeVisible" class="section-card"
@@ -450,23 +439,22 @@
         <div class="meta-line">{{ meta }}</div>
       </div>
 
-      <!-- ══════════ 税名核对 ══════════ -->
-      <div v-show="page === 'mapping'" id="page-mapping">
+      <!-- ══════════ 税名核对（所有人可用；普通用户只见自己发票里的销方，超管看全局） ══════════ -->
+      <div v-if="page === 'mapping'" id="page-mapping">
         <div class="page-head">
           <h2>税名核对：税务局销方名称 → 1688 商家名称</h2>
           <el-alert type="info" :closable="false" show-icon style="margin-top:8px"
             title="「已开票订单」里的销方名称是税务局口径，跟订单里的商家名称不一致，所以要靠这张映射表建立名称关系。">
             <div style="font-size:12px;line-height:1.8">
               导入时会自动匹配（名称完全一致 / 包含 / 登录ID / 备注线索）；自动匹配不上的会列在下面「待人工比对」，选好对应的 1688 商家保存即可。<br>
-              映射关系<b>全员共享</b>：任何用户核对过的销方名称，其他用户直接复用，无须重复匹配；「待人工比对」只显示你自己发票里的销方名称。<br>
+              本页<b>只显示你自己导入的税务局发票里出现过的销方名称</b>，也只能维护这些名称（保存 / 忽略 / 删除）。<br>
+              但映射关系是<b>全平台共用一套、去重存放</b>的：同一个销方名称只要有人维护过一次，其他人发票里的同名销方<b>自动关联</b>，不用重复映射。<br>
               若某个销方名称<b>确认没有</b>对应的 1688 商家，点「忽略」把它移出列表（可在下方「已忽略」区恢复）。
             </div>
           </el-alert>
           <el-alert v-if="map.allUsers" type="success" :closable="false" show-icon style="margin-top:8px"
-            title="超管全局视图：正在查看全体用户的税名核对信息（映射全员共享）。"></el-alert>
+            title="超级管理员全局视图：此处列出全体用户的销方名称与全部已维护映射（含未映射），维护结果对所有用户生效。"></el-alert>
         </div>
-        <el-alert v-if="readonly" type="warning" :closable="false" show-icon style="margin-bottom:12px" title="只读模式：正在查看他人数据，不能修改映射。"></el-alert>
-
         <el-card shadow="never" class="section-card">
           <div slot="header"><b>待人工比对</b> <span class="loginid">（{{ map.unmatched.length }} 个销方名称未匹配）</span></div>
           <el-alert v-if="!map.unmatched.length" type="success" :closable="false" show-icon
@@ -481,10 +469,15 @@
               <el-table-column label="开票金额" width="110"><template slot-scope="p"><span class="amount ok">{{ yuan(p.row.invoice_amount) }}</span></template></el-table-column>
               <el-table-column label="最近开票" width="110"><template slot-scope="p"><span class="loginid">{{ fmtDate(p.row.last_invoice_date) }}</span></template></el-table-column>
               <el-table-column label="备注线索" width="160"><template slot-scope="p"><span class="loginid">{{ p.row.remark || '' }}</span></template></el-table-column>
+              <el-table-column v-if="map.allUsers" label="涉及账号" width="170">
+                <template slot-scope="p">
+                  <span class="loginid" :title="p.row.owners || '—'">{{ p.row.owners || '—' }}</span>
+                  <el-tag v-if="p.row.user_count > 1" size="mini" type="info" style="margin-left:4px">{{ p.row.user_count }}</el-tag>
+                </template>
+              </el-table-column>
               <el-table-column label="对应的 1688 商家" min-width="330">
                 <template slot-scope="p">
-                  <div v-if="readonly" class="muted">只读</div>
-                  <div v-else style="display:flex;gap:6px;align-items:center">
+                  <div style="display:flex;gap:6px;align-items:center">
                     <el-select v-model="mapDraft[p.row.tax_seller_name]" size="mini" filterable clearable
                                placeholder="输入1688公司名搜索" style="flex:1;min-width:180px">
                       <el-option v-for="s in map.sellers" :key="s.company" :label="s.company" :value="s.company">
@@ -508,7 +501,7 @@
 
         <el-card shadow="never" class="section-card">
           <div slot="header"><b>已维护映射</b> <span class="loginid">（{{ map.mappings.length }} 条）</span></div>
-          <el-alert v-if="!map.mappings.length" type="info" :closable="false" show-icon title="映射表还是空的，先点看板的「导入税务局发票数据」上传发票后自动匹配。"></el-alert>
+          <el-alert v-if="!map.mappings.length" type="info" :closable="false" show-icon title="这里还没有与你相关的映射：先在「1688发票」页点「导入税务局发票数据」上传发票，系统会自动匹配；匹配不上的会出现在上面「待人工比对」。"></el-alert>
           <template v-else>
             <el-table :data="mappingPage" size="small" border style="width:100%">
               <el-table-column prop="tax_seller_name" label="税务局销方名称" min-width="170"></el-table-column>
@@ -524,11 +517,17 @@
               </el-table-column>
               <el-table-column label="人工确认" width="90"><template slot-scope="p"><el-tag size="mini" :type="p.row.is_confirmed ? 'success' : 'warning'">{{ p.row.is_confirmed ? '已确认' : '待复核' }}</el-tag></template></el-table-column>
               <el-table-column label="开票金额" width="110"><template slot-scope="p"><span class="amount ok">{{ yuan(p.row.invoice_amount) }}</span></template></el-table-column>
+              <el-table-column label="维护人" width="140">
+                <template slot-scope="p">
+                  <span v-if="map.allUsers" class="loginid">{{ p.row.maintainer || '—' }}</span>
+                  <el-tag v-else-if="p.row.maintainer_is_me" size="mini" type="success">我</el-tag>
+                  <el-tag v-else size="mini" type="info" title="该映射由其他账号维护，全平台共用">他人维护·共享</el-tag>
+                </template>
+              </el-table-column>
               <el-table-column label="更新时间" width="140"><template slot-scope="p"><span class="loginid">{{ fmtMinute(p.row.updated_at) }}</span></template></el-table-column>
               <el-table-column label="操作" width="150">
                 <template slot-scope="p">
-                  <div v-if="readonly" class="muted">只读</div>
-                  <div v-else style="display:flex;gap:6px">
+                  <div style="display:flex;gap:6px">
                     <el-button size="mini" type="danger" plain @click="delMap(p.row)">删除</el-button>
                     <el-button size="mini" @click="ignoreMap(p.row)" title="确认没有对应的 1688 商家，改为忽略">忽略</el-button>
                   </div>
@@ -553,8 +552,7 @@
                 <el-table-column label="更新时间" width="140"><template slot-scope="p"><span class="loginid">{{ fmtMinute(p.row.updated_at) }}</span></template></el-table-column>
                 <el-table-column label="操作" width="100">
                   <template slot-scope="p">
-                    <el-button v-if="!readonly" size="mini" @click="unignoreMap(p.row)">恢复</el-button>
-                    <span v-else class="muted">只读</span>
+                    <el-button size="mini" @click="unignoreMap(p.row)">恢复</el-button>
                   </template>
                 </el-table-column>
               </el-table>
@@ -713,7 +711,7 @@
         <div class="page-head">
           <h2>系统管理</h2>
           <div style="font-size:12px;color:var(--sub);line-height:1.8">
-            仅超级管理员可见。可在此维护账号（新增 / 重置密码 / 禁用 / 删除）与<b>每个账号的开票抬头</b>、查看业务账号的看板与映射数据，以及调整全局发送参数与话术模板。<br>
+            仅超级管理员可见。可在此维护账号（新增 / 重置密码 / 禁用 / 删除）与<b>每个账号的开票抬头</b>、查看业务账号的「1688发票」数据，以及调整全局发送参数与话术模板。<br>
             超级管理员（<b>admin</b>）是<b>纯系统账号</b>，不承载业务数据，因此在列表中只提供「重置密码」。
           </div>
         </div>
@@ -741,12 +739,12 @@
               <el-form label-position="top" size="small">
                 <el-form-item label="服务器地址（所有用户共用）">
                   <el-input v-model="cfg.serverUrl" placeholder="http://你的服务器:8787 或 https://invoice.example.com"></el-input>
-                  <div class="form-tip">本机助手连接看板时使用的地址。在此统一配置后，用户下载的助手里会<b>自动内置</b>该地址，无需手动填写；留空则用户需手动输入。</div>
+                  <div class="form-tip">本机助手连接系统时使用的地址。在此统一配置后，用户下载的助手里会<b>自动内置</b>该地址，无需手动填写；留空则用户需手动输入。</div>
                 </el-form-item>
               </el-form>
               <div style="margin-top:6px">
                 <el-button type="primary" size="small" @click="openDownload">⬇ 下载本机助手（Windows）</el-button>
-                <span class="form-tip" style="display:inline;margin-left:8px">用户下载到的助手已内置全局地址；在本机登录看板后点「绑定本机助手」即可完成绑定（设备令牌，无需填税号）。</span>
+                <span class="form-tip" style="display:inline;margin-left:8px">用户下载到的助手已内置全局地址；在网页登录后点「绑定本机助手」即可完成绑定（设备令牌，无需填税号）。</span>
               </div>
 
               <el-divider style="margin:14px 0 10px"></el-divider>
@@ -1310,9 +1308,22 @@
         <!-- 顶部状态条：登录 / 刷新（与退单列表、毛利监控共用同一组件，只换服务名） -->
         <el-card class="section-card" shadow="never" :body-style="{ padding: '12px 14px' }">
           <qnh-login-bar service="拼多多" :cookie="pd.cookie" :last-run="pd.lastRun"
-                         :who-label="qnhWhoLabel" action-text="立即刷新数据"
+                         :who-label="qnhWhoLabel" action-text="刷新发票状态"
                          :action-loading="pd.syncing"
-                         @login="onPddLoginBtn" @action="doPddSync"></qnh-login-bar>
+                         @login="onPddLoginBtn" @action="doPddSync">
+            <template slot="actions">
+              <el-button size="small" type="success" plain :loading="pd.orderSyncing"
+                         @click="syncPddOrders"
+                         :title="pd.orderSync && pd.orderSync.synced
+                           ? '从最新订单往前增量拉取，追平即停'
+                           : '首次同步：全量拉取全部订单（待付款/待发货/待收货/已完成/已退款）'">
+                {{ pd.orderSync && pd.orderSync.synced ? '获取订单数据' : '获取订单数据（首次全量）' }}
+              </el-button>
+              <el-tag v-if="pd.orderSync && pd.orderSync.lastAt" size="small" type="info">
+                订单同步 {{ String(pd.orderSync.lastAt).slice(0, 16) }}
+              </el-tag>
+            </template>
+          </qnh-login-bar>
         </el-card>
 
         <el-alert v-if="qnhNeedPick" type="warning" :closable="false" show-icon style="margin-bottom:12px"
@@ -1329,13 +1340,14 @@
           </el-card>
         </div>
 
-        <!-- 批量申请发票 · 任务进度（页面内展示，与看板「发送催收消息」的任务进度卡同款） -->
+        <!-- 批量申请发票 · 任务进度（页面内展示，与「1688发票」页「发送催收消息」的任务进度卡同款） -->
         <el-card v-if="pd.applyDialog.visible" ref="applyCard" class="section-card" shadow="never"
                  :body-style="{ padding: '14px 16px' }" style="margin-bottom:12px">
           <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px">
             <span style="font-size:13px">{{ applyTaskText }}</span>
             <span style="flex:1"></span>
-            <el-button v-if="pd.applyDialog.running" size="mini" type="danger" plain @click="stopPddApply">停止</el-button>
+            <el-button v-if="pd.applyDialog.running" size="mini" type="danger" plain
+                       @click="pd.applyDialog.kind === 'orders' ? stopPddOrders() : stopPddApply()">停止</el-button>
             <el-button v-else size="mini" plain @click="pd.applyDialog.visible = false">关闭</el-button>
           </div>
           <el-progress :percentage="applyPercent" :stroke-width="10" :show-text="false"></el-progress>
@@ -1343,15 +1355,17 @@
           <el-alert v-if="!pd.applyDialog.running && pd.applyDialog.status === 'failed'" type="error"
                     :closable="false" show-icon style="margin-top:10px"
                     :title="'任务失败：' + (pd.applyDialog.message || '未知原因')"
-                    :description="pd.applyDialog.kind === 'send'
-                      ? '未发出任何催收消息。可按提示处理后重试（等待上一个任务结束 / 重新登录拼多多 / 升级助手）；已发出去的部分不受影响。'
-                      : '未提交开票申请。可按提示处理后重试（等待上一个任务结束 / 重新登录拼多多 / 升级助手）；已提交成功的部分不受影响。'"></el-alert>
+                    :description="pd.applyDialog.kind === 'orders'
+                      ? '拉取订单失败。常见原因：拼多多登录态过期（重新登录后再试）、接口风控限流（过几分钟再试）。已入库的部分不受影响。'
+                      : (pd.applyDialog.kind === 'send'
+                        ? '未发出任何催收消息。可按提示处理后重试（等待上一个任务结束 / 重新登录拼多多 / 升级助手）；已发出去的部分不受影响。'
+                        : '未提交开票申请。可按提示处理后重试（等待上一个任务结束 / 重新登录拼多多 / 升级助手）；已提交成功的部分不受影响。')"></el-alert>
           <el-alert v-else-if="!pd.applyDialog.running && pd.applyDialog.status === 'timeout'" type="warning"
                     :closable="false" show-icon style="margin-top:10px"
                     :title="pd.applyDialog.message"></el-alert>
           <el-alert v-else-if="!pd.applyDialog.running && pd.applyDialog.status === 'done'" type="success"
                     :closable="false" show-icon style="margin-top:10px"
-                    :title="pd.applyDialog.message || '申请提交完成'"></el-alert>
+                    :title="pd.applyDialog.message || (pd.applyDialog.kind === 'orders' ? '订单同步完成' : '申请提交完成')"></el-alert>
         </el-card>
 
         <!-- 筛选 + 列表 -->
@@ -1365,6 +1379,7 @@
               <el-option label="已开票" value="2"></el-option>
               <el-option label="商家处理中" value="6"></el-option>
               <el-option label="暂不可开票" value="0"></el-option>
+              <el-option label="未同步开票" value="9"></el-option>
             </el-select>
             <el-input v-model="pd.filter.keyword" size="small" clearable style="width:240px"
                       placeholder="订单号 / 商品 / 规格 / 抬头" @keyup.enter.native="applyPddFilter"></el-input>
@@ -1402,6 +1417,11 @@
             <el-table-column label="订单号" width="180">
               <template slot-scope="p"><span class="loginid">{{ p.row.orderSn || '—' }}</span></template>
             </el-table-column>
+            <el-table-column label="实付金额" width="110" align="right">
+              <template slot-scope="p">
+                <span class="amount">{{ p.row.payAmount == null ? '—' : yuan(p.row.payAmount) }}</span>
+              </template>
+            </el-table-column>
             <el-table-column prop="orderTime" label="下单时间" width="132" sortable="custom"
                              :sort-orders="['descending', 'ascending']"
                              :header-cell-style="{ cursor: 'pointer' }">
@@ -1415,6 +1435,18 @@
             <el-table-column label="开票状态" width="110">
               <template slot-scope="p">
                 <el-tag size="mini" :type="pddStatusType(p.row.invoiceStatus)">{{ p.row.statusText || '—' }}</el-tag>
+              </template>
+            </el-table-column>
+            <!-- 订单状态：来自「我的订单」接口（order_status_prompt），与开票状态是两套口径 -->
+            <el-table-column label="订单状态" width="130">
+              <template slot-scope="p">
+                <el-tooltip v-if="p.row.orderStatusText" placement="top"
+                            :content="'平台订单状态：' + p.row.orderStatusText
+                              + (p.row.orderStatus == null ? '' : '（status=' + p.row.orderStatus + '）')
+                              + (p.row.parentOrderSn ? '｜组合单：' + p.row.parentOrderSn : '')">
+                  <el-tag size="mini" :type="pddOrderStatusType(p.row)">{{ p.row.orderStatusText }}</el-tag>
+                </el-tooltip>
+                <span v-else class="loginid">—</span>
               </template>
             </el-table-column>
             <el-table-column label="最近催收时间" width="130">
@@ -1468,7 +1500,7 @@
       <!-- 全局页脚：版权归属（主体来自 config.json 的 copyright，缺省回退系统名；年份服务端按当年生成） -->
       <div class="app-footer">
         <span v-if="copyright">{{ copyright }}</span>
-        <span v-else>1688 发票催收系统 · 保留所有权利</span>
+        <span v-else>发票催收系统 · 保留所有权利</span>
       </div>
     </el-main>
   </el-container>
@@ -1609,7 +1641,7 @@
       <li><b>装一次</b>：点下方「<b>下载本机助手（Windows）</b>」，下载并安装（绿色便携版双击即可，无需安装）。</li>
       <li><b>绑一次</b>：回到本页点「<b>绑定本机助手</b>」——浏览器会弹窗问是否打开「1688催收助手」，点「打开」即可自动完成绑定。若没装，会提示你先下载。</li>
       <li><b>登一次</b>：在助手面板里点「<b>打开 1688 登录窗口</b>」登录你的 1688（登录态只存在你本机，不经过服务器）。</li>
-      <li>之后回到看板点「<b>发送催收消息</b>」：助手会自己打开 1688 聊天页逐家发送，并在面板里显示实时进度，可随时停止。</li>
+      <li>之后回到「<b>1688发票</b>」页点「<b>发送催收消息</b>」：助手会自己打开 1688 聊天页逐家发送，并在面板里显示实时进度，可随时停止。</li>
     </ol>
     <div class="muted" style="font-size:12px;margin-bottom:10px" v-html="guide.msg"></div>
     <div style="display:flex;gap:8px;flex-wrap:wrap">
@@ -1619,7 +1651,7 @@
       <el-button @click="guide.visible = false">知道了</el-button>
     </div>
     <div class="muted" style="font-size:12px;margin-top:10px;line-height:1.8">
-      断线了？助手正常是托盘常驻的；若已退出，再点一次「批量发送」看板会自动把它唤起来。发送中断后，看板会出现「继续发送未完成」——已成功的不会重发。
+      断线了？助手正常是托盘常驻的；若已退出，再点一次「批量发送」页面会自动把它唤起来。发送中断后，页面会出现「继续发送未完成」——已成功的不会重发。
     </div>
   </el-dialog>
 
@@ -1670,7 +1702,7 @@
 // ══════════════ 通用格式化 ══════════════
 const yuan = v => '¥' + Number(v || 0).toFixed(2);
 const statusText = st => ({ none: '未申请', applying: '已申请', issued: '已开票' }[st] || st || '');
-const channelText = c => ({ web: '看板', cli: '命令行', legacy: '历史导入' }[c] || c || '');
+const channelText = c => ({ web: '网页', cli: '命令行', legacy: '历史导入' }[c] || c || '');
 const sentKey = m => m.sellerLogin || m.loginId;
 const fmtDur = (ms) => { const s = Math.max(0, Math.round(ms / 1000)); return s < 90 ? `${s}秒` : `${Math.round(s / 60)}分`; };
 const ecLib = () => window.echarts || window.ECharts;
@@ -1780,6 +1812,7 @@ Vue.component('qnh-login-bar', {
   <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
     <el-button size="small" :type="btnType" :loading="loading" @click="onLogin">{{ btnText }}</el-button>
     <el-button size="small" type="primary" :loading="actionLoading" @click="onAction">{{ actionText }}</el-button>
+    <slot name="actions"></slot>
     <el-tag v-if="lastRunText" size="small" :type="lastRunType" :title="lastRunTip">{{ lastRunText }}</el-tag>
     <el-tag v-if="scheduleText" size="small" type="success">每天 {{ scheduleText }} 自动同步</el-tag>
     <el-tag v-if="logined && accountText" size="small">{{ service }} {{ accountText }}</el-tag>
@@ -1852,11 +1885,13 @@ const vm = new Vue({
         filter: { status: '', keyword: '', sort: 'time_desc' },
         summary: null, lastRun: null, syncing: false,
         cookie: { logined: false, loading: false, message: '' },
+        // 「获取订单数据」（订单列表接口）：首次全量、之后增量；orderSync 来自 /api/pdd/status
+        orderSyncing: false, orderTaskId: '', orderSync: null,
         // 批量申请发票
         selected: [], applying: false, applyTaskId: '',
         applyDialog: { visible: false, running: false, kind: '', status: '', message: '', progress: null, log: [], startedAt: 0 },
       },
-      // 看板数据
+      // 1688发票数据
       companies: [], sent: {}, invSummary: null, unmatchedCnt: 0, ignoredCnt: 0, manualCnt: 0, boardLoading: false,
       // 商品列表（前置仓补货参考）
       product: {
@@ -1945,7 +1980,7 @@ const vm = new Vue({
     // 拼多多发票对所有用户开放，不需要单独配置菜单权限
     // 管理员必须先选定一个账号，才能看该账号的牵牛花数据
     qnhNeedPick() { return this.isAdmin && this.qnhTenant == null; },
-    // 拼多多催收话术预览：用当前查看账号的抬头填充（看板里各账号抬头不同）
+    // 拼多多催收话术预览：用当前查看账号的抬头填充（「1688发票」页里各账号抬头不同）
     pddMsgPreview() {
       const tpl = String(this.cfg.pddChat || '');
       // 管理员正在查看某个账号时，预览用该账号的抬头（真实发送也是用它）
@@ -1968,31 +2003,48 @@ const vm = new Vue({
     applyPercent() {
       const ad = this.pd.applyDialog;
       const p = ad && ad.progress;
+      // 订单同步：接口不给总页数，无法算真实百分比 → 运行中按时长缓爬到 90，结束给 100
+      if (ad && ad.kind === 'orders') {
+        if (!ad.running) return 100;
+        if (p && p.percent) return Math.min(95, Number(p.percent));
+        const pages = Number(p && p.page) || 0;
+        return Math.min(90, Math.round(pages * 4));
+      }
       if (!p || !p.total) return ad && ad.running ? 0 : 100;
       return Math.min(100, Math.round((Number(p.index) / Number(p.total)) * 100));
     },
-    // 进度文案：与看板「发送催收消息」同款（X/Y · 当前 · 成功/失败 · 已用/约剩）
+    // 进度文案：与「1688发票」页「发送催收消息」同款（X/Y · 当前 · 成功/失败 · 已用/约剩）
     applyTaskText() {
       const ad = this.pd.applyDialog;
       const p = ad.progress;
       const isSend = ad.kind === 'send';
-      const name = isSend ? '批量催商家开票' : '批量申请发票';
+      const isOrders = ad.kind === 'orders';
+      const name = isOrders ? '获取订单数据' : (isSend ? '批量催商家开票' : '批量申请发票');
       const done = p ? (Number(p.index) || 0) : 0;
       const total = p ? (Number(p.total) || 0) : 0;
-      let s = (ad.running ? name + '：' : name + '（已结束）：') + done + '/' + total;
-      if (ad.running && p && p.current) s += ' · 当前: ' + p.current;
-      s += ' · 成功' + (p ? (p.okCount || 0) : 0) + ' 失败' + (p ? (p.failCount || 0) : 0);
+      let s;
+      if (isOrders) {
+        s = (ad.running ? name + '：' : name + '（已结束）：')
+          + '第 ' + (Number(p && p.page) || 0) + ' 页 · 已拉 ' + (Number(p && p.fetched) || 0) + ' 单'
+          + ' · 入库 ' + (Number(p && p.saved) || 0) + ' 条（新增 ' + (Number(p && p.newCount) || 0) + '）';
+      } else {
+        s = (ad.running ? name + '：' : name + '（已结束）：') + done + '/' + total;
+        if (ad.running && p && p.current) s += ' · 当前: ' + p.current;
+        s += ' · 成功' + (p ? (p.okCount || 0) : 0) + ' 失败' + (p ? (p.failCount || 0) : 0);
+      }
       if (ad.startedAt) {
         const elapsed = Date.now() - ad.startedAt;
         s += ' · 已用' + fmtDur(elapsed);
-        if (ad.running && done > 0 && total > done) s += ' · 约剩' + fmtDur((total - done) * (elapsed / done));
+        if (!isOrders && ad.running && done > 0 && total > done) s += ' · 约剩' + fmtDur((total - done) * (elapsed / done));
       }
       return s;
     },
     // 深色日志面板内容（成功绿 / 失败红，与 1688 任务面板一致的观感）
     applyLogHtml() {
-      const logs = (this.pd.applyDialog && this.pd.applyDialog.log) || [];
-      if (!logs.length) return '<div style="color:#8a8f98">等待本机助手开始执行…</div>';
+      const ad = this.pd.applyDialog || {};
+      const logs = ad.log || [];
+      const waiting = ad.kind === 'orders' ? '等待开始拉取…' : '等待本机助手开始执行…';
+      if (!logs.length) return '<div style="color:#8a8f98">' + waiting + '</div>';
       return logs.map((l) => {
         const bad = l.text.indexOf('✗') > -1 || l.text.indexOf('失败') > -1;
         const good = l.text.indexOf('✓') > -1;
@@ -2064,7 +2116,8 @@ const vm = new Vue({
       const n = (o) => ((o && o.count) || 0);
       const a = (o) => ((o && o.amount) || 0);
       return [
-        { label: '订单总数', value: (s.totalCount || 0) + ' 单', sub: '金额合计 ' + yuan(s.totalAmount || 0) },
+        { label: '订单总数', value: (s.totalCount || 0) + ' 单',
+          sub: '金额合计 ' + yuan(s.totalAmount || 0) + (n(s.unsynced) ? '｜未同步开票 ' + n(s.unsynced) + ' 单' : '') },
         { label: '待申请', value: n(s.pending) + ' 单', sub: '可开票 ' + yuan(a(s.pending)) },
         { label: '已申请', value: n(s.applied) + ' 单', sub: '已提交，等商家开票' },
         { label: '开票中', value: n(s.issuing) + ' 单', sub: yuan(a(s.issuing)) },
@@ -2292,7 +2345,7 @@ const vm = new Vue({
       await this.ensureQnhTenant();
       this.qnhReload();
     },
-    // ── 看板数据 ──
+    // ── 1688发票数据 ──
     async loadData() {
       this.boardLoading = true;
       try {
@@ -2950,6 +3003,7 @@ const vm = new Vue({
           accountName: c.accountName || (c.pdduid ? ('用户 ' + c.pdduid) : ''),
         };
         this.pd.summary = d.summary || null;
+        this.pd.orderSync = d.orderSync || null;
         if (Array.isArray(d.sessions)) this.pddSessions = d.sessions.map(Number);
         if (Array.isArray(d.users)) {
           this.pddUsers = d.users;
@@ -3038,6 +3092,92 @@ const vm = new Vue({
         this.$message.error('拉取失败：' + e.message);
       } finally {
         this.pd.syncing = false;
+      }
+    },
+
+    // ── 「获取订单数据」：拉「我的订单」全部订单（首次全量、之后增量）──
+    //   后端是后台任务（全量要翻几十页），这里只负责发起 + 轮询进度，进度卡复用批量申请发票那张
+    async syncPddOrders() {
+      if (this.pd.orderSyncing) { this.$message.info('正在同步中，请看下方进度'); return; }
+      if (this.qnhNeedPick) { this.$message.warning('请先选择要以哪个账号的身份同步'); return; }
+      try {
+        const d = await this.pddApi('/api/pdd/orders-sync', {
+          method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+        });
+        if (d.error || !d.ok) {
+          this.$message.error(d.message || d.error || '发起失败');
+          if (d.loginish) await this.loadPddStatus();
+          return;
+        }
+        this.pd.orderSyncing = true;
+        this.pd.orderTaskId = d.taskId || '';
+        this.pd.applyDialog = {
+          visible: true, running: true, kind: 'orders', status: '', message: '',
+          progress: { page: 0, fetched: 0, rows: 0, saved: 0, newCount: 0 }, log: [],
+          startedAt: Date.now(),
+        };
+        this.$message.info(d.message || '已开始拉取订单，进度见下方');
+        this.$nextTick(() => {
+          const el = this.$refs.applyCard && this.$refs.applyCard.$el;
+          if (el && el.scrollIntoView) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        });
+        this.pollPddOrdersSync();
+      } catch (e) {
+        this.$message.error('发起失败：' + e.message);
+      }
+    },
+    async pollPddOrdersSync() {
+      const taskId = this.pd.orderTaskId;
+      if (!taskId) return;
+      const started = Date.now();
+      for (;;) {
+        // 20 分钟兜底，避免极端情况下无限轮询
+        if (Date.now() - started > 20 * 60 * 1000) {
+          this.pd.applyDialog.running = false;
+          this.pd.applyDialog.status = 'timeout';
+          this.pd.applyDialog.message = '等待超时（20 分钟）。同步可能仍在后台进行，稍后点「刷新发票状态」或重新打开本页查看结果。';
+          this.pd.orderSyncing = false;
+          return;
+        }
+        let d;
+        try {
+          d = await this.pddApi('/api/pdd/task-status?taskId=' + encodeURIComponent(taskId));
+        } catch (e) {
+          d = null;
+        }
+        if (d && !d.error) {
+          if (d.progress) this.pd.applyDialog.progress = d.progress;
+          if (Array.isArray(d.progressLog)) this.pd.applyDialog.log = d.progressLog;
+          if (d.status !== 'pending') {
+            this.pd.applyDialog.running = false;
+            this.pd.applyDialog.status = d.ok ? 'done' : 'failed';
+            this.pd.applyDialog.message = d.message || '';
+            this.pd.applyDialog.progress = Object.assign({ percent: 100 }, this.pd.applyDialog.progress, {
+              page: (d.progress && d.progress.page) || 0,
+              saved: (d.progress && d.progress.saved) || 0,
+              newCount: (d.progress && d.progress.newCount) || 0,
+            });
+            this.pd.orderSyncing = false;
+            if (d.ok) this.$message.success(d.message || '订单同步完成');
+            else this.$message.error(d.message || '订单同步失败');
+            await this.loadPddStatus();
+            this.loadPddOrders();
+            return;
+          }
+        }
+        await new Promise((r) => setTimeout(r, 1500));
+      }
+    },
+    async stopPddOrders() {
+      if (!this.pd.orderTaskId) return;
+      try {
+        const d = await this.pddApi('/api/pdd/task-stop', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ taskId: this.pd.orderTaskId }),
+        });
+        this.$message[d && d.ok ? 'success' : 'warning']((d && d.message) || '已请求停止');
+      } catch (e) {
+        this.$message.error('停止失败：' + e.message);
       }
     },
 
@@ -3192,7 +3332,7 @@ const vm = new Vue({
         this.$message.error('停止失败：' + e.message);
       }
     },
-    /** 轮询任务：每 3 秒一次，直到 done / failed（兜底 20 分钟）；进度实时刷进看板卡片 */
+    /** 轮询任务：每 3 秒一次，直到 done / failed（兜底 20 分钟）；进度实时刷进页面内进度卡 */
     async pollPddTask() {
       const isSend = this.pd.applyDialog.kind === 'send';
       const startAt = Date.now();
@@ -3211,7 +3351,7 @@ const vm = new Vue({
           this.$nextTick(() => { const el = this.$refs.applyLogPanel; if (el) el.scrollTop = el.scrollHeight; });
         }
         if (d.status === 'pending') continue;
-        // done / failed → 看板内如实展示（failed 时展示服务端给出的真实原因，绝不掩码成 0/0）
+        // done / failed → 页面内如实展示（failed 时展示服务端给出的真实原因，绝不掩码成 0/0）
         this.pd.applyDialog.running = false;
         if (d.status === 'failed') {
           this.pd.applyDialog.status = 'failed';
@@ -3242,6 +3382,15 @@ const vm = new Vue({
       if (n === 1) return 'primary';
       if (n === 6) return 'danger';
       if (n === 7) return 'warning';
+      return 'info';
+    },
+    /** 订单状态标签配色：进行中蓝、已完成绿、退款/取消灰红 */
+    pddOrderStatusType(row) {
+      const t = String((row && row.orderStatusText) || '');
+      if (/退款|取消|关闭/.test(t)) return 'danger';
+      if (/待付款|待分享/.test(t)) return 'warning';
+      if (/待发货|待收货|待确认|待提货|待评价/.test(t)) return 'primary';
+      if (/交易成功|已完成|已提货/.test(t)) return 'success';
       return 'info';
     },
     shortDate(v) {
@@ -3456,7 +3605,7 @@ const vm = new Vue({
       return (this.rq.log.rows || []).filter((r) => r.logType === type).length;
     },
 
-    // ══════ 税名核对 ══════
+    // ══════ 税名核对（所有人可用；普通用户只见自己发票里的销方，映射全平台共享） ══════
     async loadMapping() {
       try { this.map = await this.api('/api/mapping'); this.mapDraft = {}; }
       catch (e) { this.$message.error('加载失败: ' + e.message); }
@@ -3469,14 +3618,15 @@ const vm = new Vue({
       try {
         const d = await this.api('/api/mapping', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ taxSellerName: u.tax_seller_name, sellerCompany: hit.company, sellerLogin: hit.sellerLogin || hit.loginId }) });
         if (d.error) { this.$message.error('保存失败: ' + d.error); return; }
-        this.$message.success('已保存映射');
+        this.$message.success('已保存映射（全平台共用，其他账号的同名销方已自动关联' + (d.updatedInvoices > 1 ? '，共更新 ' + d.updatedInvoices + ' 行发票' : '') + '）');
         this.resetDetailCache();
         await this.loadMapping(); await this.loadData();
       } catch (e) { this.$message.error('保存失败: ' + e.message); }
     },
     async delMap(m) {
-      try { await this.$confirm(`确认删除「${m.tax_seller_name}」的映射？删除后该销方名称重新变为待人工比对。`, '删除映射', { type: 'warning' }); } catch (e) { return; }
-      await this.api('/api/mapping/delete', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ taxSellerName: m.tax_seller_name }) });
+      try { await this.$confirm(`确认删除「${m.tax_seller_name}」的映射？\n\n映射全平台共用：删除后所有账号里这个销方名称都会重新变为待人工比对。`, '删除映射', { type: 'warning' }); } catch (e) { return; }
+      const d = await this.api('/api/mapping/delete', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ taxSellerName: m.tax_seller_name }) });
+      if (d && d.error) { this.$message.error('删除失败: ' + d.error); return; }
       this.resetDetailCache();
       await this.loadMapping(); await this.loadData();
     },
@@ -3485,7 +3635,7 @@ const vm = new Vue({
       const curMap = row.seller_company || '';
       const extra = curMap ? `\n\n注意：该名称当前已映射到「${curMap}」，忽略后将清除这个映射。` : '';
       try {
-        await this.$confirm(`确认「${taxSellerName}」没有对应的 1688 商家？\n\n忽略后该销方名称将从「待人工比对」列表移除，不再参与自动匹配与看板统计；以后可在「已忽略」里恢复。${extra}`, '忽略销方名称', { type: 'warning' });
+        await this.$confirm(`确认「${taxSellerName}」没有对应的 1688 商家？\n\n忽略后该销方名称将从「待人工比对」列表移除，不再参与自动匹配与「1688发票」统计；以后可在「已忽略」里恢复。\n映射全平台共用，此操作对所有账号生效。${extra}`, '忽略销方名称', { type: 'warning' });
       } catch (e) { return; }
       try {
         const d = await this.api('/api/mapping/ignore', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ taxSellerName, ignored: true }) });
@@ -3957,8 +4107,8 @@ const vm = new Vue({
     /**
      * 唤起本机助手（xsh:// 深链）。
      * ⚠ 不能用 location.href = 'xsh://…'：那会让浏览器尝试导航当前页，
-     *   首次安装的用户常被导航到一个空白页，还以为「看板没了、得退出重进」。
-     *   用隐藏 iframe 唤起，当前看板页面原封不动。
+     *   首次安装的用户常被导航到一个空白页，还以为「页面没了、得退出重进」。
+     *   用隐藏 iframe 唤起，当前页面原封不动。
      */
     wakeAgent(link) {
       try {
