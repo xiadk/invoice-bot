@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>1688 发票催收 · 本机助手（Windows）— 下载与安装</title>
+<title>发票催收 · 本机助手（Windows）— 下载与安装</title>
 <!-- Element UI（本地 vendor，免外网 CDN） -->
 <link rel="stylesheet" href="/vendor/element-ui/index.css">
 <style>
@@ -36,7 +36,7 @@
     <header>
       <div class="logo">发</div>
       <div>
-        <h1>1688 发票催收 · 本机助手</h1>
+        <h1>发票催收 · 本机助手</h1>
         <div class="sub">Windows 桌面程序（Windows 10 / 11）· 发送只在你本机执行，登录凭据不出本机 · 断线续跑</div>
       </div>
     </header>
@@ -51,9 +51,9 @@
           <span class="muted" v-else>管理员需先在本机构建安装包（<code>npm run agent:dist</code>），或直接向管理员索取「1688催收助手」安装包。</span>
         </div>
         <div class="muted" style="margin-top:10px" v-if="me">
-          当前账号：<b>{{ who }}</b><span v-if="me.taxNo">（税号 {{ maskTax(me.taxNo) }}，仅作抬头展示，不再用于绑定）</span> · 下载后回看板点「绑定本机助手」即可完成绑定。
+          当前账号：<b>{{ who }}</b><span v-if="me.taxNo">（税号 {{ maskTax(me.taxNo) }}，仅作抬头展示，不再用于绑定）</span> · 下载后回到「1688发票」页点「绑定本机助手」即可完成绑定。
         </div>
-        <div class="muted" style="margin-top:10px" v-else>未检测到登录状态：可先下载安装，安装后请登录本系统，再到看板点「绑定本机助手」完成绑定。</div>
+        <div class="muted" style="margin-top:10px" v-else>未检测到登录状态：可先下载安装，安装后请登录本系统，再到「1688发票」页点「绑定本机助手」完成绑定。</div>
       </div>
       <el-alert :type="dl.available ? 'success' : 'warning'" :closable="false" show-icon style="margin-top:12px"
                 :title="dl.available ? '✓ 安装包已完成配置，绑定免手填——服务器地址已内置，无需手动输入。' : '⚠ 安装包尚未构建到服务器（dist/*.exe）。安装与绑定流程不受影响，拿到安装包后按下方步骤操作即可。'"></el-alert>
@@ -72,29 +72,29 @@
     <el-card shadow="never" style="margin-bottom:16px;border-radius:12px">
       <div class="card-title"><span class="n">2</span> 绑定到你的账号</div>
       <ol style="margin-top:10px">
-        <li>回到发票看板，点右上角「<b>本机助手</b>」→ 弹窗里点「<b>绑定本机助手</b>」。</li>
+        <li>回到「<b>1688发票</b>」页，点右上角「<b>本机助手</b>」→ 弹窗里点「<b>绑定本机助手</b>」。</li>
         <li>浏览器会弹窗询问是否打开「<b>1688催收助手</b>」，点「<b>打开</b>」。</li>
-        <li>助手自动完成绑定（用一次性令牌换取本机长期<b>设备令牌</b>），看板显示「<b>助手已连接</b>」即成功。</li>
+        <li>助手自动完成绑定（用一次性令牌换取本机长期<b>设备令牌</b>），页面显示「<b>助手已连接</b>」即成功。</li>
       </ol>
-      <el-alert type="success" :closable="false" style="margin-top:10px" title="全程不需要手填服务器地址或税号：安装包已内置服务器地址，绑定令牌由看板自动签发。"></el-alert>
+      <el-alert type="success" :closable="false" style="margin-top:10px" title="全程不需要手填服务器地址或税号：安装包已内置服务器地址，绑定令牌由系统自动签发。"></el-alert>
     </el-card>
 
     <el-card shadow="never" style="margin-bottom:16px;border-radius:12px">
       <div class="card-title"><span class="n">3</span> 在助手里登录 1688（只需一次）</div>
       <ol style="margin-top:10px">
-        <li>点看板「本机助手」弹窗里的「<b>打开 1688 登录页</b>」（或在助手托盘面板点「打开登录页」）。</li>
+        <li>点右上角「本机助手」弹窗里的「<b>打开 1688 登录页</b>」（或在助手托盘面板点「打开登录页」）。</li>
         <li>在打开的窗口里正常登录 1688。</li>
         <li>登录态只保存在<b>你本机</b>的助手浏览器里，<b>不会上传服务器</b>，下次无需重复登录。</li>
       </ol>
       <el-alert type="info" :closable="false" style="margin-top:10px"
-                title="管理员登录「牵牛花」同样在助手里完成：看板退单页点「登录牵牛花」→ 助手弹出窗口 → 登录后登录态回传服务器（存数据库）。服务器自己不打开浏览器。"></el-alert>
+                title="管理员登录「牵牛花」同样在助手里完成：退单页点「登录牵牛花」→ 助手弹出窗口 → 登录后登录态回传服务器（存数据库）。服务器自己不打开浏览器。"></el-alert>
     </el-card>
 
     <el-card shadow="never" style="margin-bottom:16px;border-radius:12px">
       <div class="card-title"><span class="n">4</span> 开始催收</div>
       <ol style="margin-top:10px">
-        <li>回到发票看板，勾选要催收发票的卖家 → 点「<b>发送催收消息</b>」。</li>
-        <li>若助手没开着，看板会自动用 <code>xsh://run</code> 唤起它，请在弹出的询问里点「打开」。</li>
+        <li>回到「<b>1688发票</b>」页，勾选要催收发票的卖家 → 点「<b>发送催收消息</b>」。</li>
+        <li>若助手没开着，页面会自动用 <code>xsh://run</code> 唤起它，请在弹出的询问里点「打开」。</li>
         <li>消息经由<b>你自己电脑上的浏览器</b>逐家发出；中途断网/关机，重新打开助手即可续跑，已成功的不会重发。</li>
       </ol>
     </el-card>
@@ -117,7 +117,7 @@
           服务器只负责下发任务、记录结果与调用接口。</div>
         </el-collapse-item>
         <el-collapse-item title="安全说明" name="q4">
-          <div style="font-size:13.5px">发送全程在你本机浏览器执行，1688 登录凭据<b>不出本机</b>；服务器只负责下发任务、记录结果。<b>绑定不再使用税号</b>：改为一次性绑定令牌换取本机长期设备令牌，服务器仅保存令牌的 SHA-256 摘要，可在看板「本机助手」中随时查看并撤销已绑定设备。</div>
+          <div style="font-size:13.5px">发送全程在你本机浏览器执行，1688 登录凭据<b>不出本机</b>；服务器只负责下发任务、记录结果。<b>绑定不再使用税号</b>：改为一次性绑定令牌换取本机长期设备令牌，服务器仅保存令牌的 SHA-256 摘要，可在「本机助手」中随时查看并撤销已绑定设备。</div>
         </el-collapse-item>
       </el-collapse>
     </el-card>

@@ -1,5 +1,5 @@
 /**
- * server.js — 发票催收控制台（多用户 / 可云端部署）
+ * server.js — 发票催收（多用户 / 可云端部署）
  *
  * 启动: node server.js   →  浏览器打开 http://localhost:8787 （生产建议放在 HTTPS 反代后面）
  *
@@ -7,14 +7,17 @@
  *   登录页 /login（只能登录，不能注册）；账号由超级管理员在「系统管理」里创建。
  *   超级管理员 admin（首次建库自动创建，默认密码 admin，请立即修改）：
  *     · 新增用户（账号/密码/公司名称/纳税人识别号/收票邮箱）、重置密码、启用/禁用
- *     · 按用户名查看任意用户的看板与名称映射数据（只读）
- *   普通用户：只能看自己的「看板」与「名称映射」，看不到「系统管理」。
+ *     · 按用户名查看任意用户的「1688发票」数据（只读）
+ *     · 「税名核对」全局视图：可查看并维护所有用户产生的待映射 / 已维护映射
+ *   普通用户：只能看自己的「1688发票」「拼多多发票」等业务数据，看不到「系统管理」。
+ *     · 「税名核对」可用（查询 / 保存 / 忽略），但只看得到、也只改得动自己发票里的销方名称；
+ *       底层映射表是全平台一套去重表，别人维护过的同名销方会直接复用，无须重复映射。
  *   所有业务数据按 user_id 隔离（见 sql/schema.sql 与 lib/tenancy.js）。
  *
  * ── 1688 登录态与发送（只在用户本机执行） ─────────────────────────────────
  *   服务器不保存任何 1688 登录态、不启动服务端浏览器：登录与发送都发生在
  *   **用户自己电脑上的「1688 催收助手」桌面程序**（Electron 自带浏览器窗口）里。
- *   绑定：看板点「绑定本机助手」→ 服务端签发一次性绑定令牌 → 深链 xsh://bind?... 唤起助手
+ *   绑定：「1688发票」页点「绑定本机助手」→ 服务端签发一次性绑定令牌 → 深链 xsh://bind?... 唤起助手
  *         → 助手用令牌换取**长期设备令牌**（本地保存）→ 连 /ws/agent?device=<token>。
  *   发送：点「发送催收消息」后，服务器只编排任务并通过 WS 下发；
  *         助手在自带浏览器里打开 1688 聊天页逐家发送，回执经 WS 回来落库。
@@ -24,7 +27,7 @@
  *
  * ── 接口 ──────────────────────────────────────────────────────────────────
  *   认证:   POST /api/auth/login | POST /api/auth/logout | GET /api/auth/me | POST /api/auth/password
- *   看板:   GET  /api/data | GET /api/seller-detail | GET /api/collect-history
+ *   1688发票: GET  /api/data | GET /api/seller-detail | GET /api/collect-history
  *   发送:   POST /api/send（只走本机助手通道） | GET /api/task | POST /api/task/stop
  *   数据:   POST /api/import | GET /api/import-log
  *   映射:   GET  /api/mapping | POST /api/mapping | POST /api/mapping/delete | POST /api/mapping/ignore
@@ -62,6 +65,7 @@ const { buildMessages } = require('./lib/sender');
 const qnh = require('./lib/qnh');
 const qagent = require('./lib/qnh-agent');
 const pdd = require('./lib/pdd');
+const pddOrders = require('./lib/pdd-orders');
 
 const PORT = Number(process.env.PORT) || 8787;
 const ROOT = __dirname;
@@ -684,6 +688,8 @@ const OP_ACTIONS = {
   'pdd.send': (d) => d.ok === false
     ? `拼多多批量催收失败${d.reason ? '：' + d.reason : ''}`
     : `拼多多批量催收完成（成功 ${d.okCount || 0} 个商家、失败 ${d.failCount || 0} 个）`,
+  'pdd.sync': (d) => `刷新了拼多多发票状态${d.ok ? '（' + (d.total || 0) + ' 条）' : '（失败）'}`,
+  'pdd.orders.sync': (d) => `拉取了拼多多全部订单${d.full ? '（全量）' : '（增量）'}`,
 };
 
 // 前端下拉是「值」，日志里要显示人能看懂的「文案」，在服务端做映射，避免客户端乱传
@@ -701,7 +707,7 @@ function copyrightText() {
     const c = loadConfig();
     owner = String((c && c.copyright) || '').trim();
   } catch (e) { /* 配置读不到不影响页面渲染 */ }
-  return '© ' + new Date().getFullYear() + ' ' + (owner || '1688 发票催收系统') + ' · 保留所有权利';
+  return '© ' + new Date().getFullYear() + ' ' + (owner || '发票催收系统') + ' · 保留所有权利';
 }
 
 /** 收口成单行、去掉换行与首尾空白、超长截断。保留中文引号（下方格式化要用） */
@@ -1200,9 +1206,9 @@ async function finishClientTask(ctx, status) {
   taskLog(t, `任务完成 ${t.ok}/${t.total}`);
   const left = items.filter((i) => i.status === 'pending').length;
   if (left > 0) {
-    taskLog(t, `↻ 还有 ${left} 家未发送：本机通道重新连接后，点看板「继续发送未完成」即可续跑（不会重发已成功的）`);
+    taskLog(t, `↻ 还有 ${left} 家未发送：本机通道重新连接后，点「继续发送未完成」即可续跑（不会重发已成功的）`);
   } else if (t.fail > 0) {
-    taskLog(t, `↻ 有 ${t.fail} 家发送失败：可在看板「重试失败项」按原清单重发`);
+    taskLog(t, `↻ 有 ${t.fail} 家发送失败：可在「重试失败项」按原清单重发`);
   }
   pushClientProgress(ctx.userId, ctx);
   try { ctx.resolve && ctx.resolve(); } catch (e) { /* 忽略 */ }
@@ -1213,7 +1219,7 @@ function maybeAbortClientTask(uid) {
   if (agentHub.isOnline(uid)) return;
   for (const ctx of CLIENT_TASKS.values()) {
     if (ctx.userId === Number(uid) && !ctx.finished) {
-      taskLog(ctx.taskState, '⛔ 本机助手连接已断开，任务中断（重新启动助手并连上后，可点看板「继续发送未完成」续跑）');
+      taskLog(ctx.taskState, '⛔ 本机助手连接已断开，任务中断（重新启动助手并连上后，可点「继续发送未完成」续跑）');
       ctx.abortReason = '本机助手通道断开';
       finishClientTask(ctx, 'aborted');
     }
@@ -1389,7 +1395,7 @@ async function doClientSend(userId, loginIds, opts = {}) {
   const resumeOf = Number(opts.resumeOf) || null;
   const taskState = taskFor(userId);
   if (taskState.running) throw new Error('已有任务在运行中');
-  if (!agentHub.isOnline(userId)) throw new Error('本机助手未连接：请先在本机启动「1688 催收助手」桌面程序并完成绑定（看板顶部「本机助手」有下载与绑定入口）');
+  if (!agentHub.isOnline(userId)) throw new Error('本机助手未连接：请先在本机启动「1688 催收助手」桌面程序并完成绑定（页面顶部「本机助手」有下载与绑定入口）');
 
   const config = loadConfig();
   const rt = config.runtime || {};
@@ -1498,25 +1504,35 @@ async function doClientSend(userId, loginIds, opts = {}) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// 税名核对（销方名称 ↔ 1688 商家名称；映射全员共享，user_id 仅作维护人记录）
+// 税名核对（销方名称 ↔ 1688 商家名称）
+//   权限：所有登录用户可用（查询 / 保存 / 忽略 / 删除）。
+//   数据口径（两件事要分开看）：
+//     · 映射关系 —— 底层一套全局去重表（tax_seller_name 唯一）。谁维护都一样，
+//       用户 A 映射后，用户 B 发票里出现的同名销方直接复用，无须重复映射。
+//     · 可见/可操作范围 —— 普通用户只看得到自己发票里出现过的销方名称（待比对 + 已维护 + 已忽略），
+//       也只能对这些名称做维护；超级管理员看得到所有用户的数据并可直接操作。
+//   映射写入后回填 issued_invoice.seller_company（按销方名称全表），这正是「B 自动关联」的实现。
 // ─────────────────────────────────────────────────────────────────────────
 async function loadMapping(userId, { allUsers = false } = {}) {
-  // 映射列表全局共享；金额/行数统计：普通用户只算自己发票行（userId=查看者），超管全局视图算所有用户
-  const scope = allUsers ? '' : 'AND i.user_id = ?';
-  const scopeArgs = allUsers ? [] : [userId, userId]; // scope 在金额与行数两个子查询里各出现一次
+  // allUsers=true（超管）→ 全部映射行、统计算所有用户；false（普通用户）→ 只列自己发票涉及过的销方名称
+  const scoped = !allUsers;
+  const scope = scoped ? 'AND i.user_id = ?' : '';
   const all = await db.query(`
     SELECT m.id, m.tax_seller_name, m.seller_company, m.seller_login,
            m.match_type, m.match_rule, m.is_confirmed, m.is_ignored, m.note, m.updated_at,
+           (m.user_id = ?) AS maintainer_is_me,
+           (SELECT COALESCE(NULLIF(u.company_name,''), u.username) FROM app_user u WHERE u.id = m.user_id) AS maintainer,
            (SELECT ROUND(SUM(total_amount),2) FROM issued_invoice i
              WHERE i.seller_name = m.tax_seller_name ${scope}) AS invoice_amount,
            (SELECT COUNT(*) FROM issued_invoice i
              WHERE i.seller_name = m.tax_seller_name ${scope}) AS invoice_rows
     FROM seller_name_mapping m
+    ${scoped ? 'WHERE EXISTS (SELECT 1 FROM issued_invoice i2 WHERE i2.seller_name = m.tax_seller_name AND i2.user_id = ?)' : ''}
     ORDER BY m.is_ignored ASC, (m.seller_company IS NULL) DESC, invoice_amount DESC
-  `, scopeArgs);
+  `, scoped ? [userId, userId, userId, userId] : [userId]);
   const mappings = all.filter((m) => !m.is_ignored);
   const ignored = all.filter((m) => m.is_ignored);
-  // 待人工比对：普通用户只看自己发票里的销方名称；超管看所有用户的聚合
+  // 待人工比对（超管全局视图）：汇总所有用户发票里的销方名称，并标出「涉及哪些账号」
   const unmatched = allUsers ? await db.query(`
     SELECT i.seller_name AS tax_seller_name,
            COUNT(*)      AS invoice_rows,
@@ -1524,7 +1540,11 @@ async function loadMapping(userId, { allUsers = false } = {}) {
            MIN(i.invoice_date) AS first_invoice_date,
            MAX(i.invoice_date) AS last_invoice_date,
            MAX(i.seller_tax_no) AS seller_tax_no,
-           MAX(i.remark) AS remark
+           MAX(i.remark) AS remark,
+           COUNT(DISTINCT i.user_id) AS user_count,
+           (SELECT GROUP_CONCAT(DISTINCT COALESCE(NULLIF(u.company_name,''), u.username) ORDER BY COALESCE(NULLIF(u.company_name,''), u.username) SEPARATOR '、')
+              FROM issued_invoice i2 LEFT JOIN app_user u ON u.id = i2.user_id
+             WHERE i2.seller_name = i.seller_name) AS owners
     FROM issued_invoice i
     LEFT JOIN seller_name_mapping m
            ON m.tax_seller_name = i.seller_name
@@ -1544,6 +1564,20 @@ async function loadMapping(userId, { allUsers = false } = {}) {
     GROUP BY loginId ORDER BY company
   `, allUsers ? [] : [userId]);
   return { mappings, ignored, unmatched, sellers, unmatchedCount: unmatched.length, ignoredCount: ignored.length, allUsers };
+}
+
+/**
+ * 普通用户能否维护该销方名称：只能操作「自己发票里出现过的」销方名称。
+ * 超管不受限制（他就是来兜底的）。
+ */
+async function canMaintainSeller(user, taxSellerName) {
+  const name = (taxSellerName == null ? '' : String(taxSellerName)).trim();
+  if (!name) return false;
+  if (user.role === 'admin') return true;
+  const rows = await db.query(
+    'SELECT 1 FROM issued_invoice WHERE user_id = ? AND seller_name = ? LIMIT 1', [user.id, name]
+  );
+  return rows.length > 0;
 }
 
 async function saveMapping(userId, { taxSellerName, sellerLogin, sellerCompany, note }) {
@@ -1586,7 +1620,7 @@ async function ignoreMapping(userId, { taxSellerName, ignored }) {
          note = '确认无对应1688商家，已忽略'`,
       [userId, taxSellerName]
     );
-    // 忽略同样全员生效：所有用户的该销方发票行都不再计入看板统计
+    // 忽略同样全员生效：所有用户的该销方发票行都不再计入「1688发票」统计
     await db.exec('UPDATE issued_invoice SET seller_company = NULL WHERE seller_name = ?', [taxSellerName]);
   } else {
     const rows = await db.query(
@@ -2065,7 +2099,7 @@ const server = http.createServer(async (req, res) => {
       const rawLogin = (url.searchParams.get('login') || '').trim();
       if (!code || !rawLogin) return sendJson(res, 400, { error: '缺少参数' });
       const uid = await agentHub.resolveUserByCode(code);
-      if (!uid) return sendJson(res, 401, { error: '设备令牌无效或已撤销（不再接受税号；请在看板「本机助手 → 书签令牌」重新签发）' });
+      if (!uid) return sendJson(res, 401, { error: '设备令牌无效或已撤销（不再接受税号；请在「本机助手 → 书签令牌」重新签发）' });
       return sendJson(res, 200, await bmComputeTask(uid, rawLogin));
     }
     // 书签工具：回报发送结果（公开，用 code=设备令牌 解析用户）
@@ -2403,15 +2437,31 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { logs: rows });
     }
 
-    // 名称映射
+    // 名称映射（所有登录用户可用；普通用户只见/可改自己发票里的销方名称，超管看全局）
     if (method === 'GET' && p === '/api/mapping') {
-      // 超管看全局（所有用户的销方名称聚合 + 全部商家候选）；普通用户只看自己发票里的销方名称
-      const allUsers = user.role === 'admin';
-      return sendJson(res, 200, await loadMapping(tenantId, { allUsers }));
+      return sendJson(res, 200, await loadMapping(user.id, { allUsers: isAdmin }));
     }
-    if (method === 'POST' && p === '/api/mapping') { writeGuard(); return sendJson(res, 200, await saveMapping(tenantId, await readBody(req))); }
-    if (method === 'POST' && p === '/api/mapping/delete') { writeGuard(); return sendJson(res, 200, await deleteMapping(tenantId, await readBody(req))); }
-    if (method === 'POST' && p === '/api/mapping/ignore') { writeGuard(); return sendJson(res, 200, await ignoreMapping(tenantId, await readBody(req))); }
+    if (method === 'POST' && p === '/api/mapping') {
+      const body = await readBody(req);
+      if (!(await canMaintainSeller(user, body.taxSellerName))) {
+        return sendJson(res, 403, { error: '该销方名称不在你的发票数据里，无权维护' });
+      }
+      writeGuard(); return sendJson(res, 200, await saveMapping(user.id, body));
+    }
+    if (method === 'POST' && p === '/api/mapping/delete') {
+      const body = await readBody(req);
+      if (!(await canMaintainSeller(user, body.taxSellerName))) {
+        return sendJson(res, 403, { error: '该销方名称不在你的发票数据里，无权维护' });
+      }
+      writeGuard(); return sendJson(res, 200, await deleteMapping(user.id, body));
+    }
+    if (method === 'POST' && p === '/api/mapping/ignore') {
+      const body = await readBody(req);
+      if (!(await canMaintainSeller(user, body.taxSellerName))) {
+        return sendJson(res, 403, { error: '该销方名称不在你的发票数据里，无权维护' });
+      }
+      writeGuard(); return sendJson(res, 200, await ignoreMapping(user.id, body));
+    }
 
     // ── 商品列表（前置仓补货参考导入） ── 所有登录用户可用（菜单不做逐用户授权）
     if (method === 'GET' && p === '/api/products') {
@@ -2615,7 +2665,7 @@ const server = http.createServer(async (req, res) => {
       const t = taskFor(tenantId);
       if (t.running) throw new Error('已有任务在运行中');
       if (!agentHub.isOnline(tenantId)) {
-        throw new Error('本机助手未连接：请先在本机启动「1688 催收助手」桌面程序并完成绑定（看板顶部「本机助手」有下载与绑定入口）。发送只在你本机执行');
+        throw new Error('本机助手未连接：请先在本机启动「1688 催收助手」桌面程序并完成绑定（页面顶部「本机助手」有下载与绑定入口）。发送只在你本机执行');
       }
       doClientSend(tenantId, loginIds).catch((e) => {
         const ts = taskFor(tenantId);
@@ -2893,13 +2943,15 @@ const server = http.createServer(async (req, res) => {
 
       // 概况：登录态 + 状态汇总 + 状态字典；管理员额外拿到账号列表以便「代入」
       if (method === 'GET' && p === '/api/pdd/status') {
-        const [cookie, sum] = await Promise.all([
+        const [cookie, sum, orderSync] = await Promise.all([
           pdd.cookieStatus(pddUid).catch(() => ({ ok: false, logined: false, message: '登录态读取失败' })),
           pdd.summary(pddUid).catch(() => null),
+          pddOrders.orderSyncSummary(pddUid).catch(() => null),
         ]);
         const out = {
           cookie,
           summary: sum,
+          orderSync,
           statusText: pdd.STATUS_TEXT,
           isAdmin,
           tenantId: pddUid,
@@ -2938,8 +2990,78 @@ const server = http.createServer(async (req, res) => {
       // 「立即刷新数据」：服务器直连拼多多接口，不需要助手在线
       if (method === 'POST' && p === '/api/pdd/sync') {
         const out = await pdd.sync({ userId: pddUid, trigger: 'manual' });
-        await logOp(user, 'pdd.sync', { ok: !!out.ok, pending: out.pending, invoiced: out.invoiced, tenantId: pddUid });
+        await logOp(user, 'pdd.sync', { ok: !!out.ok, total: out.total, tenantId: pddUid });
         return sendJson(res, 200, out);
+      }
+
+      // 「获取订单数据」：拉「我的订单」全部订单（待付款/待发货/待收货/已完成/已退款）
+      // 数据源 order_list_v4（cookie 直连，不需要助手）；首次全量、之后增量。
+      // 全量要翻几十页（限速 900ms/页），不能让浏览器干等 → 后台任务 + 进度轮询（复用 task-status）。
+      if (method === 'POST' && p === '/api/pdd/orders-sync') {
+        const b = await readBody(req).catch(() => ({}));
+        const running = [...PDD_TASKS.values()].find(
+          (c) => c.kind === 'orders' && c.userId === Number(pddUid) && c.status === 'pending'
+        );
+        if (running) {
+          return sendJson(res, 200, {
+            ok: true, pending: true, taskId: running.taskId, already: true,
+            message: '订单同步正在运行中，继续展示进度…',
+          });
+        }
+        // 首次（库里还没有订单列表同步过的数据）自动全量；之后默认增量
+        let full = b.full === true || b.full === 'true';
+        if (!(await pddOrders.hasOrderData(pddUid))) full = true;
+
+        const taskId = 'pddord-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+        const ctx = {
+          taskId, kind: 'orders', full, userId: Number(pddUid), status: 'pending', message: '',
+          total: 0, results: [], okCount: 0, failCount: 0,
+          progress: { page: 0, fetched: 0, rows: 0, saved: 0, newCount: 0, current: '' },
+          progressLog: [], createdAt: Date.now(), expiresAt: Date.now() + 30 * 60 * 1000,
+        };
+        const pushLog = (text) => {
+          // 本地时间（toISOString 是 UTC，用户看到的会是 08:xx 而不是 16:xx）
+          const t = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+          ctx.progressLog.push({ t, text });
+          if (ctx.progressLog.length > 300) ctx.progressLog.shift();
+        };
+        PDD_TASKS.set(taskId, ctx);
+        pushLog(full ? '开始全量拉取订单（首次同步，会翻到最后一页）…'
+          : '开始增量拉取订单（从最新往前翻，追平即停）…');
+
+        pddOrders.syncOrders({
+          userId: pddUid,
+          full,
+          onProgress: (pr) => {
+            ctx.progress = Object.assign({}, ctx.progress, pr);
+            ctx.total = pr.fetched || 0;
+            pushLog(`第 ${pr.page} 页：已拉 ${pr.fetched} 单（子单 ${pr.rows} 条），入库 ${pr.saved} 条，新增 ${pr.newCount}`);
+          },
+          shouldStop: () => !!ctx.stopping,
+        }).then((out) => {
+          ctx.status = out.ok ? 'done' : 'failed';
+          ctx.message = out.message || '';
+          ctx.progress = Object.assign({}, ctx.progress, {
+            page: out.pages || ctx.progress.page,
+            fetched: out.fetched || 0, rows: out.rows || 0,
+            saved: out.saved || 0, newCount: out.newCount || 0, percent: 100,
+          });
+          ctx.total = out.fetched || ctx.total;
+          ctx.finishedAt = Date.now();
+          ctx.expiresAt = Date.now() + PDD_APPLY_TTL_MS;
+          pushLog((out.ok ? '✓ ' : '✗ ') + (out.message || ''));
+        }).catch((e) => {
+          ctx.status = 'failed';
+          ctx.message = (e && e.message) || String(e);
+          ctx.finishedAt = Date.now();
+          pushLog('✗ 同步异常：' + ctx.message);
+        });
+
+        await logOp(user, 'pdd.orders.sync', { tenantId: pddUid, full });
+        return sendJson(res, 200, {
+          ok: true, pending: true, taskId, full,
+          message: full ? '已开始全量拉取全部订单，进度见下方…' : '已开始增量拉取订单，进度见下方…',
+        });
       }
 
       // 「登录拼多多」：把任务下发给该用户的本机助手 → 助手弹窗让用户登录 → Cookie 回传入库
@@ -3158,6 +3280,10 @@ const server = http.createServer(async (req, res) => {
         if (!mine) return sendJson(res, 404, { error: '任务不存在或已结束' });
         if (ctx.status !== 'pending') return sendJson(res, 200, { ok: false, message: '任务已结束，无需停止' });
         ctx.stopping = true;
+        // 订单同步是服务器自己翻页（不经过助手），只需置停止标记，当前这一页处理完就停
+        if (ctx.kind === 'orders') {
+          return sendJson(res, 200, { ok: true, message: '已请求停止：当前这一页处理完就停' });
+        }
         const sent = agentHub.send(ctx.userId, { type: 'stop' });
         return sendJson(res, 200, {
           ok: true,
@@ -3175,6 +3301,7 @@ const server = http.createServer(async (req, res) => {
           status: ctx.status,
           ok: ctx.status === 'done',
           message: ctx.message || '',
+          full: !!ctx.full,
           total: ctx.total,
           results: ctx.results,
           okCount: ctx.okCount,

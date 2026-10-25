@@ -290,14 +290,23 @@ async function ensureQnhSchema(q) {
       "  `paper_tracking_number` VARCHAR(128) DEFAULT NULL COMMENT '纸质发票快递单号'," +
       "  `is_full_refund` TINYINT(1) DEFAULT NULL COMMENT '是否全额退款'," +
       "  `is_mall_close` TINYINT(1) DEFAULT NULL COMMENT '店铺是否已关闭'," +
+      // ── 以下 6 列来自「订单列表」接口（order_list_v4，含待付款/待发货/待收货/已完成全部订单）──
+      //     与发票接口的两列状态互不覆盖：invoice_status 只由发票接口写，订单接口只写 order_*
+      "  `order_status` TINYINT DEFAULT NULL COMMENT '平台订单状态：0待付款 1待发货 2待收货 3待确认收货 4已完成 5已取消 6已退款（多多买菜组合单为空）'," +
+      "  `order_status_text` VARCHAR(32) DEFAULT NULL COMMENT '订单状态文案（接口 order_status_prompt，如「已签收，待确认收货」）'," +
+      "  `pay_amount` DECIMAL(14,2) DEFAULT NULL COMMENT '订单实付金额（元）'," +
+      "  `tabs_belong` VARCHAR(64) DEFAULT NULL COMMENT '平台分类标签 all/unreceived/unrated 等，逗号分隔'," +
+      "  `parent_order_sn` VARCHAR(64) DEFAULT NULL COMMENT '组合单父单号（多多买菜 PO- 开头；自身为父单时留空）'," +
+      "  `order_source` TINYINT NOT NULL DEFAULT 1 COMMENT '来源：1=发票助手接口 2=订单列表接口'," +
       "  `raw_json` LONGTEXT DEFAULT NULL," +
       "  `synced_at` DATETIME DEFAULT NULL COMMENT '本轮同步时间'," +
       "  `fetched_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP," +
       "  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP," +
       "  PRIMARY KEY (`user_id`,`order_sn`)," +
       "  KEY `idx_pdo_status` (`user_id`,`invoice_status`)," +
+      "  KEY `idx_pdo_ostatus` (`user_id`,`order_status`)," +
       "  KEY `idx_pdo_time` (`order_time`)" +
-      ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='拼多多已完成订单与开票状态'",
+      ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='拼多多订单与开票状态'",
 
     // 拼多多登录态（Cookie 串）。与 qnh_session 同样的思路：入库不落盘。
     // 只需要 Cookie 头，不需要 Playwright storageState（接口是纯 HTTP 调用）。
@@ -488,6 +497,25 @@ async function migrate(conn, dbName) {
       'ALTER TABLE `app_user` ADD COLUMN `pdd_enabled` TINYINT(1) NOT NULL DEFAULT 0 ' +
       "COMMENT '是否允许查看拼多多发票页（1=开启，超级管理员始终可见）'"
     );
+  }
+
+  // ── 拼多多订单补列（老库）：订单列表接口带来的平台状态 / 实付金额 / 来源 ──
+  if (await tableExists('pdd_order')) {
+    for (const [col, decl] of [
+      ['order_status', "TINYINT DEFAULT NULL COMMENT '平台订单状态 0待付款 1待发货 2待收货 3待确认收货 4已完成 5已取消 6已退款'"],
+      ['order_status_text', "VARCHAR(32) DEFAULT NULL COMMENT '订单状态文案（接口 order_status_prompt）'"],
+      ['pay_amount', "DECIMAL(14,2) DEFAULT NULL COMMENT '订单实付金额（元）'"],
+      ['tabs_belong', "VARCHAR(64) DEFAULT NULL COMMENT '平台分类标签 all/unreceived/unrated 等'"],
+      ['parent_order_sn', "VARCHAR(64) DEFAULT NULL COMMENT '组合单父单号（多多买菜 PO-）'"],
+      ['order_source', "TINYINT NOT NULL DEFAULT 1 COMMENT '来源：1=发票助手接口 2=订单列表接口'"],
+    ]) {
+      if (!(await colExists('pdd_order', col))) {
+        await q(`ALTER TABLE \`pdd_order\` ADD COLUMN \`${col}\` ${decl}`);
+      }
+    }
+    if (!(await idxExists('pdd_order', 'idx_pdo_ostatus'))) {
+      await q('ALTER TABLE `pdd_order` ADD KEY `idx_pdo_ostatus` (`user_id`,`order_status`)');
+    }
   }
 
   // ── 毛利明细补列（老库）：订单编号 / 渠道名称 / 预计收入 ──
