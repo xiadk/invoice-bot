@@ -1,5 +1,5 @@
 ---
-title: "1688 发票催收助手 · Electron 单机版实施方案"
+title: "催收小助手 · Electron 单机版实施方案"
 version: 0.1（方案稿，待确认）
 date: 2026-10-14
 status: draft
@@ -9,7 +9,7 @@ supersedes-docs:
   - 云端部署Docker.md（2026-10-14 移出 docs/，归档于 data/backups/legacy-cleanup-2026-10-14/）
 ---
 
-# 1688 发票催收助手 · Electron 单机版实施方案
+# 催收小助手 · Electron 单机版实施方案
 
 > **一句话**：把现在「服务端 MariaDB + 用户装浏览器扩展 + 配对 WS」的多租户 SaaS，改造成**一个 Windows exe**——内置浏览器窗口自己驱动 1688 发送，数据存本地，授权用离线签名码，收款走平台回调。
 

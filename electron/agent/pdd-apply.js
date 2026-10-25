@@ -80,6 +80,9 @@ async function attachNet(w) {
 }
 
 /** 申请专用窗口（与登录窗口同一个分区、同一个 UA；批量结束不销毁，复用） */
+/** 当前窗口（没有就返回 null，绝不懒创建——退出登录时要「关掉已存在的窗口」而不是新开一个） */
+function peekWindow() { return (win && !win.isDestroyed()) ? win : null; }
+
 function getWindow() {
   if (win && !win.isDestroyed()) return win;
   const part = session.fromPartition(PARTITION);
@@ -389,4 +392,4 @@ function createApplyHandler({ log = () => {} } = {}) {
   };
 }
 
-module.exports = { createApplyHandler, runApply, getWindow, PARTITION, PAGE_URL };
+module.exports = { createApplyHandler, runApply, getWindow, peekWindow, PARTITION, PAGE_URL };

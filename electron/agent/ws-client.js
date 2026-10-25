@@ -101,6 +101,16 @@ class AgentClient extends EventEmitter {
     };
   }
 
+  /** 是否有任务在跑（清登录态必须等任务结束，否则会把正在用的窗口关掉） */
+  busy() {
+    return {
+      sending: !!this.sending,
+      pdd: !!this._pddBusy,
+      qnh: !!this._qnhBusy,
+      any: !!(this.sending || this._pddBusy || this._qnhBusy),
+    };
+  }
+
   send(obj) {
     try {
       if (this.ws && this.ws.readyState === 1) { this.ws.send(JSON.stringify(obj)); return true; }
@@ -176,6 +186,7 @@ class AgentClient extends EventEmitter {
     if (m.type === 'pdd_login') { this._runPddLogin(m).catch((e) => this.log('拼多多登录异常: ' + e.message)); return; }
     if (m.type === 'pdd_apply') { this._runPddApply(m).catch((e) => this.log('拼多多申请异常: ' + e.message)); return; }
     if (m.type === 'pdd_send') { this._runPddSend(m).catch((e) => this.log('拼多多催收异常: ' + e.message)); return; }
+    if (m.type === 'logout') { this._runLogout(m).catch((e) => this.log('清除登录态异常: ' + e.message)); return; }
     if (m.type === 'stop') { this.stopFlag = true; this.log('收到停止指令：当前步骤完成后即停'); return; }
     if (m.type === 'task_progress') { this.emit('progress', m); return; }
   }
@@ -441,6 +452,46 @@ class AgentClient extends EventEmitter {
       this._pddBusy = false;
       this.stopFlag = false;
       this.currentTaskId = null;
+      this._emitState();
+    }
+  }
+
+  /** 注册「清除登录态」处理器（main.js 注入 agent/logout 模块） */
+  setLogoutHandler(fn) { this._logoutHandler = fn; }
+
+  /**
+   * 执行一次「清除本机登录态」：看板点「退出拼多多 / 退出牵牛花账号」时，
+   * 服务器除了删库里的 Cookie，还会让本机把浏览器分区里的 Cookie 一起清掉 ——
+   * 否则下次点「登录」会因分区里还留着旧账号而直接免登录进去。
+   * 与发送/登录互斥：正在跑的任务会把窗口关掉，宁可让用户等一会儿。
+   */
+  async _runLogout(m) {
+    const done = (payload) => this.send(Object.assign({
+      type: 'logout_done', taskId: m.taskId,
+    }, payload || {}));
+
+    const busy = this.busy();
+    if (busy.any) {
+      const what = busy.sending ? '发送催收消息' : (busy.pdd ? '拼多多任务' : '牵牛花任务');
+      done({ ok: false, error: `助手正在执行任务（${what}），请等任务结束后再退出账号` });
+      return;
+    }
+    if (typeof this._logoutHandler !== 'function') {
+      done({ ok: false, error: '助手版本过旧，不支持自动退出登录态，请重新下载安装助手' });
+      return;
+    }
+    const api = {
+      log: (text) => this.send({ type: 'log', text: String(text == null ? '' : text).slice(0, 200) }),
+      report: done,
+    };
+    const target = String((m && m.target) || '').toLowerCase();
+    try {
+      await this._logoutHandler(m, api);
+    } catch (e) {
+      done({ ok: false, error: String((e && e.message) || e).slice(0, 200) });
+    } finally {
+      // 1688 的登录态是助手自己上报的：清完顺手置为未登录，看板右上角立刻变成「未登录」
+      if (target === '1688' || target === 'ali' || target === 'alibaba') this.reportLoginState(false, '');
       this._emitState();
     }
   }

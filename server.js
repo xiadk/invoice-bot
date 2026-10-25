@@ -16,7 +16,7 @@
  *
  * ── 1688 登录态与发送（只在用户本机执行） ─────────────────────────────────
  *   服务器不保存任何 1688 登录态、不启动服务端浏览器：登录与发送都发生在
- *   **用户自己电脑上的「1688 催收助手」桌面程序**（Electron 自带浏览器窗口）里。
+ *   **用户自己电脑上的「催收小助手」桌面程序**（Electron 自带浏览器窗口）里。
  *   绑定：「1688发票」页点「绑定本机助手」→ 服务端签发一次性绑定令牌 → 深链 xsh://bind?... 唤起助手
  *         → 助手用令牌换取**长期设备令牌**（本地保存）→ 连 /ws/agent?device=<token>。
  *   发送：点「发送催收消息」后，服务器只编排任务并通过 WS 下发；
@@ -677,6 +677,9 @@ const OP_ACTIONS = {
   'qnh.notify_pending': (d) => `手动触发了超时退单提醒${d.ok ? `（推送 ${d.sent || 0} 条）` : '（失败）'}`,
   'qnh.login': (d) => `在退单列表点击了「登录牵牛花」刷新 Cookie${d.ok ? '（成功）' : '（失败）'}`,
   'qnh.login.start': (d) => `发起了「登录牵牛花」（${d.tenantId ? '用户 ' + d.tenantId : '本人'}）`,
+  'qnh.logout': (d) => `退出了牵牛花账号`
+    + (d.accountName ? `「${d.accountName}」` : '')
+    + (d.agentCleared ? '（含本机登录态）' : '（本机助手未同步清除）'),
   'qnh.config': (d) => `修改了退单同步设置（${d.items}）`,
   'qnh.permit': (d) => `${d.enabled ? '开启' : '关闭'}了账号「${d.username}」的退单列表权限`,
   'qnh.view': () => '打开了退单列表页',
@@ -694,7 +697,8 @@ const OP_ACTIONS = {
   'pdd.login': (d) => `登录拼多多${d.ok ? '（成功）' : '（失败）'}`,
   'pdd.logout': (d) => `退出了拼多多账号`
     + (d.accountName ? `「${d.accountName}」` : '')
-    + (d.pdduid ? `（ID ${d.pdduid}）` : ''),
+    + (d.pdduid ? `（ID ${d.pdduid}）` : '')
+    + (d.agentCleared ? '（含本机登录态）' : '（本机助手未同步清除）'),
 };
 
 // 前端下拉是「值」，日志里要显示人能看懂的「文案」，在服务端做映射，避免客户端乱传
@@ -868,6 +872,114 @@ const PDD_APPLY_TTL_MS = PDD_APPLY_TIMEOUT_MS + 5 * 60 * 1000;
 const PDD_APPLY_MIN_AGENT = '0.2.21';   // 0.2.21 起：CDP 抓包判成败 + 页面就绪再点（修「等待结果超时」）
 // 支持「催商家开票」的最低助手版本（0.2.23 起才有 pdd_send 内核）
 const PDD_SEND_MIN_AGENT = '0.2.23';
+
+// ── 「清除本机登录态」──────────────────────────────────────────────
+// 看板点「退出 XX 账号」时，光删数据库里的 Cookie 不够：助手那边的登录窗口用的是
+// Electron 持久分区（persist:pdd / persist:qnh），Cookie 还在用户本机上，下次点「登录」
+// 会直接免登录进去 —— 表现为「退出了却没退掉 / 换不了号」。
+// 所以退出时顺带下发一条 logout 指令，让助手把本机分区一起清掉，并等它回执。
+const LOGOUT_MIN_AGENT = '0.2.24';   // 0.2.24 起助手才认识 logout 指令
+const AGENT_LOGOUTS = new Map();     // taskId -> { resolve, timer }
+const AGENT_LOGOUT_TIMEOUT_MS = 6000;
+
+/**
+ * 让该用户的本机助手清掉某个站点的登录态，等回执（最多 6 秒）。
+ * 助手不在线 / 版本太旧 / 不回应，都如实返回原因，由调用方写进提示语 ——
+ * 不能假装清了（用户下次登录会莫名还是旧账号）。
+ * @param {number} uid
+ * @param {'pdd'|'qnh'|'1688'} target
+ * @returns {Promise<{ok:boolean,offline?:boolean,outdated?:boolean,timeout?:boolean,agentVer?:string,cleared?:number,error?:string}>}
+ */
+function agentLogout(uid, target) {
+  return new Promise((resolve) => {
+    if (!agentHub.isOnline(uid)) { resolve({ ok: false, offline: true }); return; }
+    const agentVer = agentHub.status(uid).agentVer || '';
+    if (agentVer && !verGte(agentVer, LOGOUT_MIN_AGENT)) {
+      resolve({ ok: false, outdated: true, agentVer });
+      return;
+    }
+    const taskId = 'lo-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+    const timer = setTimeout(() => {
+      AGENT_LOGOUTS.delete(taskId);
+      resolve({ ok: false, timeout: true });
+    }, AGENT_LOGOUT_TIMEOUT_MS);
+    if (timer.unref) timer.unref();
+    AGENT_LOGOUTS.set(taskId, { resolve, timer });
+    const sent = agentHub.send(uid, { type: 'logout', taskId, target });
+    if (!sent) {
+      clearTimeout(timer);
+      AGENT_LOGOUTS.delete(taskId);
+      resolve({ ok: false, offline: true });
+    }
+  });
+}
+
+/** 助手回报「清除本机登录态」结果 */
+function onAgentLogoutDone(uid, msg) {
+  const taskId = String((msg && msg.taskId) || '');
+  const ctx = AGENT_LOGOUTS.get(taskId);
+  if (!ctx) return;
+  clearTimeout(ctx.timer);
+  AGENT_LOGOUTS.delete(taskId);
+  const label = msg.label || msg.target || '';
+  console.log(`[agent] uid=${uid} 清除本机${label}登录态：${msg.ok ? '成功' : '失败 ' + (msg.error || '')}`);
+  ctx.resolve({
+    ok: !!msg.ok,
+    target: msg.target || '',
+    cleared: Number(msg.cleared) || 0,
+    error: msg.ok ? '' : String(msg.error || '助手清除登录态失败').slice(0, 200),
+  });
+}
+
+/**
+ * 把「本机登录态有没有一起清掉」翻译成一句人话（拼多多与牵牛花共用）。
+ * @param {object} agent agentLogout 的返回值
+ * @param {string} name  '拼多多' / '牵牛花'
+ */
+function logoutAgentNote(agent, name) {
+  const a = agent || {};
+  if (a.ok) return '本机助手里的登录态也已一并退出。';
+  if (a.offline) {
+    return `本机助手当前未连接，本机浏览器里的登录态没被退出：下次点「登录${name}」如果还是旧账号，`
+      + `请在助手面板「本机登录态」里点「${name} · 退出」再登录。`;
+  }
+  if (a.outdated) {
+    return `本机助手是 v${a.agentVer}，不支持自动退出本机登录态：升级助手，或在助手面板点「${name} · 退出」。`;
+  }
+  if (a.timeout) {
+    return `本机助手没有回应退出指令，本机登录态可能还在：请在助手面板点「${name} · 退出」。`;
+  }
+  return `本机助手退出登录态失败（${a.error || '未知原因'}），请在助手面板点「${name} · 退出」。`;
+}
+
+/**
+ * 这次动作该下发给哪台本机助手？
+ *
+ * 默认是「数据归属用户」自己的助手。但管理员以他人身份进入（?tenant=<id>）时，
+ * 那台电脑上通常没有助手，而管理员自己电脑上的助手是在线的 —— 登录/申请/发送
+ * 只需要一台能真干活的助手，登录态照样写进被代入用户的库。
+ * 所以：目标用户的助手在线就用它，否则退回到「当前登录用户」（管理员本机）的助手。
+ *
+ * @param {{id:number}} user     当前登录用户
+ * @param {number} tenantId      数据归属用户
+ * @returns {number|null} 在线助手所属的 userId；都没在线则 null
+ */
+function agentUidFor(user, tenantId) {
+  const t = Number(tenantId);
+  if (agentHub.isOnline(t)) return t;
+  const me = Number(user && user.id);
+  if (me && me !== t && agentHub.isOnline(me)) return me;
+  return null;
+}
+
+/** 用户/租户的展示名（公司全称优先），只用于提示文案 */
+async function tenantLabelOf(uid) {
+  try {
+    const r = await db.query('SELECT username, company_name FROM app_user WHERE id = ?', [Number(uid)]);
+    const u = r[0] || null;
+    return u ? (u.company_name || u.username || '') : '';
+  } catch (e) { return ''; }
+}
 
 /** 定期清掉没人管的登录任务（用户点了又不登录），避免内存堆积 */
 const qnhLoginSweeper = setInterval(() => {
@@ -1113,6 +1225,8 @@ function handleAgentMessage(uid, msg) {
   if (msg.type === 'pdd_send_progress') { onPddApplyProgress(uid, msg); return; }
   // 「牵牛花页内签名请求」：助手回传配送日志 / 毛利明细等接口结果
   if (msg.type === 'qnh_fetch_done') { qagent.onDone(uid, msg); return; }
+  // 「清除本机登录态」：助手清掉本机浏览器分区后回执
+  if (msg.type === 'logout_done') { onAgentLogoutDone(uid, msg); return; }
   if (msg.type === 'login_state') { agentHub.setLoggedIn(uid, msg.loggedIn); return; }
   if (msg.type === 'sent') { onAgentSent(uid, msg); return; }
   if (msg.type === 'log') {
@@ -1271,7 +1385,7 @@ function finishExport(ctx, ok, error) {
 async function doExportOrders(userId, { dateStart, dateEnd }) {
   const taskState = taskFor(userId);
   if (taskState.running) throw new Error('已有任务在运行中，请等待完成或点「停止」');
-  if (!agentHub.isOnline(userId)) throw new Error('本机助手未连接：请先在本机启动「1688 催收助手」桌面程序并完成绑定');
+  if (!agentHub.isOnline(userId)) throw new Error('本机助手未连接：请先在本机启动「催收小助手」桌面程序并完成绑定');
 
   Object.assign(taskState, {
     running: true, channel: 'client', type: 'export',
@@ -1404,7 +1518,7 @@ async function doClientSend(userId, loginIds, opts = {}) {
   const resumeOf = Number(opts.resumeOf) || null;
   const taskState = taskFor(userId);
   if (taskState.running) throw new Error('已有任务在运行中');
-  if (!agentHub.isOnline(userId)) throw new Error('本机助手未连接：请先在本机启动「1688 催收助手」桌面程序并完成绑定（页面顶部「本机助手」有下载与绑定入口）');
+  if (!agentHub.isOnline(userId)) throw new Error('本机助手未连接：请先在本机启动「催收小助手」桌面程序并完成绑定（页面右上角有「下载本机助手 / 绑定本机助手」入口）');
 
   const config = loadConfig();
   const rt = config.runtime || {};
@@ -1989,7 +2103,7 @@ const server = http.createServer(async (req, res) => {
       const ins = findAgentInstaller();
       if (!ins) {
         return sendJson(res, 404, {
-          error: '安装包尚未构建。请管理员在本机执行 npm run agent:dist 生成，或联系管理员获取「1688催收助手」安装包。',
+          error: '安装包尚未构建。请管理员在本机执行 npm run agent:dist 生成，或联系管理员获取「催收小助手」安装包。',
           hint: 'electron-builder 产物输出到 dist/ 目录（nsis 安装版优先）。',
         });
       }
@@ -2079,7 +2193,7 @@ const server = http.createServer(async (req, res) => {
     // ── 已废弃（2026-10-14）：浏览器扩展包下载下线，统一迁移到桌面助手 ──
     if (method === 'GET' && p === '/api/agent/extension-download') {
       return sendJson(res, 410, {
-        error: '浏览器扩展已下线，请到下载页获取「1688 催收助手」桌面程序',
+        error: '浏览器扩展已下线，请到下载页获取「催收小助手」桌面程序',
         migrateTo: '/download',
       });
     }
@@ -2170,10 +2284,10 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { ok: true });
     }
 
-    // ── 已废弃（2026-10-14）：浏览器扩展通道下线，统一迁移到「1688 催收助手」桌面程序 ──
+    // ── 已废弃（2026-10-14）：浏览器扩展通道下线，统一迁移到「催收小助手」桌面程序 ──
     if (method === 'GET' && p === '/api/agent/my-extension-download') {
       return sendJson(res, 410, {
-        error: '浏览器扩展通道已下线，请改用「1688 催收助手」桌面程序',
+        error: '浏览器扩展通道已下线，请改用「催收小助手」桌面程序',
         migrateTo: '/download',
         note: '桌面助手自带浏览器、无需再装扩展，且用设备令牌连接、更安全。',
       });
@@ -2659,7 +2773,7 @@ const server = http.createServer(async (req, res) => {
         throw new Error(scope === 'failed' ? '该任务没有失败项需要重试' : '该任务没有未完成的卖家');
       }
       if (!agentHub.isOnline(user.id)) {
-        throw new Error('本机助手未连接：请先在本机启动「1688 催收助手」桌面程序，再点「续跑」');
+        throw new Error('本机助手未连接：请先在本机启动「催收小助手」桌面程序，再点「续跑」');
       }
       doClientSend(tenantId, picked.loginIds, { resumeOf: picked.taskId }).catch((e) => {
         const ts = taskFor(tenantId);
@@ -2681,7 +2795,7 @@ const server = http.createServer(async (req, res) => {
       const t = taskFor(tenantId);
       if (t.running) throw new Error('已有任务在运行中');
       if (!agentHub.isOnline(tenantId)) {
-        throw new Error('本机助手未连接：请先在本机启动「1688 催收助手」桌面程序并完成绑定（页面顶部「本机助手」有下载与绑定入口）。发送只在你本机执行');
+        throw new Error('本机助手未连接：请先在本机启动「催收小助手」桌面程序并完成绑定（页面右上角有「下载本机助手 / 绑定本机助手」入口）。发送只在你本机执行');
       }
       doClientSend(tenantId, loginIds).catch((e) => {
         const ts = taskFor(tenantId);
@@ -2701,8 +2815,8 @@ const server = http.createServer(async (req, res) => {
       const profitApi = p === '/api/qnh/profit' || p === '/api/qnh/profit/pull' || p === '/api/qnh/profit/trend';
       if (profitApi) {
         if (!canProfit) return sendJson(res, 403, { error: '未开启毛利监控权限，请联系超级管理员' });
-      } else if (p === '/api/qnh/status') {
-        // 两个面板都要用它拿配置，任一权限即可
+      } else if (p === '/api/qnh/status' || p === '/api/qnh/logout') {
+        // 两个面板都要用它拿配置 / 退出登录，任一权限即可
         if (!canRefund && !canProfit) return sendJson(res, 403, { error: '未开启菜单权限，请联系超级管理员' });
       } else if (!canRefund) {
         return sendJson(res, 403, { error: '未开启退单列表权限，请联系超级管理员' });
@@ -2772,22 +2886,26 @@ const server = http.createServer(async (req, res) => {
       // 返回 pending + taskId，前端轮询 /api/qnh/login-status 拿结果。
       // 权限：有退单列表权限即可（管理员以某用户身份进入时，登录的就是该用户的牵牛花）。
       if (method === 'POST' && p === '/api/qnh/login') {
-        if (!agentHub.isOnline(qnhUid)) {
+        // 与拼多多一致：优先目标用户自己的助手，管理员代入时用管理员本机在线的助手，
+        // 登录态仍写进 qnhUid 名下。
+        const aUid = agentUidFor(user, qnhUid);
+        const onMyPc = aUid && Number(aUid) !== Number(qnhUid);
+        if (!aUid) {
           return sendJson(res, 200, {
             ok: false,
             needAgent: true,
-            message: '本机助手未连接：请先在该用户的电脑上启动「1688 催收助手」并完成绑定（看板右上角「本机助手」）。'
+            message: '本机助手未连接：请先在电脑上启动「催收小助手」并点页面右上角「绑定本机助手」完成绑定。'
               + '牵牛花登录只在本机完成，服务器不会代你登录。',
           });
         }
         // 旧版助手没有这个能力：它会直接忽略指令，用户只能干等到超时
-        const agentVer = agentHub.status(qnhUid).agentVer || '';
+        const agentVer = agentHub.status(aUid).agentVer || '';
         if (agentVer && !verGte(agentVer, QNH_LOGIN_MIN_AGENT)) {
           return sendJson(res, 200, {
             ok: false,
             needAgent: true,
             agentOutdated: true,
-            message: `该用户的本机助手是 v${agentVer}，还不支持登录牵牛花。请下载安装 v${QNH_LOGIN_MIN_AGENT} 及以上版本。`,
+            message: `这台电脑上的催收小助手是 v${agentVer}，还不支持登录牵牛花。请下载安装 v${QNH_LOGIN_MIN_AGENT} 及以上版本。`,
           });
         }
         const taskId = 'qnh-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
@@ -2796,7 +2914,7 @@ const server = http.createServer(async (req, res) => {
           cookieCount: 0, writtenAt: null, createdAt: Date.now(),
           expiresAt: Date.now() + QNH_LOGIN_TTL_MS,
         };
-        const sent = agentHub.send(qnhUid, {
+        const sent = agentHub.send(aUid, {
           type: 'qnh_login',
           taskId,
           url: (process.env.QNH_BASE_URL || 'https://qnh.meituan.com').replace(/\/+$/, ''),
@@ -2809,10 +2927,12 @@ const server = http.createServer(async (req, res) => {
           });
         }
         QNH_LOGINS.set(taskId, ctx);
-        await logOp(user, 'qnh.login.start', { tenantId: qnhUid });
+        await logOp(user, 'qnh.login.start', { tenantId: qnhUid, agentUid: aUid });
         return sendJson(res, 200, {
           ok: true, pending: true, taskId,
-          message: '已在该用户电脑上打开牵牛花登录窗口，请在弹出的助手窗口里完成登录。',
+          message: onMyPc
+            ? '已在你本机的助手窗口里打开牵牛花登录（登录态记在「' + ((await tenantLabelOf(qnhUid)) || '该账号') + '」名下），请在窗口里完成登录。'
+            : '已在该用户电脑上打开牵牛花登录窗口，请在弹出的助手窗口里完成登录。',
         });
       }
 
@@ -2828,6 +2948,29 @@ const server = http.createServer(async (req, res) => {
           message: ctx.message || '',
           cookieCount: ctx.cookieCount,
           writtenAt: ctx.writtenAt,
+        });
+      }
+
+      // 「退出牵牛花账号」：删库里的登录态 + 让本机助手清掉浏览器分区里的 Cookie。
+      // 退单列表与实时毛利监控共用同一个牵牛花登录态，所以一处退出两处都回到未登录。
+      if (method === 'POST' && p === '/api/qnh/logout') {
+        const info = await qnh.sessionInfo(qnhUid).catch(() => null);
+        await qnh.clearLoginState(qnhUid);
+        const agent = await agentLogout(agentUidFor(user, qnhUid) || qnhUid, 'qnh');
+        await logOp(user, 'qnh.logout', {
+          tenantId: qnhUid,
+          accountName: (info && info.accountName) || '',
+          agentCleared: !!agent.ok,
+        });
+        return sendJson(res, 200, {
+          ok: true,
+          accountName: (info && info.accountName) || '',
+          agentCleared: !!agent.ok,
+          agentOffline: !!agent.offline,
+          message: '已退出牵牛花账号'
+            + (info && info.accountName ? `「${info.accountName}」` : '')
+            + '，服务器登录态已清除（退单列表与实时毛利监控都回到未登录）。'
+            + logoutAgentNote(agent, '牵牛花'),
         });
       }
 
@@ -3093,21 +3236,25 @@ const server = http.createServer(async (req, res) => {
 
       // 「登录拼多多」：把任务下发给该用户的本机助手 → 助手弹窗让用户登录 → Cookie 回传入库
       if (method === 'POST' && p === '/api/pdd/login') {
-        if (!agentHub.isOnline(pddUid)) {
+        // 管理员代入他人时，登录窗口开在「有在线助手的那台电脑」上（通常就是管理员本机），
+        // 登录态仍写进被代入用户（pddUid）名下。
+        const aUid = agentUidFor(user, pddUid);
+        const onMyPc = aUid && Number(aUid) !== Number(pddUid);
+        if (!aUid) {
           return sendJson(res, 200, {
             ok: false,
             needAgent: true,
-            message: '本机助手未连接：请先在该用户的电脑上启动「1688 催收助手」并完成绑定（看板右上角「本机助手」）。'
+            message: '本机助手未连接：请先在电脑上启动「催收小助手」并点页面右上角「绑定本机助手」完成绑定。'
               + '拼多多登录只在本机完成，服务器不会代你登录。',
           });
         }
-        const agentVer = agentHub.status(pddUid).agentVer || '';
+        const agentVer = agentHub.status(aUid).agentVer || '';
         if (agentVer && !verGte(agentVer, PDD_LOGIN_MIN_AGENT)) {
           return sendJson(res, 200, {
             ok: false,
             needAgent: true,
             agentOutdated: true,
-            message: `该用户的本机助手是 v${agentVer}，还不支持登录拼多多。请下载安装 v${PDD_LOGIN_MIN_AGENT} 及以上版本。`,
+            message: `这台电脑上的催收小助手是 v${agentVer}，还不支持登录拼多多。请下载安装 v${PDD_LOGIN_MIN_AGENT} 及以上版本。`,
           });
         }
         const taskId = 'pdd-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
@@ -3116,7 +3263,7 @@ const server = http.createServer(async (req, res) => {
           cookieCount: 0, writtenAt: null, createdAt: Date.now(),
           expiresAt: Date.now() + PDD_LOGIN_TTL_MS,
         };
-        const sent = agentHub.send(pddUid, {
+        const sent = agentHub.send(aUid, {
           type: 'pdd_login',
           taskId,
           // 发票助手页：未登录会自动跳登录，登录完正好停在订单页，方便确认身份
@@ -3130,10 +3277,11 @@ const server = http.createServer(async (req, res) => {
           });
         }
         PDD_LOGINS.set(taskId, ctx);
-        await logOp(user, 'pdd.login.start', { tenantId: pddUid });
+        await logOp(user, 'pdd.login.start', { tenantId: pddUid, agentUid: aUid });
         return sendJson(res, 200, {
           ok: true, pending: true, taskId,
-          message: '已在该用户电脑上打开拼多多登录窗口，请在弹出的助手窗口里完成登录（支持扫码/短信验证）。',
+          message: (onMyPc ? '已在你本机的助手窗口里打开拼多多登录（登录态记在「' + ((await tenantLabelOf(pddUid)) || '该账号') + '」名下），' : '已在该用户电脑上打开拼多多登录窗口，')
+            + '请在弹出的助手窗口里完成登录（支持扫码/短信验证）。',
         });
       }
 
@@ -3152,21 +3300,28 @@ const server = http.createServer(async (req, res) => {
       }
 
       // 退出登录：清掉该用户的拼多多 Cookie（登录态失效/换账号时用）
+      // 顺带让该用户的本机助手把浏览器分区里的 Cookie 也清掉——只删库的话，
+      // 本机分区还留着旧账号，下次点「登录」会直接免登录进去（看起来像没退掉）。
       if (method === 'POST' && p === '/api/pdd/logout') {
         // 先记下是谁，退出后库里就没有这条记录了
         const info = await pdd.sessionInfo(pddUid).catch(() => null);
         await pdd.clearSession(pddUid);
+        const agent = await agentLogout(agentUidFor(user, pddUid) || pddUid, 'pdd');
         await logOp(user, 'pdd.logout', {
           tenantId: pddUid,
           accountName: (info && info.accountName) || '',
           pdduid: (info && info.pdduid) || '',
+          agentCleared: !!agent.ok,
         });
         return sendJson(res, 200, {
           ok: true,
           accountName: (info && info.accountName) || '',
+          agentCleared: !!agent.ok,
+          agentOffline: !!agent.offline,
           message: '已退出拼多多账号'
             + (info && info.accountName ? `「${info.accountName}」` : '')
-            + '，登录态已清除',
+            + '，服务器登录态已清除。'
+            + logoutAgentNote(agent, '拼多多'),
         });
       }
 
@@ -3180,17 +3335,18 @@ const server = http.createServer(async (req, res) => {
         if (!(await pdd.cookieStatus(pddUid).catch(() => null) || {}).logined) {
           return sendJson(res, 200, { ok: false, loginish: true, message: '尚未登录拼多多或登录态已失效，请先登录' });
         }
-        if (!agentHub.isOnline(pddUid)) {
+        const aUid = agentUidFor(user, pddUid);
+        if (!aUid) {
           return sendJson(res, 200, {
             ok: false, needAgent: true,
-            message: '本机助手未连接：申请发票要在该用户电脑的助手里真实提交（页面生成风控签名），请先启动助手。',
+            message: '本机助手未连接：申请发票要在本机助手里真实提交（页面生成风控签名），请先启动并绑定助手。',
           });
         }
-        const agentVer = agentHub.status(pddUid).agentVer || '';
+        const agentVer = agentHub.status(aUid).agentVer || '';
         if (agentVer && !verGte(agentVer, PDD_APPLY_MIN_AGENT)) {
           return sendJson(res, 200, {
             ok: false, needAgent: true, agentOutdated: true,
-            message: `该用户的本机助手是 v${agentVer}，还不支持申请发票。请升级到 v${PDD_APPLY_MIN_AGENT} 及以上。`,
+            message: `这台电脑上的催收小助手是 v${agentVer}，还不支持申请发票。请升级到 v${PDD_APPLY_MIN_AGENT} 及以上。`,
           });
         }
 
@@ -3209,7 +3365,7 @@ const server = http.createServer(async (req, res) => {
           total: orders.length, results: [], okCount: 0, failCount: 0,
           createdAt: Date.now(), expiresAt: Date.now() + PDD_APPLY_TTL_MS,
         };
-        const sent = agentHub.send(pddUid, {
+        const sent = agentHub.send(aUid, {
           type: 'pdd_apply',
           taskId,
           orders: orders.map((o) => ({ order_sn: o.order_sn, mall_id: o.mall_id })),
@@ -3225,7 +3381,7 @@ const server = http.createServer(async (req, res) => {
           ok: true, pending: true, taskId,
           total: orders.length,
           skipped: invalid,
-          message: `已下发申请任务（${orders.length} 单），正在该用户电脑的助手里逐单提交…`,
+          message: `已下发申请任务（${orders.length} 单），正在本机助手里逐单提交…`,
         });
       }
 
@@ -3239,17 +3395,18 @@ const server = http.createServer(async (req, res) => {
         if (!(await pdd.cookieStatus(pddUid).catch(() => null) || {}).logined) {
           return sendJson(res, 200, { ok: false, loginish: true, message: '尚未登录拼多多或登录态已失效，请先登录' });
         }
-        if (!agentHub.isOnline(pddUid)) {
+        const sendUid = agentUidFor(user, pddUid);
+        if (!sendUid) {
           return sendJson(res, 200, {
             ok: false, needAgent: true,
-            message: '本机助手未连接：发催收消息要在该用户电脑的助手里打开真实聊天页（页面生成风控签名），请先启动助手。',
+            message: '本机助手未连接：发催收消息要在本机助手里打开真实聊天页（页面生成风控签名），请先启动并绑定助手。',
           });
         }
-        const agentVer = agentHub.status(pddUid).agentVer || '';
+        const agentVer = agentHub.status(sendUid).agentVer || '';
         if (agentVer && !verGte(agentVer, PDD_SEND_MIN_AGENT)) {
           return sendJson(res, 200, {
             ok: false, needAgent: true, agentOutdated: true,
-            message: `该用户的本机助手是 v${agentVer}，还不支持发送催收消息。请升级到 v${PDD_SEND_MIN_AGENT} 及以上。`,
+            message: `这台电脑上的催收小助手是 v${agentVer}，还不支持发送催收消息。请升级到 v${PDD_SEND_MIN_AGENT} 及以上。`,
           });
         }
 
@@ -3289,7 +3446,7 @@ const server = http.createServer(async (req, res) => {
           total: items.length, results: [], okCount: 0, failCount: 0,
           createdAt: Date.now(), expiresAt: Date.now() + PDD_APPLY_TTL_MS,
         };
-        const sent = agentHub.send(pddUid, {
+        const sent = agentHub.send(sendUid, {
           type: 'pdd_send',
           taskId,
           items,
@@ -3307,7 +3464,7 @@ const server = http.createServer(async (req, res) => {
           merged: orders.length - items.length,   // 同商家合并掉的单数
           skipped: invalid,
           preview: items[0] ? items[0].content : '',
-          message: `已下发催收任务（${items.length} 个商家${orders.length > items.length ? `，${orders.length - items.length} 单同商家已合并` : ''}），正在该用户电脑的助手里逐条发送…`,
+          message: `已下发催收任务（${items.length} 个商家${orders.length > items.length ? `，${orders.length - items.length} 单同商家已合并` : ''}），正在本机助手里逐条发送…`,
         });
       }
 

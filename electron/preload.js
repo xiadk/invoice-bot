@@ -12,6 +12,10 @@ contextBridge.exposeInMainWorld('xsh', {
     return () => ipcRenderer.removeListener('agent:state', h);
   },
   openLoginWindow: () => ipcRenderer.invoke('agent:openLoginWindow'),
+  /** 清除本机某个站点的登录态：target = pdd / qnh / 1688 */
+  logout: (target) => ipcRenderer.invoke('agent:logout', target),
+  /** 各站点在本机的 Cookie 概况（面板显示「本机还有没有登录态」） */
+  localState: () => ipcRenderer.invoke('agent:localState'),
   stopTask: () => ipcRenderer.invoke('agent:stopTask'),
   openDataDir: () => ipcRenderer.invoke('agent:openDataDir'),
   unbind: () => ipcRenderer.invoke('agent:unbind'),
