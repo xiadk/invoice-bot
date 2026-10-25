@@ -22,6 +22,9 @@ const { AgentClient } = require('./agent/ws-client');
 const sender = require('./agent/sender');
 const orderExport = require('./agent/order-export');
 const qnhLogin = require('./agent/qnh-login');
+const pddLogin = require('./agent/pdd-login');
+const pddApply = require('./agent/pdd-apply');
+const pddSend = require('./agent/pdd-send');
 
 // 隐藏自动化特征（navigator.webdriver=false），降低 1688 风控识别 Electron 的概率。
 // 必须在 app ready 前调用，渲染进程启动后即失效。
@@ -125,6 +128,7 @@ function refreshTray() {
     { label: '打开状态面板', click: () => showStatusWin() },
     { label: '打开 1688 登录窗口', click: () => openLogin() },
     { label: '打开 牵牛花 登录窗口', click: () => qnhLogin.openLogin() },
+  { label: '打开 拼多多 登录窗口', click: () => pddLogin.openLogin() },
     { type: 'separator' },
     { label: '开机自启', type: 'checkbox', checked: !!store.get('autoStart'), click: (mi) => setAutoStart(mi.checked) },
     { label: '退出', click: () => { quitting = true; app.quit(); } },
@@ -237,6 +241,19 @@ function startAgent() {
   // 「牵牛花页内签名请求」内核：配送日志 / 订单毛利明细等接口要求 mtgsig 签名，
   // 服务器直连 403，只有真实页面环境里的 fetch 能自动带上——这个环境只有本机有。
   client.setQnhFetchHandler(qnhLogin.createFetchHandler({
+    log: (m) => { log(m); pushState(); },
+  }));
+  // 「登录拼多多」内核：与牵牛花同一套路（服务器没有浏览器，登录只在本机完成），
+  // 差别是走手机端 H5，回传的是一整条 Cookie 串（服务器直接放进请求头拉发票订单）。
+  client.setPddLoginHandler(pddLogin.createLoginHandler({
+    log: (m) => { log(m); pushState(); },
+  }));
+  // 「拼多多批量申请发票」内核：加载真实开票页逐单提交，anti-content 由页面自己生成。
+  client.setPddApplyHandler(pddApply.createApplyHandler({
+    log: (m) => { log(m); pushState(); },
+  }));
+  // 「拼多多催商家开票」内核：加载真实聊天页逐单发消息，anti-content 由页面自己生成。
+  client.setPddSendHandler(pddSend.createSendHandler({
     log: (m) => { log(m); pushState(); },
   }));
   client.on('ready', () => { log('已连接服务器'); refreshTray(); pushState(); });

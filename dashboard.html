@@ -115,6 +115,15 @@
   .pager-wrap { margin-top: 10px; display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
   .pager-wrap .total { font-size: 12px; color: var(--sub); }
   .meta-line { margin-top: 10px; font-size: 12px; color: var(--sub); }
+  /* 拼多多页：账号独占提醒。这句是「操作前必须知道」的硬要求，混在灰色小字正文里最容易被略过，
+     所以独占一行 + 红色加粗 + 略大字号 + 警示图标；不上底色，避免和页面里的 el-alert 抢视觉。 */
+  .pdd-warn { display: flex; align-items: center; gap: 5px; margin-top: 7px;
+    color: #e53935; font-weight: 700; font-size: 13.5px; line-height: 1.7; letter-spacing: .2px; }
+  .pdd-warn i { font-size: 15px; }
+  /* 全局页脚：版权归属（主体来自 config.json 的 copyright，避免在页面里写死） */
+  .app-footer { margin-top: 30px; padding: 14px 4px 4px; border-top: 1px solid var(--border);
+    text-align: center; font-size: 12px; color: var(--sub); line-height: 1.8; letter-spacing: .3px; }
+  .app-footer .sep { margin: 0 6px; color: var(--border); }
   .page-head { margin-bottom: 14px; }
   .page-head h2 { font-size: 16px; margin-bottom: 6px; }
   @media (max-width: 900px) { .el-main { padding: 12px; } }
@@ -128,6 +137,7 @@
         <div class="brand">1688 发票催收</div>
         <el-menu class="nav-menu" :default-active="page" mode="horizontal" @select="switchPage">
           <el-menu-item index="board">看板</el-menu-item>
+          <el-menu-item index="pdd">拼多多发票</el-menu-item>
           <el-menu-item index="mapping">税名核对</el-menu-item>
           <el-menu-item index="product">商品列表</el-menu-item>
           <el-menu-item index="market">交易市场</el-menu-item>
@@ -138,6 +148,9 @@
         </el-menu>
         <div class="nav-right">
           <el-button size="small" plain @click="openGuideModal" title="发送只在你本机执行：装一次「1688催收助手」→ 绑定 → 在本机登录 1688">本机助手</el-button>
+          <el-tag v-if="agent.online" size="mini" type="success" style="margin-left:6px;cursor:default"
+                  :title="'1688 ' + (agent.loggedIn ? '已登录' : '未登录')">已连接{{ agentVer ? ' · v' + agentVer : '' }}</el-tag>
+          <el-tag v-else size="mini" type="info" style="margin-left:6px;cursor:default" title="助手未运行，发送/登录/申请时会自动唤起">未连接</el-tag>
           <div class="user-chip">
             <div class="avatar">{{ avatarText }}</div>
             <div>
@@ -786,6 +799,32 @@
 
         <el-card shadow="never" class="section-card">
           <div slot="header">
+            <b>拼多多催收消息</b>
+            <span class="loginid">（只用于拼多多发票列表里「商家处理中」订单的催商家开票，与上面 1688 的模板互不影响）</span>
+          </div>
+          <el-form label-position="top" size="small">
+            <el-form-item label="催收话术（只有一条，发给商家客服会话）">
+              <el-input type="textarea" :rows="4" v-model="cfg.pddChat"></el-input>
+              <div class="form-tip">
+                变量：{companyName}=抬头，{taxNo}=税号，{email}=收票邮箱，{orderSn}=订单号，{amount}=开票金额。
+                不含 {orderSn} 时，同一商家的多笔订单只会发一条（避免重复打扰）。
+              </div>
+            </el-form-item>
+            <el-form-item label="每个商家之间的间隔（秒，太小容易被风控）">
+              <el-input-number v-model="cfg.pddGapSec" :min="2" :max="120" :step="1" size="small"></el-input-number>
+            </el-form-item>
+            <el-form-item label="实际发送效果预览（按当前登录账号的抬头填充）">
+              <div class="preview-box">{{ pddMsgPreview }}</div>
+            </el-form-item>
+          </el-form>
+          <el-button type="primary" size="small" @click="saveConfig">保存配置</el-button>
+          <el-button size="small" @click="loadConfigUI">放弃修改</el-button>
+          <el-button size="small" type="text" @click="cfg.pddChat = defaultPddChat">恢复默认话术</el-button>
+          <el-tag v-if="saveOk" type="success" size="small" style="margin-left:10px">✓ 已保存</el-tag>
+        </el-card>
+
+        <el-card shadow="never" class="section-card">
+          <div slot="header">
             <b>用户管理</b> <span class="loginid">（{{ users.length }} 个账号）</span>
             <el-button size="mini" style="margin-left:10px" @click="loadUsers">刷新</el-button>
           </div>
@@ -1249,6 +1288,188 @@
           <div id="profit-trend" style="height:220px"></div>
         </el-card>
       </div>
+
+      <!-- ══════════ 拼多多发票（对所有用户开放） ══════════ -->
+      <div v-show="page === 'pdd'" id="page-pdd">
+        <div class="page-head">
+          <h2>拼多多发票</h2>
+          <div class="meta-line">
+            该页面需要在小助手登录拼多多后使用：先确认已下载并启动<b>本机助手</b>，再点下方「登录拼多多」按钮，
+            在「1688 小助手」弹出的手机端窗口里扫码或短信验证。
+          </div>
+          <div class="pdd-warn">
+            <i class="el-icon-warning"></i>
+            <span>操作数据过程中请确保拼多多账号不要被其他人登录使用，以免程序中断。</span>
+          </div>
+        </div>
+
+        <qnh-tenant-picker v-if="isAdmin" service="拼多多" :users="pddUsers" :value="qnhTenant"
+                           :sessions="pddSessions" :self-id="me && me.id"
+                           @change="onQnhTenantChange"></qnh-tenant-picker>
+
+        <!-- 顶部状态条：登录 / 刷新（与退单列表、毛利监控共用同一组件，只换服务名） -->
+        <el-card class="section-card" shadow="never" :body-style="{ padding: '12px 14px' }">
+          <qnh-login-bar service="拼多多" :cookie="pd.cookie" :last-run="pd.lastRun"
+                         :who-label="qnhWhoLabel" action-text="立即刷新数据"
+                         :action-loading="pd.syncing"
+                         @login="onPddLoginBtn" @action="doPddSync"></qnh-login-bar>
+        </el-card>
+
+        <el-alert v-if="qnhNeedPick" type="warning" :closable="false" show-icon style="margin-bottom:12px"
+                  title="请先在上方选择要以哪个账号的身份查看"
+                  description="超级管理员自己没有独立的拼多多数据；选定账号后，订单、登录与同步都属于该账号。"></el-alert>
+
+        <!-- 汇总 -->
+        <div style="display:flex;gap:12px;margin:12px 0;flex-wrap:wrap">
+          <el-card v-for="s in pddStats" :key="s.label" shadow="never" :body-style="{ padding: '12px 16px' }"
+                   style="flex:1;min-width:150px">
+            <div style="font-size:20px;font-weight:600;color:#26282c">{{ s.value }}</div>
+            <div class="loginid">{{ s.label }}</div>
+            <div class="loginid" v-if="s.sub">{{ s.sub }}</div>
+          </el-card>
+        </div>
+
+        <!-- 批量申请发票 · 任务进度（页面内展示，与看板「发送催收消息」的任务进度卡同款） -->
+        <el-card v-if="pd.applyDialog.visible" ref="applyCard" class="section-card" shadow="never"
+                 :body-style="{ padding: '14px 16px' }" style="margin-bottom:12px">
+          <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px">
+            <span style="font-size:13px">{{ applyTaskText }}</span>
+            <span style="flex:1"></span>
+            <el-button v-if="pd.applyDialog.running" size="mini" type="danger" plain @click="stopPddApply">停止</el-button>
+            <el-button v-else size="mini" plain @click="pd.applyDialog.visible = false">关闭</el-button>
+          </div>
+          <el-progress :percentage="applyPercent" :stroke-width="10" :show-text="false"></el-progress>
+          <div class="log-panel" ref="applyLogPanel" v-html="applyLogHtml"></div>
+          <el-alert v-if="!pd.applyDialog.running && pd.applyDialog.status === 'failed'" type="error"
+                    :closable="false" show-icon style="margin-top:10px"
+                    :title="'任务失败：' + (pd.applyDialog.message || '未知原因')"
+                    :description="pd.applyDialog.kind === 'send'
+                      ? '未发出任何催收消息。可按提示处理后重试（等待上一个任务结束 / 重新登录拼多多 / 升级助手）；已发出去的部分不受影响。'
+                      : '未提交开票申请。可按提示处理后重试（等待上一个任务结束 / 重新登录拼多多 / 升级助手）；已提交成功的部分不受影响。'"></el-alert>
+          <el-alert v-else-if="!pd.applyDialog.running && pd.applyDialog.status === 'timeout'" type="warning"
+                    :closable="false" show-icon style="margin-top:10px"
+                    :title="pd.applyDialog.message"></el-alert>
+          <el-alert v-else-if="!pd.applyDialog.running && pd.applyDialog.status === 'done'" type="success"
+                    :closable="false" show-icon style="margin-top:10px"
+                    :title="pd.applyDialog.message || '申请提交完成'"></el-alert>
+        </el-card>
+
+        <!-- 筛选 + 列表 -->
+        <el-card class="section-card" shadow="never">
+          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px">
+            <el-select v-model="pd.filter.status" size="small" style="width:150px" placeholder="开票状态">
+              <el-option label="全部状态" value=""></el-option>
+              <el-option label="待申请" value="7"></el-option>
+              <el-option label="已申请" value="8"></el-option>
+              <el-option label="开票中" value="1"></el-option>
+              <el-option label="已开票" value="2"></el-option>
+              <el-option label="商家处理中" value="6"></el-option>
+              <el-option label="暂不可开票" value="0"></el-option>
+            </el-select>
+            <el-input v-model="pd.filter.keyword" size="small" clearable style="width:240px"
+                      placeholder="订单号 / 商品 / 规格 / 抬头" @keyup.enter.native="applyPddFilter"></el-input>
+            <el-button size="small" type="primary" @click="applyPddFilter">查询</el-button>
+            <el-button size="small" @click="resetPddFilter">重置</el-button>
+            <el-button size="small" type="danger" plain :disabled="!applySelCount"
+                       :loading="pd.applying" @click="applyPddBatch">
+              批量申请发票{{ applySelCount ? '（' + applySelCount + '）' : '' }}
+            </el-button>
+            <el-button size="small" type="warning" plain :disabled="!chatSelCount"
+                       :loading="pd.applying" @click="sendPddBatch">
+              批量催商家开票{{ chatSelCount ? '（' + chatSelCount + '）' : '' }}
+            </el-button>
+            <span style="flex:1"></span>
+            <span class="loginid">共 {{ pd.total }} 条</span>
+          </div>
+
+          <el-table ref="pddTable" :data="pd.rows" size="small" border style="width:100%" v-loading="pd.loading"
+                    :default-sort="pddDefaultSort"
+                    empty-text="暂无订单数据" @selection-change="onPddSelChange" @sort-change="onPddSortChange">
+            <el-table-column type="selection" width="42"
+                             :selectable="(row) => !!(row.applyable || row.chatable)"></el-table-column>
+            <el-table-column label="商品" min-width="260">
+              <template slot-scope="p">
+                <div style="display:flex;align-items:center;gap:8px">
+                  <img v-if="p.row.thumbUrl" :src="p.row.thumbUrl" alt=""
+                       style="width:36px;height:36px;object-fit:cover;border-radius:4px;flex:none">
+                  <div style="min-width:0">
+                    <div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ p.row.goodsName || '—' }}</div>
+                    <div class="loginid">{{ p.row.spec || '' }}</div>
+                  </div>
+                </div>
+              </template>
+            </el-table-column>
+            <el-table-column label="订单号" width="180">
+              <template slot-scope="p"><span class="loginid">{{ p.row.orderSn || '—' }}</span></template>
+            </el-table-column>
+            <el-table-column prop="orderTime" label="下单时间" width="132" sortable="custom"
+                             :sort-orders="['descending', 'ascending']"
+                             :header-cell-style="{ cursor: 'pointer' }">
+              <template slot-scope="p">{{ shortDate(p.row.orderTime) }}</template>
+            </el-table-column>
+            <el-table-column prop="invoiceAmount" label="开票金额" width="118" align="right" sortable="custom"
+                             :sort-orders="['descending', 'ascending']"
+                             :header-cell-style="{ cursor: 'pointer' }">
+              <template slot-scope="p"><span class="amount">{{ p.row.invoiceAmount == null ? '—' : yuan(p.row.invoiceAmount) }}</span></template>
+            </el-table-column>
+            <el-table-column label="开票状态" width="110">
+              <template slot-scope="p">
+                <el-tag size="mini" :type="pddStatusType(p.row.invoiceStatus)">{{ p.row.statusText || '—' }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="最近催收时间" width="130">
+              <template slot-scope="p">
+                <span v-if="p.row.lastSentAt">{{ fmtMinute(p.row.lastSentAt) }}</span>
+                <span v-else class="loginid">—</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="催收次数" width="90" align="center">
+              <template slot-scope="p">
+                <el-tooltip v-if="p.row.sendCount" placement="top"
+                            :content="'已成功催收 ' + p.row.sendCount + ' 次' + (p.row.sendFailCount ? '（另有 ' + p.row.sendFailCount + ' 次失败尝试）' : '')">
+                  <el-tag size="mini" type="success">{{ p.row.sendCount }}</el-tag>
+                </el-tooltip>
+                <el-tooltip v-else-if="p.row.sendFailCount" placement="top"
+                            :content="'失败 ' + p.row.sendFailCount + ' 次，尚未成功发出'">
+                  <span class="loginid" style="color:#f56c6c">0</span>
+                </el-tooltip>
+                <span v-else class="loginid">0</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="进度 / 说明" min-width="180">
+              <template slot-scope="p">
+                <span v-if="p.row.rejectReason" style="color:#e6a23c">{{ p.row.rejectReason }}</span>
+                <span v-else class="loginid">{{ p.row.invoiceTimeStr || '—' }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="抬头" width="180">
+              <template slot-scope="p">{{ p.row.payerName || '—' }}</template>
+            </el-table-column>
+            <el-table-column label="操作" width="170" fixed="right">
+              <template slot-scope="p">
+                <el-button v-if="p.row.applyable" type="text" size="mini" :disabled="pd.applying"
+                           @click="applyPddRows([p.row])">申请发票</el-button>
+                <el-button v-if="p.row.chatable" type="text" size="mini" :disabled="pd.applying"
+                           style="color:#e6a23c" @click="sendPddMsgRows([p.row])">发送催收消息</el-button>
+                <span v-if="!p.row.applyable && !p.row.chatable" class="loginid">—</span>
+              </template>
+            </el-table-column>
+          </el-table>
+
+          <div style="margin-top:12px;display:flex;align-items:center;gap:8px">
+            <el-pagination small layout="sizes, prev, pager, next" :total="pd.total"
+                           :current-page.sync="pd.page" :page-size="pd.size" :page-sizes="pageSizes"
+                           @current-change="onPddPage" @size-change="onPddSize"></el-pagination>
+            <span class="total">共 {{ pd.total }} 条</span>
+          </div>
+        </el-card>
+      </div>
+
+      <!-- 全局页脚：版权归属（主体来自 config.json 的 copyright，缺省回退系统名；年份服务端按当年生成） -->
+      <div class="app-footer">
+        <span v-if="copyright">{{ copyright }}</span>
+        <span v-else>1688 发票催收系统 · 保留所有权利</span>
+      </div>
     </el-main>
   </el-container>
 
@@ -1503,10 +1724,13 @@ const UP_GUIDES = {
 const OP_SKIP_BTN = ['确定', '取消', '确 定', '取 消', '关闭', '×', 'OK', 'Cancel', '知道了'];
 
 // ════════════════════════════════════════════════════════════════════
-// 牵牛花登录状态条（退单列表 / 实时毛利监控 共用同一组件与同一套交互）
+// 登录状态条（退单列表 / 实时毛利监控 / 拼多多发票 三页共用同一组件与同一套交互）
 //   · 登录按钮：未登录 → 发起登录（本机助手弹窗）；已登录 → 刷新状态
-//   · 数据按钮：文案与行为由调用方注入（退单=立即刷新数据，毛利=立即拉取毛利数据）
+//   · 数据按钮：文案与行为由调用方注入（退单=立即刷新数据，毛利=立即拉取毛利数据，拼多多=立即刷新数据）
 //   · 状态展示：最近同步结果 / 定时任务 / 登录账号 / 失效提示
+//   · service：服务名（牵牛花 / 拼多多）—— 退单与拼多多是两套完全不同的站点与登录态，
+//     但「登录只在本机助手完成、登录态存数据库、点按钮轮询结果」的交互完全一致，
+//     所以共用这一个组件，只换文案。
 // ════════════════════════════════════════════════════════════════════
 Vue.component('qnh-login-bar', {
   props: {
@@ -1516,13 +1740,14 @@ Vue.component('qnh-login-bar', {
     lastRun: { type: Object, default: null },
     schedule: { type: Object, default: null },
     whoLabel: { type: String, default: '' },
+    service: { type: String, default: '牵牛花' },
   },
   computed: {
     logined() { return !!(this.cookie && this.cookie.logined); },
     loading() { return !!(this.cookie && this.cookie.loading); },
     btnText() {
       if (this.loading) return '等待本机登录…';
-      return this.logined ? '已登录牵牛花' : '登录牵牛花';
+      return this.logined ? ('已登录' + this.service) : ('登录' + this.service);
     },
     btnType() { return this.logined ? 'success' : 'danger'; },
     accountText() {
@@ -1557,7 +1782,7 @@ Vue.component('qnh-login-bar', {
     <el-button size="small" type="primary" :loading="actionLoading" @click="onAction">{{ actionText }}</el-button>
     <el-tag v-if="lastRunText" size="small" :type="lastRunType" :title="lastRunTip">{{ lastRunText }}</el-tag>
     <el-tag v-if="scheduleText" size="small" type="success">每天 {{ scheduleText }} 自动同步</el-tag>
-    <el-tag v-if="logined && accountText" size="small">牵牛花 {{ accountText }}</el-tag>
+    <el-tag v-if="logined && accountText" size="small">{{ service }} {{ accountText }}</el-tag>
     <span style="flex:1"></span>
     <span class="loginid" v-if="whoLabel">身份：{{ whoLabel }}</span>
     <span class="loginid" v-if="cookie && cookie.message" style="color:#e6a23c">{{ cookie.message }}</span>
@@ -1575,6 +1800,7 @@ Vue.component('qnh-tenant-picker', {
     value: { type: [Number, String], default: null },
     sessions: { type: Array, default: () => [] },
     selfId: { type: [Number, String], default: null },
+    service: { type: String, default: '牵牛花' },
   },
   computed: {
     options() { return this.users || []; },
@@ -1585,7 +1811,7 @@ Vue.component('qnh-tenant-picker', {
       const name = (u.companyName || u.username || ('#' + u.id));
       const tags = [];
       if (Number(u.id) === Number(this.selfId)) tags.push('我自己');
-      if ((this.sessions || []).some((s) => Number(s) === Number(u.id))) tags.push('已登录牵牛花');
+      if ((this.sessions || []).some((s) => Number(s) === Number(u.id))) tags.push('已登录' + this.service);
       else tags.push('未登录');
       return name + (tags.length ? '（' + tags.join(' · ') + '）' : '');
     },
@@ -1595,7 +1821,7 @@ Vue.component('qnh-tenant-picker', {
     <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
       <b style="font-size:13px">查看身份</b>
       <el-select :value="value" size="small" filterable style="width:320px"
-                 placeholder="选择要以哪个账号的牵牛花身份查看"
+                 :placeholder="'选择要以哪个账号的' + service + '身份查看'"
                  @change="(v) => $emit('change', v)">
         <el-option v-for="u in options" :key="u.id" :label="labelOf(u)" :value="u.id"></el-option>
       </el-select>
@@ -1615,6 +1841,21 @@ const vm = new Vue({
       me: null, page: 'board', viewTenant: null,
       // 牵牛花：以哪个账号的身份查看（管理员必选；普通用户 = 自己）
       qnhTenant: null, qnhUsers: [], qnhSessions: [],
+      // 拼多多发票：复用牵牛花的「查看身份」（同一个账号），但两套登录态各自独立
+      pddUsers: [], pddSessions: [],
+      // 拼多多列表默认排序：下单时间倒序（同一天按金额倒序，由服务端 SQL 保证）。
+      // ⚠ 必须是稳定引用：写成内联对象每渲染一次就是新对象，el-table 的 default-sort
+      //   watcher 会把用户的排序重置回默认（表现为「点了排序又跳回去」）。
+      pddDefaultSort: { prop: 'orderTime', order: 'descending' },
+      pd: {
+        loading: false, rows: [], total: 0, page: 1, size: 20,
+        filter: { status: '', keyword: '', sort: 'time_desc' },
+        summary: null, lastRun: null, syncing: false,
+        cookie: { logined: false, loading: false, message: '' },
+        // 批量申请发票
+        selected: [], applying: false, applyTaskId: '',
+        applyDialog: { visible: false, running: false, kind: '', status: '', message: '', progress: null, log: [], startedAt: 0 },
+      },
       // 看板数据
       companies: [], sent: {}, invSummary: null, unmatchedCnt: 0, ignoredCnt: 0, manualCnt: 0, boardLoading: false,
       // 商品列表（前置仓补货参考）
@@ -1628,7 +1869,7 @@ const vm = new Vue({
       // 交易市场
       market: { loading: false, rows: [] },
       quotes: { visible: false, loading: false, sku: '', goodsName: '', rows: [] },
-      meta: '', tenantLabel: '',
+      meta: '', tenantLabel: '', copyright: '',
       // 筛选（草稿 vs 生效）
       draftKeyword: '', keyword: '', draftCollect: '15', collectState: '15', draftInvoice: '', invoiceState: '',
       pendSort: '', amountSort: '', dashPage: 1, dashSize: 20, pageSizes: [10, 20, 50, 100],
@@ -1649,7 +1890,14 @@ const vm = new Vue({
       map: { mappings: [], unmatched: [], sellers: [], ignored: [] },
       mapDraft: {}, unPage: 1, unSize: 20, mapPage: 1, mapSize: 20, igPage: 1, igSize: 20,
       // 系统管理
-      cfg: { gapMin: 15, gapMax: 30, chunkMax: 450, template: '', orderItem: '', reminder: '', serverUrl: '' },
+      cfg: {
+        gapMin: 15, gapMax: 30, chunkMax: 450, template: '', orderItem: '', reminder: '', serverUrl: '',
+        // 拼多多催收话术（与 1688 的 templates 完全分开，只有一条）
+        pddChat: '', pddGapSec: 4,
+      },
+      // 系统默认拼多多话术（「恢复默认」按钮用；真实值由 /api/config 下发）
+      defaultPddChat: '你好，麻烦尽快开一下发票，在平台都已经申请！！！如需线下开票，我的抬头：{companyName}，'
+        + '税号：{taxNo}，邮箱：{email}，非常感谢，已经在平台申请！！！',
       previewText: '', saveOk: false,
       users: [], newUser: { company: '', password: '', role: 'user', taxNo: '', email: '', note: '' },
       build: { running: false, ok: null, error: '', version: '', installer: null, log: [] },
@@ -1694,8 +1942,64 @@ const vm = new Vue({
     canRefund() { return !!(this.me && (this.me.role === 'admin' || this.me.qnhRefundEnabled)); },
     // 实时毛利监控权限（独立菜单权限）
     canProfit() { return !!(this.me && (this.me.role === 'admin' || this.me.qnhProfitEnabled)); },
+    // 拼多多发票对所有用户开放，不需要单独配置菜单权限
     // 管理员必须先选定一个账号，才能看该账号的牵牛花数据
     qnhNeedPick() { return this.isAdmin && this.qnhTenant == null; },
+    // 拼多多催收话术预览：用当前查看账号的抬头填充（看板里各账号抬头不同）
+    pddMsgPreview() {
+      const tpl = String(this.cfg.pddChat || '');
+      // 管理员正在查看某个账号时，预览用该账号的抬头（真实发送也是用它）
+      const picked = (this.isAdmin && this.qnhTenant)
+        ? (this.qnhUsers || []).find((x) => Number(x.id) === Number(this.qnhTenant)) : null;
+      const u = picked || this.me || {};
+      const vars = {
+        companyName: u.companyName || '（未设置公司全称）',
+        taxNo: u.taxNo || '（未设置税号）',
+        email: u.email || '（未设置邮箱）',
+        orderSn: '261022-076095220081773',
+        amount: '15.11',
+      };
+      return tpl.replace(/\{(companyName|taxNo|email|orderSn|amount)\}/g, (m, k) => vars[k] || '');
+    },
+    // 勾选里可申请 / 可催收的条数（两种操作共用一套勾选，各自只处理自己那一类）
+    applySelCount() { return (this.pd.selected || []).filter((r) => r && r.applyable).length; },
+    chatSelCount() { return (this.pd.selected || []).filter((r) => r && r.chatable).length; },
+    // 批量申请发票进度百分比（结束且无进度数据时按 100 展示，避免停在 0 误导）
+    applyPercent() {
+      const ad = this.pd.applyDialog;
+      const p = ad && ad.progress;
+      if (!p || !p.total) return ad && ad.running ? 0 : 100;
+      return Math.min(100, Math.round((Number(p.index) / Number(p.total)) * 100));
+    },
+    // 进度文案：与看板「发送催收消息」同款（X/Y · 当前 · 成功/失败 · 已用/约剩）
+    applyTaskText() {
+      const ad = this.pd.applyDialog;
+      const p = ad.progress;
+      const isSend = ad.kind === 'send';
+      const name = isSend ? '批量催商家开票' : '批量申请发票';
+      const done = p ? (Number(p.index) || 0) : 0;
+      const total = p ? (Number(p.total) || 0) : 0;
+      let s = (ad.running ? name + '：' : name + '（已结束）：') + done + '/' + total;
+      if (ad.running && p && p.current) s += ' · 当前: ' + p.current;
+      s += ' · 成功' + (p ? (p.okCount || 0) : 0) + ' 失败' + (p ? (p.failCount || 0) : 0);
+      if (ad.startedAt) {
+        const elapsed = Date.now() - ad.startedAt;
+        s += ' · 已用' + fmtDur(elapsed);
+        if (ad.running && done > 0 && total > done) s += ' · 约剩' + fmtDur((total - done) * (elapsed / done));
+      }
+      return s;
+    },
+    // 深色日志面板内容（成功绿 / 失败红，与 1688 任务面板一致的观感）
+    applyLogHtml() {
+      const logs = (this.pd.applyDialog && this.pd.applyDialog.log) || [];
+      if (!logs.length) return '<div style="color:#8a8f98">等待本机助手开始执行…</div>';
+      return logs.map((l) => {
+        const bad = l.text.indexOf('✗') > -1 || l.text.indexOf('失败') > -1;
+        const good = l.text.indexOf('✓') > -1;
+        const color = bad ? '#ff8a80' : (good ? '#69f0ae' : '#b9f6ca');
+        return '<div style="color:' + color + '">' + this.esc(l.t) + ' ' + this.esc(l.text) + '</div>';
+      }).join('');
+    },
     // 当前查看的账号名（展示用）
     qnhWhoLabel() {
       if (!this.me) return '';
@@ -1753,6 +2057,21 @@ const vm = new Vue({
       const rows = this.rq.log.rows || [];
       if (t === 'order' || t === 'delivery') return rows.filter((r) => r.logType === t);
       return rows;
+    },
+    /** 拼多多汇总卡：条数 + 金额（金额只在有意义时展示，避免全是 0 干扰阅读） */
+    pddStats() {
+      const s = this.pd.summary || {};
+      const n = (o) => ((o && o.count) || 0);
+      const a = (o) => ((o && o.amount) || 0);
+      return [
+        { label: '订单总数', value: (s.totalCount || 0) + ' 单', sub: '金额合计 ' + yuan(s.totalAmount || 0) },
+        { label: '待申请', value: n(s.pending) + ' 单', sub: '可开票 ' + yuan(a(s.pending)) },
+        { label: '已申请', value: n(s.applied) + ' 单', sub: '已提交，等商家开票' },
+        { label: '开票中', value: n(s.issuing) + ' 单', sub: yuan(a(s.issuing)) },
+        { label: '已开票', value: n(s.issued) + ' 单', sub: yuan(a(s.issued)) },
+        { label: '商家处理中', value: n(s.mallProcessing) + ' 单', sub: yuan(a(s.mallProcessing)) },
+        { label: '暂不可开票', value: n(s.unavailable) + ' 单', sub: '全额退款等' },
+      ];
     },
     readonly() {
       if (this.viewTenant == null || !this.me) return false;
@@ -1890,11 +2209,14 @@ const vm = new Vue({
   mounted() {
     window.addEventListener('resize', this.onResize);
     document.addEventListener('click', this.onDocClick);   // 全局按钮点击埋点（操作日志）
+    // 助手连接状态：导航栏常驻展示，每 10 秒轻量刷新一次
+    this.agentTimer = setInterval(() => { this.refreshAgent(); }, 10000);
     this.boot();
   },
   beforeDestroy() {
     window.removeEventListener('resize', this.onResize);
     document.removeEventListener('click', this.onDocClick);
+    if (this.agentTimer) { clearInterval(this.agentTimer); this.agentTimer = null; }
   },
   methods: {
     esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); },
@@ -1931,6 +2253,8 @@ const vm = new Vue({
       if (t == null || t === '') return this.api(path, opts);
       return this.api(path + (path.includes('?') ? '&' : '?') + 'tenant=' + encodeURIComponent(t), opts);
     },
+    /** 拼多多接口：与 qnhApi 同构（普通用户=自己，管理员=顶部选定的账号） */
+    pddApi(path, opts) { return this.qnhApi(path, opts); },
     goLogin() { location.href = '/login'; },
     async logout() { await fetch('/api/auth/logout', { method: 'POST', credentials: 'same-origin' }).catch(() => {}); this.goLogin(); },
     // ── 初始化 ──
@@ -1939,6 +2263,7 @@ const vm = new Vue({
       try { d = await this.api('/api/auth/me'); } catch (e) { return; }
       if (!d || !d.user) { this.goLogin(); return; }
       this.me = d.user;
+      this.copyright = d.copyright || '';
       await this.loadData();
       this.renderTrend();
       this.pollTask();
@@ -1957,12 +2282,12 @@ const vm = new Vue({
       if (p === 'admin') { this.loadConfigUI(); this.loadUsers(); this.loadBuildStatus(); }
       if (p === 'mapping') this.loadMapping();
       if (p === 'audit') this.loadOpLog();
-      if (p === 'profit' || p === 'refund') {
+      if (p === 'profit' || p === 'refund' || p === 'pdd') {
         if (p === 'refund') this.reportOp('qnh.view');
         this.enterQnhPage(p);
       }
     },
-    /** 进入退单列表 / 实时毛利监控：先确定「以哪个账号的身份」，再拉该账号的数据 */
+    /** 进入退单列表 / 实时毛利监控 / 拼多多发票：先确定「以哪个账号的身份」，再拉该账号的数据 */
     async enterQnhPage(p) {
       await this.ensureQnhTenant();
       this.qnhReload();
@@ -1986,7 +2311,7 @@ const vm = new Vue({
         this.ignoredCnt = d.ignoredNameCount || 0;
         this.manualCnt = d.manualIssuedCount || 0;
         const memberCnt = this.companies.reduce((a, c) => a + c.memberCount, 0);
-        this.meta = '数据: ' + d.generatedAt + ' · ' + this.companies.length + ' 家公司 / ' + memberCnt + ' 个会员名 · 数据源 MySQL'
+        this.meta = '数据: ' + d.generatedAt + ' · ' + this.companies.length + ' 家公司 / ' + memberCnt + ' 个会员名'
           + (d.tenant ? ' · 租户: ' + d.tenant.username : '');
         this.tenantLabel = d.tenant ? (d.tenant.companyName || d.tenant.username) : '';
         this.loadTrend();
@@ -2339,10 +2664,17 @@ const vm = new Vue({
       this.rq.trend = []; this.rq.summary = null; this.rq.lastRun = null;
       this.rq.profit = { loading: false, rows: [], total: 0, alerts: 0, error: '' };
       this.rq.profitTrend = [];
+      this.pd.rows = []; this.pd.total = 0; this.pd.page = 1;
+      this.pd.summary = null; this.pd.lastRun = null; this.pd.selected = [];
+      this.pd.cookie = { logined: false, loading: false, message: '' };
+      // 切换账号：上一个账号的申请结果不再适用（任务仍在跑的话保留卡片，避免误以为任务被停）
+      if (!this.pd.applyDialog.running) this.pd.applyDialog.visible = false;
       this.qnhReload();
     },
-    /** 按当前页面重载牵牛花数据（两个页面共用） */
+    /** 按当前页面重载（退单 / 毛利 / 拼多多 三个页面共用同一套「身份 → 数据」流程） */
     qnhReload() {
+      // 拼多多与牵牛花是两套独立登录态，进拼多多页不该去请求牵牛花状态
+      if (this.page === 'pdd') { this.loadPddStatus(); this.loadPddOrders(); return; }
       this.loadRefundStatus();
       if (this.page === 'refund') { this.loadRefunds(); this.loadRefundTrend(); }
       if (this.page === 'profit') { this.loadProfit(); }
@@ -2543,6 +2875,378 @@ const vm = new Vue({
         if (d.error) return 'gone';
       }
       return 'timeout';
+    },
+
+    // ══════ 拼多多发票 ══════
+    /** 「登录拼多多」按钮：与「登录牵牛花」完全同一套路（本机助手弹窗 → 轮询结果） */
+    async onPddLoginBtn() {
+      if (this.pd.cookie.loading) return;
+      if (this.qnhNeedPick) { this.$message.warning('请先选择要以哪个账号的身份登录'); return; }
+      if (this.pd.cookie.logined) {
+        this.$message.success('拼多多已登录，Cookie 有效');
+        await this.loadPddStatus();
+        return;
+      }
+      const who = this.isAdmin ? ('「' + (this.qnhWhoLabel || '所选账号') + '」') : '你';
+      try {
+        await this.$confirm(
+          `登录在${who}的电脑上完成：点「开始登录」后，「1688 小助手」会在那台电脑上弹出拼多多（手机端）窗口，`
+          + '在窗口里扫码或短信验证即可（最多等 5 分钟）。\n登录态回传后由服务器保管（存数据库），服务器不会代你登录。',
+          '登录拼多多',
+          { confirmButtonText: '开始登录', cancelButtonText: '取消', type: 'warning' }
+        );
+      } catch (e) { return; }
+
+      this.pd.cookie.loading = true;
+      try {
+        const d = await this.pddApi('/api/pdd/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+        if (d.needAgent) {
+          this.$message.warning(d.message || '本机助手未连接');
+          if (d.agentOutdated) this.reportOp('agent.download');
+          this.openGuideModal();
+          return;
+        }
+        if (!d.pending || !d.taskId) {
+          this.$message.error(d.message || d.error || '发起登录失败');
+          return;
+        }
+        this.$message.info(d.message || '已打开登录窗口，请在助手里完成登录…');
+        const r = await this.pollPddLogin(d.taskId);
+        if (r === 'done') this.$message.success('已登录拼多多，登录态已更新');
+        else if (r === 'failed') this.$message.error('登录未完成：' + (this._pddLoginMsg || '未获取到登录态'));
+        else this.$message.warning('等待登录超时：请在助手窗口里登录后，再点一次「登录拼多多」');
+        await this.loadPddStatus();
+      } catch (e) {
+        this.$message.error('登录失败：' + e.message);
+      } finally {
+        this.pd.cookie.loading = false;
+      }
+    },
+    /** 轮询「登录拼多多」任务，最多 5.5 分钟 */
+    async pollPddLogin(taskId) {
+      const deadline = Date.now() + 5.5 * 60 * 1000;
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 2000));
+        let d = null;
+        try { d = await this.pddApi('/api/pdd/login-status?taskId=' + encodeURIComponent(taskId)); } catch (e) { continue; }
+        if (!d) continue;
+        this._pddLoginMsg = d.message || '';
+        if (d.status === 'done') return 'done';
+        if (d.status === 'failed') return 'failed';
+        if (d.error) return 'gone';
+      }
+      return 'timeout';
+    },
+    async loadPddStatus() {
+      if (this.qnhNeedPick) return;
+      try {
+        const d = await this.pddApi('/api/pdd/status');
+        if (d.error) { this.$message.error(d.error); return; }
+        const c = d.cookie || {};
+        this.pd.cookie = {
+          logined: !!c.logined,
+          loading: false,
+          message: c.ok ? '' : (c.message || ''),
+          accountName: c.accountName || (c.pdduid ? ('用户 ' + c.pdduid) : ''),
+        };
+        this.pd.summary = d.summary || null;
+        if (Array.isArray(d.sessions)) this.pddSessions = d.sessions.map(Number);
+        if (Array.isArray(d.users)) {
+          this.pddUsers = d.users;
+          if (!this.qnhUsers.length) this.qnhUsers = d.users;
+        }
+      } catch (e) {
+        this.$message.error('获取拼多多状态失败：' + e.message);
+      }
+    },
+    async loadPddOrders() {
+      if (this.qnhNeedPick) return;
+      this.pd.loading = true;
+      try {
+        const q = new URLSearchParams();
+        const f = this.pd.filter || {};
+        if (f.status !== '') q.set('status', f.status);
+        if (f.keyword) q.set('keyword', f.keyword);
+        if (f.sort) q.set('sort', f.sort);
+        q.set('page', this.pd.page);
+        q.set('size', this.pd.size);
+        const d = await this.pddApi('/api/pdd/orders?' + q.toString());
+        if (d.error) { this.$message.error(d.error); return; }
+        this.pd.rows = d.rows || [];
+        this.pd.total = d.total || 0;
+      } catch (e) {
+        this.$message.error('加载拼多多订单失败：' + e.message);
+      } finally {
+        this.pd.loading = false;
+      }
+    },
+    applyPddFilter() { this.pd.page = 1; this.loadPddOrders(); },
+    // 表头排序（下单时间 / 开票金额）：点一次降序、再点升序、第三次取消 → 回落到默认（时间倒序）
+    onPddSortChange({ prop, order }) {
+      const key = prop === 'invoiceAmount' ? 'amount' : 'time';
+      // order 为空 = 把激活的箭头再点一下「取消排序」→ 回落到该字段的业务默认（降序）
+      const want = order || 'descending';
+      this.pd.filter.sort = key + '_' + (want === 'ascending' ? 'asc' : 'desc');
+      if (this._pddSortSilent) return;     // 由触发方（重置筛选 / 箭头复位）统一加载，避免重复请求
+      // 取消排序时箭头会消失，但数据仍按默认口径排列 → 把箭头一起复位，避免「看着没排序其实是倒序」
+      if (!order) {
+        const t = this.$refs.pddTable;
+        if (t && typeof t.sort === 'function') {
+          this._pddSortSilent = true;      // sort() 会再次触发 sort-change，跳过它那次加载
+          t.sort(prop, 'descending');
+          this.$nextTick(() => { this._pddSortSilent = false; });
+        }
+      }
+      this.pd.page = 1;
+      this.loadPddOrders();
+    },
+    resetPddFilter() {
+      this.pd.filter = { status: '', keyword: '', sort: 'time_desc' };
+      this.pd.page = 1;
+      // 排序箭头一起复位；el-table.sort() 会触发 sort-change，用标记跳过它自带的那次加载
+      const t = this.$refs.pddTable;
+      if (t && typeof t.sort === 'function') {
+        this._pddSortSilent = true;
+        t.sort('orderTime', 'descending');
+        this.$nextTick(() => { this._pddSortSilent = false; });
+      }
+      this.loadPddOrders();
+    },
+    onPddPage(p) { this.pd.page = p; this.loadPddOrders(); },
+    onPddSize(s) { this.pd.size = s; this.pd.page = 1; this.loadPddOrders(); },
+    async doPddSync() {
+      if (this.pd.syncing) return;
+      if (this.qnhNeedPick) { this.$message.warning('请先选择要以哪个账号的身份同步'); return; }
+      this.pd.syncing = true;
+      try {
+        this.$message.info('已开始拉取，完成后会自动刷新列表');
+        const d = await this.pddApi('/api/pdd/sync', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+        if (d.loginish || (d.error && /登录/.test(d.error))) {
+          this.$message.warning(d.message || d.error || '登录态已失效，请重新登录拼多多');
+          await this.loadPddStatus();
+          return;
+        }
+        if (d.error || !d.ok) {
+          this.$message.error(d.message || d.error || '拉取失败');
+          return;
+        }
+        this.$message.success(d.message || '拉取完成');
+        this.pd.lastRun = { status: 'success', finishedAt: new Date().toLocaleString('zh-CN', { hour12: false }), message: d.message || '' };
+        await this.loadPddStatus();
+        this.loadPddOrders();
+      } catch (e) {
+        this.$message.error('拉取失败：' + e.message);
+      } finally {
+        this.pd.syncing = false;
+      }
+    },
+
+    // ── 拼多多「申请发票」（勾选批量 / 行内单个，同一入口） ──
+    onPddSelChange(rows) { this.pd.selected = rows || []; },
+    applyPddBatch() { this.applyPddRows(this.pd.selected); },
+    async applyPddRows(rows) {
+      const list = (rows || []).filter((r) => r && r.applyable);
+      if (!list.length) { this.$message.warning('请先勾选「待申请」状态的订单'); return; }
+      if (this.pd.applying) return;
+      if (this.qnhNeedPick) { this.$message.warning('请先选择要以哪个账号的身份操作'); return; }
+      const totalAmt = list.reduce((s, r) => s + (Number(r.invoiceAmount) || 0), 0);
+      try {
+        await this.$confirm(
+          '将向拼多多真实提交 ' + list.length + ' 笔开票申请（金额合计 ' + this.yuan(Math.round(totalAmt * 100) / 100) + '）。'
+          + '抬头与发票类型以开票页默认信息为准（企业抬头·电子普通发票），提交后请在拼多多里核对开票进度。是否继续？',
+          '申请发票确认',
+          { confirmButtonText: '提交申请', cancelButtonText: '再想想', type: 'warning' }
+        );
+      } catch (e) { return; }
+
+      this.pd.applying = true;
+      try {
+        let d = await this.pddApi('/api/pdd/apply', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ orderSns: list.map((r) => r.orderSn) }),
+        });
+        // 助手未连接 → 自动唤起（xsh://run 深链 + 等待重连），成功后重试一次
+        if (d.needAgent) {
+          this.$message.info('本机助手未连接，正在自动唤起…（浏览器若弹窗询问是否打开，请点「打开」）');
+          const up = await this.ensureAgentOnline();
+          if (!up) {
+            this.$message.error('无法唤起本机助手：请确认已安装助手并在本机运行后重试');
+            return;
+          }
+          this.$message.success('助手已连接，继续提交申请');
+          d = await this.pddApi('/api/pdd/apply', {
+            method: 'POST', headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ orderSns: list.map((r) => r.orderSn) }),
+          });
+        }
+        if (d.error || !d.ok) {
+          this.$message.error(d.message || d.error || '下发申请任务失败');
+          return;
+        }
+        if (Array.isArray(d.skipped) && d.skipped.length) {
+          this.$message.warning('有 ' + d.skipped.length + ' 笔订单不可申请（非该账号或非待申请状态），已跳过');
+        }
+        this.$message.info(d.message || '已下发申请任务');
+        await this.openPddTaskCard('apply', d.taskId, d.total || list.length);
+      } catch (e) {
+        this.$message.error('申请失败：' + e.message);
+      } finally {
+        this.pd.applying = false;
+        this.pd.applyTaskId = '';
+      }
+    },
+
+    // ── 拼多多「催商家开票」（商家处理中订单；行内单个 / 勾选批量，同一入口） ──
+    sendPddBatch() { this.sendPddMsgRows(this.pd.selected); },
+    async sendPddMsgRows(rows) {
+      const list = (rows || []).filter((r) => r && r.chatable);
+      if (!list.length) { this.$message.warning('请先勾选「商家处理中」的订单'); return; }
+      if (this.pd.applying) return;
+      if (this.qnhNeedPick) { this.$message.warning('请先选择要以哪个账号的身份操作'); return; }
+      const preview = this.esc(this.pddMsgPreview);
+      try {
+        await this.$confirm(
+          '将给 <b>' + list.length + '</b> 个商家发送催收消息'
+          + '（同一商家的多笔订单会自动合并成一条，避免重复打扰）。实际发送内容：'
+          + '<div style="margin-top:8px;padding:8px 10px;background:#f6f7f9;border-radius:6px;'
+          + 'white-space:pre-wrap;word-break:break-all;font-size:12px;line-height:1.7">' + preview + '</div>',
+          '发送催收消息确认',
+          { dangerouslyUseHTMLString: true, confirmButtonText: '发送', cancelButtonText: '再想想', type: 'warning' }
+        );
+      } catch (e) { return; }
+
+      this.pd.applying = true;
+      try {
+        let d = await this.pddApi('/api/pdd/send', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ orderSns: list.map((r) => r.orderSn) }),
+        });
+        // 助手未连接 → 自动唤起（xsh://run 深链 + 等待重连），成功后重试一次
+        if (d.needAgent) {
+          this.$message.info('本机助手未连接，正在自动唤起…（浏览器若弹窗询问是否打开，请点「打开」）');
+          const up = await this.ensureAgentOnline();
+          if (!up) {
+            this.$message.error('无法唤起本机助手：请确认已安装助手并在本机运行后重试');
+            return;
+          }
+          this.$message.success('助手已连接，继续发送');
+          d = await this.pddApi('/api/pdd/send', {
+            method: 'POST', headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ orderSns: list.map((r) => r.orderSn) }),
+          });
+        }
+        if (d.error || !d.ok) {
+          if (d.loginish) {
+            this.$message.error((d.message || '拼多多登录态已失效') + '（请在页面顶部点「登录拼多多」重新登录后再试）');
+            return;
+          }
+          this.$message.error(d.message || d.error || '下发催收任务失败');
+          return;
+        }
+        if (Array.isArray(d.skipped) && d.skipped.length) {
+          this.$message.warning('有 ' + d.skipped.length + ' 笔订单不可催收（非该账号或非商家处理中），已跳过');
+        }
+        this.$message.info(d.message || '已下发催收任务');
+        await this.openPddTaskCard('send', d.taskId, d.total || list.length);
+      } catch (e) {
+        this.$message.error('发送失败：' + e.message);
+      } finally {
+        this.pd.applying = false;
+        this.pd.applyTaskId = '';
+      }
+    },
+
+    /** 在页面内展开任务进度卡片（申请发票 / 催商家开票共用），并滚动到可见位置 */
+    async openPddTaskCard(kind, taskId, total) {
+      this.pd.applyDialog = {
+        visible: true, running: true, kind, status: '', message: '',
+        progress: { index: 0, total: total || 0, okCount: 0, failCount: 0, current: '' },
+        log: [], startedAt: Date.now(),
+      };
+      this.pd.applyTaskId = taskId || '';
+      this.$nextTick(() => {
+        const card = this.$refs.applyCard;
+        const el = card && (card.$el || card);
+        if (el && el.scrollIntoView) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      });
+      await this.pollPddTask();
+    },
+    /** 停止任务：已完成的不会撤回，当前这一单处理完就停 */
+    async stopPddApply() {
+      if (!this.pd.applyTaskId) return;
+      const isSend = this.pd.applyDialog.kind === 'send';
+      try {
+        await this.$confirm(
+          '停止后，当前这一单处理完就停，' + (isSend ? '已经发出去的催收消息不会撤回。' : '已经提交成功的申请不会撤回。') + '是否继续？',
+          isSend ? '停止发送' : '停止申请',
+          { type: 'warning', confirmButtonText: '停止', cancelButtonText: '继续' }
+        );
+      } catch (e) { return; }
+      try {
+        const d = await this.pddApi('/api/pdd/task-stop', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ taskId: this.pd.applyTaskId }),
+        });
+        this.$message.info((d && d.message) || '已发送停止指令');
+      } catch (e) {
+        this.$message.error('停止失败：' + e.message);
+      }
+    },
+    /** 轮询任务：每 3 秒一次，直到 done / failed（兜底 20 分钟）；进度实时刷进看板卡片 */
+    async pollPddTask() {
+      const isSend = this.pd.applyDialog.kind === 'send';
+      const startAt = Date.now();
+      while (this.pd.applyTaskId && Date.now() - startAt < 20 * 60 * 1000) {
+        await new Promise((r) => setTimeout(r, 3000));
+        if (!this.pd.applyTaskId) return;
+        let d = null;
+        try {
+          d = await this.pddApi('/api/pdd/task-status?taskId=' + encodeURIComponent(this.pd.applyTaskId));
+        } catch (e) { continue; }
+        if (!d || d.error) return;
+        // 实时进度：当前单 / 成败计数 / 逐单日志
+        if (d.progress) this.pd.applyDialog.progress = d.progress;
+        if (Array.isArray(d.progressLog) && d.progressLog.length) {
+          this.pd.applyDialog.log = d.progressLog;
+          this.$nextTick(() => { const el = this.$refs.applyLogPanel; if (el) el.scrollTop = el.scrollHeight; });
+        }
+        if (d.status === 'pending') continue;
+        // done / failed → 看板内如实展示（failed 时展示服务端给出的真实原因，绝不掩码成 0/0）
+        this.pd.applyDialog.running = false;
+        if (d.status === 'failed') {
+          this.pd.applyDialog.status = 'failed';
+          this.pd.applyDialog.message = d.message || (isSend ? '助手执行催收失败' : '助手执行申请失败');
+        } else if (!(d.okCount || 0) && (d.failCount || 0) > 0) {
+          // 任务「完成」但全部失败 → 也按失败展示（红条 + 真实明细在日志里）
+          this.pd.applyDialog.status = 'failed';
+          this.pd.applyDialog.message = d.message
+            || (isSend ? ('全部发送失败（失败 ' + d.failCount + ' 个）') : ('全部申请失败（失败 ' + d.failCount + ' 单）'));
+        } else {
+          this.pd.applyDialog.status = 'done';
+          this.pd.applyDialog.message = d.message || '';
+        }
+        await this.loadPddStatus();
+        this.loadPddOrders();
+        return;
+      }
+      if (this.pd.applyTaskId) {
+        this.pd.applyDialog.running = false;
+        this.pd.applyDialog.status = 'timeout';
+        this.pd.applyDialog.message = '等待超时（20 分钟）。任务可能仍在助手里执行，请稍后刷新列表核对结果。';
+      }
+    },
+    pddStatusType(st) {
+      const n = Number(st);
+      if (n === 2) return 'success';
+      if (n === 8) return 'primary';   // 已申请（本地中间态）
+      if (n === 1) return 'primary';
+      if (n === 6) return 'danger';
+      if (n === 7) return 'warning';
+      return 'info';
+    },
+    shortDate(v) {
+      if (!v) return '—';
+      return String(v).slice(0, 10);
     },
 
     async doSync() {
@@ -2848,13 +3552,23 @@ const vm = new Vue({
       try {
         const d = await this.api('/api/config');
         const c = d.config || {};
-        const rt = c.runtime || {}, m = c.messages || d.defaultMessages || {};
+        const rt = c.runtime || {}, m = c.messages || {}, dm = d.defaultMessages || {};
+        // 单个字段为空 → 回退系统默认文案。
+        // （历史坑：config.json 里三项被保存成空字符串后，配置页显示空白，用户直接点保存又写回空值，
+        //   最终派单生成 3 条空消息，助手报「发送未确认」。这里保证表单永远有内容可看。）
+        const pick = (k) => (typeof m[k] === 'string' && m[k].trim()) ? m[k] : (dm[k] || '');
+        const pm = c.pddMessage || {};
+        const dpm = d.defaultPddMessage || {};
         this.cfg = {
           gapMin: Number(rt.sendGapMinSec) || 15, gapMax: Number(rt.sendGapMaxSec) || 30,
           chunkMax: Number(m.orderChunkMax) || 450,
-          template: m.template || '', orderItem: m.orderItem || '', reminder: m.reminder || '',
+          template: pick('template'), orderItem: pick('orderItem'), reminder: pick('reminder'),
           serverUrl: c.serverUrl || c.server_url || '',
+          // 拼多多话术：同样做字段级回退，避免把空值存回去
+          pddChat: (typeof pm.chat === 'string' && pm.chat.trim()) ? pm.chat : (dpm.chat || this.defaultPddChat),
+          pddGapSec: Math.max(2, Math.round((Number(pm.gapMs) || Number(dpm.gapMs) || 4000) / 1000)),
         };
+        if (dpm.chat) this.defaultPddChat = dpm.chat;
         this.saveOk = false;
         this.updatePreview();
       } catch (e) { this.$message.error('加载配置失败: ' + e.message); }
@@ -2874,6 +3588,7 @@ const vm = new Vue({
           server_url: (this.cfg.serverUrl || '').trim(),
           runtime: { sendGapMinSec: Number(this.cfg.gapMin) || 15, sendGapMaxSec: Number(this.cfg.gapMax) || 30 },
           messages: { template: this.cfg.template, orderItem: this.cfg.orderItem, orderChunkMax: Number(this.cfg.chunkMax) || 450, reminder: this.cfg.reminder },
+          pddMessage: { chat: this.cfg.pddChat, gapMs: Math.max(1500, Math.round((Number(this.cfg.pddGapSec) || 4) * 1000)) },
         } }) });
         if (d.ok) { this.saveOk = true; setTimeout(() => { this.saveOk = false; }, 2500); }
         else this.$message.error('保存失败: ' + d.error);
@@ -2889,7 +3604,7 @@ const vm = new Vue({
       } catch (e) { this.$message.error('加载失败: ' + e.message); }
     },
     // 开关某个账号的「退单列表」权限
-    /** 打开「菜单权限」弹窗（逐用户开放退单列表 / 实时毛利监控） */
+    /** 打开「菜单权限」弹窗（逐用户开放退单列表 / 实时毛利监控；拼多多发票全量开放不需要配） */
     openMenuPermit(row) {
       this.menuPermit = {
         visible: true, id: row.id, username: row.username,

@@ -173,6 +173,9 @@ class AgentClient extends EventEmitter {
     if (m.type === 'export_orders') { this._runExport(m).catch((e) => this.log('订单导出异常: ' + e.message)); return; }
     if (m.type === 'qnh_login') { this._runQnhLogin(m).catch((e) => this.log('牵牛花登录异常: ' + e.message)); return; }
     if (m.type === 'qnh_fetch') { this._runQnhFetch(m).catch((e) => this.log('牵牛花页内请求异常: ' + e.message)); return; }
+    if (m.type === 'pdd_login') { this._runPddLogin(m).catch((e) => this.log('拼多多登录异常: ' + e.message)); return; }
+    if (m.type === 'pdd_apply') { this._runPddApply(m).catch((e) => this.log('拼多多申请异常: ' + e.message)); return; }
+    if (m.type === 'pdd_send') { this._runPddSend(m).catch((e) => this.log('拼多多催收异常: ' + e.message)); return; }
     if (m.type === 'stop') { this.stopFlag = true; this.log('收到停止指令：当前步骤完成后即停'); return; }
     if (m.type === 'task_progress') { this.emit('progress', m); return; }
   }
@@ -234,6 +237,13 @@ class AgentClient extends EventEmitter {
 
   /** 注册「牵牛花页内签名请求」处理器（main.js 注入 qnh-login.createFetchHandler） */
   setQnhFetchHandler(fn) { this._qnhFetchHandler = fn; }
+
+  /** 注册「登录拼多多」处理器（main.js 注入 pdd-login 模块） */
+  setPddLoginHandler(fn) { this._pddLoginHandler = fn; }
+  /** 注册「拼多多批量申请发票」处理器（main.js 注入 pdd-apply.createApplyHandler） */
+  setPddApplyHandler(fn) { this._pddApplyHandler = fn; }
+  /** 注册「拼多多批量催商家开票」处理器（main.js 注入 pdd-send.createSendHandler） */
+  setPddSendHandler(fn) { this._pddSendHandler = fn; }
 
   /**
    * 执行一次「页内签名请求」：在牵牛花页面环境里 fetch（自动带 mtgsig），结果回传服务器。
@@ -301,6 +311,134 @@ class AgentClient extends EventEmitter {
       done({ ok: false, error: String((e && e.message) || e).slice(0, 200) });
     } finally {
       this._qnhBusy = false;
+      this.stopFlag = false;
+      this.currentTaskId = null;
+      this._emitState();
+    }
+  }
+
+  /**
+   * 执行一次「登录拼多多」：在本机弹手机端 H5 窗口让用户登录，完成后把 Cookie 串回传服务器。
+   * 与牵牛花登录各自独立（不同窗口、不同站点分区），只在发送催收消息时互斥。
+   */
+  async _runPddLogin(m) {
+    const done = (payload) => this.send(Object.assign({
+      type: 'pdd_login_done', taskId: m.taskId,
+    }, payload || {}));
+
+    if (this._pddBusy) { done({ ok: false, error: '已有拼多多登录任务在进行中' }); return; }
+    if (this.sending) {
+      done({ ok: false, error: '正在发送催收消息，请等发送完成后再登录拼多多' });
+      return;
+    }
+    if (typeof this._pddLoginHandler !== 'function') {
+      done({ ok: false, error: '助手版本过旧，不支持登录拼多多，请重新下载安装助手' });
+      return;
+    }
+    this._pddBusy = true;
+    this.stopFlag = false;
+    this.currentTaskId = m.taskId;
+    this._emitState();
+    const api = {
+      log: (text) => this.send({ type: 'log', text: String(text == null ? '' : text).slice(0, 200) }),
+      isStopped: () => this.stopFlag,
+      sleep: async (ms) => {
+        for (let waited = 0; waited < ms && !this.stopFlag; waited += 300) {
+          await new Promise((r) => setTimeout(r, Math.min(300, ms - waited)));
+        }
+      },
+      report: done,
+    };
+    try {
+      await this._pddLoginHandler(m, api);
+    } catch (e) {
+      done({ ok: false, error: String((e && e.message) || e).slice(0, 200) });
+    } finally {
+      this._pddBusy = false;
+      this.stopFlag = false;
+      this.currentTaskId = null;
+      this._emitState();
+    }
+  }
+
+  /**
+   * 执行一次「拼多多批量申请发票」：助手加载真实开票页并逐单提交（anti-content 由页面生成）。
+   * 与登录共用 _pddBusy 互斥（都用同一个拼多多窗口分区，避免同时操作互相干扰）。
+   */
+  async _runPddApply(m) {
+    const done = (payload) => this.send(Object.assign({
+      type: 'pdd_apply_done', taskId: m.taskId,
+    }, payload || {}));
+
+    if (this._pddBusy) { done({ ok: false, error: '已有拼多多任务在进行中' }); return; }
+    if (typeof this._pddApplyHandler !== 'function') {
+      done({ ok: false, error: '助手版本过旧，不支持申请发票，请重新下载安装助手' });
+      return;
+    }
+    this._pddBusy = true;
+    this.stopFlag = false;
+    this.currentTaskId = m.taskId;
+    this._emitState();
+    const api = {
+      log: (text) => this.send({ type: 'log', text: String(text == null ? '' : text).slice(0, 200) }),
+      isStopped: () => this.stopFlag,
+      sleep: async (ms) => {
+        for (let waited = 0; waited < ms && !this.stopFlag; waited += 300) {
+          await new Promise((r) => setTimeout(r, Math.min(300, ms - waited)));
+        }
+      },
+      report: done,
+      // 逐单进度：服务端记进任务上下文，看板轮询 apply-status 时渲染进度看板
+      progress: (p) => this.send(Object.assign({ type: 'pdd_apply_progress', taskId: m.taskId }, p || {})),
+    };
+    try {
+      await this._pddApplyHandler(m, api);
+    } catch (e) {
+      done({ ok: false, error: String((e && e.message) || e).slice(0, 200) });
+    } finally {
+      this._pddBusy = false;
+      this.stopFlag = false;
+      this.currentTaskId = null;
+      this._emitState();
+    }
+  }
+
+  /**
+   * 执行一次「拼多多批量催商家开票」：助手加载真实聊天页逐单发消息（anti-content 由页面生成）。
+   * 与申请共用 _pddBusy 互斥（同一拼多多分区，避免两个窗口同时操作互相干扰）。
+   */
+  async _runPddSend(m) {
+    const done = (payload) => this.send(Object.assign({
+      type: 'pdd_send_done', taskId: m.taskId,
+    }, payload || {}));
+
+    if (this._pddBusy) { done({ ok: false, error: '已有拼多多任务在进行中' }); return; }
+    if (typeof this._pddSendHandler !== 'function') {
+      done({ ok: false, error: '助手版本过旧，不支持发送催收消息，请重新下载安装助手' });
+      return;
+    }
+    this._pddBusy = true;
+    this.stopFlag = false;
+    this.currentTaskId = m.taskId;
+    this._emitState();
+    const api = {
+      log: (text) => this.send({ type: 'log', text: String(text == null ? '' : text).slice(0, 200) }),
+      isStopped: () => this.stopFlag,
+      sleep: async (ms) => {
+        for (let waited = 0; waited < ms && !this.stopFlag; waited += 300) {
+          await new Promise((r) => setTimeout(r, Math.min(300, ms - waited)));
+        }
+      },
+      report: done,
+      // 逐单进度：服务端记进任务上下文，看板轮询 task-status 时渲染进度看板
+      progress: (p) => this.send(Object.assign({ type: 'pdd_send_progress', taskId: m.taskId }, p || {})),
+    };
+    try {
+      await this._pddSendHandler(m, api);
+    } catch (e) {
+      done({ ok: false, error: String((e && e.message) || e).slice(0, 200) });
+    } finally {
+      this._pddBusy = false;
       this.stopFlag = false;
       this.currentTaskId = null;
       this._emitState();

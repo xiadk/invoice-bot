@@ -137,22 +137,74 @@
   //   旧节点引用失效 → 草稿滞留在「新编辑器节点」里会被误判成「已发送」（严格自测抓到过）。
   //   因此这里排除**所有** contenteditable 元素（编辑器无论怎么重建都不是聊天记录）。
   // ⚠ 比对前去掉所有空白：1688 回显时换行/缩进可能与原文不同，严格比对会误判「发送未确认」→ 重复发送。
-  function historyContains(frag, editorEl) {
-    var norm = function (s) { return String(s || '').replace(/\s+/g, ''); };
-    var target = norm(frag);
-    if (!target) return false;
+  //
+  // ⚠ 2026-10-25 真机复测（订单 3312608485660047261 那批全部报「发送未确认」）发现：
+  //   新版 IM 里「自己发的消息」渲染成 .message-item.self > .content，**不是每条消息都有 pre.edit**
+  //   （pre.edit 只出现在模板消息/部分气泡里）。只扫 pre.edit 会在虚拟列表下漏检 → 明明发出去了却判失败，
+  //   于是每条都报失败、整批中断，重试路径还可能重复发送。
+  //   改为：优先扫整个 .message-list 的可见文本（实测包含全部消息，含自己发的），pre.edit 作为兜底。
+  var normText = function (s) { return String(s || '').replace(/\s+/g, ''); };
+
+  /** 聊天记录区域的可见文本（不含输入框，因为输入框不在 message-list 内） */
+  function chatAreaText() {
+    var sel = '.message-list, [class*="message-list"], .ww_message';
+    var boxes = document.querySelectorAll(sel);
+    var out = '';
+    for (var i = 0; i < boxes.length; i++) {
+      // 只取最外层：避免父子容器重复累加
+      var isNested = false;
+      for (var k = 0; k < i; k++) {
+        if (boxes[k].contains(boxes[i])) { isNested = true; break; }
+      }
+      if (isNested) continue;
+      out += ' ' + (boxes[i].innerText || '');
+    }
+    return normText(out);
+  }
+
+  function countOccur(hay, needle) {
+    if (!needle) return 0;
+    var n = 0, i = 0;
+    for (;;) {
+      var p = hay.indexOf(needle, i);
+      if (p < 0) break;
+      n++; i = p + needle.length;
+    }
+    return n;
+  }
+
+  /** 该片段在聊天记录里出现的次数（发送前记基线，发送后比对增量 → 内容重复也不会误判） */
+  function historyCount(frag) {
+    var target = normText(frag);
+    if (!target) return 0;
+    var area = chatAreaText();
+    if (area) return countOccur(area, target);
+    // 兜底：旧结构直接用气泡节点
     var els = Array.prototype.slice.call(document.querySelectorAll('pre.edit'));
-    return els.some(function (e) {
-      if (editorEl && e === editorEl) return false;
-      if (e.getAttribute && e.getAttribute('contenteditable') === 'true') return false;
-      return norm(e.innerText).indexOf(target) >= 0;
+    var txt = '';
+    els.forEach(function (e) {
+      if (e.getAttribute && e.getAttribute('contenteditable') === 'true') return;
+      txt += ' ' + normText(e.innerText);
     });
+    return countOccur(txt, target);
+  }
+
+  function historyContains(frag, editorEl) {
+    return historyCount(frag) > 0;
+  }
+
+  /** 输入框是否已空（1688 发送成功后会把草稿清掉，这是与聊天记录无关的独立判据） */
+  function editorEmpty(editor) {
+    return !normText(editor && editor.innerText);
   }
 
   /** 发送单条消息（含一次重试） */
   async function sendOne(msg) {
-    var normMsg = String(msg || '').replace(/\s+/g, '');
+    var normMsg = normText(msg);
+    // 空内容发送必然失败（页面上等于点了个空发送），立即报明确原因而不是空转到超时
+    if (!normMsg) return { ok: false, error: '消息内容为空（服务端消息模板未配置）' };
     var frag = normMsg.length > 30 ? normMsg.slice(-30) : normMsg;
+    var beforeCount = historyCount(frag);       // 发送前基线：已存在同样内容也能识别新增
     for (var attempt = 0; attempt < 2; attempt++) {
       try {
         dismissModals();
@@ -160,22 +212,44 @@
         if (!ed) throw new Error('编辑器丢失');
         ed.focus();
         ed.click();
-        if ((ed.innerText || '').trim()) {
+        if (!editorEmpty(ed)) {
           selectAll(ed);
           document.execCommand('delete');
           await sleep(180);
         }
         insertText(ed, msg);
         await sleep(250);
-        var head = msg.slice(0, 10).replace(/\s+/g, '');
-        var inEd = (ed.innerText || '').replace(/\s+/g, '');
-        if (head && inEd.indexOf(head) < 0) throw new Error('消息未成功输入编辑器');
+        var head = normText(String(msg).slice(0, 10));
+        if (head && normText(ed.innerText).indexOf(head) < 0) throw new Error('消息未成功输入编辑器');
         var btn = findSendBtn();
-        if (btn) btn.click(); else pressEnter(ed);
-        for (var i = 0; i < 24; i++) { await sleep(250); if (historyContains(frag, ed)) return { ok: true }; }
-        pressEnter(ed);
-        for (var j = 0; j < 12; j++) { await sleep(250); if (historyContains(frag, ed)) return { ok: true }; }
-        throw new Error(btn ? '发送未确认（消息未出现在聊天记录）' : '未找到发送按钮，且回车发送未确认');
+        var clicked = false;
+        if (btn) {
+          var disabled = !!btn.disabled
+            || /disabled/i.test(String(btn.className || ''))
+            || (btn.getAttribute && btn.getAttribute('aria-disabled') === 'true');
+          if (!disabled) { try { btn.click(); clicked = true; } catch (e) { clicked = false; } }
+        }
+        if (!clicked) pressEnter(ed);
+        // 判定成败：① 聊天记录里该片段出现次数增加（最可靠）② 输入框被清空（页面已收下这条消息）
+        for (var i = 0; i < 24; i++) {
+          await sleep(250);
+          if (historyCount(frag) > beforeCount) return { ok: true, via: 'history' };
+          if (editorEmpty(ed)) return { ok: true, via: 'cleared' };
+        }
+        // 还没确认：只有草稿仍在输入框里才「可能没发出去」，此时补一次回车
+        if (!editorEmpty(ed)) {
+          pressEnter(ed);
+          for (var j = 0; j < 12; j++) {
+            await sleep(250);
+            if (historyCount(frag) > beforeCount) return { ok: true, via: 'history2' };
+            if (editorEmpty(ed)) return { ok: true, via: 'cleared2' };
+          }
+          throw new Error(clicked
+            ? '发送未确认（草稿仍在输入框，消息可能未发出）'
+            : '未找到可用发送按钮，且回车发送未确认');
+        }
+        // 输入框已清空、聊天记录暂未渲染（虚拟列表延迟）：按已发送处理，避免重复发
+        return { ok: true, via: 'cleared-no-history' };
       } catch (e) {
         if (attempt === 1) return { ok: false, error: e.message };
         await sleep(1500);
@@ -186,15 +260,20 @@
 
   /** 依次发送一组消息 */
   async function sendBatch(messages) {
+    // 先剔掉空消息：服务端一旦下发了空文案（模板被清空的历史问题），
+    // 原来会一条条「输入空内容→点发送→找不到聊天记录」空转到超时，最后只报「发送未确认」。
+    var list = (messages || []).filter(function (m) { return normText(m); });
+    if (!list.length) return { ok: false, error: '消息内容为空（服务端消息模板未配置），未发送任何消息' };
+    var dropped = (messages || []).length - list.length;
     var editor = await waitEditor(30000);
     if (!editor) return { ok: false, error: '聊天编辑器未出现（可能未登录 1688，或页面结构变化）' };
     dismissModals();
-    for (var i = 0; i < messages.length; i++) {
-      var r = await sendOne(messages[i]);
-      if (!r.ok) return { ok: false, error: '第 ' + (i + 1) + '/' + messages.length + ' 条消息发送失败：' + r.error };
-      if (i < messages.length - 1) await sleep(1200 + Math.random() * 1300);
+    for (var i = 0; i < list.length; i++) {
+      var r = await sendOne(list[i]);
+      if (!r.ok) return { ok: false, error: '第 ' + (i + 1) + '/' + list.length + ' 条消息发送失败：' + r.error };
+      if (i < list.length - 1) await sleep(1200 + Math.random() * 1300);
     }
-    return { ok: true };
+    return dropped > 0 ? { ok: true, warning: '已跳过 ' + dropped + ' 条空消息' } : { ok: true };
   }
 
   /** 就绪/登录态探测：能拿到编辑器即可视为已登录 */
@@ -245,5 +324,25 @@
   window.__xsh = {
     ping: ping, waitReady: waitReady, sendBatch: sendBatch,
     isChatFrame: isChatFrame, selfTest: selfTest,
+    // 只读诊断入口（不发送）：排查「发送未确认」用
+    _debug: function (probeText) {
+      var ed = findEditor();
+      var btn = findSendBtn();
+      var t = String(probeText || '');
+      return {
+        url: location.href,
+        hasEditor: !!ed,
+        editorEmpty: ed ? editorEmpty(ed) : null,
+        sendBtn: !!btn,
+        sendBtnText: btn ? String(btn.innerText || '').trim().slice(0, 10) : '',
+        sendBtnDisabled: btn ? (!!btn.disabled || /disabled/i.test(String(btn.className || ''))) : null,
+        chatTextLen: chatAreaText().length,
+        probe: t,
+        probeCount: t ? historyCount(t) : null,
+        preEdit: document.querySelectorAll('pre.edit').length,
+        selfItems: document.querySelectorAll('.message-item.self').length,
+        msgItems: document.querySelectorAll('.message-item').length,
+      };
+    },
   };
 })();
