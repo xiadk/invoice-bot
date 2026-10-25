@@ -689,7 +689,12 @@ const OP_ACTIONS = {
     ? `拼多多批量催收失败${d.reason ? '：' + d.reason : ''}`
     : `拼多多批量催收完成（成功 ${d.okCount || 0} 个商家、失败 ${d.failCount || 0} 个）`,
   'pdd.sync': (d) => `刷新了拼多多发票状态${d.ok ? '（' + (d.total || 0) + ' 条）' : '（失败）'}`,
-  'pdd.orders.sync': (d) => `拉取了拼多多全部订单${d.full ? '（全量）' : '（增量）'}`,
+  'pdd.orders.sync': (d) => `拉取了拼多多全部订单${d.full ? `（全量·最近 ${d.months || 3} 个月）` : '（增量）'}`,
+  'pdd.login.start': (d) => `发起了「登录拼多多」（${d.tenantId ? '用户 ' + d.tenantId : '本人'}）`,
+  'pdd.login': (d) => `登录拼多多${d.ok ? '（成功）' : '（失败）'}`,
+  'pdd.logout': (d) => `退出了拼多多账号`
+    + (d.accountName ? `「${d.accountName}」` : '')
+    + (d.pdduid ? `（ID ${d.pdduid}）` : ''),
 };
 
 // 前端下拉是「值」，日志里要显示人能看懂的「文案」，在服务端做映射，避免客户端乱传
@@ -967,6 +972,10 @@ function onPddLoginDone(uid, msg) {
     ctx.writtenAt = new Date();
     ctx.message = `登录态已更新（${ctx.cookieCount} 个 Cookie）`;
     logOp(Number(uid), 'pdd.login', { ok: true });
+    // 登录后立刻把昵称拉回来（接口不需要风控签名），页面顶部即可显示「登录的是哪个账号」
+    pdd.refreshProfile(ctx.userId).then((p) => {
+      if (p && p.ok && p.nickname) ctx.accountName = p.nickname;
+    }).catch(() => {});
   }).catch((e) => {
     ctx.status = 'failed';
     ctx.message = '保存登录态失败：' + String((e && e.message) || e).slice(0, 200);
@@ -3144,9 +3153,21 @@ const server = http.createServer(async (req, res) => {
 
       // 退出登录：清掉该用户的拼多多 Cookie（登录态失效/换账号时用）
       if (method === 'POST' && p === '/api/pdd/logout') {
+        // 先记下是谁，退出后库里就没有这条记录了
+        const info = await pdd.sessionInfo(pddUid).catch(() => null);
         await pdd.clearSession(pddUid);
-        await logOp(user, 'pdd.logout', { tenantId: pddUid });
-        return sendJson(res, 200, { ok: true, message: '已清除该账号的拼多多登录态' });
+        await logOp(user, 'pdd.logout', {
+          tenantId: pddUid,
+          accountName: (info && info.accountName) || '',
+          pdduid: (info && info.pdduid) || '',
+        });
+        return sendJson(res, 200, {
+          ok: true,
+          accountName: (info && info.accountName) || '',
+          message: '已退出拼多多账号'
+            + (info && info.accountName ? `「${info.accountName}」` : '')
+            + '，登录态已清除',
+        });
       }
 
       // 「申请发票」：校验订单归属与状态 → 派给该用户的本机助手 → 助手加载真实开票页逐单提交
