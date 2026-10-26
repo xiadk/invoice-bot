@@ -52,6 +52,7 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const zlib = require('zlib');
 const { spawn } = require('child_process'); // arch-allow: child_process（管理员「一键重新打包本机助手」功能使用，全项目唯一豁免）
 const { WebSocketServer } = require('ws');
 const db = require('./db');
@@ -75,13 +76,36 @@ const DATA = path.join(ROOT, 'data');
 // HTTP 工具
 // ─────────────────────────────────────────────────────────────────────────
 function sendJson(res, code, obj) {
-  const body = JSON.stringify(obj);
+  const buf = Buffer.from(JSON.stringify(obj));
+  // 大响应（列表类接口常有几百 KB ~ 几 MB）按 gzip 压缩下发：浏览器原生支持，无需额外依赖
+  // 小响应不压（压了反而多耗 CPU、省不了几个字节）
+  const ae = String((res.req && res.req.headers && res.req.headers['accept-encoding']) || '');
+  if (buf.length > 2048 && /\bgzip\b/i.test(ae)) {
+    res.writeHead(code, {
+      'content-type': 'application/json; charset=utf-8',
+      'content-encoding': 'gzip',
+      'vary': 'Accept-Encoding',
+    });
+    return res.end(zlib.gzipSync(buf));
+  }
   res.writeHead(code, { 'content-type': 'application/json; charset=utf-8' });
-  res.end(body);
+  res.end(buf);
 }
 function sendHtml(res, file) {
+  // 页面本体 ~300KB 且 no-store（每次访问都重下），gzip 后约 1/5，首屏明显更快
+  const buf = fs.readFileSync(path.join(ROOT, file));
+  const ae = String((res.req && res.req.headers && res.req.headers['accept-encoding']) || '');
+  if (/\bgzip\b/i.test(ae)) {
+    res.writeHead(200, {
+      'content-type': 'text/html; charset=utf-8',
+      'cache-control': 'no-store',
+      'content-encoding': 'gzip',
+      'vary': 'Accept-Encoding',
+    });
+    return res.end(zlib.gzipSync(buf));
+  }
   res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-  res.end(fs.readFileSync(path.join(ROOT, file), 'utf-8'));
+  res.end(buf);
 }
 // 前端本地依赖（Vue2 / Element UI / ECharts）—— 白名单式静态服务，杜绝路径穿越
 const VENDOR_DIR = path.join(ROOT, 'vendor');
@@ -1807,26 +1831,71 @@ async function doClientSend(userId, loginIds, opts = {}) {
 //       也只能对这些名称做维护；超级管理员看得到所有用户的数据并可直接操作。
 //   映射写入后回填 issued_invoice.seller_company（按销方名称全表），这正是「B 自动关联」的实现。
 // ─────────────────────────────────────────────────────────────────────────
+/**
+ * 1688 商家候选（按需搜索，不再整表下发）
+ *   浏览器一次只渲染 50 条，输入关键词时由服务端过滤，避免几万个选项把页面卡死。
+ *   allUsers=true（超管）→ 全部用户订单里的卖家；false → 只看自己订单里的。
+ */
+async function searchSellers(userId, { q = '', limit = 50, allUsers = false } = {}) {
+  const kw = String(q == null ? '' : q).trim().slice(0, 64);
+  const lim = Math.min(200, Math.max(1, Number(limit) || 50));
+  const where = ['seller_company IS NOT NULL', "seller_company <> ''"];
+  const args = [];
+  if (!allUsers) { where.push('user_id = ?'); args.push(userId); }
+  if (kw) {
+    where.push('(seller_company LIKE ? OR seller_login LIKE ?)');
+    args.push(`%${kw}%`, `%${kw}%`);
+  }
+  const w = where.join(' AND ');
+  // 按公司名分组：同一家公司可能对应多个会员名，下拉里只出现一次（取其中一个会员名回填）
+  const sellers = await db.query(`
+    SELECT seller_company AS company,
+           MAX(seller_login) AS sellerLogin,
+           COUNT(DISTINCT NULLIF(seller_login, '')) AS loginCount
+    FROM invoice_order
+    WHERE ${w}
+    GROUP BY seller_company
+    ORDER BY seller_company
+    LIMIT ?
+  `, [...args, lim]);
+  const cnt = await db.query(
+    `SELECT COUNT(DISTINCT seller_company) AS n FROM invoice_order WHERE ${w}`, args
+  );
+  return { sellers, total: Number(cnt[0] && cnt[0].n) || 0, q: kw, limit: lim };
+}
+
 async function loadMapping(userId, { allUsers = false } = {}) {
   // allUsers=true（超管）→ 全部映射行、统计算所有用户；false（普通用户）→ 只列自己发票涉及过的销方名称
   const scoped = !allUsers;
-  const scope = scoped ? 'AND i.user_id = ?' : '';
+  // 发票按销方名称聚合成一张派生表，再 JOIN 到映射表：
+  //   原写法是每行跑 2 次相关子查询（359 行 = 718 次），现在是 1 次扫描 + 1 次 JOIN。
+  //   顺带把「最近开票时间」带出来，用于默认排序（最近开票在前）。
+  const agg = `(
+      SELECT seller_name AS n,
+             ROUND(SUM(total_amount), 2) AS invoice_amount,
+             COUNT(*) AS invoice_rows,
+             MAX(invoice_date) AS last_invoice_date
+        FROM issued_invoice
+        ${scoped ? 'WHERE user_id = ?' : ''}
+       GROUP BY seller_name
+    )`;
+  // 普通用户用 INNER JOIN：派生表只含自己的发票行，JOIN 后天然只剩「自己发票里出现过的销方名称」
   const all = await db.query(`
     SELECT m.id, m.tax_seller_name, m.seller_company, m.seller_login,
            m.match_type, m.match_rule, m.is_confirmed, m.is_ignored, m.note, m.updated_at,
            (m.user_id = ?) AS maintainer_is_me,
-           (SELECT COALESCE(NULLIF(u.company_name,''), u.username) FROM app_user u WHERE u.id = m.user_id) AS maintainer,
-           (SELECT ROUND(SUM(total_amount),2) FROM issued_invoice i
-             WHERE i.seller_name = m.tax_seller_name ${scope}) AS invoice_amount,
-           (SELECT COUNT(*) FROM issued_invoice i
-             WHERE i.seller_name = m.tax_seller_name ${scope}) AS invoice_rows
+           u.name AS maintainer,
+           agg.invoice_amount, agg.invoice_rows, agg.last_invoice_date
     FROM seller_name_mapping m
-    ${scoped ? 'WHERE EXISTS (SELECT 1 FROM issued_invoice i2 WHERE i2.seller_name = m.tax_seller_name AND i2.user_id = ?)' : ''}
-    ORDER BY m.is_ignored ASC, (m.seller_company IS NULL) DESC, invoice_amount DESC
-  `, scoped ? [userId, userId, userId, userId] : [userId]);
+    LEFT JOIN (SELECT id, COALESCE(NULLIF(company_name, ''), username) AS name FROM app_user) u
+           ON u.id = m.user_id
+    ${scoped ? 'INNER JOIN' : 'LEFT JOIN'} ${agg} agg ON agg.n = m.tax_seller_name
+    ORDER BY agg.last_invoice_date IS NULL, agg.last_invoice_date DESC, agg.invoice_amount DESC
+  `, scoped ? [userId, userId] : [userId]);
   const mappings = all.filter((m) => !m.is_ignored);
   const ignored = all.filter((m) => m.is_ignored);
   // 待人工比对（超管全局视图）：汇总所有用户发票里的销方名称，并标出「涉及哪些账号」
+  //   GROUP_CONCAT 直接对 JOIN 后的「发票行 × 用户」聚合，不再每组跑一次子查询（624 组 = 624 次扫描）
   const unmatched = allUsers ? await db.query(`
     SELECT i.seller_name AS tax_seller_name,
            COUNT(*)      AS invoice_rows,
@@ -1836,28 +1905,27 @@ async function loadMapping(userId, { allUsers = false } = {}) {
            MAX(i.seller_tax_no) AS seller_tax_no,
            MAX(i.remark) AS remark,
            COUNT(DISTINCT i.user_id) AS user_count,
-           (SELECT GROUP_CONCAT(DISTINCT COALESCE(NULLIF(u.company_name,''), u.username) ORDER BY COALESCE(NULLIF(u.company_name,''), u.username) SEPARATOR '、')
-              FROM issued_invoice i2 LEFT JOIN app_user u ON u.id = i2.user_id
-             WHERE i2.seller_name = i.seller_name) AS owners
+           GROUP_CONCAT(DISTINCT COALESCE(NULLIF(u.company_name,''), u.username)
+                        ORDER BY COALESCE(NULLIF(u.company_name,''), u.username) SEPARATOR '、') AS owners
     FROM issued_invoice i
+    LEFT JOIN app_user u ON u.id = i.user_id
     LEFT JOIN seller_name_mapping m
            ON m.tax_seller_name = i.seller_name
           AND (m.is_ignored = 1 OR m.seller_company IS NOT NULL)
     WHERE m.id IS NULL
     GROUP BY i.seller_name
-    ORDER BY invoice_amount DESC
+    ORDER BY MAX(i.invoice_date) IS NULL, MAX(i.invoice_date) DESC, invoice_amount DESC
   `) : await db.query(
-    'SELECT * FROM v_unmatched_seller_name WHERE user_id = ? ORDER BY invoice_amount DESC', [userId]
+    `SELECT * FROM v_unmatched_seller_name WHERE user_id = ?
+      ORDER BY last_invoice_date IS NULL, last_invoice_date DESC, invoice_amount DESC`, [userId]
   );
-  // 1688 商家候选：普通用户只列自己订单里的卖家；超管列全部用户的
-  const sellers = await db.query(`
-    SELECT COALESCE(NULLIF(seller_login,''), seller_company) AS loginId,
-           MAX(seller_company) AS company, MAX(seller_login) AS sellerLogin
-    FROM invoice_order
-    WHERE ${allUsers ? '' : 'user_id = ? AND'} seller_company IS NOT NULL
-    GROUP BY loginId ORDER BY company
-  `, allUsers ? [] : [userId]);
-  return { mappings, ignored, unmatched, sellers, unmatchedCount: unmatched.length, ignoredCount: ignored.length, allUsers };
+  // 商家候选不再随映射整表返回（近 3000 条、约 600KB）；前端改按需搜索
+  const sellerTotal = await searchSellers(userId, { allUsers, limit: 1 });
+  return {
+    mappings, ignored, unmatched,
+    sellerTotal: sellerTotal.total,
+    unmatchedCount: unmatched.length, ignoredCount: ignored.length, allUsers,
+  };
 }
 
 /**
@@ -2828,6 +2896,14 @@ const server = http.createServer(async (req, res) => {
     if (method === 'GET' && p === '/api/mapping') {
       return sendJson(res, 200, await loadMapping(user.id, { allUsers: isAdmin }));
     }
+    // 1688 商家候选：按关键词搜索、最多返回 50 条（前端下拉按需拉取，避免整表下发）
+    if (method === 'GET' && p === '/api/mapping/sellers') {
+      return sendJson(res, 200, await searchSellers(user.id, {
+        q: url.searchParams.get('q') || '',
+        limit: url.searchParams.get('limit'),
+        allUsers: isAdmin,
+      }));
+    }
     if (method === 'POST' && p === '/api/mapping') {
       const body = await readBody(req);
       if (!(await canMaintainSeller(user, body.taxSellerName))) {
@@ -2898,7 +2974,11 @@ const server = http.createServer(async (req, res) => {
 
     // ── 交易市场（跨用户共享） ──
     if (method === 'GET' && p === '/api/market') {
-      return sendJson(res, 200, await products.marketOverview());
+      return sendJson(res, 200, await products.marketOverview({
+        page: url.searchParams.get('page'),
+        size: url.searchParams.get('size'),
+        q: url.searchParams.get('q') || '',
+      }));
     }
     if (method === 'GET' && p === '/api/market/quotes') {
       const sku = String(url.searchParams.get('sku') || '').trim();

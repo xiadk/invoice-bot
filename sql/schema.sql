@@ -100,7 +100,8 @@ CREATE TABLE IF NOT EXISTS `invoice_order` (
   KEY `idx_seller_login`   (`seller_login`),
   KEY `idx_seller_company` (`seller_company`),
   KEY `idx_invoice_state`  (`invoice_state`),
-  KEY `idx_pay_time`       (`pay_time`)
+  KEY `idx_pay_time`       (`pay_time`),
+  KEY `idx_user_seller_company` (`user_id`, `seller_company`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   COMMENT='1688完成订单表（源：data/users/<id>/完成订单/*.xlsx）';
 
@@ -151,7 +152,9 @@ CREATE TABLE IF NOT EXISTS `issued_invoice` (
   KEY `idx_e_invoice_no`           (`e_invoice_no`),
   KEY `idx_seller_name`            (`seller_name`),
   KEY `idx_seller_company`         (`seller_company`),
-  KEY `idx_invoice_date`           (`invoice_date`)
+  KEY `idx_invoice_date`           (`invoice_date`),
+  KEY `idx_user_seller_name`       (`user_id`, `seller_name`),
+  KEY `idx_seller_invoice_date`    (`seller_name`, `invoice_date`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   COMMENT='历史已开票数据表（源：data/users/<id>/已开票订单/*.xlsx）';
 

@@ -462,16 +462,22 @@
       </div>
 
       <!-- ══════════ 税名核对（所有人可用；普通用户只见自己发票里的销方，超管看全局） ══════════ -->
-      <div v-if="page === 'mapping'" id="page-mapping">
+      <div v-if="page === 'mapping'" id="page-mapping" v-loading="map.loading">
         <div class="page-head">
-          <h2>税名核对：税务局销方名称 → 1688 商家名称</h2>
+          <h2>税名核对</h2>
           <el-alert type="info" :closable="false" show-icon style="margin-top:8px"
-            title="「已开票订单」里的销方名称是税务局口径，跟订单里的商家名称不一致，所以要靠这张映射表建立名称关系。">
-            <div style="font-size:12px;line-height:1.8">
-              导入时会自动匹配（名称完全一致 / 包含 / 登录ID / 备注线索）；自动匹配不上的会列在下面「待人工比对」，选好对应的 1688 商家保存即可。<br>
-              本页<b>只显示你自己导入的税务局发票里出现过的销方名称</b>，也只能维护这些名称（保存 / 忽略 / 删除）。<br>
-              但映射关系是<b>全平台共用一套、去重存放</b>的：同一个销方名称只要有人维护过一次，其他人发票里的同名销方<b>自动关联</b>，不用重复映射。<br>
-              若某个销方名称<b>确认没有</b>对应的 1688 商家，点「忽略」把它移出列表（可在下方「已忽略」区恢复）。
+            title="同一家店，在 1688 上叫一个名字，开出来的发票上往往写着另一个名字 —— 这里就是把这两个名字对起来的。">
+            <div style="font-size:12px;line-height:1.9">
+              举个最常见的例子：你在 1688 上跟「东莞市旭弘贸易有限公司」进货，收到的发票上销方写的却是「东莞旭弘贸易有限公司」，少一个「市」字。<br>
+              <b>这不是导错了，也不是假票</b>：发票上的名字是对方的工商登记名称，1688 上的名字是店铺名，本来就允许不一样。系统只能按字面比对，字面不一样就认不出是同一家，<br>
+              结果就是这张发票不知道该算到哪个商家头上 —— 看板上的「已开票金额」对不上订单、「待开票金额」一直不减。<br>
+              <b>你要做的就一件事：亲口告诉系统「这个发票名称，就是这家 1688 商家」。</b>对过一次全公司永久记住，以后同名发票自动对上，别人也不用再对一遍。
+              <div style="margin:10px 0 4px;padding-top:8px;border-top:1px dashed rgba(144,147,153,.35)"></div>
+              <b>怎么操作（3 步）</b><br>
+              ① 看下面「待人工比对」—— 那是系统认不出来的发票名称，<b>按最近开票时间从新到旧排列</b>，建议优先处理最近还在开的<br>
+              ② 在它右边输入 1688 商家的名字（输两个字就能搜），从下拉里选中，点「保存」<br>
+              ③ 如果这个名称确实不是 1688 上任何一家店（运费、服务费、个人代开、税务局代开等），点「忽略」，它就不会再出现<br>
+              配对成功的会移到下面「已维护映射」里，随时可以改或删；以后导入的新发票里如果有认不出的名称，会自动回到上面的待比对列表。
             </div>
           </el-alert>
           <el-alert v-if="map.allUsers" type="success" :closable="false" show-icon style="margin-top:8px"
@@ -483,7 +489,8 @@
                     :title="'✓ 所有销方名称都已处理：已匹配到 1688 商家，或已忽略' + (map.ignored.length ? '（当前已忽略 ' + map.ignored.length + ' 个，可在下方展开恢复）' : '') + '。'"></el-alert>
           <template v-else>
             <el-alert type="warning" :closable="false" show-icon style="margin-bottom:10px"
-                      :title="'以下 ' + map.unmatched.length + ' 个税务局销方名称没有匹配上 1688 商家：选好对应的商家点「保存」；若确认没有对应的 1688 商家，点「忽略」把它移出列表（可在下方「已忽略」里恢复）。'"></el-alert>
+                      :title="'以下 ' + map.unmatched.length + ' 个税务局销方名称没有匹配上 1688 商家：在右边输入商家名（两个字就能搜）选中后点「保存」；若确认没有对应的 1688 商家，点「忽略」把它移出列表（可在下方「已忽略」里恢复）。'"
+                      :description="'商家候选共 ' + map.sellerTotal + ' 个，下拉里一次最多显示 50 条，输入关键词可缩小范围。'"></el-alert>
             <el-table :data="unmatchedPage" size="small" border style="width:100%">
               <el-table-column label="税务局销方名称" min-width="180"><template slot-scope="p"><span class="company">{{ p.row.tax_seller_name }}</span></template></el-table-column>
               <el-table-column label="销方税号" width="150"><template slot-scope="p"><span class="loginid">{{ p.row.seller_tax_no || '' }}</span></template></el-table-column>
@@ -500,11 +507,15 @@
               <el-table-column label="对应的 1688 商家" min-width="330">
                 <template slot-scope="p">
                   <div style="display:flex;gap:6px;align-items:center">
-                    <el-select v-model="mapDraft[p.row.tax_seller_name]" size="mini" filterable clearable
-                               placeholder="输入1688公司名搜索" style="flex:1;min-width:180px">
-                      <el-option v-for="s in map.sellers" :key="s.company" :label="s.company" :value="s.company">
+                    <!-- 候选商家按需搜索：「输入两个字就能搜」，一次最多渲染 50 条（原先每行都塞入全部候选，近 3000 条把页面拖慢） -->
+                    <el-select v-model="mapDraft[p.row.tax_seller_name]" size="mini" filterable remote clearable
+                               :remote-method="searchSellers" :loading="mapSeller.loading"
+                               @visible-change="onSellerDropdown"
+                               placeholder="输入1688商家名搜索" style="flex:1;min-width:180px"
+                               no-match-text="没搜到，换个关键词试试（可只输入两个字）">
+                      <el-option v-for="s in mapSeller.opts" :key="s.company" :label="s.company" :value="s.company">
                         <span style="float:left">{{ s.company }}</span>
-                        <span style="float:right;color:#8492a6;font-size:12px">{{ s.sellerLogin || s.loginId }}</span>
+                        <span style="float:right;color:#8492a6;font-size:12px">{{ s.sellerLogin || '' }}</span>
                       </el-option>
                     </el-select>
                     <el-button size="mini" type="primary" @click="saveMap(p.row)">保存</el-button>
@@ -539,6 +550,7 @@
               </el-table-column>
               <el-table-column label="人工确认" width="90"><template slot-scope="p"><el-tag size="mini" :type="p.row.is_confirmed ? 'success' : 'warning'">{{ p.row.is_confirmed ? '已确认' : '待复核' }}</el-tag></template></el-table-column>
               <el-table-column label="开票金额" width="110"><template slot-scope="p"><span class="amount ok">{{ yuan(p.row.invoice_amount) }}</span></template></el-table-column>
+              <el-table-column label="最近开票" width="110"><template slot-scope="p"><span class="loginid">{{ p.row.last_invoice_date ? fmtDate(p.row.last_invoice_date) : '—' }}</span></template></el-table-column>
               <el-table-column label="维护人" width="140">
                 <template slot-scope="p">
                   <span v-if="map.allUsers" class="loginid">{{ p.row.maintainer || '—' }}</span>
@@ -695,7 +707,7 @@
         <el-card shadow="never" class="section-card">
           <div slot="header" style="display:flex;align-items:center;gap:10px">
             <b>在售商品</b>
-            <span class="loginid">（{{ market.rows.length }} 个 SKU）</span>
+            <span class="loginid">（共 {{ market.total }} 个 SKU，同一 SKU 多人发布只显示一行）</span>
             <span style="flex:1"></span>
             <el-button size="small" :loading="market.loading" @click="loadMarket">刷新</el-button>
           </div>
@@ -709,6 +721,12 @@
             <el-table-column label="报价数" width="90"><template slot-scope="p"><el-tag size="mini">{{ p.row.quote_count }}</el-tag></template></el-table-column>
             <el-table-column label="最近发布" width="150"><template slot-scope="p"><span class="loginid">{{ fmtMinute(p.row.last_published_at) }}</span></template></el-table-column>
           </el-table>
+          <div class="pager-wrap" v-if="market.total > market.size">
+            <el-pagination background layout="sizes, prev, pager, next" :total="market.total"
+                           :page-size="market.size" :current-page="market.page" :page-sizes="pageSizes"
+                           @size-change="v => { market.size = v; market.page = 1; loadMarket(); }"
+                           @current-change="v => { market.page = v; loadMarket(); }"></el-pagination>
+          </div>
         </el-card>
 
         <!-- 报价列表 -->
@@ -2062,7 +2080,7 @@ const vm = new Vue({
       // 发布到交易市场（单个/批量共用弹窗）
       publish: { visible: false, title: '', discount: 100, items: [], saving: false },
       // 交易市场
-      market: { loading: false, rows: [] },
+      market: { loading: false, rows: [], total: 0, page: 1, size: 20 },
       quotes: { visible: false, loading: false, sku: '', goodsName: '', rows: [] },
       meta: '', tenantLabel: '', copyright: '',
       // 筛选（草稿 vs 生效）
@@ -2083,7 +2101,9 @@ const vm = new Vue({
       // 历史弹窗
       hist: { visible: false, title: '', loading: false, logs: [], total: 0, okCount: 0, failCount: 0 },
       // 映射
-      map: { mappings: [], unmatched: [], sellers: [], ignored: [] },
+      map: { loading: false, mappings: [], unmatched: [], ignored: [], sellerTotal: 0, unmatchedCount: 0, ignoredCount: 0, allUsers: false },
+      // 商家候选下拉：按关键词向服务端要前 50 条（不再整表下发），cache 用于「选中后取会员名」
+      mapSeller: { q: '', opts: [], cache: {}, loading: false, timer: null },
       mapDraft: {}, unPage: 1, unSize: 20, mapPage: 1, mapSize: 20, igPage: 1, igSize: 20,
       // 系统管理
       cfg: {
@@ -3938,13 +3958,47 @@ const vm = new Vue({
 
     // ══════ 税名核对（所有人可用；普通用户只见自己发票里的销方，映射全平台共享） ══════
     async loadMapping() {
-      try { this.map = await this.api('/api/mapping'); this.mapDraft = {}; }
-      catch (e) { this.$message.error('加载失败: ' + e.message); }
+      this.map.loading = true;
+      try {
+        const d = await this.api('/api/mapping');
+        this.map = Object.assign({}, this.map, d);
+        this.mapDraft = {};
+        // 页码回正：处理掉若干条后再刷新，原来的页码可能已经超出（会停在空页）
+        this.unPage = Math.min(this.unPage, Math.max(1, Math.ceil((this.map.unmatched || []).length / this.unSize)));
+        this.mapPage = Math.min(this.mapPage, Math.max(1, Math.ceil((this.map.mappings || []).length / this.mapSize)));
+        this.igPage = Math.min(this.igPage, Math.max(1, Math.ceil((this.map.ignored || []).length / this.igSize)));
+        // 预热候选商家（前 50 条），下拉一打开就有内容
+        this.mapSeller.q = '';
+        this.fetchSellerOpts();
+      } catch (e) { this.$message.error('加载失败: ' + e.message); }
+      finally { this.map.loading = false; }
+    },
+    /** 商家下拉输入关键词：防抖 250ms，避免每敲一个字打一次接口 */
+    searchSellers(q) {
+      this.mapSeller.q = String(q || '').trim();
+      clearTimeout(this.mapSeller.timer);
+      this.mapSeller.timer = setTimeout(() => this.fetchSellerOpts(), 250);
+    },
+    /** 打开下拉时复位到「默认前 50 条」，避免接着上一行残留的关键词 */
+    onSellerDropdown(visible) {
+      if (!visible) return;
+      this.mapSeller.q = '';
+      this.fetchSellerOpts();
+    },
+    /** 只取前 50 条候选（原来整表下发近 3000 条 / 约 600KB，页面渲染几万个选项直接卡死） */
+    async fetchSellerOpts() {
+      this.mapSeller.loading = true;
+      try {
+        const d = await this.api('/api/mapping/sellers?limit=50&q=' + encodeURIComponent(this.mapSeller.q || ''));
+        this.mapSeller.opts = d.sellers || [];
+        for (const s of this.mapSeller.opts) this.mapSeller.cache[s.company] = s;
+      } catch (e) { /* 搜索失败保留上次结果，不打断填写 */ }
+      finally { this.mapSeller.loading = false; }
     },
     async saveMap(u) {
       const company = ((this.mapDraft[u.tax_seller_name] || '') + '').trim();
       if (!company) { this.$message.warning('请先选择对应的 1688 商家'); return; }
-      const hit = (this.map.sellers || []).find(s => s.company === company);
+      const hit = this.mapSeller.cache[company] || (this.mapSeller.opts || []).find(s => s.company === company);
       if (!hit) { this.$message.warning('没找到这个商家，请从下拉候选里选'); return; }
       try {
         const d = await this.api('/api/mapping', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ taxSellerName: u.tax_seller_name, sellerCompany: hit.company, sellerLogin: hit.sellerLogin || hit.loginId }) });
@@ -4505,8 +4559,12 @@ const vm = new Vue({
     async loadMarket() {
       this.market.loading = true;
       try {
-        const d = await this.api('/api/market');
+        const d = await this.api('/api/market?page=' + this.market.page + '&size=' + this.market.size);
         this.market.rows = d.rows || [];
+        this.market.total = Number(d.total) || 0;
+        // 越界回正（例如别人撤掉发布后当前页变空）
+        const pages = Math.max(1, Math.ceil(this.market.total / this.market.size));
+        if (this.market.page > pages) { this.market.page = pages; return this.loadMarket(); }
       } catch (e) { this.$message.error('交易市场加载失败: ' + e.message); }
       finally { this.market.loading = false; }
     },

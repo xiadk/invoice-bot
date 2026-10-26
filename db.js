@@ -663,6 +663,17 @@ async function migrate(conn, dbName) {
   if (!(await idxExists('send_log', 'idx_user_login'))) {
     await q('ALTER TABLE `send_log` ADD KEY `idx_user_login` (`user_id`, `seller_login`)');
   }
+  // 税名核对页性能（v0.2.29）：按「销方名称」聚合并按最近开票时间排序、普通用户按 (用户, 销方) 过滤
+  if (!(await idxExists('issued_invoice', 'idx_user_seller_name'))) {
+    await q('ALTER TABLE `issued_invoice` ADD KEY `idx_user_seller_name` (`user_id`, `seller_name`)');
+  }
+  if (!(await idxExists('issued_invoice', 'idx_seller_invoice_date'))) {
+    await q('ALTER TABLE `issued_invoice` ADD KEY `idx_seller_invoice_date` (`seller_name`, `invoice_date`)');
+  }
+  // 商家候选下拉按公司名搜索（原先只有 seller_login 的复合索引，按公司名过滤会全表扫）
+  if (!(await idxExists('invoice_order', 'idx_user_seller_company'))) {
+    await q('ALTER TABLE `invoice_order` ADD KEY `idx_user_seller_company` (`user_id`, `seller_company`)');
+  }
   // 唯一键改造（v0.2.15）：seller_name_mapping 改为全员共享——tax_seller_name 全局唯一，
   // user_id 退化为「维护人」（记录这条映射最早由谁维护）。老库从 (user_id, tax_seller_name)
   // 迁移过来时先把同一销方名称的多行合并成一行。
