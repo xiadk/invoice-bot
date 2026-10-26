@@ -661,6 +661,133 @@
           </div>
         </el-card>
 
+        <!-- ══════ 补货界面（导入完成后进入）══════ -->
+        <el-dialog :visible.sync="rp.visible" title="补货" width="94%" top="4vh" append-to-body :close-on-click-modal="false">
+          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px">
+            <el-alert type="info" :closable="false" show-icon style="flex:1;min-width:340px"
+              title="齐货通价 = 一件价格 ÷ 一件瓶数（实时取自齐货通商品详情，两位小数四舍五入）；还没关联的商品点「关联」，搜到齐货通商品后绑定即可取价。">
+            </el-alert>
+            <el-tag size="small" :type="rp.session.configured ? 'success' : 'warning'">
+              齐货通登录态：{{ rp.session.configured ? ('已配置 ' + rp.session.tokenMasked) : '未配置（取价/加购都用不了）' }}
+            </el-tag>
+            <el-button size="small" @click="openQhtDlg">登录态设置</el-button>
+            <el-button size="small" :loading="rp.pricing" @click="loadQhtPrices">重新取价</el-button>
+            <span class="loginid">共 {{ rp.rows.length }} 个商品</span>
+          </div>
+          <el-table :data="rp.rows" size="small" border max-height="60vh" style="width:100%" v-loading="rp.loading"
+                    empty-text="本次导入没有商品">
+            <el-table-column label="商品名称" min-width="220">
+              <template slot-scope="p"><span :title="p.row.goods_name">{{ p.row.goods_name }}</span></template>
+            </el-table-column>
+            <el-table-column label="商品SKU" width="170">
+              <template slot-scope="p"><span class="loginid" style="font-family:Consolas,monospace">{{ p.row.sku }}</span></template>
+            </el-table-column>
+            <el-table-column label="采购价" width="90">
+              <template slot-scope="p"><span class="amount">{{ yuan(p.row.purchase_price) }}</span></template>
+            </el-table-column>
+            <el-table-column label="齐货通价" min-width="230">
+              <template slot-scope="p">
+                <template v-if="p.row.qht_goods_id">
+                  <template v-if="rp.prices[p.row.qht_goods_id] && rp.prices[p.row.qht_goods_id].ok">
+                    <span class="amount ok">¥{{ rp.prices[p.row.qht_goods_id].unitPrice }}</span>
+                    <span class="loginid" style="margin-left:6px">
+                      （{{ rp.prices[p.row.qht_goods_id].saleIP }}/{{ rp.prices[p.row.qht_goods_id].packingSpecification }}{{ rp.prices[p.row.qht_goods_id].smallUnit }}）
+                    </span>
+                  </template>
+                  <span v-else-if="rp.prices[p.row.qht_goods_id]" class="loginid" style="color:#f56c6c">取价失败</span>
+                  <span v-else class="loginid">取价中…</span>
+                  <el-button size="mini" type="primary" plain style="margin-left:6px" @click="openBuy(p.row)">选购</el-button>
+                </template>
+                <el-button v-else size="mini" type="warning" plain @click="openLinkDlg(p.row)">关联</el-button>
+              </template>
+            </el-table-column>
+            <el-table-column label="阿发价" width="90">
+              <template slot-scope="p"><span class="loginid">—</span></template>
+            </el-table-column>
+            <el-table-column label="本地价" width="130">
+              <template slot-scope="p">
+                <el-input v-model="p.row.local_price" size="mini" placeholder="可手工填写"
+                          @change="saveLocalPrice(p.row)" style="width:110px"></el-input>
+              </template>
+            </el-table-column>
+            <el-table-column prop="available_stock" label="可用库存" width="90"></el-table-column>
+            <el-table-column prop="transit_stock" label="在途库存" width="90"></el-table-column>
+            <el-table-column prop="suggest_qty" label="建议量" width="90"></el-table-column>
+          </el-table>
+        </el-dialog>
+
+        <!-- 关联齐货通商品：搜关键字 → 选商品 → 确认 -->
+        <el-dialog title="关联齐货通商品" :visible.sync="rpLink.visible" width="760px" append-to-body>
+          <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px">
+            <el-input v-model="rpLink.keyword" size="small" placeholder="输入商品名关键字搜索齐货通" style="flex:1"
+                      @keyup.enter.native="searchQht"></el-input>
+            <el-button size="small" type="primary" :loading="rpLink.loading" @click="searchQht">搜索</el-button>
+          </div>
+          <el-alert v-if="rpLink.error" type="error" :closable="false" show-icon :title="rpLink.error" style="margin-bottom:10px"></el-alert>
+          <el-table :data="rpLink.rows" size="small" border max-height="46vh" style="width:100%" highlight-current-row
+                    @current-change="v => rpLink.picked = v" empty-text="输入关键字搜索">
+            <el-table-column label="图片" width="70">
+              <template slot-scope="p">
+                <img v-if="p.row.picture" :src="p.row.picture" style="width:48px;height:48px;object-fit:cover;border-radius:4px">
+                <span v-else class="loginid">无图</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="齐货通商品名称" min-width="260"><template slot-scope="p">{{ p.row.goodsName }}</template></el-table-column>
+            <el-table-column label="一件价" width="90"><template slot-scope="p">{{ yuan(p.row.saleIP) }}</template></el-table-column>
+            <el-table-column label="规格" width="110">
+              <template slot-scope="p">{{ p.row.packingSpecification }} {{ p.row.smallUnit }}/{{ p.row.largeUnit }}</template>
+            </el-table-column>
+            <el-table-column label="折合单价" width="100">
+              <template slot-scope="p"><span class="amount ok">¥{{ p.row.unitPrice }}</span></template>
+            </el-table-column>
+            <el-table-column prop="goodsId" label="商品ID" width="90"></el-table-column>
+          </el-table>
+          <div slot="footer">
+            <span class="loginid" style="float:left;line-height:32px">
+              已选：{{ rpLink.picked ? rpLink.picked.goodsName : '（点一行选中）' }}
+            </span>
+            <el-button size="small" @click="rpLink.visible = false">取消</el-button>
+            <el-button size="small" type="primary" :disabled="!rpLink.picked" @click="confirmLink">确认关联</el-button>
+          </div>
+        </el-dialog>
+
+        <!-- 选购：输入采购数量 → 加入齐货通购物车 -->
+        <el-dialog :visible.sync="rpBuy.visible" title="加入齐货通购物车" width="420px" append-to-body>
+          <div style="font-size:13px;margin-bottom:10px">
+            商品：{{ rpBuy.goodsName }}<br>
+            <span class="loginid">齐货通商品ID {{ rpBuy.goodsId }}</span>
+          </div>
+          <el-form label-position="top" size="small">
+            <el-form-item label="采购数量（件）">
+              <el-input-number v-model="rpBuy.qty" :min="1" :step="1" controls-position="right" style="width:160px"></el-input-number>
+            </el-form-item>
+          </el-form>
+          <el-alert type="warning" :closable="false" show-icon style="margin-top:6px"
+            title="确认后会真实写入你自己的齐货通账号购物车，请核对数量。"></el-alert>
+          <div slot="footer">
+            <el-button size="small" @click="rpBuy.visible = false">取消</el-button>
+            <el-button size="small" type="primary" :loading="rpBuy.saving" @click="confirmBuy">确定</el-button>
+          </div>
+        </el-dialog>
+
+        <!-- 齐货通登录态：用户自己粘贴 x-token / 手机号 -->
+        <el-dialog :visible.sync="qhtDlg.visible" title="齐货通登录态" width="520px" append-to-body>
+          <el-alert type="info" :closable="false" show-icon style="margin-bottom:12px"
+            title="登录齐货通网页/小程序后，按 F12 → 网络 → 随便点一个 mall/api 请求，把请求头里的 x-token（登录态）和 x-user（登录手机号）复制过来。过期后接口会报「安全参数不可用」，重贴一次即可。"></el-alert>
+          <el-form label-position="top" size="small">
+            <el-form-item label="x-token">
+              <el-input v-model="qhtDlg.token" size="small" placeholder="如 25b3690c-e272-4322-abf0-d9b7564fbb05"></el-input>
+            </el-form-item>
+            <el-form-item label="x-user（登录手机号）">
+              <el-input v-model="qhtDlg.xUser" size="small" placeholder="如 13047901299"></el-input>
+            </el-form-item>
+          </el-form>
+          <div slot="footer">
+            <el-button size="small" @click="qhtDlg.visible = false">取消</el-button>
+            <el-button size="small" type="primary" :loading="qhtDlg.saving" @click="saveQhtSession">保存</el-button>
+          </div>
+        </el-dialog>
+
         <!-- 发布到交易市场（单个 / 批量共用） -->
         <el-dialog :title="publish.title" :visible.sync="publish.visible" width="520px" append-to-body>
           <el-form label-position="top" size="small">
@@ -2066,6 +2193,11 @@ const vm = new Vue({
         draftQ: '', status: '', priceSort: '', selected: [],
         filteredValue: 0, latestBatch: null, trend: [],
       },
+      // 补货界面（导入完成后进入）+ 关联的齐货通弹窗
+      rp: { visible: false, loading: false, pricing: false, batchId: null, rows: [], prices: {}, session: { configured: false, tokenMasked: '', xUser: '' } },
+      rpLink: { visible: false, sku: '', keyword: '', rows: [], loading: false, error: '', picked: null },
+      rpBuy: { visible: false, sku: '', goodsId: null, goodsName: '', qty: 1, saving: false },
+      qhtDlg: { visible: false, token: '', xUser: '', saving: false },
       // 发布到交易市场（单个/批量共用弹窗）
       publish: { visible: false, title: '', discount: 100, items: [], saving: false },
       // 交易市场
@@ -4432,6 +4564,16 @@ const vm = new Vue({
           this.loadData();
           if (this.page === 'mapping') this.loadMapping();
           if (this.page === 'product') { this.loadProducts(); this.loadProductTrend(); }
+          // 商品导入完成：询问是否进入补货（否=关闭弹框，是=打开补货界面）
+          if (kind === 'products') {
+            this.$nextTick(() => {
+              this.$confirm(`共导入 <b>${d.total || 0}</b> 个商品。是否需要补货？`, '导入完成', {
+                dangerouslyUseHTMLString: true,
+                confirmButtonText: '是，去补货', cancelButtonText: '否，稍后再说', type: 'success',
+              }).then(() => { this.up.visible = false; this.openReplenish(d.batchId); })
+                .catch(() => { this.up.visible = false; });
+            });
+          }
         } else {
           this.up.result = { ok: false, html: '✗ ' + this.esc((payload && payload.error) || '导入失败') };
         }
@@ -4544,6 +4686,131 @@ const vm = new Vue({
       } catch (e) { this.$message.error('发布失败：' + e.message); }
       finally { p.saving = false; }
     },
+    // ══════ 补货界面（导入完成后询问是否进入）══════
+    async openReplenish(batchId) {
+      this.rp.visible = true;
+      this.rp.batchId = batchId || null;
+      this.rp.rows = [];
+      this.rp.prices = {};
+      await Promise.all([this.loadReplenish(), this.loadQhtSession()]);
+      await this.loadQhtPrices();
+    },
+    /** 本次导入的商品（按 batch 精确取；没有 batchId 时取最近更新的 500 条） */
+    async loadReplenish() {
+      this.rp.loading = true;
+      try {
+        const q = new URLSearchParams({ size: '500' });
+        if (this.rp.batchId) q.set('batch', this.rp.batchId);
+        const d = await this.api('/api/products?' + q.toString());
+        this.rp.rows = d.rows || [];
+      } catch (e) { this.$message.error('补货列表加载失败: ' + e.message); }
+      finally { this.rp.loading = false; }
+    },
+    async loadQhtSession() {
+      try { this.rp.session = await this.api('/api/qht/session'); } catch (e) { /* 静默：状态提示而已 */ }
+    },
+    /** 批量实时取齐货通价（只查已关联的商品） */
+    async loadQhtPrices() {
+      const ids = [...new Set((this.rp.rows || []).map((r) => r.qht_goods_id).filter(Boolean))];
+      if (!ids.length) { this.rp.prices = {}; return; }
+      this.rp.pricing = true;
+      try {
+        const d = await this.api('/api/qht/prices?ids=' + encodeURIComponent(ids.join(',')));
+        if (d.error) {
+          this.rp.prices = {};
+          this.$message.warning('取价失败：' + d.error
+            + ((d.code === 'no_session' || d.code === 'auth') ? '（点右上角「登录态设置」重新粘贴）' : ''));
+          return;
+        }
+        this.rp.prices = d.prices || {};
+      } catch (e) { this.$message.error('取价请求失败: ' + e.message); }
+      finally { this.rp.pricing = false; }
+    },
+    openLinkDlg(row) {
+      this.rpLink = { visible: true, sku: row.sku, keyword: row.goods_name || '', rows: [], loading: false, error: '', picked: null };
+      this.searchQht();
+    },
+    async searchQht() {
+      const kw = String(this.rpLink.keyword || '').trim();
+      if (!kw) { this.$message.warning('请输入搜索关键字'); return; }
+      this.rpLink.loading = true; this.rpLink.error = '';
+      try {
+        const d = await this.api('/api/qht/search?keyword=' + encodeURIComponent(kw) + '&pageNum=1&pageSize=20');
+        if (d.error) {
+          this.rpLink.rows = [];
+          this.rpLink.error = d.error + ((d.code === 'no_session' || d.code === 'auth') ? '（请先设置齐货通登录态）' : '');
+          return;
+        }
+        this.rpLink.rows = d.rows || [];
+        this.rpLink.picked = null;
+      } catch (e) { this.rpLink.error = '搜索失败: ' + e.message; }
+      finally { this.rpLink.loading = false; }
+    },
+    async confirmLink() {
+      const pick = this.rpLink.picked;
+      if (!pick) return;
+      try {
+        const d = await this.api('/api/products/link', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ sku: this.rpLink.sku, goodsId: pick.goodsId }),
+        });
+        if (d.error) { this.$message.error('关联失败: ' + d.error); return; }
+        const row = (this.rp.rows || []).find((r) => r.sku === this.rpLink.sku);
+        if (row) row.qht_goods_id = String(pick.goodsId);
+        this.rpLink.visible = false;
+        this.$message.success('已关联：' + pick.goodsName);
+        await this.loadQhtPrices();
+      } catch (e) { this.$message.error('关联失败: ' + e.message); }
+    },
+    openBuy(row) {
+      this.rpBuy = { visible: true, sku: row.sku, goodsId: row.qht_goods_id, goodsName: row.goods_name, qty: Number(row.suggest_qty) > 0 ? Number(row.suggest_qty) : 1, saving: false };
+    },
+    async confirmBuy() {
+      this.rpBuy.saving = true;
+      try {
+        const d = await this.api('/api/qht/cart', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ goodsId: Number(this.rpBuy.goodsId), ipcnt: Number(this.rpBuy.qty) || 1 }),
+        });
+        if (d.error) { this.$message.error('加入购物车失败：' + d.error); return; }
+        this.$message.success('已加入齐货通购物车：' + this.rpBuy.qty + ' 件');
+        this.rpBuy.visible = false;
+      } catch (e) { this.$message.error('加入购物车失败: ' + e.message); }
+      finally { this.rpBuy.saving = false; }
+    },
+    async saveLocalPrice(row) {
+      const raw = String(row.local_price == null ? '' : row.local_price).trim();
+      try {
+        const d = await this.api('/api/products/local-price', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ sku: row.sku, localPrice: raw }),
+        });
+        if (d.error) { this.$message.error('本地价保存失败: ' + d.error); return; }
+        row.local_price = d.localPrice;
+        this.$message.success('本地价已保存');
+      } catch (e) { this.$message.error('本地价保存失败: ' + e.message); }
+    },
+    async openQhtDlg() {
+      await this.loadQhtSession();
+      const s = this.rp.session || {};
+      this.qhtDlg = { visible: true, token: '', xUser: s.xUser || '', saving: false };
+    },
+    async saveQhtSession() {
+      this.qhtDlg.saving = true;
+      try {
+        const d = await this.api('/api/qht/session', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ token: this.qhtDlg.token, xUser: this.qhtDlg.xUser }),
+        });
+        if (d.error) { this.$message.error('保存失败: ' + d.error); return; }
+        this.qhtDlg.visible = false;
+        await this.loadQhtSession();
+        this.$message.success('齐货通登录态已保存');
+        await this.loadQhtPrices();
+      } catch (e) { this.$message.error('保存失败: ' + e.message); }
+      finally { this.qhtDlg.saving = false; }
+    },
+
     // ══════ 交易市场 ══════
     async loadMarket() {
       this.market.loading = true;

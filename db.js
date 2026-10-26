@@ -498,6 +498,33 @@ async function migrate(conn, dbName) {
       "COMMENT '是否允许查看拼多多发票页（1=开启，超级管理员始终可见）'"
     );
   }
+  // ── 齐货通登录态（v0.2.31）：用户在「商品列表 / 补货」页粘贴自己的 x-token 与 x-user（手机号）
+  //    接口要求登录态，缺了会返回 503「商城安全参数暂时不可用」
+  if (!(await colExists('app_user', 'qht_token'))) {
+    await q(
+      "ALTER TABLE `app_user` ADD COLUMN `qht_token` VARCHAR(128) DEFAULT NULL " +
+      "COMMENT '齐货通接口登录态 x-token（用户自行粘贴，过期需重贴）'"
+    );
+  }
+  if (!(await colExists('app_user', 'qht_x_user'))) {
+    await q(
+      "ALTER TABLE `app_user` ADD COLUMN `qht_x_user` VARCHAR(64) DEFAULT NULL " +
+      "COMMENT '齐货通接口登录态 x-user（一般是登录手机号）'"
+    );
+  }
+
+  // ── 商品列表补列（v0.2.31）：补货界面要的建议量 / 齐货通商品ID / 本地价 ──
+  if (await tableExists('product_item')) {
+    for (const [col, decl] of [
+      ['suggest_qty', "INT NOT NULL DEFAULT 0 COMMENT '建议量（基础单位，来自补货参考文件的「建议量(基础单位)」列）'"],
+      ['qht_goods_id', "VARCHAR(64) DEFAULT NULL COMMENT '关联的齐货通商品ID（goodsId，用于实时取价与加购）'"],
+      ['local_price', "DECIMAL(12,2) DEFAULT NULL COMMENT '本地价（手工填写并保存，仅作比价参考）'"],
+    ]) {
+      if (!(await colExists('product_item', col))) {
+        await q(`ALTER TABLE \`product_item\` ADD COLUMN \`${col}\` ${decl}`);
+      }
+    }
+  }
 
   // ── 拼多多订单补列（老库）：订单列表接口带来的平台状态 / 实付金额 / 来源 ──
   if (await tableExists('pdd_order')) {

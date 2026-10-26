@@ -59,6 +59,7 @@ const db = require('./db');
 const auth = require('./lib/auth');
 const tenancy = require('./lib/tenancy');
 const { runImport, importOrderUpload, importInvoiceUpload } = require('./import-to-db');
+const qht = require('./lib/qht');
 const products = require('./lib/products');
 const { loadConfig } = require('./lib/config');
 const { AgentHub } = require('./lib/agent-hub');
@@ -2931,17 +2932,21 @@ const server = http.createServer(async (req, res) => {
       const q = (url.searchParams.get('q') || '').trim();
       const status = (url.searchParams.get('status') || '').trim();
       const sort = url.searchParams.get('sort') || ''; // ''=最近更新 | price_asc | price_desc
-      const w = (q ? 'AND (sku LIKE ? OR goods_name LIKE ?) ' : '') + (status ? 'AND purchase_status = ? ' : '');
+      const batch = (url.searchParams.get('batch') || '').trim(); // 补货界面：只取某次导入的商品
+      const w = (q ? 'AND (sku LIKE ? OR goods_name LIKE ?) ' : '')
+        + (status ? 'AND purchase_status = ? ' : '')
+        + (batch ? 'AND batch_id = ? ' : '');
       const args = [];
       if (q) args.push(`%${q}%`, `%${q}%`);
       if (status) args.push(status);
+      if (batch) args.push(batch);
       const order = sort === 'price_asc' ? 'purchase_price ASC, id ASC'
         : sort === 'price_desc' ? 'purchase_price DESC, id DESC'
         : 'updated_at DESC, id DESC';
       const totalR = await db.query(`SELECT COUNT(*) AS n FROM product_item WHERE user_id = ? ${w}`, [tenantId, ...args]);
       const rows = await db.query(`
         SELECT id, sku, goods_name, purchase_price, available_stock, transit_stock, purchase_status, sales_30d,
-               source_file, updated_at
+               suggest_qty, qht_goods_id, local_price, source_file, updated_at
         FROM product_item WHERE user_id = ? ${w}
         ORDER BY ${order} LIMIT ${size} OFFSET ${(page - 1) * size}
       `, [tenantId, ...args]);
@@ -2968,6 +2973,75 @@ const server = http.createServer(async (req, res) => {
         ORDER BY imported_at ASC, id ASC LIMIT 90
       `, [tenantId]);
       return sendJson(res, 200, { days: rows });
+    }
+
+    // ── 齐货通（商品关联 / 实时取价 / 加入购物车）── 所有登录用户可用，各用各的登录态
+    if (method === 'GET' && p === '/api/qht/session') {
+      return sendJson(res, 200, await qht.sessionStatus(tenantId));
+    }
+    if (method === 'POST' && p === '/api/qht/session') {
+      writeGuard();
+      const b = await readBody(req);
+      return sendJson(res, 200, await qht.saveSession(tenantId, { token: b.token, xUser: b.xUser }));
+    }
+    if (method === 'GET' && p === '/api/qht/search') {
+      try {
+        return sendJson(res, 200, await qht.searchGoods(tenantId, url.searchParams.get('keyword'), {
+          pageNum: url.searchParams.get('pageNum'),
+          pageSize: url.searchParams.get('pageSize'),
+        }));
+      } catch (e) {
+        return sendJson(res, 200, { error: String((e && e.message) || e), code: (e && e.code) || 'unknown', rows: [], total: 0 });
+      }
+    }
+    // 批量取价：ids=37207,1002（齐货通商品ID，逗号分隔）
+    if (method === 'GET' && p === '/api/qht/prices') {
+      const ids = String(url.searchParams.get('ids') || '').split(',').map((s) => s.trim()).filter(Boolean);
+      if (!ids.length) return sendJson(res, 200, { prices: {} });
+      try {
+        return sendJson(res, 200, await qht.pricesByGoodsIds(tenantId, ids));
+      } catch (e) {
+        return sendJson(res, 200, { error: String((e && e.message) || e), code: (e && e.code) || 'unknown', prices: {} });
+      }
+    }
+    // 加入购物车：会在用户自己的齐货通账号里真实加一件，只在用户点确认后调用一次
+    if (method === 'POST' && p === '/api/qht/cart') {
+      writeGuard();
+      const b = await readBody(req);
+      try {
+        return sendJson(res, 200, await qht.addToCart(tenantId, b));
+      } catch (e) {
+        return sendJson(res, 200, { error: String((e && e.message) || e), code: (e && e.code) || 'unknown' });
+      }
+    }
+
+    // 关联齐货通商品（按 user+sku）/ 保存本地价
+    if (method === 'POST' && p === '/api/products/link') {
+      writeGuard();
+      const b = await readBody(req);
+      const sku = String(b.sku || '').trim();
+      const goodsId = String(b.goodsId == null ? '' : b.goodsId).trim();
+      if (!sku) return sendJson(res, 200, { error: '缺少 sku' });
+      const r = await db.exec(
+        'UPDATE product_item SET qht_goods_id = ? WHERE user_id = ? AND sku = ?',
+        [goodsId || null, tenantId, sku]
+      );
+      return sendJson(res, 200, { ok: true, sku, goodsId: goodsId || null, affected: r.affectedRows || 0 });
+    }
+    if (method === 'POST' && p === '/api/products/local-price') {
+      writeGuard();
+      const b = await readBody(req);
+      const sku = String(b.sku || '').trim();
+      if (!sku) return sendJson(res, 200, { error: '缺少 sku' });
+      const raw = String(b.localPrice == null ? '' : b.localPrice).trim();
+      let v = null;
+      if (raw !== '') {
+        const n = Number(raw);
+        if (!Number.isFinite(n) || n < 0) return sendJson(res, 200, { error: '本地价应为非负数字' });
+        v = Math.round(n * 100) / 100;
+      }
+      await db.exec('UPDATE product_item SET local_price = ? WHERE user_id = ? AND sku = ?', [v, tenantId, sku]);
+      return sendJson(res, 200, { ok: true, sku, localPrice: v });
     }
 
     // ── 交易市场（跨用户共享） ──
