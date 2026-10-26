@@ -228,9 +228,43 @@ function findChatFrame(wc) {
   return list.length ? list[0] : null;
 }
 
+/** 目标会话 URL 是否已在浏览器里生效（防止把「上一个卖家的旧页面」当成新会话）
+ *  ⚠ 0.2.26 引入过一个严重时序 bug：navigate() 发起后立刻去 waitChatFrameEx，
+ *    此时旧页面还没卸载，探测到的是**上一个卖家的聊天 frame**（编辑器还在）→
+ *    被误判为「下一家已就绪」→ 轮到下一家时旧 frame 已销毁 → 只能重新导航一遍，
+ *    同一个会话加载两遍（用户看到的就是「打开聊天框要等 10 秒+」）；
+ *    更糟的情况是旧 frame 恰好还活着 → 模板打进上一个卖家的聊天框 / 发送中途
+ *    frame 被销毁报「发送未确认」。
+ */
+function chatUrlMatches(url, sellerLogin) {
+  const raw = String(sellerLogin || '');
+  if (!raw) return false;
+  const uid = /cnali/i.test(raw) ? raw : ('cnalichn' + raw);
+  const u = String(url || '');
+  let dec = u;
+  try { dec = decodeURIComponent(u); } catch (e) { /* 保持原文 */ }
+  return dec.indexOf(uid) >= 0 || u.indexOf(encodeURIComponent(uid)) >= 0;
+}
+
+/** 等主 frame 的 URL 真正提交到目标会话（did-navigate 级别，秒级；不是 did-finish-load）。
+ *  返回 'ok' | 'login'（被踢到登录页）| 'timeout'（URL 形态没匹配上，交由后续 frame 探测兜底）。 */
+async function waitChatCommit(wc, sellerLogin, timeoutMs = 15000) {
+  const t0 = Date.now();
+  for (;;) {
+    let url = '';
+    try { url = String(wc.mainFrame.url || ''); } catch (e) { /* frame 短暂不可用 */ }
+    if (chatUrlMatches(url, sellerLogin)) return 'ok';
+    if (/login\.1688\.com|signin/i.test(url)) return 'login';
+    if (Date.now() - t0 >= timeoutMs) return 'timeout';
+    await sleep(200);
+  }
+}
+
 /**
  * 同上，但额外带回「这个 frame 是否已经渲染出编辑器」。
  * 已经出现编辑器时就不必再跑到页面里执行 waitReady 二次等待（省掉一轮 ~1~5s 的往返）。
+ * ⚠ 编辑器就绪只认 IM 核心子框（web_im_core）：主框 def_cbu_web_im 里可能存在
+ *   搜索框等 textarea 之类的伪命中，提前 return 会锁定错误的 frame（真机踩过）。
  * @returns {Promise<{frame:object, hadEditor:boolean}|null>}
  */
 async function waitChatFrameEx(wc, timeoutMs) {
@@ -241,17 +275,19 @@ async function waitChatFrameEx(wc, timeoutMs) {
       if (!frameAlive(f)) continue;
       const remain = timeoutMs - (Date.now() - t0);
       if (remain <= 0) return fallback ? { frame: fallback, hadEditor: false } : null;
-      const ok = await frameExecutable(f, Math.min(1500, Math.max(400, remain)));
+      const ok = await frameExecutable(f, Math.min(800, Math.max(400, remain)));
       if (!ok) continue;
-      if (!fallback) fallback = f;
+      const isCore = /web_im_core/i.test(String(f.url || ''));
       try {
         const has = await f.executeJavaScript(
           '!!document.querySelector(\'pre.edit,[contenteditable="true"],textarea\')', false);
-        if (has) return { frame: f, hadEditor: true };
+        if (has && isCore) return { frame: f, hadEditor: true };
+        // 非 core 框的伪编辑器命中：只作兜底，继续等真正的核心框
+        if (has && !fallback) fallback = f;
       } catch (e) { /* 该 frame 不可用，试下一个 */ }
     }
     if (Date.now() - t0 >= timeoutMs) return fallback ? { frame: fallback, hadEditor: false } : null;
-    await sleep(300);
+    await sleep(250);
   }
 }
 
@@ -346,14 +382,31 @@ async function probeLoggedIn(win) {
 /**
  * 让某家的会话就绪（导航 + 等编辑器），返回可直接注入执行的 frame。
  * 每一步都套了 raceStop：页面卡住时点停止也能立刻退出。
+ *
+ * ── 时序（0.2.28 修复）──
+ *   ① 当前页已经在目标会话 → 不再重复导航（重试同一卖家不用整页重载）
+ *   ② 导航后必须先等主 frame URL 提交到目标会话（did-navigate 级别），
+ *      否则会把「上一个卖家的旧页面 frame」当成已就绪 —— 曾导致：
+ *      同一会话加载两遍（打开聊天框后干等 10s+）、模板打进错误卖家、发送中断报失败。
  */
 async function prepareSeller(win, seller, isStopped, opts = {}) {
-  navigate(win, CHAT_URL(seller.sellerLogin));
+  let cur = '';
+  try { cur = win.webContents.getURL(); } catch (e) { /* 忽略 */ }
+  if (!chatUrlMatches(cur, seller.sellerLogin)) {
+    navigate(win, CHAT_URL(seller.sellerLogin));
+    const commit = await raceStop(
+      waitChatCommit(win.webContents, seller.sellerLogin, opts.commitTimeoutMs || 15000), isStopped);
+    if (commit === 'login') {
+      try { openLoginWindow(); } catch (e) { /* 忽略 */ }
+      throw new Error('1688 未登录（已跳转登录页）：请点面板「打开 1688 登录窗口」登录后重试');
+    }
+    // 'timeout' 不中断：URL 可能是变体形态，交给下面的 frame 探测兜底
+  }
   const found = await raceStop(
     waitChatFrameEx(win.webContents, opts.frameTimeoutMs || 45000), isStopped);
   if (!found || !found.frame) {
-    const cur = win.webContents.getURL();
-    throw new Error(/login\.1688\.com|signin/i.test(cur)
+    const curUrl = win.webContents.getURL();
+    throw new Error(/login\.1688\.com|signin/i.test(curUrl)
       ? '1688 未登录（已跳转登录页）：请点面板「打开 1688 登录窗口」登录后重试'
       : '聊天窗口未就绪（可能未登录 1688，或页面结构变化）');
   }
@@ -443,6 +496,13 @@ function createBatchHandler({ log = () => {}, onLoginState = () => {} } = {}) {
         try {
           // ① 会话就绪：上一轮预加载好了就直接复用，否则现场加载
           frame = (prepared && prepared.index === i) ? prepared.frame : null;
+          if (frame) {
+            // 兜底：预加载后到真正发送之间隔了（gap + 预加载）一段时间，
+            // 期间页面若被手动导航走，编辑器还在也不该用 —— 当前页必须仍是这家卖家的会话
+            let u = '';
+            try { u = win.webContents.getURL(); } catch (e) { /* 忽略 */ }
+            if (!chatUrlMatches(u, s.sellerLogin)) frame = null;
+          }
           if (frame && !(await confirmReady(frame, isStopped))) frame = null;
           if (!frame) {
             const p = await prepareSeller(win, s, isStopped);
@@ -521,5 +581,6 @@ module.exports = {
   _test: {
     collectChatFrames, waitChatFrame, waitChatFrameEx, execInChat, loadUrl, frameExecutable,
     StopError, raceStop, navigate, prepareSeller, sendMessages, confirmReady, sleep,
+    chatUrlMatches, waitChatCommit,
   },
 };
