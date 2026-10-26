@@ -124,6 +124,8 @@
   .pager-wrap .total { font-size: 12px; color: var(--sub); }
   /* 补货表：单元格不折行（长名称省略号+悬浮看全），行高从 ~100px 压到 ~40px，一屏能看到十几行 */
   .rp-table .el-table__row .cell { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* 关联齐货通表：同样不折行，行高更紧凑（名称省略号+悬浮看全） */
+  .rp-link-table .el-table__row .cell { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .meta-line { margin-top: 10px; font-size: 12px; color: var(--sub); }
   /* 拼多多页：账号独占提醒。这句是「操作前必须知道」的硬要求，混在灰色小字正文里最容易被略过，
      所以独占一行 + 红色加粗 + 略大字号 + 警示图标；不上底色，避免和页面里的 el-alert 抢视觉。 */
@@ -731,11 +733,11 @@
         <el-dialog title="关联齐货通商品" :visible.sync="rpLink.visible" width="760px" append-to-body>
           <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px">
             <el-input v-model="rpLink.keyword" size="small" placeholder="输入商品名关键字搜索齐货通" style="flex:1"
-                      @keyup.enter.native="searchQht"></el-input>
-            <el-button size="small" type="primary" :loading="rpLink.loading" @click="searchQht">搜索</el-button>
+                      @keyup.enter.native="newSearchQht"></el-input>
+            <el-button size="small" type="primary" :loading="rpLink.loading" @click="newSearchQht">搜索</el-button>
           </div>
           <el-alert v-if="rpLink.error" type="error" :closable="false" show-icon :title="rpLink.error" style="margin-bottom:10px"></el-alert>
-          <el-table :data="rpLink.rows" size="small" border max-height="46vh" style="width:100%" highlight-current-row
+          <el-table :data="rpLink.rows" size="small" border max-height="46vh" class="rp-link-table" style="width:100%" highlight-current-row
                     @current-change="v => rpLink.picked = v" empty-text="输入关键字搜索">
             <el-table-column label="图片" width="70">
               <template slot-scope="p">
@@ -743,7 +745,7 @@
                 <span v-else class="loginid">无图</span>
               </template>
             </el-table-column>
-            <el-table-column label="齐货通商品名称" min-width="260"><template slot-scope="p">{{ p.row.goodsName }}</template></el-table-column>
+            <el-table-column label="齐货通商品名称" min-width="260"><template slot-scope="p"><span :title="p.row.goodsName">{{ p.row.goodsName }}</span></template></el-table-column>
             <el-table-column label="一件价" width="90"><template slot-scope="p">{{ yuan(p.row.saleIP) }}</template></el-table-column>
             <el-table-column label="规格" width="110">
               <template slot-scope="p">{{ p.row.packingSpecification }} {{ p.row.smallUnit }}/{{ p.row.largeUnit }}</template>
@@ -753,6 +755,10 @@
             </el-table-column>
             <el-table-column prop="goodsId" label="商品ID" width="90"></el-table-column>
           </el-table>
+          <div class="pager-wrap">
+            <el-pagination background layout="total, prev, pager, next" :total="rpLink.total" :page-size="rpLink.size"
+                           :current-page="rpLink.page" @current-change="onRpLinkPage"></el-pagination>
+          </div>
           <div slot="footer">
             <span class="loginid" style="float:left;line-height:32px">
               已选：{{ rpLink.picked ? rpLink.picked.goodsName : '（点一行选中）' }}
@@ -2207,7 +2213,7 @@ const vm = new Vue({
       // 补货界面（导入完成后进入）+ 关联的齐货通弹窗
       // 补货默认 20 条/页（页码可翻）；页大小可切 20/50/100/全部(2000)
       rp: { visible: false, loading: false, pricing: false, batchId: null, rows: [], prices: {}, total: 0, page: 1, size: 20, expect: 0, session: { configured: false, tokenMasked: '', xUser: '' } },
-      rpLink: { visible: false, sku: '', keyword: '', rows: [], loading: false, error: '', picked: null },
+      rpLink: { visible: false, sku: '', keyword: '', rows: [], loading: false, error: '', picked: null, total: 0, page: 1, size: 20 },
       rpBuy: { visible: false, sku: '', goodsId: null, goodsName: '', qty: 1, saving: false },
       qhtDlg: { visible: false, token: '', xUser: '', saving: false },
       // 发布到交易市场（单个/批量共用弹窗）
@@ -4755,21 +4761,30 @@ const vm = new Vue({
       finally { this.rp.pricing = false; }
     },
     openLinkDlg(row) {
-      this.rpLink = { visible: true, sku: row.sku, keyword: row.goods_name || '', rows: [], loading: false, error: '', picked: null };
+      this.rpLink = { visible: true, sku: row.sku, keyword: row.goods_name || '', rows: [], loading: false, error: '', picked: null, total: 0, page: 1, size: 20 };
       this.searchQht();
     },
+    /** 新搜索（点搜索按钮/回车）：回到第 1 页 */
+    newSearchQht() { this.rpLink.page = 1; this.searchQht(); },
+    async onRpLinkPage(v) { this.rpLink.page = v; await this.searchQht(); },
     async searchQht() {
       const kw = String(this.rpLink.keyword || '').trim();
       if (!kw) { this.$message.warning('请输入搜索关键字'); return; }
       this.rpLink.loading = true; this.rpLink.error = '';
       try {
-        const d = await this.api('/api/qht/search?keyword=' + encodeURIComponent(kw) + '&pageNum=1&pageSize=20');
+        const d = await this.api('/api/qht/search?keyword=' + encodeURIComponent(kw)
+          + '&pageNum=' + this.rpLink.page + '&pageSize=' + this.rpLink.size);
         if (d.error) {
           this.rpLink.rows = [];
+          this.rpLink.total = 0;
           this.rpLink.error = d.error + ((d.code === 'no_session' || d.code === 'auth') ? '（请先设置齐货通登录态）' : '');
           return;
         }
         this.rpLink.rows = d.rows || [];
+        this.rpLink.total = Number(d.total) || 0;
+        // 页码越界（搜到结果变少）时回正重搜
+        const pages = Number(d.pages) || Math.max(1, Math.ceil(this.rpLink.total / this.rpLink.size));
+        if (this.rpLink.page > pages) { this.rpLink.page = pages; return this.searchQht(); }
         this.rpLink.picked = null;
       } catch (e) { this.rpLink.error = '搜索失败: ' + e.message; }
       finally { this.rpLink.loading = false; }
