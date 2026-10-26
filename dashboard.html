@@ -124,6 +124,10 @@
   .pager-wrap .total { font-size: 12px; color: var(--sub); }
   /* 补货表：单元格不折行（长名称省略号+悬浮看全），行高从 ~100px 压到 ~40px，一屏能看到十几行 */
   .rp-table .el-table__row .cell { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* 例外：齐货通价列要放「单价+规格+选购按钮」，不折行时按钮会被 overflow:hidden 裁掉
+     → 允许换行（单价/规格一行、按钮挤不下时换到下一行），保证按钮永远可见可点 */
+  .rp-table td.col-price .cell { white-space: normal; overflow: visible; text-overflow: clip; }
+  .rp-table td.col-price .cell .el-button { margin-top: 2px; }
   /* 关联齐货通表：同样不折行，行高更紧凑（名称省略号+悬浮看全） */
   .rp-link-table .el-table__row .cell { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .meta-line { margin-top: 10px; font-size: 12px; color: var(--sub); }
@@ -693,7 +697,7 @@
             <el-table-column label="采购价" width="80">
               <template slot-scope="p"><span class="amount">{{ yuan(p.row.purchase_price) }}</span></template>
             </el-table-column>
-            <el-table-column label="齐货通价" min-width="190">
+            <el-table-column label="齐货通价" min-width="190" class-name="col-price">
               <template slot-scope="p">
                 <template v-if="p.row.qht_goods_id">
                   <template v-if="rp.prices[p.row.qht_goods_id] && rp.prices[p.row.qht_goods_id].ok">
