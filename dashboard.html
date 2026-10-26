@@ -122,6 +122,8 @@
   .preview-box { background: #fafbfc; border: 1px dashed var(--border); border-radius: 6px; padding: 12px; font-size: 12px; line-height: 1.7; white-space: pre-wrap; word-break: break-all; }
   .pager-wrap { margin-top: 10px; display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
   .pager-wrap .total { font-size: 12px; color: var(--sub); }
+  /* 补货表：单元格不折行（长名称省略号+悬浮看全），行高从 ~100px 压到 ~40px，一屏能看到十几行 */
+  .rp-table .el-table__row .cell { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .meta-line { margin-top: 10px; font-size: 12px; color: var(--sub); }
   /* 拼多多页：账号独占提醒。这句是「操作前必须知道」的硬要求，混在灰色小字正文里最容易被略过，
      所以独占一行 + 红色加粗 + 略大字号 + 警示图标；不上底色，避免和页面里的 el-alert 抢视觉。 */
@@ -678,9 +680,9 @@
               <el-button type="text" size="mini" @click="showAllProducts">查看全部商品</el-button>
             </span>
           </div>
-          <el-table :data="rp.rows" size="small" border max-height="64vh" style="width:100%" v-loading="rp.loading"
+          <el-table :data="rp.rows" size="small" border max-height="64vh" class="rp-table" style="width:100%" v-loading="rp.loading"
                     empty-text="本次导入没有商品">
-            <el-table-column label="商品名称" min-width="220">
+            <el-table-column label="商品名称" min-width="240">
               <template slot-scope="p"><span :title="p.row.goods_name">{{ p.row.goods_name }}</span></template>
             </el-table-column>
             <el-table-column label="商品SKU" width="170">
@@ -719,8 +721,9 @@
             <el-table-column prop="suggest_qty" label="建议量" width="90"></el-table-column>
           </el-table>
           <div class="pager-wrap">
-            <el-pagination background layout="total, prev, pager, next" :total="rp.total" :page-size="rp.size"
-                           :current-page="rp.page" @current-change="onRpPage"></el-pagination>
+            <el-pagination background layout="total, sizes, prev, pager, next" :total="rp.total" :page-size="rp.size"
+                           :current-page="rp.page" :page-sizes="[20, 50, 100, 2000]"
+                           @size-change="onRpSize" @current-change="onRpPage"></el-pagination>
           </div>
         </el-dialog>
 
@@ -2202,8 +2205,8 @@ const vm = new Vue({
         filteredValue: 0, latestBatch: null, trend: [],
       },
       // 补货界面（导入完成后进入）+ 关联的齐货通弹窗
-      // size 默认 2000 = 一次展示本次导入的全部商品（补货是一次性作业，不按页切）
-      rp: { visible: false, loading: false, pricing: false, batchId: null, rows: [], prices: {}, total: 0, page: 1, size: 2000, expect: 0, session: { configured: false, tokenMasked: '', xUser: '' } },
+      // 补货默认 20 条/页（页码可翻）；页大小可切 20/50/100/全部(2000)
+      rp: { visible: false, loading: false, pricing: false, batchId: null, rows: [], prices: {}, total: 0, page: 1, size: 20, expect: 0, session: { configured: false, tokenMasked: '', xUser: '' } },
       rpLink: { visible: false, sku: '', keyword: '', rows: [], loading: false, error: '', picked: null },
       rpBuy: { visible: false, sku: '', goodsId: null, goodsName: '', qty: 1, saving: false },
       qhtDlg: { visible: false, token: '', xUser: '', saving: false },
@@ -4703,7 +4706,7 @@ const vm = new Vue({
       this.rp.prices = {};
       this.rp.total = 0;
       this.rp.page = 1;
-      this.rp.size = 2000; // 一次展示本次导入的全部商品
+      this.rp.size = 20; // 默认 20 条/页，页码可翻；要一次看全在分页器里选「2000」
       this.rp.expect = Number(expectTotal) || 0;
       await Promise.all([this.loadReplenish(), this.loadQhtSession()]);
       await this.loadQhtPrices();
@@ -4723,6 +4726,7 @@ const vm = new Vue({
       } catch (e) { this.$message.error('补货列表加载失败: ' + e.message); }
       finally { this.rp.loading = false; }
     },
+    async onRpSize(v) { this.rp.size = v; this.rp.page = 1; await this.loadReplenish(); await this.loadQhtPrices(); },
     async onRpPage(v) { this.rp.page = v; await this.loadReplenish(); await this.loadQhtPrices(); },
     /** 批次筛出的数量少于本次导入时：去掉批次条件，看全部商品 */
     async showAllProducts() {
