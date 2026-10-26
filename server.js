@@ -151,6 +151,36 @@ function findAgentInstaller() {
   return { file, size, mtime };
 }
 
+/** dist/ 里全部 .exe 安装包清单（用于看板「助手安装包」管理，支持上传/删除/指定下载） */
+function listAllInstallers() {
+  const dir = path.join(ROOT, 'dist');
+  let names = [];
+  try { names = fs.readdirSync(dir); } catch (e) { return []; }
+  return names
+    .filter((n) => /\.exe$/i.test(n))
+    .map((n) => {
+      let st = null;
+      try { st = fs.statSync(path.join(dir, n)); } catch (e) { /* 忽略 */ }
+      return { file: n, version: parseVerFromName(n), size: st ? st.size : 0, mtime: st ? st.mtimeMs : 0 };
+    })
+    .sort((a, b) => b.mtime - a.mtime);
+}
+
+/**
+ * 安装包上传文件名净化：只允许「基本名 + .exe」，禁路径穿越 / 目录分隔符。
+ * 允许中文、字母、数字、下划线、点、短横、空格（覆盖「催收小助手-Setup-0.2.28.exe」这类命名）。
+ * @returns {string} 净化后的文件名；非法返回空串
+ */
+function sanitizeInstallerName(raw) {
+  if (!raw) return '';
+  const s = String(raw).trim();
+  // 先拦掉任何路径分隔符 / 相对段，杜绝 a/b.exe、..\x.exe、../../x.exe 之类
+  if (s.includes('/') || s.includes('\\') || s.includes('..')) return '';
+  const base = path.basename(s);
+  if (!base || !/^[\w.\-\u4e00-\u9fa5][\w.\-\u4e00-\u9fa5 ]*\.exe$/i.test(base)) return '';
+  return base;
+}
+
 // ── 助手安装包重新打包（系统管理页一键触发）──
 //    在服务器上执行 npm run agent:dist（electron-builder），产物落到 dist/，
 //    下载接口按「最新构建时间」自动取包，打完即生效，无需改代码。
@@ -167,6 +197,8 @@ function agentBuildStatus() {
     finishedAt: agentBuild.finishedAt,
     version: (() => { try { return require('./package.json').version; } catch (e) { return ''; } })(),
     installer: ins ? { file: ins.file, sizeBytes: ins.size, mtime: ins.mtime || 0 } : null,
+    installers: listAllInstallers(),
+    platform: process.platform,
     log: agentBuild.log.slice(-80),
   };
 }
@@ -2238,8 +2270,10 @@ const server = http.createServer(async (req, res) => {
     }
 
     // ── 本机助手安装包下载（公开；文件来自 dist/，未构建则 404）──
+    //    ?file=<包名> 可指定下载某个具体版本；缺省给「最新构建」那份
     if (method === 'GET' && p === '/api/agent/download-exe') {
-      const ins = findAgentInstaller();
+      const qName = sanitizeInstallerName(url.searchParams.get('file'));
+      const ins = qName ? { file: qName } : findAgentInstaller();
       if (!ins) {
         return sendJson(res, 404, {
           error: '安装包尚未构建。请管理员在本机执行 npm run agent:dist 生成，或联系管理员获取「催收小助手」安装包。',
@@ -2403,6 +2437,64 @@ const server = http.createServer(async (req, res) => {
         await logOp(user, 'agent.build', {});
         return sendJson(res, 200, { ok: true, message: '打包已开始，约 1~2 分钟' });
       }
+    }
+
+    // ── 本机助手安装包上传（仅超级管理员；Linux 容器无法 npm run agent:dist 时的替代方案）──
+    //    流程：管理员在本机 Windows 跑 npm run agent:dist → 把生成的 .exe 上传到这里 →
+    //    写入 dist/（同名覆盖）→ 版本策略自动取用 → 旧助手到宽限期后可被硬拦并一键更新。
+    //    注意：裸二进制上传（fetch/XHR 直接发 File），不走 readBody；超大直接流式截断。
+    if (method === 'POST' && p === '/api/agent/installer-upload') {
+      if (!user || !isAdmin) return sendJson(res, user ? 403 : 401, { error: '仅超级管理员可上传安装包' });
+      const name = sanitizeInstallerName(url.searchParams.get('name'));
+      if (!name) return sendJson(res, 400, { error: '文件名非法（仅允许 .exe，且不能含路径分隔符 / ..）' });
+      const MAX = 400 * 1024 * 1024; // 400MB 上限，超出直接拒绝
+      const dest = path.join(ROOT, 'dist', name);
+      let done = false;
+      const fail = (code, obj) => { if (done) return; done = true; sendJson(res, code, obj); };
+      const ws = fs.createWriteStream(dest);
+      let size = 0;
+      let aborted = false;
+      req.on('data', (c) => {
+        if (aborted || done) return;
+        size += c.length;
+        if (size > MAX) {
+          aborted = true;
+          try { ws.destroy(); } catch (e) { /* 忽略 */ }
+          try { fs.unlinkSync(dest); } catch (e) { /* 忽略 */ }
+          try { req.destroy(); } catch (e) { /* 忽略 */ }
+          fail(413, { error: '安装包超过 400MB 上限，已丢弃' });
+        }
+      });
+      req.on('error', () => {
+        if (aborted || done) return;
+        try { ws.destroy(); } catch (e) { /* 忽略 */ }
+        try { fs.unlinkSync(dest); } catch (e) { /* 忽略 */ }
+      });
+      ws.on('error', (e) => {
+        try { fs.unlinkSync(dest); } catch (er) { /* 忽略 */ }
+        fail(500, { error: '写入安装包失败：' + e.message });
+      });
+      req.pipe(ws);
+      ws.on('finish', () => {
+        if (aborted || done) return;
+        const ins = findAgentInstaller();
+        fail(200, {
+          ok: true,
+          installer: ins ? { file: ins.file, version: parseVerFromName(ins.file), sizeBytes: ins.size } : null,
+          policy: agentUpdatePolicy(),
+        });
+      });
+      return; // 由上面的事件回调结束响应
+    }
+
+    // ── 本机助手安装包删除（仅超级管理员）──
+    if (method === 'DELETE' && p === '/api/agent/installer') {
+      if (!user || !isAdmin) return sendJson(res, user ? 403 : 401, { error: '仅超级管理员可删除安装包' });
+      const name = sanitizeInstallerName(url.searchParams.get('name'));
+      if (!name) return sendJson(res, 400, { error: '文件名非法' });
+      const full = path.join(ROOT, 'dist', name);
+      try { fs.unlinkSync(full); } catch (e) { return sendJson(res, 404, { error: '文件不存在或已删除' }); }
+      return sendJson(res, 200, { ok: true, policy: agentUpdatePolicy() });
     }
 
     // 操作日志上报（前端埋点）：action 必须命中白名单，文案一律由服务端渲染
