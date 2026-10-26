@@ -466,31 +466,20 @@
         <div class="page-head">
           <h2>税名核对</h2>
           <el-alert type="info" :closable="false" show-icon style="margin-top:8px"
-            title="同一家店，在 1688 上叫一个名字，开出来的发票上往往写着另一个名字 —— 这里就是把这两个名字对起来的。">
+            title="本页面是处理税务已开票公司名称无法在 1688 商家匹配到的，需要你手动匹配，操作步骤如下">
             <div style="font-size:12px;line-height:1.9">
-              举个最常见的例子：你在 1688 上跟「东莞市旭弘贸易有限公司」进货，收到的发票上销方写的却是「东莞旭弘贸易有限公司」，少一个「市」字。<br>
-              <b>这不是导错了，也不是假票</b>：发票上的名字是对方的工商登记名称，1688 上的名字是店铺名，本来就允许不一样。系统只能按字面比对，字面不一样就认不出是同一家，<br>
-              结果就是这张发票不知道该算到哪个商家头上 —— 看板上的「已开票金额」对不上订单、「待开票金额」一直不减。<br>
-              <b>你要做的就一件事：亲口告诉系统「这个发票名称，就是这家 1688 商家」。</b>对过一次全公司永久记住，以后同名发票自动对上，别人也不用再对一遍。
-              <div style="margin:10px 0 4px;padding-top:8px;border-top:1px dashed rgba(144,147,153,.35)"></div>
-              <b>怎么操作（3 步）</b><br>
-              ① 看下面「待人工比对」—— 那是系统认不出来的发票名称，<b>按最近开票时间从新到旧排列</b>，建议优先处理最近还在开的<br>
-              ② 在它右边输入 1688 商家的名字（输两个字就能搜），从下拉里选中，点「保存」<br>
-              ③ 如果这个名称确实不是 1688 上任何一家店（运费、服务费、个人代开、税务局代开等），点「忽略」，它就不会再出现<br>
-              配对成功的会移到下面「已维护映射」里，随时可以改或删；以后导入的新发票里如果有认不出的名称，会自动回到上面的待比对列表。
+              ① 看下面「待人工比对」—— 那是系统认不出来的发票名称<br>
+              ② 在右边输入 1688 商家的名字，从下拉里选中，点「保存」<br>
+              ③ 如果这个名称确实不是 1688 上任何一家店，点「忽略」，它就不会再出现，也不会被统计进去<br>
+              配对成功的会移到下面「已维护映射」里；
             </div>
           </el-alert>
-          <el-alert v-if="map.allUsers" type="success" :closable="false" show-icon style="margin-top:8px"
-            title="超级管理员全局视图：此处列出全体用户的销方名称与全部已维护映射（含未映射），维护结果对所有用户生效。"></el-alert>
         </div>
         <el-card shadow="never" class="section-card">
           <div slot="header"><b>待人工比对</b> <span class="loginid">（{{ map.unmatched.length }} 个销方名称未匹配）</span></div>
           <el-alert v-if="!map.unmatched.length" type="success" :closable="false" show-icon
-                    :title="'✓ 所有销方名称都已处理：已匹配到 1688 商家，或已忽略' + (map.ignored.length ? '（当前已忽略 ' + map.ignored.length + ' 个，可在下方展开恢复）' : '') + '。'"></el-alert>
+                    title="✓ 所有销方名称都已处理（已匹配或已忽略）"></el-alert>
           <template v-else>
-            <el-alert type="warning" :closable="false" show-icon style="margin-bottom:10px"
-                      :title="'以下 ' + map.unmatched.length + ' 个税务局销方名称没有匹配上 1688 商家：在右边输入商家名（两个字就能搜）选中后点「保存」；若确认没有对应的 1688 商家，点「忽略」把它移出列表（可在下方「已忽略」里恢复）。'"
-                      :description="'商家候选共 ' + map.sellerTotal + ' 个，下拉里一次最多显示 50 条，输入关键词可缩小范围。'"></el-alert>
             <el-table :data="unmatchedPage" size="small" border style="width:100%">
               <el-table-column label="税务局销方名称" min-width="180"><template slot-scope="p"><span class="company">{{ p.row.tax_seller_name }}</span></template></el-table-column>
               <el-table-column label="销方税号" width="150"><template slot-scope="p"><span class="loginid">{{ p.row.seller_tax_no || '' }}</span></template></el-table-column>
@@ -534,7 +523,7 @@
 
         <el-card shadow="never" class="section-card">
           <div slot="header"><b>已维护映射</b> <span class="loginid">（{{ map.mappings.length }} 条）</span></div>
-          <el-alert v-if="!map.mappings.length" type="info" :closable="false" show-icon title="这里还没有与你相关的映射：先在「1688发票」页点「导入税务局发票数据」上传发票，系统会自动匹配；匹配不上的会出现在上面「待人工比对」。"></el-alert>
+          <el-alert v-if="!map.mappings.length" type="info" :closable="false" show-icon title="暂无已维护映射"></el-alert>
           <template v-else>
             <el-table :data="mappingPage" size="small" border style="width:100%">
               <el-table-column prop="tax_seller_name" label="税务局销方名称" min-width="170"></el-table-column>
@@ -578,7 +567,7 @@
 
         <el-card shadow="never" class="section-card" v-if="map.ignored.length">
           <el-collapse>
-            <el-collapse-item :title="'已忽略 ' + map.ignored.length + ' 条（确认无对应 1688 商家，不参与待比对与统计；点击展开可恢复）'" name="ignored">
+            <el-collapse-item :title="'已忽略 ' + map.ignored.length + ' 条（点击展开可恢复）'" name="ignored">
               <el-table :data="ignoredPage" size="small" border style="width:100%">
                 <el-table-column label="税务局销方名称" min-width="200"><template slot-scope="p"><span class="company">{{ p.row.tax_seller_name }}</span></template></el-table-column>
                 <el-table-column label="说明" width="200"><template slot-scope="p"><span class="loginid">{{ p.row.note || '' }}</span></template></el-table-column>
@@ -2101,7 +2090,7 @@ const vm = new Vue({
       // 历史弹窗
       hist: { visible: false, title: '', loading: false, logs: [], total: 0, okCount: 0, failCount: 0 },
       // 映射
-      map: { loading: false, mappings: [], unmatched: [], ignored: [], sellerTotal: 0, unmatchedCount: 0, ignoredCount: 0, allUsers: false },
+      map: { loading: false, mappings: [], unmatched: [], ignored: [], unmatchedCount: 0, ignoredCount: 0, allUsers: false },
       // 商家候选下拉：按关键词向服务端要前 50 条（不再整表下发），cache 用于「选中后取会员名」
       mapSeller: { q: '', opts: [], cache: {}, loading: false, timer: null },
       mapDraft: {}, unPage: 1, unSize: 20, mapPage: 1, mapSize: 20, igPage: 1, igSize: 20,

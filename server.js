@@ -1919,11 +1919,9 @@ async function loadMapping(userId, { allUsers = false } = {}) {
     `SELECT * FROM v_unmatched_seller_name WHERE user_id = ?
       ORDER BY last_invoice_date IS NULL, last_invoice_date DESC, invoice_amount DESC`, [userId]
   );
-  // 商家候选不再随映射整表返回（近 3000 条、约 600KB）；前端改按需搜索
-  const sellerTotal = await searchSellers(userId, { allUsers, limit: 1 });
+  // 商家候选不再随映射整表返回（近 3000 条、约 600KB）；前端改按需搜索（/api/mapping/sellers）
   return {
     mappings, ignored, unmatched,
-    sellerTotal: sellerTotal.total,
     unmatchedCount: unmatched.length, ignoredCount: ignored.length, allUsers,
   };
 }
