@@ -672,7 +672,11 @@
             </el-tag>
             <el-button size="small" @click="openQhtDlg">登录态设置</el-button>
             <el-button size="small" :loading="rp.pricing" @click="loadQhtPrices">重新取价</el-button>
-            <span class="loginid">共 {{ rp.rows.length }} 个商品</span>
+            <span class="loginid">共 {{ rp.total }} 个商品</span>
+            <span v-if="rp.expect && rp.total < rp.expect" style="font-size:12px;color:#e6a23c">
+              本次导入 {{ rp.expect }} 个，当前筛出 {{ rp.total }} 个（同名 SKU 已合并）
+              <el-button type="text" size="mini" @click="showAllProducts">查看全部商品</el-button>
+            </span>
           </div>
           <el-table :data="rp.rows" size="small" border max-height="60vh" style="width:100%" v-loading="rp.loading"
                     empty-text="本次导入没有商品">
@@ -714,6 +718,11 @@
             <el-table-column prop="transit_stock" label="在途库存" width="90"></el-table-column>
             <el-table-column prop="suggest_qty" label="建议量" width="90"></el-table-column>
           </el-table>
+          <div class="pager-wrap">
+            <el-pagination background layout="total, sizes, prev, pager, next" :total="rp.total" :page-size="rp.size"
+                           :current-page="rp.page" :page-sizes="pageSizes"
+                           @size-change="onRpSize" @current-change="onRpPage"></el-pagination>
+          </div>
         </el-dialog>
 
         <!-- 关联齐货通商品：搜关键字 → 选商品 → 确认 -->
@@ -2194,7 +2203,7 @@ const vm = new Vue({
         filteredValue: 0, latestBatch: null, trend: [],
       },
       // 补货界面（导入完成后进入）+ 关联的齐货通弹窗
-      rp: { visible: false, loading: false, pricing: false, batchId: null, rows: [], prices: {}, session: { configured: false, tokenMasked: '', xUser: '' } },
+      rp: { visible: false, loading: false, pricing: false, batchId: null, rows: [], prices: {}, total: 0, page: 1, size: 20, expect: 0, session: { configured: false, tokenMasked: '', xUser: '' } },
       rpLink: { visible: false, sku: '', keyword: '', rows: [], loading: false, error: '', picked: null },
       rpBuy: { visible: false, sku: '', goodsId: null, goodsName: '', qty: 1, saving: false },
       qhtDlg: { visible: false, token: '', xUser: '', saving: false },
@@ -4570,7 +4579,7 @@ const vm = new Vue({
               this.$confirm(`共导入 <b>${d.total || 0}</b> 个商品。是否需要补货？`, '导入完成', {
                 dangerouslyUseHTMLString: true,
                 confirmButtonText: '是，去补货', cancelButtonText: '否，稍后再说', type: 'success',
-              }).then(() => { this.up.visible = false; this.openReplenish(d.batchId); })
+              }).then(() => { this.up.visible = false; this.openReplenish(d.batchId, d.total); })
                 .catch(() => { this.up.visible = false; });
             });
           }
@@ -4687,29 +4696,45 @@ const vm = new Vue({
       finally { p.saving = false; }
     },
     // ══════ 补货界面（导入完成后询问是否进入）══════
-    async openReplenish(batchId) {
+    async openReplenish(batchId, expectTotal) {
       this.rp.visible = true;
       this.rp.batchId = batchId || null;
       this.rp.rows = [];
       this.rp.prices = {};
+      this.rp.total = 0;
+      this.rp.page = 1;
+      this.rp.size = 20;
+      this.rp.expect = Number(expectTotal) || 0;
       await Promise.all([this.loadReplenish(), this.loadQhtSession()]);
       await this.loadQhtPrices();
     },
-    /** 本次导入的商品（按 batch 精确取；没有 batchId 时取最近更新的 500 条） */
+    /** 本次导入的商品（按 batch 精确取；没有 batchId 时取最近更新的）— 服务端分页，避免一次拉不全 */
     async loadReplenish() {
       this.rp.loading = true;
       try {
-        const q = new URLSearchParams({ size: '500' });
+        const q = new URLSearchParams({ page: String(this.rp.page), size: String(this.rp.size) });
         if (this.rp.batchId) q.set('batch', this.rp.batchId);
         const d = await this.api('/api/products?' + q.toString());
         this.rp.rows = d.rows || [];
+        this.rp.total = Number(d.total) || 0;
+        // 页码越界（改大每页条数、或数据变少）时回正重拉
+        const maxPage = Math.max(1, Math.ceil(this.rp.total / this.rp.size));
+        if (this.rp.page > maxPage) { this.rp.page = maxPage; await this.loadReplenish(); }
       } catch (e) { this.$message.error('补货列表加载失败: ' + e.message); }
       finally { this.rp.loading = false; }
+    },
+    async onRpSize(v) { this.rp.size = v; this.rp.page = 1; await this.loadReplenish(); await this.loadQhtPrices(); },
+    async onRpPage(v) { this.rp.page = v; await this.loadReplenish(); await this.loadQhtPrices(); },
+    /** 批次筛出的数量少于本次导入时：去掉批次条件，看全部商品 */
+    async showAllProducts() {
+      this.rp.batchId = null; this.rp.expect = 0; this.rp.page = 1;
+      await this.loadReplenish();
+      await this.loadQhtPrices();
     },
     async loadQhtSession() {
       try { this.rp.session = await this.api('/api/qht/session'); } catch (e) { /* 静默：状态提示而已 */ }
     },
-    /** 批量实时取齐货通价（只查已关联的商品） */
+    /** 批量实时取齐货通价（只查当前页里已关联的商品，翻页/改页大小都会重取） */
     async loadQhtPrices() {
       const ids = [...new Set((this.rp.rows || []).map((r) => r.qht_goods_id).filter(Boolean))];
       if (!ids.length) { this.rp.prices = {}; return; }
