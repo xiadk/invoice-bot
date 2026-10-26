@@ -666,7 +666,7 @@
         </el-card>
 
         <!-- ══════ 补货界面（导入完成后进入）══════ -->
-        <el-dialog :visible.sync="rp.visible" title="补货" width="94%" top="4vh" append-to-body :close-on-click-modal="false">
+        <el-dialog :visible.sync="rp.visible" title="补货" width="94%" top="3vh" append-to-body :close-on-click-modal="false">
           <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px">
             <el-alert type="info" :closable="false" show-icon style="flex:1;min-width:340px"
               title="齐货通价 = 一件价格 ÷ 一件瓶数（实时取自齐货通商品详情，两位小数四舍五入）；还没关联的商品点「关联」，搜到齐货通商品后绑定即可取价。">
@@ -682,18 +682,18 @@
               <el-button type="text" size="mini" @click="showAllProducts">查看全部商品</el-button>
             </span>
           </div>
-          <el-table :data="rp.rows" size="small" border max-height="64vh" class="rp-table" style="width:100%" v-loading="rp.loading"
+          <el-table :data="rp.rows" size="small" border :max-height="tblH.rp" class="rp-table" style="width:100%" v-loading="rp.loading"
                     empty-text="本次导入没有商品">
-            <el-table-column label="商品名称" min-width="240">
+            <el-table-column label="商品名称" min-width="200">
               <template slot-scope="p"><span :title="p.row.goods_name">{{ p.row.goods_name }}</span></template>
             </el-table-column>
-            <el-table-column label="商品SKU" width="170">
+            <el-table-column label="商品SKU" width="150">
               <template slot-scope="p"><span class="loginid" style="font-family:Consolas,monospace">{{ p.row.sku }}</span></template>
             </el-table-column>
-            <el-table-column label="采购价" width="90">
+            <el-table-column label="采购价" width="80">
               <template slot-scope="p"><span class="amount">{{ yuan(p.row.purchase_price) }}</span></template>
             </el-table-column>
-            <el-table-column label="齐货通价" min-width="230">
+            <el-table-column label="齐货通价" min-width="190">
               <template slot-scope="p">
                 <template v-if="p.row.qht_goods_id">
                   <template v-if="rp.prices[p.row.qht_goods_id] && rp.prices[p.row.qht_goods_id].ok">
@@ -709,18 +709,18 @@
                 <el-button v-else size="mini" type="warning" plain @click="openLinkDlg(p.row)">关联</el-button>
               </template>
             </el-table-column>
-            <el-table-column label="阿发价" width="90">
+            <el-table-column label="阿发价" width="80">
               <template slot-scope="p"><span class="loginid">—</span></template>
             </el-table-column>
-            <el-table-column label="本地价" width="130">
+            <el-table-column label="本地价" width="118">
               <template slot-scope="p">
                 <el-input v-model="p.row.local_price" size="mini" placeholder="可手工填写"
-                          @change="saveLocalPrice(p.row)" style="width:110px"></el-input>
+                          @change="saveLocalPrice(p.row)" style="width:100px"></el-input>
               </template>
             </el-table-column>
-            <el-table-column prop="available_stock" label="可用库存" width="90"></el-table-column>
-            <el-table-column prop="transit_stock" label="在途库存" width="90"></el-table-column>
-            <el-table-column prop="suggest_qty" label="建议量" width="90"></el-table-column>
+            <el-table-column prop="available_stock" label="可用库存" width="80"></el-table-column>
+            <el-table-column prop="transit_stock" label="在途库存" width="80"></el-table-column>
+            <el-table-column prop="suggest_qty" label="建议量" width="80"></el-table-column>
           </el-table>
           <div class="pager-wrap">
             <el-pagination background layout="total, sizes, prev, pager, next" :total="rp.total" :page-size="rp.size"
@@ -730,18 +730,18 @@
         </el-dialog>
 
         <!-- 关联齐货通商品：搜关键字 → 选商品 → 确认 -->
-        <el-dialog title="关联齐货通商品" :visible.sync="rpLink.visible" width="760px" append-to-body>
+        <el-dialog title="关联齐货通商品" :visible.sync="rpLink.visible" width="760px" top="4vh" append-to-body>
           <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px">
             <el-input v-model="rpLink.keyword" size="small" placeholder="输入商品名关键字搜索齐货通" style="flex:1"
                       @keyup.enter.native="newSearchQht"></el-input>
             <el-button size="small" type="primary" :loading="rpLink.loading" @click="newSearchQht">搜索</el-button>
           </div>
           <el-alert v-if="rpLink.error" type="error" :closable="false" show-icon :title="rpLink.error" style="margin-bottom:10px"></el-alert>
-          <el-table :data="rpLink.rows" size="small" border max-height="46vh" class="rp-link-table" style="width:100%" highlight-current-row
+          <el-table :data="rpLink.rows" size="small" border :max-height="tblH.link" class="rp-link-table" style="width:100%" highlight-current-row
                     @current-change="v => rpLink.picked = v" empty-text="输入关键字搜索">
-            <el-table-column label="图片" width="70">
+            <el-table-column label="图片" width="60">
               <template slot-scope="p">
-                <img v-if="p.row.picture" :src="p.row.picture" style="width:48px;height:48px;object-fit:cover;border-radius:4px">
+                <img v-if="p.row.picture" :src="p.row.picture" style="width:36px;height:36px;object-fit:cover;border-radius:4px">
                 <span v-else class="loginid">无图</span>
               </template>
             </el-table-column>
@@ -2213,6 +2213,8 @@ const vm = new Vue({
       // 补货界面（导入完成后进入）+ 关联的齐货通弹窗
       // 补货默认 20 条/页（页码可翻）；页大小可切 20/50/100/全部(2000)
       rp: { visible: false, loading: false, pricing: false, batchId: null, rows: [], prices: {}, total: 0, page: 1, size: 20, expect: 0, session: { configured: false, tokenMasked: '', xUser: '' } },
+      // 弹窗表格高度按视口动态算（写死 vh 在小屏笔记本上会把弹窗撑出屏幕）
+      tblH: { rp: 500, link: 320 },
       rpLink: { visible: false, sku: '', keyword: '', rows: [], loading: false, error: '', picked: null, total: 0, page: 1, size: 20 },
       rpBuy: { visible: false, sku: '', goodsId: null, goodsName: '', qty: 1, saving: false },
       qhtDlg: { visible: false, token: '', xUser: '', saving: false },
@@ -2628,6 +2630,7 @@ const vm = new Vue({
     'detail.visible'(v) { if (!v) this.detail.q = ''; },
   },
   mounted() {
+    this.calcTblH();
     window.addEventListener('resize', this.onResize);
     document.addEventListener('click', this.onDocClick);   // 全局按钮点击埋点（操作日志）
     // 助手连接状态：导航栏常驻展示，每 10 秒轻量刷新一次
@@ -3027,10 +3030,17 @@ const vm = new Vue({
       this.$nextTick(() => this.renderTrend());
     },
     onResize() {
+      this.calcTblH();
       if (this._charts) this._charts.forEach((ch) => { try { ch.resize(); } catch (e) {} });
       if (this._rqChart) { try { this._rqChart.resize(); } catch (e) {} }
       if (this._profitChart) { try { this._profitChart.resize(); } catch (e) {} }
       if (this._pTrendChart) { try { this._pTrendChart.resize(); } catch (e) {} }
+    },
+    /** 弹窗表格高度自适应：视口高 − 弹窗固定部分（标题/工具栏/表头/分页/边距），保证弹窗整体不出屏 */
+    calcTblH() {
+      const h = window.innerHeight || 800;
+      this.tblH.rp = Math.max(260, h - 300);   // 补货弹窗固定部分 ≈300px
+      this.tblH.link = Math.max(220, h - 400); // 关联弹窗固定部分（含 footer）≈400px
     },
     renderTrend() {
       if (this.page !== 'board') return;
