@@ -782,11 +782,41 @@
               <div style="margin-bottom:6px">
                 <b>助手安装包</b>
                 <span class="loginid" style="margin-left:6px">
-                  <template v-if="build.installer">当前：{{ build.installer.file }}（{{ (build.installer.sizeBytes / 1048576).toFixed(1) }} MB）</template>
-                  <template v-else>尚未构建（dist/ 里没有安装包）</template>
+                  <template v-if="build.installer">当前最新：{{ build.installer.file }}（{{ (build.installer.sizeBytes / 1048576).toFixed(1) }} MB）</template>
+                  <template v-else>dist/ 里没有可用安装包</template>
                 </span>
               </div>
-              <div>
+
+              <!-- 上传：Linux 容器无法 npm run agent:dist 时的替代方案 -->
+              <div style="margin-bottom:8px">
+                <label class="el-button el-button--primary el-button--small" style="position:relative;overflow:hidden;cursor:pointer">
+                  <input ref="installerFile" type="file" accept=".exe" style="position:absolute;inset:0;opacity:0;cursor:pointer" @change="onInstallerFile">
+                  {{ uploading ? '上传中…' : '⬆ 上传安装包（.exe）' }}
+                </label>
+                <span v-if="uploading" style="margin-left:10px;color:#2b7de9">{{ uploadProgress }}%</span>
+                <span v-if="uploadMsg" style="margin-left:10px" :style="{ color: uploadMsg.startsWith('✓') ? '#34a853' : '#e53935' }">{{ uploadMsg }}</span>
+              </div>
+
+              <!-- 已上传清单 -->
+              <el-table v-if="build.installers && build.installers.length" :data="build.installers" size="mini" max-height="200" style="margin-top:4px">
+                <el-table-column label="文件" min-width="200">
+                  <template slot-scope="s"><span class="loginid">{{ s.row.file }}</span></template>
+                </el-table-column>
+                <el-table-column label="版本" width="90">
+                  <template slot-scope="s">v{{ s.row.version || '—' }}</template>
+                </el-table-column>
+                <el-table-column label="大小" width="100">
+                  <template slot-scope="s">{{ (s.row.size / 1048576).toFixed(1) }} MB</template>
+                </el-table-column>
+                <el-table-column label="操作" width="150">
+                  <template slot-scope="s">
+                    <el-button type="text" size="mini" @click="downloadInstaller(s.row.file)">下载</el-button>
+                    <el-button type="text" size="mini" style="color:#e53935" @click="deleteInstaller(s.row.file)">删除</el-button>
+                  </template>
+                </el-table-column>
+              </el-table>
+
+              <div style="margin-top:8px">
                 <el-button type="warning" size="small" :loading="build.running" @click="rebuildAgent">
                   {{ build.running ? '打包中…（约 1~2 分钟）' : '🔨 重新打包最新助手' }}
                 </el-button>
@@ -796,8 +826,10 @@
               <div v-if="build.log.length" class="preview-box"
                    style="max-height:170px;overflow:auto;font-size:11px;line-height:1.6;margin-top:8px;white-space:pre-wrap;word-break:break-all">{{ build.log.join('\n') }}</div>
               <div class="form-tip" style="margin-top:6px">
-                在本服务所在机器上执行 <code>npm run agent:dist</code> 重新构建（需 Windows 环境）。
-                打包完成后，下载页与「下载本机助手」按钮会自动提供最新构建的安装包。
+                <b>Windows 服务器</b>：点「重新打包」一键构建（需本机 Windows 环境）。<br>
+                <b>Linux 容器</b>：无法在本机打包，请在本机 Windows 跑 <code>npm run agent:dist</code>，
+                把生成的 <code>催收小助手-Setup-x.x.x.exe</code>（和 portable 版）上传到此。上传即覆盖同名文件，
+                版本策略随之生效；到宽限期后旧助手会被硬拦并可直接「一键更新」下载这里的最新包。
               </div>
 
               <el-divider style="margin:14px 0 10px"></el-divider>
@@ -2073,7 +2105,8 @@ const vm = new Vue({
         + '税号：{taxNo}，邮箱：{email}，非常感谢，已经在平台申请！！！',
       previewText: '', saveOk: false,
       users: [], newUser: { company: '', password: '', role: 'user', taxNo: '', email: '', note: '' },
-      build: { running: false, ok: null, error: '', version: '', installer: null, log: [] },
+      build: { running: false, ok: null, error: '', version: '', installer: null, installers: [], platform: '', log: [] },
+      uploading: false, uploadProgress: 0, uploadMsg: '',
       creatingUser: false, createOk: false,
       userEdit: { visible: false, id: null, title: '', company: '', taxNo: '', email: '', note: '', hint: '', lockCompany: false, saving: false },
       // 菜单权限弹窗（退单列表 / 实时毛利监控）
@@ -4006,6 +4039,60 @@ const vm = new Vue({
         this.loadBuildStatus();
       } catch (e) {
         this.$message.error('触发打包失败：' + e.message);
+      }
+    },
+    // ── 助手安装包上传（Linux 容器无法 npm run agent:dist 时的替代方案）──
+    onInstallerFile(e) {
+      const f = e.target.files && e.target.files[0];
+      if (f) this.uploadInstaller(f);
+      e.target.value = ''; // 允许重复选同一文件
+    },
+    uploadInstaller(file) {
+      if (!/\.exe$/i.test(file.name)) { this.uploadMsg = '✗ 仅支持 .exe 安装包'; return; }
+      this.uploading = true;
+      this.uploadProgress = 0;
+      this.uploadMsg = '';
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', '/api/agent/installer-upload?name=' + encodeURIComponent(file.name));
+      xhr.setRequestHeader('content-type', 'application/octet-stream');
+      // 同域请求默认带看板 Cookie；上传进度靠 upload.onprogress
+      xhr.upload.onprogress = (ev) => {
+        if (ev.lengthComputable) this.uploadProgress = Math.floor((ev.loaded / ev.total) * 100);
+      };
+      xhr.onload = () => {
+        this.uploading = false;
+        let d = null;
+        try { d = JSON.parse(xhr.responseText); } catch (e) { /* 忽略 */ }
+        if (xhr.status >= 200 && xhr.status < 300 && d && d.ok) {
+          this.uploadMsg = '✓ 已上传 ' + (d.installer ? d.installer.file : file.name);
+          this.loadBuildStatus();
+        } else {
+          this.uploadMsg = '✗ ' + ((d && d.error) || ('上传失败（HTTP ' + xhr.status + '）'));
+        }
+      };
+      xhr.onerror = () => { this.uploading = false; this.uploadMsg = '✗ 网络错误，上传失败'; };
+      xhr.send(file);
+    },
+    downloadInstaller(file) {
+      // 公开下载接口；?file= 指定具体版本，否则给最新
+      const a = document.createElement('a');
+      a.href = '/api/agent/download-exe?file=' + encodeURIComponent(file);
+      a.download = file;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    },
+    async deleteInstaller(file) {
+      try {
+        await this.$confirm('删除安装包「' + file + '」？删除后该版本不再可下载。', '删除安装包', { type: 'warning' });
+      } catch (e) { return; }
+      try {
+        const d = await this.api('/api/agent/installer?name=' + encodeURIComponent(file), { method: 'DELETE' });
+        if (d.error) { this.$message.error(d.error); return; }
+        this.$message.success('已删除');
+        this.loadBuildStatus();
+      } catch (e) {
+        this.$message.error('删除失败：' + e.message);
       }
     },
     async loadConfigUI() {
