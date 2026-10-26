@@ -2928,7 +2928,8 @@ const server = http.createServer(async (req, res) => {
     // ── 商品列表（前置仓补货参考导入） ── 所有登录用户可用（菜单不做逐用户授权）
     if (method === 'GET' && p === '/api/products') {
       const page = Math.max(1, Number(url.searchParams.get('page')) || 1);
-      const size = Math.min(200, Math.max(1, Number(url.searchParams.get('size')) || 20));
+      // 上限 2000：补货界面要一次展示本次导入的全部商品（导入文件常见几百~上千行）
+      const size = Math.min(2000, Math.max(1, Number(url.searchParams.get('size')) || 20));
       const q = (url.searchParams.get('q') || '').trim();
       const status = (url.searchParams.get('status') || '').trim();
       const sort = url.searchParams.get('sort') || ''; // ''=最近更新 | price_asc | price_desc
