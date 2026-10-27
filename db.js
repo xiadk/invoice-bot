@@ -384,7 +384,7 @@ async function ensureQnhSchema(q) {
 
     // ── 账单（按月统计收支）─────────────────────────────────────────────
     // 一人一月一行：手工项存这里；1688/拼多多两项不落库，每次由 invoice_order / pdd_order 实时聚合。
-    // 收入 = 美团 + 淘宝 + 京东（全部手工）；支出 = 1688(自动) + 拼多多(自动) + 下列 11 项手工。
+    // 收入 = 美团 + 淘宝 + 京东（全部手工）；支出 = 1688(自动) + 拼多多(自动) + 下列 12 项手工。
     'CREATE TABLE IF NOT EXISTS `billing_month` (' +
       "  `user_id` INT NOT NULL DEFAULT 1 COMMENT '数据归属用户（app_user.id）'," +
       "  `month` CHAR(7) NOT NULL COMMENT '账期月份 YYYY-MM'," +
@@ -394,6 +394,7 @@ async function ensureQnhSchema(q) {
       "  `exp_rent` DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT '支出：房租（手工）'," +
       "  `exp_utility` DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT '支出：水电（手工）'," +
       "  `exp_labor` DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT '支出：人工（手工）'," +
+      "  `exp_warehouse` DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT '支出：中心仓（手工）'," +
       "  `exp_delivery` DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT '支出：配送费（手工）'," +
       "  `exp_promo` DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT '支出：推广费（手工）'," +
       "  `exp_liquor` DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT '支出：自采酒水（手工）'," +
@@ -544,6 +545,14 @@ async function migrate(conn, dbName) {
       "COMMENT '是否允许查看账单页（1=开启，超级管理员始终可见）'"
     );
   }
+  // ── 账单新增支出项「中心仓」（v0.2.43）：排在「人工」之后，手工录入，计入支出合计
+  if (await tableExists('billing_month') && !(await colExists('billing_month', 'exp_warehouse'))) {
+    await q(
+      "ALTER TABLE `billing_month` ADD COLUMN `exp_warehouse` DECIMAL(14,2) NOT NULL DEFAULT 0 " +
+      "COMMENT '支出：中心仓（手工）'"
+    );
+  }
+
   // ── 齐货通登录态（v0.2.31）：用户在「商品列表 / 补货」页粘贴自己的 x-token 与 x-user（手机号）
   //    接口要求登录态，缺了会返回 503「商城安全参数暂时不可用」
   if (!(await colExists('app_user', 'qht_token'))) {
