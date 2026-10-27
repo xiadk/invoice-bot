@@ -304,6 +304,10 @@ function publicUser(u) {
     qnhProfitEnabled: u.role === 'admin' ? true : !!Number(u.qnh_profit_enabled),
     // 拼多多发票页权限（同上，独立开关）
     pddEnabled: u.role === 'admin' ? true : !!Number(u.pdd_enabled),
+    // 商品列表页权限（含补货、齐货通；超级管理员始终可见，普通用户默认关闭）
+    productEnabled: u.role === 'admin' ? true : !!Number(u.product_enabled),
+    // 交易市场页权限（同上，独立开关）
+    marketEnabled: u.role === 'admin' ? true : !!Number(u.market_enabled),
     lastLoginAt: u.last_login_at,
     createdAt: u.created_at,
   };
@@ -2107,7 +2111,7 @@ async function listUsers() {
   const users = await db.query(`
     SELECT u.id, u.username, u.role, u.status, u.company_name, u.tax_no, u.email, u.display_name, u.note,
            u.must_change_password, u.last_login_at, u.created_at, u.updated_at,
-           u.qnh_refund_enabled, u.qnh_profit_enabled,
+           u.qnh_refund_enabled, u.qnh_profit_enabled, u.product_enabled, u.market_enabled,
            (SELECT COUNT(*) FROM invoice_order o WHERE o.user_id = u.id)              AS order_count,
            (SELECT COUNT(DISTINCT o.seller_company) FROM invoice_order o WHERE o.user_id = u.id) AS company_count,
            (SELECT COUNT(*) FROM issued_invoice i WHERE i.user_id = u.id)             AS invoice_rows,
@@ -2123,6 +2127,8 @@ async function listUsers() {
     qnhRefundEnabled: u.role === 'admin' ? true : !!Number(u.qnh_refund_enabled),
     qnhProfitEnabled: u.role === 'admin' ? true : !!Number(u.qnh_profit_enabled),
     pddEnabled: u.role === 'admin' ? true : !!Number(u.pdd_enabled),
+    productEnabled: u.role === 'admin' ? true : !!Number(u.product_enabled),
+    marketEnabled: u.role === 'admin' ? true : !!Number(u.market_enabled),
     lastLoginAt: u.last_login_at, createdAt: u.created_at, updatedAt: u.updated_at,
     orderCount: Number(u.order_count) || 0,
     companyCount: Number(u.company_count) || 0,
@@ -2490,6 +2496,12 @@ const server = http.createServer(async (req, res) => {
     const tenantId = tenantOf(req, url, user);
     const isAdmin = user.role === 'admin';
     const writeGuard = () => assertWritable(user, tenantId);
+    // ── 菜单权限：商品列表 / 交易市场（v0.2.38；默认所有普通用户关闭，超管始终可用）──
+    //    菜单隐藏只是体验，接口这里才是真正的放行判断（含补货、齐货通加购、商品导入）
+    const canProduct = isAdmin || !!Number(user.product_enabled);
+    const canMarket = isAdmin || !!Number(user.market_enabled);
+    const denyProduct = () => sendJson(res, 403, { error: '未开启商品列表权限，请联系超级管理员' });
+    const denyMarket = () => sendJson(res, 403, { error: '未开启交易市场权限，请联系超级管理员' });
 
     // ── 助手安装包重新打包（仅超级管理员；系统管理页一键触发）──
     if (p === '/api/agent/build') {
@@ -2829,6 +2841,8 @@ const server = http.createServer(async (req, res) => {
       const up = new URL(req.url, 'http://localhost');
       const kp = up.searchParams.get('kind');
       const kind = kp === 'invoices' ? 'invoices' : kp === 'products' ? 'products' : 'orders';
+      // 商品列表导入（前置仓补货参考）随「商品列表」菜单权限放行
+      if (kind === 'products' && !canProduct) return denyProduct();
       const rawName = String(up.searchParams.get('name') || '').trim();
       const safeName = path.basename(rawName).replace(/[\\/:*?"<>|]+/g, '_').slice(-120)
         || (kind === 'invoices' ? 'invoices.xlsx' : kind === 'products' ? 'products.xlsx' : 'orders.xlsx');
@@ -2927,6 +2941,7 @@ const server = http.createServer(async (req, res) => {
 
     // ── 商品列表（前置仓补货参考导入） ── 所有登录用户可用（菜单不做逐用户授权）
     if (method === 'GET' && p === '/api/products') {
+      if (!canProduct) return denyProduct();
       const page = Math.max(1, Number(url.searchParams.get('page')) || 1);
       // 上限 2000：补货界面要一次展示本次导入的全部商品（导入文件常见几百~上千行）
       const size = Math.min(2000, Math.max(1, Number(url.searchParams.get('size')) || 20));
@@ -2968,6 +2983,7 @@ const server = http.createServer(async (req, res) => {
 
     // 总货值趋势：按导入批次（每次导入记一个点）
     if (method === 'GET' && p === '/api/products/trend') {
+      if (!canProduct) return denyProduct();
       const rows = await db.query(`
         SELECT id, source_file, item_count, total_value, imported_at
         FROM product_import_batch WHERE user_id = ?
@@ -2976,7 +2992,8 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { days: rows });
     }
 
-    // ── 齐货通（商品关联 / 实时取价 / 加入购物车）── 所有登录用户可用，各用各的登录态
+    // ── 齐货通（商品关联 / 实时取价 / 加入购物车）── 随「商品列表」菜单权限一同放行
+    if (p.startsWith('/api/qht/') && !canProduct) return denyProduct();
     if (method === 'GET' && p === '/api/qht/session') {
       return sendJson(res, 200, await qht.sessionStatus(tenantId));
     }
@@ -3018,6 +3035,7 @@ const server = http.createServer(async (req, res) => {
 
     // 关联齐货通商品（按 user+sku）/ 保存本地价
     if (method === 'POST' && p === '/api/products/link') {
+      if (!canProduct) return denyProduct();
       writeGuard();
       const b = await readBody(req);
       const sku = String(b.sku || '').trim();
@@ -3030,6 +3048,7 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { ok: true, sku, goodsId: goodsId || null, affected: r.affectedRows || 0 });
     }
     if (method === 'POST' && p === '/api/products/local-price') {
+      if (!canProduct) return denyProduct();
       writeGuard();
       const b = await readBody(req);
       const sku = String(b.sku || '').trim();
@@ -3047,6 +3066,7 @@ const server = http.createServer(async (req, res) => {
 
     // ── 交易市场（跨用户共享） ──
     if (method === 'GET' && p === '/api/market') {
+      if (!canMarket) return denyMarket();
       return sendJson(res, 200, await products.marketOverview({
         page: url.searchParams.get('page'),
         size: url.searchParams.get('size'),
@@ -3054,11 +3074,13 @@ const server = http.createServer(async (req, res) => {
       }));
     }
     if (method === 'GET' && p === '/api/market/quotes') {
+      if (!canMarket) return denyMarket();
       const sku = String(url.searchParams.get('sku') || '').trim();
       if (!sku) return sendJson(res, 400, { error: '缺少 sku' });
       return sendJson(res, 200, await products.marketQuotes(sku));
     }
     if (method === 'POST' && p === '/api/market/publish') {
+      if (!canMarket) return denyMarket();
       writeGuard();
       const body = await readBody(req);
       return sendJson(res, 200, await products.publishToMarket(user.id, body.skus, body.discount));
@@ -3985,7 +4007,7 @@ const server = http.createServer(async (req, res) => {
       if (method === 'POST' && p === '/api/admin/users/delete') {
         return sendJson(res, 200, await deleteUser(await readBody(req), user));
       }
-      // 菜单权限：逐个账号开启/关闭（menu=refund|profit，缺省 refund 向后兼容；
+      // 菜单权限：逐个账号开启/关闭（menu=refund|profit|product|market，缺省 refund 向后兼容；
       // 拼多多发票对所有用户开放，不再走这里）
       if (method === 'POST' && p === '/api/admin/users/qnh-refund') {
         const b = await readBody(req);
@@ -3995,6 +4017,8 @@ const server = http.createServer(async (req, res) => {
         const MENU = {
           refund: { col: 'qnh_refund_enabled', label: '退单列表', field: 'qnhRefundEnabled' },
           profit: { col: 'qnh_profit_enabled', label: '实时毛利监控', field: 'qnhProfitEnabled' },
+          product: { col: 'product_enabled', label: '商品列表', field: 'productEnabled' },
+          market: { col: 'market_enabled', label: '交易市场', field: 'marketEnabled' },
         };
         const m = MENU[menu];
         if (!m) return sendJson(res, 400, { error: '未知的菜单：' + menu });

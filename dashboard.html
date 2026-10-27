@@ -155,8 +155,8 @@
           <el-menu-item index="board">1688发票</el-menu-item>
           <el-menu-item index="pdd">拼多多发票</el-menu-item>
           <el-menu-item index="mapping">税名核对</el-menu-item>
-          <el-menu-item index="product">商品列表</el-menu-item>
-          <el-menu-item index="market">交易市场</el-menu-item>
+          <el-menu-item index="product" v-if="canProduct">商品列表</el-menu-item>
+          <el-menu-item index="market" v-if="canMarket">交易市场</el-menu-item>
           <el-menu-item index="refund" v-if="canRefund">退单列表</el-menu-item>
           <el-menu-item index="profit" v-if="canProfit">实时毛利监控</el-menu-item>
           <el-menu-item index="admin" v-if="isAdmin">系统管理</el-menu-item>
@@ -1142,13 +1142,17 @@
             <el-table-column label="收票邮箱" width="170"><template slot-scope="p"><span class="loginid">{{ p.row.email || '—' }}</span></template></el-table-column>
             <el-table-column label="数据量" width="130"><template slot-scope="p"><span class="loginid">{{ p.row.role === 'admin' ? '系统账号 · 不承载业务数据' : p.row.orderCount + ' 单 / ' + p.row.mappingCount + ' 映射' }}</span></template></el-table-column>
             <el-table-column label="最近登录" width="140"><template slot-scope="p"><span class="loginid">{{ fmtMinute(p.row.lastLoginAt) || '—' }}</span></template></el-table-column>
-            <el-table-column label="菜单权限" width="150">
+            <el-table-column label="菜单权限" width="240">
               <template slot-scope="p">
                 <el-tag v-if="p.row.role === 'admin'" size="mini" type="success">全部菜单</el-tag>
                 <template v-else>
                   <el-tag size="mini" :type="p.row.qnhRefundEnabled ? 'success' : 'info'"
                           style="margin-right:4px">退单</el-tag>
-                  <el-tag size="mini" :type="p.row.qnhProfitEnabled ? 'success' : 'info'">毛利</el-tag>
+                  <el-tag size="mini" :type="p.row.qnhProfitEnabled ? 'success' : 'info'"
+                          style="margin-right:4px">毛利</el-tag>
+                  <el-tag size="mini" :type="p.row.productEnabled ? 'success' : 'info'"
+                          style="margin-right:4px">商品</el-tag>
+                  <el-tag size="mini" :type="p.row.marketEnabled ? 'success' : 'info'">市场</el-tag>
                 </template>
               </template>
             </el-table-column>
@@ -1940,6 +1944,20 @@
       </div>
       <el-switch v-model="menuPermit.profit"></el-switch>
     </div>
+    <div class="menu-perm-row">
+      <div>
+        <b>商品列表</b>
+        <div class="loginid">导入补货参考文件、补货、关联齐货通商品并加购（默认关闭）</div>
+      </div>
+      <el-switch v-model="menuPermit.product"></el-switch>
+    </div>
+    <div class="menu-perm-row">
+      <div>
+        <b>交易市场</b>
+        <div class="loginid">查看别人的商品报价、发布自己的 SKU（默认关闭）</div>
+      </div>
+      <el-switch v-model="menuPermit.market"></el-switch>
+    </div>
     <div slot="footer">
       <el-button @click="menuPermit.visible = false">取消</el-button>
       <el-button type="primary" :loading="menuPermit.saving" @click="saveMenuPermit">保存</el-button>
@@ -2275,8 +2293,8 @@ const vm = new Vue({
       creatingUser: false, createOk: false,
       userEdit: { visible: false, id: null, title: '', company: '', taxNo: '', email: '', note: '', hint: '', lockCompany: false, saving: false },
       // 菜单权限弹窗（退单列表 / 实时毛利监控）
-      menuPermit: { visible: false, id: null, username: '', refund: false, profit: false, saving: false,
-                    origin: { refund: false, profit: false } },
+      menuPermit: { visible: false, id: null, username: '', refund: false, profit: false, product: false, market: false, saving: false,
+                    origin: { refund: false, profit: false, product: false, market: false } },
       // 操作日志（仅超级管理员）
       opLog: { draftUsername: '', username: '', page: 1, size: 20, total: 0, rows: [], loading: false },
       // 退单列表（牵牛花）
@@ -2340,6 +2358,10 @@ const vm = new Vue({
     canRefund() { return !!(this.me && (this.me.role === 'admin' || this.me.qnhRefundEnabled)); },
     // 实时毛利监控权限（独立菜单权限）
     canProfit() { return !!(this.me && (this.me.role === 'admin' || this.me.qnhProfitEnabled)); },
+    // 商品列表权限（含补货/齐货通；默认所有用户不授权，超管始终可见）
+    canProduct() { return !!(this.me && (this.me.role === 'admin' || this.me.productEnabled)); },
+    // 交易市场权限（同上，独立开关）
+    canMarket() { return !!(this.me && (this.me.role === 'admin' || this.me.marketEnabled)); },
     // 拼多多发票对所有用户开放，不需要单独配置菜单权限
     // 卖家发送间隔低于 15 秒时给个橙色警示：这个值直接决定会不会被平台判定为机器群发
     gapTooSmall() { return Number(this.cfg.gapMin) < 15 || Number(this.cfg.gapMax) < 15; },
@@ -2706,6 +2728,8 @@ const vm = new Vue({
       if (p === 'audit' && !this.isAdmin) p = 'board';
       if (p === 'refund' && !this.canRefund) p = 'board';
       if (p === 'profit' && !this.canProfit) p = 'board';
+      if (p === 'product' && !this.canProduct) p = 'board';
+      if (p === 'market' && !this.canMarket) p = 'board';
       this.page = p;
       if (p === 'admin') { this.loadConfigUI(); this.loadUsers(); this.loadBuildStatus(); this.loadAgentVersions(); }
       if (p === 'mapping') this.loadMapping();
@@ -4384,13 +4408,17 @@ const vm = new Vue({
       } catch (e) { this.$message.error('加载失败: ' + e.message); }
     },
     // 开关某个账号的「退单列表」权限
-    /** 打开「菜单权限」弹窗（逐用户开放退单列表 / 实时毛利监控；拼多多发票全量开放不需要配） */
+    /** 打开「菜单权限」弹窗（逐用户开放退单列表 / 实时毛利监控 / 商品列表 / 交易市场；拼多多发票全量开放不需要配） */
     openMenuPermit(row) {
       this.menuPermit = {
         visible: true, id: row.id, username: row.username,
         refund: !!row.qnhRefundEnabled, profit: !!row.qnhProfitEnabled,
+        product: !!row.productEnabled, market: !!row.marketEnabled,
         saving: false,
-        origin: { refund: !!row.qnhRefundEnabled, profit: !!row.qnhProfitEnabled },
+        origin: {
+          refund: !!row.qnhRefundEnabled, profit: !!row.qnhProfitEnabled,
+          product: !!row.productEnabled, market: !!row.marketEnabled,
+        },
       };
     },
     /** 保存菜单权限：只提交发生变化的项，逐项调用（任一项失败即提示） */
@@ -4400,6 +4428,8 @@ const vm = new Vue({
       const changes = [];
       if (m.refund !== m.origin.refund) changes.push({ menu: 'refund', enabled: m.refund, field: 'qnhRefundEnabled', label: '退单列表' });
       if (m.profit !== m.origin.profit) changes.push({ menu: 'profit', enabled: m.profit, field: 'qnhProfitEnabled', label: '实时毛利监控' });
+      if (m.product !== m.origin.product) changes.push({ menu: 'product', enabled: m.product, field: 'productEnabled', label: '商品列表' });
+      if (m.market !== m.origin.market) changes.push({ menu: 'market', enabled: m.market, field: 'marketEnabled', label: '交易市场' });
       if (!changes.length) { m.visible = false; return; }
       m.saving = true;
       const row = (this.users || []).find((u) => u.id === m.id);

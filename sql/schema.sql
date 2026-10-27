@@ -45,6 +45,8 @@ CREATE TABLE IF NOT EXISTS `app_user` (
   `note`                 VARCHAR(255)  DEFAULT NULL            COMMENT '备注（管理员填写，如所属业务线）',
   `qht_token`            VARCHAR(128)  DEFAULT NULL            COMMENT '齐货通接口登录态 x-token（用户自行粘贴，过期需重贴）',
   `qht_x_user`           VARCHAR(64)   DEFAULT NULL            COMMENT '齐货通接口登录态 x-user（一般是登录手机号）',
+  `product_enabled`      TINYINT(1)    NOT NULL DEFAULT 0      COMMENT '是否允许查看商品列表页（含补货/齐货通；1=开启，超级管理员始终可见）',
+  `market_enabled`       TINYINT(1)    NOT NULL DEFAULT 0      COMMENT '是否允许查看交易市场页（1=开启，超级管理员始终可见）',
   `token_version`        INT           NOT NULL DEFAULT 1      COMMENT '会话版本：改密/禁用时 +1，旧登录态立即失效',
   `must_change_password` TINYINT(1)    NOT NULL DEFAULT 0      COMMENT '是否强制下次登录修改密码',
   `created_by`           INT           DEFAULT NULL            COMMENT '创建者（管理员ID）',

@@ -498,6 +498,19 @@ async function migrate(conn, dbName) {
       "COMMENT '是否允许查看拼多多发票页（1=开启，超级管理员始终可见）'"
     );
   }
+  // ── 商品列表 / 交易市场菜单权限（v0.2.38）：默认 0 = 所有用户默认不授权，由超管逐个开启
+  if (!(await colExists('app_user', 'product_enabled'))) {
+    await q(
+      'ALTER TABLE `app_user` ADD COLUMN `product_enabled` TINYINT(1) NOT NULL DEFAULT 0 ' +
+      "COMMENT '是否允许查看商品列表页（含补货/齐货通；1=开启，超级管理员始终可见）'"
+    );
+  }
+  if (!(await colExists('app_user', 'market_enabled'))) {
+    await q(
+      'ALTER TABLE `app_user` ADD COLUMN `market_enabled` TINYINT(1) NOT NULL DEFAULT 0 ' +
+      "COMMENT '是否允许查看交易市场页（1=开启，超级管理员始终可见）'"
+    );
+  }
   // ── 齐货通登录态（v0.2.31）：用户在「商品列表 / 补货」页粘贴自己的 x-token 与 x-user（手机号）
   //    接口要求登录态，缺了会返回 503「商城安全参数暂时不可用」
   if (!(await colExists('app_user', 'qht_token'))) {
