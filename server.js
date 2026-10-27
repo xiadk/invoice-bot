@@ -312,6 +312,8 @@ function publicUser(u) {
     email: u.email || '',
     displayName: u.display_name || '',
     mustChangePassword: !!u.must_change_password,
+    // 服务端版本号：侧边栏品牌区展示，前端不必再为此单独请求 admin 接口
+    serverVersion: SERVER_VERSION,
     // 退单列表页权限（超级管理员始终可见，普通用户由管理员逐个开启）
     qnhRefundEnabled: u.role === 'admin' ? true : !!Number(u.qnh_refund_enabled),
     // 实时毛利监控权限（同上，独立开关）

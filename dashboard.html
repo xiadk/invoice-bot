@@ -10,48 +10,101 @@
 <!-- Element UI 主题（本地 vendor，免外网 CDN）；须在本页自身样式之前加载，便于本页样式覆盖 -->
 <link rel="stylesheet" href="/vendor/element-ui/index.css">
 <style>
+  /* ── 设计令牌（取自设计稿 Design System 屏）─────────────────────
+     Brand #E85F00 / 激活底 #FFF3E9；文字三级 #1F2429 → #636B73 → #8A8F99；
+     卡片 #FFF + 1px #EDEDF2 + 圆角 10；输入描边 #E3E5EB + 圆角 8。 */
+  :root {
+    --brand: #e85f00; --brand-hover: #f2751a; --brand-deep: #c85000;
+    --brand-tint: #fff3e9; --brand-tint-2: #fff2e8; --brand-line: #ffb27a; --brand-disabled: #ffc9a3;
+    --text-1: #1f2429; --text-2: #636b73; --text-3: #8a8f99;
+    --bg: #f5f5f7; --surface: #fff; --surface-2: #fafafc;
+    --line: #ededf2; --line-2: #e3e5eb;
+    --warn: #e5a33d; --warn-bg: #fcf5ed;
+    --ok: #2e7d32; --ok-bg: #f0f9eb; --danger: #e53935;
+    --radius: 10px; --radius-sm: 8px; --radius-pill: 12px;
+    --space-md: 16px; --space-sm: 12px;
+    --sb-w: 232px; --topbar-h: 56px;
+  }
   /* ── 品牌色覆盖 Element 默认主题色 ───────────────────────────── */
-  .el-button--primary { background-color: #ff6a00; border-color: #ff6a00; }
-  .el-button--primary:hover, .el-button--primary:focus { background-color: #ff8533; border-color: #ff8533; }
-  .el-button--primary.is-plain { color: #ff6a00; background: #fff7f1; border-color: #ffb27a; }
-  .el-button--primary.is-plain:hover { background: #ff6a00; border-color: #ff6a00; color: #fff; }
-  .el-button--primary.is-disabled, .el-button--primary.is-disabled:hover { background-color: #ffc9a3; border-color: #ffc9a3; }
-  .el-button--text { color: #ff6a00; }
-  .el-button--text:hover { color: #ff8533; }
+  .el-button--primary { background-color: var(--brand); border-color: var(--brand); }
+  .el-button--primary:hover, .el-button--primary:focus { background-color: var(--brand-hover); border-color: var(--brand-hover); }
+  .el-button--primary.is-plain { color: var(--brand); background: var(--brand-tint); border-color: var(--brand-line); }
+  .el-button--primary.is-plain:hover { background: var(--brand); border-color: var(--brand); color: #fff; }
+  .el-button--primary.is-disabled, .el-button--primary.is-disabled:hover { background-color: var(--brand-disabled); border-color: var(--brand-disabled); }
+  .el-button--text { color: var(--brand); }
+  .el-button--text:hover { color: var(--brand-hover); }
   .el-checkbox__input.is-checked .el-checkbox__inner,
-  .el-checkbox__input.is-indeterminate .el-checkbox__inner { background-color: #ff6a00; border-color: #ff6a00; }
-  .el-checkbox__input.is-focus .el-checkbox__inner { border-color: #ff6a00; }
-  .el-checkbox__input.is-checked + .el-checkbox__label { color: #ff6a00; }
-  .el-radio__input.is-checked .el-radio__inner { background: #ff6a00; border-color: #ff6a00; }
-  .el-radio__input.is-checked + .el-radio__label { color: #ff6a00; }
-  .el-tabs__item.is-active { color: #ff6a00; }
-  .el-tabs__active-bar { background-color: #ff6a00; }
-  .el-pagination.is-background .el-pager li:not(.disabled).active { background-color: #ff6a00; }
-  .el-input__inner:focus, .el-textarea__inner:focus { border-color: #ff6a00; }
-  .el-select .el-input.is-focus .el-input__inner { border-color: #ff6a00; }
-  .el-progress-bar__inner { background-color: #ff6a00; }
-  .el-menu--horizontal > .el-menu-item.is-active { color: #ff6a00; border-bottom-color: #ff6a00; }
-  .el-menu--horizontal > .el-menu-item:hover { color: #ff6a00; }
-  .el-link.el-link--primary { color: #ff6a00; }
-  .el-loading-spinner .path { stroke: #ff6a00; }
+  .el-checkbox__input.is-indeterminate .el-checkbox__inner { background-color: var(--brand); border-color: var(--brand); }
+  .el-checkbox__input.is-focus .el-checkbox__inner { border-color: var(--brand); }
+  .el-checkbox__input.is-checked + .el-checkbox__label { color: var(--brand); }
+  .el-radio__input.is-checked .el-radio__inner { background: var(--brand); border-color: var(--brand); }
+  .el-radio__input.is-checked + .el-radio__label { color: var(--brand); }
+  .el-tabs__item.is-active { color: var(--brand); }
+  .el-tabs__active-bar { background-color: var(--brand); }
+  .el-pagination.is-background .el-pager li:not(.disabled).active { background-color: var(--brand); }
+  .el-input__inner:focus, .el-textarea__inner:focus { border-color: var(--brand); }
+  .el-select .el-input.is-focus .el-input__inner { border-color: var(--brand); }
+  .el-progress-bar__inner { background-color: var(--brand); }
+  .el-link.el-link--primary { color: var(--brand); }
+  .el-loading-spinner .path { stroke: var(--brand); }
 
-  :root { --primary: #ff6a00; --bg: #f5f6f8; --card: #fff; --border: #e8e9eb; --text: #26282c; --sub: #8a8f99; }
+  /* 旧变量名保留为别名：页面里还有大量内联 style 引用，改骨架时逐个替换风险太高 */
+  :root { --primary: var(--brand); --card: var(--surface); --border: var(--line); --text: var(--text-1); --sub: var(--text-3); }
   * { margin: 0; padding: 0; box-sizing: border-box; }
   [v-cloak] { display: none; }
-  body { font-family: "Microsoft YaHei", "PingFang SC", sans-serif; background: var(--bg); color: var(--text); }
+  body { font-family: "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+         background: var(--bg); color: var(--text-1); -webkit-font-smoothing: antialiased; }
   #app { min-height: 100vh; }
-  .app-header { background: #fff; border-bottom: 1px solid var(--border); padding: 0 16px; height: auto; line-height: normal; }
-  .app-header .nav-bar { display: flex; align-items: center; gap: 10px; }
-  .app-header .brand-logo { height: 26px; width: auto; display: block; flex: none; }
-  .app-header .nav-menu { flex: 1; border-bottom: none !important; display: flex; align-items: center; }
-  .app-header .nav-menu .el-menu-item { height: 54px; line-height: 54px; }
+
+  /* ── 骨架：左侧 232px 侧边栏 + 右侧 56px 顶栏（设计稿全局布局）───── */
+  .app-shell { display: flex; min-height: 100vh; }
+  .sidebar { width: var(--sb-w); flex: none; background: var(--surface);
+             border-right: 1px solid var(--line); padding: 12px;
+             display: flex; flex-direction: column; gap: 2px;
+             position: sticky; top: 0; height: 100vh; overflow-y: auto; }
+  .sidebar .brand { display: flex; align-items: center; gap: 10px; padding: 6px 6px 16px 6px; }
+  .sidebar .brand-logo { height: 32px; width: 32px; object-fit: contain; flex: none; }
+  .sidebar .brand-name { font-size: 15px; font-weight: 700; color: var(--text-1); line-height: 1.4; }
+  .sidebar .brand-ver { font-size: 11px; color: var(--text-3); line-height: 1.4; }
+  .nav-group { font-size: 11px; color: var(--text-3); padding: 12px 16px 4px 16px; letter-spacing: .2px; }
+  .nav-item { display: flex; align-items: center; gap: 10px; padding: 10px 16px;
+              border-radius: var(--radius-sm); font-size: 14px; color: var(--text-2);
+              cursor: pointer; user-select: none; transition: background .15s, color .15s; }
+  .nav-item:hover { background: var(--surface-2); color: var(--text-1); }
+  .nav-item.is-active { background: var(--brand-tint); color: var(--brand); font-weight: 500; }
+  .nav-item i { font-size: 16px; width: 18px; text-align: center; flex: none; }
+  .main-col { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  .topbar { height: var(--topbar-h); flex: none; background: var(--surface);
+            border-bottom: 1px solid var(--line); padding: 0 20px;
+            display: flex; align-items: center; justify-content: space-between; gap: 12px;
+            position: sticky; top: 0; z-index: 20; }
+  .topbar > div:first-child { min-width: 0; overflow: hidden; }
+  .topbar-title { font-size: 16px; font-weight: 700; color: var(--text-1); line-height: 1.35; }
+  .topbar-sub { font-size: 12px; color: var(--text-3); line-height: 1.4; margin-top: 1px; }
+  .pill { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px;
+          border-radius: var(--radius-pill); font-size: 12px; font-weight: 500; white-space: nowrap; }
+  .pill-ok { background: var(--ok-bg); color: var(--ok); }
+  .pill-warn { background: var(--warn-bg); color: var(--warn); }
+  .pill-info { background: #eef2f7; color: var(--text-2); }
+
+  /* ── 组件统一（对齐设计稿 Design System 屏）───────────────────── */
+  .el-card { border: 1px solid var(--line); border-radius: var(--radius); }
+  .el-table { font-size: 12px; }
+  .el-table th.el-table__cell { background: var(--surface-2); color: var(--text-2); font-weight: 400; }
+  .el-table th.el-table__cell .cell { font-size: 12px; }
+  .el-button { border-radius: var(--radius-sm); }
+  .el-input__inner, .el-textarea__inner { border-radius: var(--radius-sm); border-color: var(--line-2); }
+  .el-select .el-input__inner { border-radius: var(--radius-sm); }
+  .el-dialog { border-radius: var(--radius); }
+  .el-tag { border-radius: var(--radius-sm); }
   /* 退单列表：已取货/送达的行加淡橙底，方便一眼扫到 */
   .el-table .row-picked td { background: #fff8ec !important; }
-  .nav-right { display: flex; align-items: center; gap: 10px; }
-  .user-chip { display: flex; align-items: center; gap: 8px; font-size: 13px; }
-  .user-chip .avatar { width: 28px; height: 28px; border-radius: 50%; background: #fff1e6; color: var(--primary); display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 12px; }
-  .user-chip .uname { font-size: 13px; color: var(--text); }
-  .user-chip .urole { font-size: 11px; color: var(--sub); }
+  .nav-right { display: flex; align-items: center; gap: 8px; flex: none; white-space: nowrap; }
+  .nav-right > * { flex: none; }
+  .user-chip { display: flex; align-items: center; gap: 8px; font-size: 13px; white-space: nowrap; }
+  .user-chip .avatar { width: 28px; height: 28px; border-radius: 50%; background: #fff1e6; color: var(--primary); display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 12px; flex: none; }
+  .user-chip .uname { font-size: 13px; color: var(--text-1); white-space: nowrap; }
+  .user-chip .urole { font-size: 11px; color: var(--text-3); white-space: nowrap; }
   /* 绑定本机助手：已连接时是「状态」不是「按钮」→ 保持绿色、hover 无反馈、光标默认 */
   .agent-bind-btn.is-bound,
   .agent-bind-btn.is-bound.is-disabled,
@@ -62,13 +115,13 @@
   /* 版本更新提示：已停用的用轻微呼吸感提示——它不能像普通弹窗那样被无视 */
   @keyframes updPulse { 0%,100% { opacity: 1; } 50% { opacity: .68; } }
   .agent-upd-btn.is-blocking { animation: updPulse 2.4s ease-in-out infinite; font-weight: 600; }
-  .el-main { padding: 18px 20px 40px; }
+  .el-main { padding: 20px 20px 40px; background: var(--bg); }
   .banner { margin: 0; padding: 10px 20px; font-size: 13px; }
   .section-card { margin-bottom: 14px; }
-  .stat-card { cursor: pointer; transition: .15s; }
-  .stat-card .num { font-size: 22px; font-weight: 700; color: var(--text); }
-  .stat-card .label { font-size: 12px; color: var(--sub); margin-top: 2px; }
-  .stat-card .sub { font-size: 11px; color: var(--sub); margin-top: 2px; }
+  .stat-card { cursor: pointer; transition: .15s; border-radius: var(--radius); }
+  .stat-card .num { font-size: 24px; font-weight: 700; color: var(--text-1); line-height: 1.4; }
+  .stat-card .label { font-size: 12px; color: var(--text-2); margin-top: 2px; }
+  .stat-card .sub { font-size: 12px; color: var(--text-3); margin-top: 2px; }
   .stat-card.s-warn .num { color: #e53935; }
   .stat-card.s-done .num { color: #2e7d32; }
   .stat-card.s-info .num { color: #1565c0; }
@@ -147,28 +200,47 @@
     text-align: center; font-size: 12px; color: var(--sub); line-height: 1.8; letter-spacing: .3px; }
   .app-footer .sep { margin: 0 6px; color: var(--border); }
   .page-head { margin-bottom: 14px; }
-  .page-head h2 { font-size: 16px; margin-bottom: 6px; }
+  /* 页面标题移到顶栏（随菜单切换），正文里不再重复一遍 */
+  .page-head h2 { display: none; }
+  /* 窄屏：侧边栏折叠成图标条 */
+  @media (max-width: 1180px) {
+    :root { --sb-w: 64px; }
+    .sidebar { padding: 8px; }
+    .sidebar .brand { padding: 6px 0 14px 0; justify-content: center; }
+    .sidebar .brand-text, .nav-group, .nav-item span { display: none; }
+    .nav-item { justify-content: center; padding: 10px 0; }
+  }
   @media (max-width: 900px) { .el-main { padding: 12px; } }
 </style>
 </head>
 <body>
 <div id="app" v-cloak>
-  <el-container>
-    <el-header class="app-header" height="auto">
-      <div class="nav-bar">
-        <img class="brand-logo" src="/assets/logo-lockup.png" alt="发票催收">
-        <el-menu class="nav-menu" :default-active="page" mode="horizontal" @select="switchPage">
-          <el-menu-item index="board">1688发票</el-menu-item>
-          <el-menu-item index="pdd">拼多多发票</el-menu-item>
-          <el-menu-item index="mapping">税名核对</el-menu-item>
-          <el-menu-item index="product" v-if="canProduct">商品列表</el-menu-item>
-          <el-menu-item index="market" v-if="canMarket">交易市场</el-menu-item>
-          <el-menu-item index="billing" v-if="canBilling">账单</el-menu-item>
-          <el-menu-item index="refund" v-if="canRefund">退单列表</el-menu-item>
-          <el-menu-item index="profit" v-if="canProfit">实时毛利监控</el-menu-item>
-          <el-menu-item index="admin" v-if="isAdmin">系统管理</el-menu-item>
-          <el-menu-item index="audit" v-if="isAdmin">操作日志</el-menu-item>
-        </el-menu>
+  <div class="app-shell">
+    <!-- ── 侧边栏：232px，分组导航（条目由 navGroups 按权限下发）── -->
+    <aside class="sidebar">
+      <div class="brand">
+        <img class="brand-logo" src="/assets/logo-icon.png" alt="发票催收">
+        <div class="brand-text">
+          <div class="brand-name">催收助手</div>
+          <div class="brand-ver">v{{ serverVersion || '—' }}</div>
+        </div>
+      </div>
+      <template v-for="g in navGroups">
+        <div class="nav-group" :key="'g-' + g.title">{{ g.title }}</div>
+        <div class="nav-item" v-for="it in g.items" :key="it.key" :title="it.label"
+             :class="{ 'is-active': page === it.key }" @click="switchPage(it.key)">
+          <i :class="it.icon"></i><span>{{ it.label }}</span>
+        </div>
+      </template>
+    </aside>
+
+    <div class="main-col">
+      <!-- ── 顶栏：56px，左侧页面标题/副标题，右侧助手与账号操作 ── -->
+      <header class="topbar">
+        <div>
+          <div class="topbar-title">{{ pageTitle }}</div>
+          <div class="topbar-sub">{{ pageSub }}</div>
+        </div>
         <div class="nav-right">
           <el-button size="small" plain @click="openDownload"
                      title="下载 Windows 版本机助手（已内置服务器地址），下载后双击运行">⬇ 下载本机助手</el-button>
@@ -194,19 +266,18 @@
             <el-button size="mini" @click="logout">退出</el-button>
           </div>
         </div>
+      </header>
+
+      <div class="banner" v-if="readonly" style="background:#e3f2fd;color:#0d47a1;border-bottom:1px solid #bbdefb">
+        👁 正在以超级管理员身份查看 <b>{{ tenantLabel }}</b> 的「1688发票」数据（<b>只读</b>，不能发送/修改）。
+        <el-button size="mini" style="margin-left:12px" @click="exitTenantView">退出查看</el-button>
       </div>
-    </el-header>
+      <div class="banner" v-if="mustChangePassword" style="background:#fff8e1;color:#8d6e00;border-bottom:1px solid #ffe082">
+        ⚠ 检测到账号使用了初始/管理员重置的密码，建议立即修改。
+        <el-button size="mini" style="margin-left:12px" @click="openPwdModal">立即修改密码</el-button>
+      </div>
 
-    <div class="banner" v-if="readonly" style="background:#e3f2fd;color:#0d47a1;border-bottom:1px solid #bbdefb">
-      👁 正在以超级管理员身份查看 <b>{{ tenantLabel }}</b> 的「1688发票」数据（<b>只读</b>，不能发送/修改）。
-      <el-button size="mini" style="margin-left:12px" @click="exitTenantView">退出查看</el-button>
-    </div>
-    <div class="banner" v-if="mustChangePassword" style="background:#fff8e1;color:#8d6e00;border-bottom:1px solid #ffe082">
-      ⚠ 检测到账号使用了初始/管理员重置的密码，建议立即修改。
-      <el-button size="mini" style="margin-left:12px" @click="openPwdModal">立即修改密码</el-button>
-    </div>
-
-    <el-main>
+      <el-main>
       <!-- ══════════ 1688发票 ══════════ -->
       <div v-show="page === 'board'" id="page-board">
         <!-- 统计卡 -->
@@ -1917,7 +1988,8 @@
         <span v-else>发票催收系统 · 保留所有权利</span>
       </div>
     </el-main>
-  </el-container>
+    </div><!-- /.main-col -->
+  </div><!-- /.app-shell -->
 
   <!-- ══════════ 退单日志（订单日志 / 配送日志） ══════════ -->
   <el-dialog :title="'订单日志 · ' + (rq.log.row.refundNo || '')" :visible.sync="rq.log.visible"
@@ -2434,6 +2506,63 @@ const vm = new Vue({
   },
   computed: {
     isAdmin() { return !!(this.me && this.me.role === 'admin'); },
+    /** 服务端版本号（后端 publicUser 下发，侧边栏品牌区展示） */
+    serverVersion() { return (this.me && this.me.serverVersion) || ''; },
+    /** 侧边栏导航：设计稿 4 组，条目按账号权限过滤，与旧 el-menu 各项的 v-if 等价 */
+    navGroups() {
+      const groups = [
+        { title: '发票', items: [
+          { key: 'board', label: '1688发票', icon: 'el-icon-document' },
+          { key: 'pdd', label: '拼多多发票', icon: 'el-icon-s-order' },
+          { key: 'mapping', label: '税名核对', icon: 'el-icon-edit-outline' },
+        ] },
+        { title: '核对与商品', items: [
+          this.canProduct ? { key: 'product', label: '商品列表', icon: 'el-icon-goods' } : null,
+          this.canMarket ? { key: 'market', label: '交易市场', icon: 'el-icon-s-marketing' } : null,
+          this.canBilling ? { key: 'billing', label: '账单', icon: 'el-icon-wallet' } : null,
+        ].filter(Boolean) },
+        { title: '牵牛花监控', items: [
+          this.canRefund ? { key: 'refund', label: '退单列表', icon: 'el-icon-s-claim' } : null,
+          this.canProfit ? { key: 'profit', label: '实时毛利监控', icon: 'el-icon-s-data' } : null,
+        ].filter(Boolean) },
+        { title: '系统', items: [
+          this.isAdmin ? { key: 'admin', label: '系统管理', icon: 'el-icon-setting' } : null,
+          this.isAdmin ? { key: 'audit', label: '操作日志', icon: 'el-icon-tickets' } : null,
+        ].filter(Boolean) },
+      ];
+      // 整组条目被权限过滤光时，连分组标题一起隐藏，避免只剩个孤零零的小标题
+      return groups.filter((g) => g.items.length);
+    },
+    /** 顶栏主标题：对应设计稿每屏的「业务 · 视角」 */
+    pageTitle() {
+      return ({
+        board: '采购发票催收 · 工作台',
+        pdd: '采购发票催收 · 拼多多平台',
+        mapping: '税务局销方名称 · 与 1688 商家核对',
+        product: '在售商品 · SKU 与价格',
+        market: '采购降本 · 比价机会',
+        billing: '按月收支 · 净利润核算',
+        refund: '售后 / 退款订单 · 同步监控',
+        profit: '商品毛利 · 实时核算',
+        admin: '平台配置 · 消息模板 · 助手治理',
+        audit: '审计轨迹 · 全量留痕',
+      })[this.page] || '发票催收';
+    },
+    /** 顶栏副标题：写清这一页的真实数据口径（不是设计稿的占位文案） */
+    pageSub() {
+      return ({
+        board: '1688 直连接口 · 票税核对 · 催收发送',
+        pdd: '拼多多商家后台 · 订单实付与开票状态',
+        mapping: '销方名称映射维护 · 人工确认与忽略',
+        product: '采购价 / 库存 / 补货建议 / 齐货通比价',
+        market: '内部报价市场 · 发布商品与报价',
+        billing: '总收入 − 总支出 = 净利润；1688 / 拼多多由系统实时统计',
+        refund: '牵牛花权益融合 · 退单明细与处理日志',
+        profit: '订单级实时毛利 · 低于阈值推送告警',
+        admin: '助手版本治理 · 平台授权 · 用户与权限',
+        audit: '操作留痕 · 保留 180 天',
+      })[this.page] || '';
+    },
     // 顶栏「绑定本机助手」按钮：未连接=动作，已连接=状态（文案与提示都跟着切）
     agentBindText() {
       if (this.guide.binding) return '正在绑定…';
@@ -4678,7 +4807,7 @@ const vm = new Vue({
       const skip = this._opSkip;
       this._opSkip = false;              // 无论后面走哪条分支都要消费掉，避免污染下一次点击
       if (skip) return;
-      const el = e.target && e.target.closest ? e.target.closest('.el-button, button, .el-menu-item') : null;
+      const el = e.target && e.target.closest ? e.target.closest('.el-button, button, .el-menu-item, .nav-item') : null;
       if (!el) return;
       const text = String(el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 40);
       if (!text || OP_SKIP_BTN.includes(text)) return;      // 弹框的「确定/取消」这类无信息量按钮不记
