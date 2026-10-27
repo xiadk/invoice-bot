@@ -4,9 +4,9 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>发票催收</title>
-<!-- 内联 favicon：浏览器默认会请求 /favicon.ico，本项目没这个静态文件，
-     于是每次开页面控制台都留一条 404 —— 直接给个 data URI 省掉它 -->
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23ff6a00'/%3E%3Ctext x='16' y='23' font-size='19' font-family='sans-serif' font-weight='700' text-anchor='middle' fill='%23fff'%3E%C2%A5%3C/text%3E%3C/svg%3E">
+<!-- 品牌图标：/favicon.ico 与 /assets/* 由 server.js 白名单式下发 -->
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="apple-touch-icon" href="/assets/logo-icon.png">
 <!-- Element UI 主题（本地 vendor，免外网 CDN）；须在本页自身样式之前加载，便于本页样式覆盖 -->
 <link rel="stylesheet" href="/vendor/element-ui/index.css">
 <style>
@@ -42,7 +42,7 @@
   #app { min-height: 100vh; }
   .app-header { background: #fff; border-bottom: 1px solid var(--border); padding: 0 16px; height: auto; line-height: normal; }
   .app-header .nav-bar { display: flex; align-items: center; gap: 10px; }
-  .app-header .brand { font-size: 16px; font-weight: 700; color: var(--primary); white-space: nowrap; }
+  .app-header .brand-logo { height: 26px; width: auto; display: block; flex: none; }
   .app-header .nav-menu { flex: 1; border-bottom: none !important; display: flex; align-items: center; }
   .app-header .nav-menu .el-menu-item { height: 54px; line-height: 54px; }
   /* 退单列表：已取货/送达的行加淡橙底，方便一眼扫到 */
@@ -156,7 +156,7 @@
   <el-container>
     <el-header class="app-header" height="auto">
       <div class="nav-bar">
-        <div class="brand">发票催收</div>
+        <img class="brand-logo" src="/assets/logo-lockup.png" alt="发票催收">
         <el-menu class="nav-menu" :default-active="page" mode="horizontal" @select="switchPage">
           <el-menu-item index="board">1688发票</el-menu-item>
           <el-menu-item index="pdd">拼多多发票</el-menu-item>

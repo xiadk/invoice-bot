@@ -122,6 +122,19 @@ function sendVendor(res, rel) {
   res.writeHead(200, { 'content-type': VENDOR_MIME[ext], 'cache-control': 'public, max-age=86400' });
   res.end(buf);
 }
+// 品牌静态资源（logo / favicon）—— 与 vendor 一样白名单式下发，杜绝路径穿越
+const ASSETS_DIR = path.join(ROOT, 'assets');
+const ASSETS_MIME = { '.png': 'image/png', '.ico': 'image/x-icon', '.svg': 'image/svg+xml' };
+function sendAsset(res, rel) {
+  const target = path.normalize(path.join(ASSETS_DIR, rel));
+  if (!target.startsWith(ASSETS_DIR + path.sep)) { res.writeHead(403); return res.end('forbidden'); }
+  const ext = path.extname(target).toLowerCase();
+  if (!ASSETS_MIME[ext]) { res.writeHead(403); return res.end('forbidden'); }
+  let buf;
+  try { buf = fs.readFileSync(target); } catch (e) { res.writeHead(404); return res.end('not found'); }
+  res.writeHead(200, { 'content-type': ASSETS_MIME[ext], 'cache-control': 'public, max-age=604800' });
+  res.end(buf);
+}
 function redirect(res, to) {
   res.writeHead(302, { location: to });
   res.end();
@@ -2282,6 +2295,9 @@ const server = http.createServer(async (req, res) => {
       return sendHtml(res, 'bookmarklet.html');
     }
     if (method === 'GET' && p === '/healthz') return sendJson(res, 200, { ok: true, ts: new Date().toISOString() });
+    // 品牌图标：浏览器默认会请求 /favicon.ico，这里给真实图标而不是一条 404
+    if (method === 'GET' && p === '/favicon.ico') return sendAsset(res, 'logo.ico');
+    if (method === 'GET' && p.startsWith('/assets/')) return sendAsset(res, decodeURIComponent(p.slice('/assets/'.length)));
     // 前端本地依赖（免外网 CDN）：/vendor/vue.min.js、/vendor/echarts.min.js、/vendor/element-ui/*
     if (method === 'GET' && p.startsWith('/vendor/')) return sendVendor(res, decodeURIComponent(p.slice('/vendor/'.length)));
     if (method === 'GET' && (p === '/' || p === '/index.html')) {

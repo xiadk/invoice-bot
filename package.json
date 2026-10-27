@@ -1,6 +1,6 @@
 {
   "name": "invoice-bot",
-  "version": "0.2.41",
+  "version": "0.2.42",
   "description": "1688/拼多多采购发票催收自动化",
   "main": "server.js",
   "scripts": {
@@ -62,6 +62,7 @@
       "!node_modules/**/*.{md,map,ts,d.ts}"
     ],
     "win": {
+      "icon": "assets/logo.ico",
       "target": [
         {
           "target": "nsis",

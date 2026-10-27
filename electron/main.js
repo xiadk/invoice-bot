@@ -33,6 +33,9 @@ try { app.commandLine.appendSwitch('disable-blink-features', 'AutomationControll
 
 const PROTOCOL = 'xsh';
 const VERSION = (() => { try { return require('../package.json').version; } catch (e) { return '0.1.0'; } })();
+// 品牌图标：必须放在 electron/ 下才会被 electron-builder 打进 asar（顶层 assets/ 不在打包清单里）
+const ASSETS = path.join(__dirname, 'assets');
+const APP_ICON = path.join(ASSETS, 'logo.ico');
 
 // 程序已改名「催收小助手」，Electron 默认的 userData 目录会跟着产品名走
 // （%APPDATA%\催收小助手），老用户升级上来会丢掉设备令牌和本机登录态 ——
@@ -146,6 +149,7 @@ function showStatusWin() {
   if (statusWin && !statusWin.isDestroyed()) { statusWin.show(); statusWin.focus(); return; }
   statusWin = new BrowserWindow({
     width: 460, height: 620, resizable: false, title: '催收小助手',
+    icon: APP_ICON,
     autoHideMenuBar: true,
     backgroundColor: '#f5f6f8', // 立即绘制底色，避免启动/加载时闪白
     webPreferences: {
@@ -195,40 +199,21 @@ function refreshTray() {
     { label: '退出', click: () => { quitting = true; app.quit(); } },
   ]));
   try {
-    const icon = online ? trayIcon('green') : trayIcon('grey');
+    const icon = online ? trayIcon('color') : trayIcon('grey');
     if (icon) tray.setImage(icon);
   } catch (e) { /* 图标缺失时忽略 */ }
 }
 
-/**
- * 托盘图标：必须是位图（PNG）。此前用 SVG data URL —— nativeImage 不支持 SVG，
- * createFromDataURL 返回空图像，托盘显示为一块白板（用户截图证实）。
- * 这里内嵌代码生成的 PNG（绿色=已连接，灰色=未连接），16x16 + 32x32 两档适配高分屏。
- */
-const TRAY_PNG = {
-  green: {
-    1: 'iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAaklEQVR42mPQqzViwIPZoBinGmyCGnq1RpP1ao3u6dUa/Yfie1AxDUIG5CNpwoXzcRlAjGYMQ5Cd/Z9ErIFswGQyDJiMbMA9Mgy4BzOAjQzNMMxGFQMo9gJVApHiaKQ4IVElKVMlM5GcnQFArXj0EvkRGAAAAABJRU5ErkJggg==',
-    2: 'iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAA20lEQVR42s2X3Q2FIAyF7QoMwgNLOAMzOEOXYStmYAe4mpSEEH+uILQPJyZGOJ9QSrtoNAunegaDRqNIMAPgMLEajdufXqOJGk0iRXrn6Bv4EuCYDDWaUBg+KdAY6AVY6c9SozzN0QSwdRjX2t4CfGl+C3G17GmQ1icA6Nzzf2IC7gBwoHkWXgHAy6PWqlCuQglgJ5hn2TMANxHAnQH4iQC+BoAqt49WzHGQAdRE8ywlCoB9C9iDUMQxZE9E7KmY/TIScR2zFyQiSjIRRamIslxEYyKiNRPTnA7RD2cV4Nw28vr+AAAAAElFTkSuQmCC',
-  },
-  grey: {
-    1: 'iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAbElEQVR42mOYtWAZAx7MBsU41WAT1Ji1YNnkWQuW3Zu1YNl/KL4HFdMgZEA+kiZcOB+XAcRoxjAE2dn/ScQayAZMJsOAycgG3CPDgHswA9jI0AzDbFQxgGIvUCUQKY5GihMSVZIyVTITydkZAPD/fAMdFUBFAAAAAElFTkSuQmCC',
-    2: 'iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAA3ElEQVR42s2X3Q2FIAyF7Qos5QzM4AwswhPhgZ2YgR3Aa1ISQvy5gtA+nJgY4XxCKe2ijVso1TMYtHECBTMADhOpjbO/p9fGRW1cQkV8Z/Eb+BLgmExp40Jh+KSAY6AXYMU/S43yOEcTwNZhXGt7C/Cl+S3E1bKnQVqfAKBzz/+JCbgDUAPNs9QVALw8aq0K5SqUAHKCeZY8A7ATAewZgJ8I4GsAqHL7aMUcBxlATDTPEqwAyLeAPAhZHEPyRESeiskvIxbXMXlBwqIkY1GUsijLWTQmLFozNs3pEO32se0YCAHWcwAAAABJRU5ErkJggg==',
-  },
-};
-
-function trayIcon(color) {
+/** 托盘图标：必须是位图 PNG（矢量不适用）。已连接=品牌彩色，未连接=中性灰。 */
+function trayIcon(kind) {
   if (trayIcon._cache === undefined) trayIcon._cache = {};
-  if (trayIcon._cache[color]) return trayIcon._cache[color];
-  const src = TRAY_PNG[color] || TRAY_PNG.grey;
-  const img = nativeImage.createEmpty();
-  img.addRepresentation({ scaleFactor: 1, dataURL: 'data:image/png;base64,' + src[1] });
-  img.addRepresentation({ scaleFactor: 2, dataURL: 'data:image/png;base64,' + src[2] });
-  // 防御：万一 addRepresentation 产物异常，至少保证返回有效图像
-  const icon = img.isEmpty()
-    ? nativeImage.createFromDataURL('data:image/png;base64,' + src[2])
-    : img;
-  trayIcon._cache[color] = icon;
-  return icon;
+  if (trayIcon._cache[kind]) return trayIcon._cache[kind];
+  const file = path.join(ASSETS, kind === 'color' ? 'tray-color.png' : 'tray-grey.png');
+  let img = nativeImage.createFromPath(file);
+  // 文件缺失/损坏时再退一次，不让整个托盘创建失败
+  if (img.isEmpty()) img = nativeImage.createFromPath(path.join(ASSETS, 'tray-grey.png'));
+  trayIcon._cache[kind] = img;
+  return img;
 }
 
 function setAutoStart(on) {
