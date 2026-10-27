@@ -97,6 +97,13 @@
   .amount { font-weight: 600; color: #e53935; }
   .amount.ok { color: #2e7d32; }
   .amount.zero { color: var(--sub); font-weight: 400; }
+  /* 账单表：分组行/汇总行/净利行（金额用普通文字色，只有净利润按正负着色） */
+  .amount.plain { color: var(--text); }
+  .bill-table .bill-group-row td { background: #fafbfc; }
+  .bill-table .bill-group { font-weight: 600; color: var(--sub); letter-spacing: 1px; }
+  .bill-table .bill-strong { font-weight: 600; }
+  .bill-table .bill-net-row td { background: #fff8f2; }
+  .bill-table .bill-net-row td .amount { font-size: 14px; }
   .company { font-weight: 600; }
   .th-sort { cursor: pointer; user-select: none; white-space: nowrap; }
   .th-sort:hover { color: var(--primary); }
@@ -157,6 +164,7 @@
           <el-menu-item index="mapping">税名核对</el-menu-item>
           <el-menu-item index="product" v-if="canProduct">商品列表</el-menu-item>
           <el-menu-item index="market" v-if="canMarket">交易市场</el-menu-item>
+          <el-menu-item index="billing" v-if="canBilling">账单</el-menu-item>
           <el-menu-item index="refund" v-if="canRefund">退单列表</el-menu-item>
           <el-menu-item index="profit" v-if="canProfit">实时毛利监控</el-menu-item>
           <el-menu-item index="admin" v-if="isAdmin">系统管理</el-menu-item>
@@ -883,6 +891,71 @@
         </el-dialog>
       </div>
 
+      <!-- ══════════ 账单（按月统计收支） ══════════ -->
+      <div v-show="page === 'billing'" id="page-billing">
+        <div class="page-head">
+          <h2>账单</h2>
+          <div style="font-size:12px;color:var(--sub);line-height:1.8;margin-top:8px">
+            一个月一列，按月看总收入、总支出和净利润。<br>
+            带「系统统计」的两项不能改：1688 是当月订单实付款合计，拼多多是当月实付合计，每次打开都按系统数据实时算。<br>
+            其它的直接点数字改，改完自动保存；新增月份时会自动复制上一个月的数据，只要改动有变化的那几项。
+          </div>
+        </div>
+
+        <el-card shadow="never" class="section-card">
+          <div slot="header" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+            <b>按月收支</b>
+            <span class="loginid">（净利润 = 总收入 − 总支出）</span>
+            <span style="flex:1"></span>
+            <el-button size="small" :loading="bill.loading" @click="loadBilling()">刷新</el-button>
+            <el-button size="small" type="primary" @click="openAddMonth">新增月份</el-button>
+          </div>
+          <el-table :data="billRows" size="small" border style="width:100%" v-loading="bill.loading"
+                    class="bill-table" :row-class-name="billRowClass" empty-text="正在加载账单…">
+            <el-table-column label="项目" width="190" fixed>
+              <template slot-scope="p">
+                <span :class="{ 'bill-group': p.row.t === 'group', 'bill-strong': p.row.t === 'sum' }">{{ p.row.label }}</span>
+                <el-tag v-if="p.row.source === 'auto'" size="mini" type="info" style="margin-left:6px">系统统计</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column v-for="c in bill.cols" :key="c.month" :label="monthText(c.month)" width="152">
+              <template slot-scope="p">
+                <template v-if="p.row.t === 'group'"></template>
+                <template v-else-if="p.row.t === 'item' && p.row.source === 'manual'">
+                  <el-input-number :value="c.cells[p.row.key]" :min="0" :precision="2" :controls="false" size="mini"
+                                   style="width:118px" @change="v => saveBillCell(c, p.row.key, v)"></el-input-number>
+                </template>
+                <template v-else-if="p.row.t === 'item'">
+                  <span class="loginid" :title="'系统按当月账单实时统计，不可手工修改'">{{ yuan(c.auto[p.row.key]) }}</span>
+                </template>
+                <template v-else>
+                  <span class="amount" :class="billSumClass(p.row.key, c)">{{ yuan(c.totals[p.row.key]) }}</span>
+                  <div v-if="p.row.key === 'net'" class="loginid" style="font-size:11px">净利率 {{ c.totals.rate }}%</div>
+                </template>
+              </template>
+            </el-table-column>
+          </el-table>
+        </el-card>
+
+        <!-- 新增月份：复制上一个月的手工数据作为初值 -->
+        <el-dialog title="新增月份" :visible.sync="billAdd.visible" width="440px" append-to-body>
+          <div class="form-tip" style="margin-bottom:12px">
+            新增后会复制 <b>{{ billAdd.copyFrom ? monthText(billAdd.copyFrom) : '（无，全部为 0）' }}</b>
+            的手工数据作为初值，之后直接在本页改有变化的项即可。
+          </div>
+          <el-form label-width="90px">
+            <el-form-item label="账期月份">
+              <el-date-picker v-model="billAdd.month" type="month" value-format="yyyy-MM"
+                              placeholder="选择月份" style="width:200px"></el-date-picker>
+            </el-form-item>
+          </el-form>
+          <div slot="footer">
+            <el-button @click="billAdd.visible = false">取消</el-button>
+            <el-button type="primary" :loading="billAdd.saving" @click="confirmAddMonth">确定</el-button>
+          </div>
+        </el-dialog>
+      </div>
+
       <!-- ══════════ 系统管理 ══════════ -->
       <div v-show="page === 'admin'" id="page-admin">
         <div class="page-head">
@@ -1142,7 +1215,7 @@
             <el-table-column label="收票邮箱" width="170"><template slot-scope="p"><span class="loginid">{{ p.row.email || '—' }}</span></template></el-table-column>
             <el-table-column label="数据量" width="130"><template slot-scope="p"><span class="loginid">{{ p.row.role === 'admin' ? '系统账号 · 不承载业务数据' : p.row.orderCount + ' 单 / ' + p.row.mappingCount + ' 映射' }}</span></template></el-table-column>
             <el-table-column label="最近登录" width="140"><template slot-scope="p"><span class="loginid">{{ fmtMinute(p.row.lastLoginAt) || '—' }}</span></template></el-table-column>
-            <el-table-column label="菜单权限" width="240">
+            <el-table-column label="菜单权限" width="300">
               <template slot-scope="p">
                 <el-tag v-if="p.row.role === 'admin'" size="mini" type="success">全部菜单</el-tag>
                 <template v-else>
@@ -1152,7 +1225,9 @@
                           style="margin-right:4px">毛利</el-tag>
                   <el-tag size="mini" :type="p.row.productEnabled ? 'success' : 'info'"
                           style="margin-right:4px">商品</el-tag>
-                  <el-tag size="mini" :type="p.row.marketEnabled ? 'success' : 'info'">市场</el-tag>
+                  <el-tag size="mini" :type="p.row.marketEnabled ? 'success' : 'info'"
+                          style="margin-right:4px">市场</el-tag>
+                  <el-tag size="mini" :type="p.row.billingEnabled ? 'success' : 'info'">账单</el-tag>
                 </template>
               </template>
             </el-table-column>
@@ -1958,6 +2033,13 @@
       </div>
       <el-switch v-model="menuPermit.market"></el-switch>
     </div>
+    <div class="menu-perm-row">
+      <div>
+        <b>账单</b>
+        <div class="loginid">按月统计总收入/总支出/净利润（默认关闭）</div>
+      </div>
+      <el-switch v-model="menuPermit.billing"></el-switch>
+    </div>
     <div slot="footer">
       <el-button @click="menuPermit.visible = false">取消</el-button>
       <el-button type="primary" :loading="menuPermit.saving" @click="saveMenuPermit">保存</el-button>
@@ -2244,6 +2326,9 @@ const vm = new Vue({
       publish: { visible: false, title: '', discount: 100, items: [], saving: false },
       // 交易市场
       market: { loading: false, rows: [], total: 0, page: 1, size: 20 },
+      // 账单（按月）：cols = 每个月一列 { month, hasRow, cells(手工项), auto(1688/拼多多), totals }
+      bill: { loading: false, items: [], cols: [] },
+      billAdd: { visible: false, month: '', copyFrom: '', saving: false },
       quotes: { visible: false, loading: false, sku: '', goodsName: '', rows: [] },
       meta: '', tenantLabel: '', copyright: '',
       // 筛选（草稿 vs 生效）
@@ -2293,8 +2378,8 @@ const vm = new Vue({
       creatingUser: false, createOk: false,
       userEdit: { visible: false, id: null, title: '', company: '', taxNo: '', email: '', note: '', hint: '', lockCompany: false, saving: false },
       // 菜单权限弹窗（退单列表 / 实时毛利监控）
-      menuPermit: { visible: false, id: null, username: '', refund: false, profit: false, product: false, market: false, saving: false,
-                    origin: { refund: false, profit: false, product: false, market: false } },
+      menuPermit: { visible: false, id: null, username: '', refund: false, profit: false, product: false, market: false, billing: false, saving: false,
+                    origin: { refund: false, profit: false, product: false, market: false, billing: false } },
       // 操作日志（仅超级管理员）
       opLog: { draftUsername: '', username: '', page: 1, size: 20, total: 0, rows: [], loading: false },
       // 退单列表（牵牛花）
@@ -2362,6 +2447,22 @@ const vm = new Vue({
     canProduct() { return !!(this.me && (this.me.role === 'admin' || this.me.productEnabled)); },
     // 交易市场权限（同上，独立开关）
     canMarket() { return !!(this.me && (this.me.role === 'admin' || this.me.marketEnabled)); },
+    // 账单权限（同上，独立开关；默认所有用户不授权）
+    canBilling() { return !!(this.me && (this.me.role === 'admin' || this.me.billingEnabled)); },
+    /** 账单行：分组行 + 明细行 + 汇总行（月份列由 bill.cols 动态生成） */
+    billRows() {
+      const items = this.bill.items || [];
+      const mk = (i) => ({ t: 'item', key: i.key, label: i.label, source: i.source });
+      return [
+        { t: 'group', key: 'g_income', label: '收入' },
+        ...items.filter((i) => i.group === 'income').map(mk),
+        { t: 'sum', key: 'income', label: '总收入' },
+        { t: 'group', key: 'g_expense', label: '支出' },
+        ...items.filter((i) => i.group === 'expense').map(mk),
+        { t: 'sum', key: 'expense', label: '总支出' },
+        { t: 'sum', key: 'net', label: '净利润' },
+      ];
+    },
     // 拼多多发票对所有用户开放，不需要单独配置菜单权限
     // 卖家发送间隔低于 15 秒时给个橙色警示：这个值直接决定会不会被平台判定为机器群发
     gapTooSmall() { return Number(this.cfg.gapMin) < 15 || Number(this.cfg.gapMax) < 15; },
@@ -2652,6 +2753,7 @@ const vm = new Vue({
       if (p === 'profit') this.$nextTick(() => this.renderProfitTrend());
       if (p === 'product') { this.loadProducts(); this.loadProductTrend(); }
       if (p === 'market') this.loadMarket();
+      if (p === 'billing') this.loadBilling();
     },
     'detail.visible'(v) { if (!v) this.detail.q = ''; },
   },
@@ -2730,6 +2832,7 @@ const vm = new Vue({
       if (p === 'profit' && !this.canProfit) p = 'board';
       if (p === 'product' && !this.canProduct) p = 'board';
       if (p === 'market' && !this.canMarket) p = 'board';
+      if (p === 'billing' && !this.canBilling) p = 'board';
       this.page = p;
       if (p === 'admin') { this.loadConfigUI(); this.loadUsers(); this.loadBuildStatus(); this.loadAgentVersions(); }
       if (p === 'mapping') this.loadMapping();
@@ -4414,10 +4517,12 @@ const vm = new Vue({
         visible: true, id: row.id, username: row.username,
         refund: !!row.qnhRefundEnabled, profit: !!row.qnhProfitEnabled,
         product: !!row.productEnabled, market: !!row.marketEnabled,
+        billing: !!row.billingEnabled,
         saving: false,
         origin: {
           refund: !!row.qnhRefundEnabled, profit: !!row.qnhProfitEnabled,
           product: !!row.productEnabled, market: !!row.marketEnabled,
+          billing: !!row.billingEnabled,
         },
       };
     },
@@ -4430,6 +4535,7 @@ const vm = new Vue({
       if (m.profit !== m.origin.profit) changes.push({ menu: 'profit', enabled: m.profit, field: 'qnhProfitEnabled', label: '实时毛利监控' });
       if (m.product !== m.origin.product) changes.push({ menu: 'product', enabled: m.product, field: 'productEnabled', label: '商品列表' });
       if (m.market !== m.origin.market) changes.push({ menu: 'market', enabled: m.market, field: 'marketEnabled', label: '交易市场' });
+      if (m.billing !== m.origin.billing) changes.push({ menu: 'billing', enabled: m.billing, field: 'billingEnabled', label: '账单' });
       if (!changes.length) { m.visible = false; return; }
       m.saving = true;
       const row = (this.users || []).find((u) => u.id === m.id);
@@ -4910,6 +5016,78 @@ const vm = new Vue({
         if (this.market.page > pages) { this.market.page = pages; return this.loadMarket(); }
       } catch (e) { this.$message.error('交易市场加载失败: ' + e.message); }
       finally { this.market.loading = false; }
+    },
+    // ── 账单（按月收支）─────────────────────────────────────────────────
+    /** 'YYYY-MM' → '2026年10月' */
+    monthText(m) {
+      if (!m) return '';
+      const [y, mm] = String(m).split('-');
+      return y + '年' + Number(mm) + '月';
+    },
+    /** 月份 +1（跨年安全） */
+    nextMonthOf(m) {
+      const y = Number(String(m).slice(0, 4));
+      const mm = Number(String(m).slice(5, 7));
+      const t = y * 12 + (mm - 1) + 1;
+      return Math.floor(t / 12) + '-' + String((t % 12) + 1).padStart(2, '0');
+    },
+    billRowClass({ row }) {
+      if (row.t === 'group') return 'bill-group-row';
+      if (row.key === 'net') return 'bill-net-row';
+      return '';
+    },
+    /** 汇总色：总收入/总支出用正文色；净利润为负标红（沿用中文习惯：亏=红） */
+    billSumClass(key, c) {
+      if (key === 'net') return (Number(c.totals.net) || 0) < 0 ? '' : 'ok';
+      return 'plain';
+    },
+    async loadBilling(silent) {
+      if (!silent) this.bill.loading = true;
+      try {
+        const d = await this.api('/api/billing?months=6');
+        if (d.error) { this.$message.error(d.error); return; }
+        this.bill.items = d.items || [];
+        this.bill.cols = d.months || [];
+      } catch (e) { this.$message.error('账单加载失败: ' + e.message); }
+      finally { if (!silent) this.bill.loading = false; }
+    },
+    /** 改一个单元格 → 立即保存，静默重算（保存后重新拉一次，金额口径统一由服务端算） */
+    async saveBillCell(col, item, value) {
+      const v = Math.max(0, Number(value) || 0);
+      if (Number(col.cells[item]) === v) return;
+      try {
+        const d = await this.api('/api/billing/cell', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ month: col.month, item, value: v }),
+        });
+        if (d.error) { this.$message.error(d.error); }
+        else { this.$message.success('已保存：' + this.monthText(col.month)); }
+      } catch (e) { this.$message.error('保存失败: ' + e.message); }
+      await this.loadBilling(true);
+    },
+    /** 新增月份：默认下一个月 + 复制当前最后一列 */
+    openAddMonth() {
+      const cols = this.bill.cols || [];
+      const last = cols.length ? cols[cols.length - 1].month : '';
+      const now = new Date();
+      const cur = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0');
+      this.billAdd = { visible: true, month: last ? this.nextMonthOf(last) : cur, copyFrom: last, saving: false };
+    },
+    async confirmAddMonth() {
+      const m = this.billAdd;
+      if (!m.month) { this.$message.warning('请选择账期月份'); return; }
+      m.saving = true;
+      try {
+        const d = await this.api('/api/billing/month', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ month: m.month, copyFrom: m.copyFrom || undefined }),
+        });
+        if (d.error) { this.$message.error(d.error); return; }
+        this.$message.success('已新增 ' + this.monthText(m.month) + (d.copiedFrom ? '（复制自 ' + this.monthText(d.copiedFrom) + '）' : ''));
+        m.visible = false;
+        await this.loadBilling();
+      } catch (e) { this.$message.error('新增失败: ' + e.message); }
+      finally { m.saving = false; }
     },
     async openQuotes(row) {
       this.quotes = { visible: true, loading: true, sku: row.sku, goodsName: row.goods_name || '', rows: [] };

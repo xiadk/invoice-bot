@@ -61,6 +61,7 @@ const tenancy = require('./lib/tenancy');
 const { runImport, importOrderUpload, importInvoiceUpload } = require('./import-to-db');
 const qht = require('./lib/qht');
 const products = require('./lib/products');
+const billing = require('./lib/billing');
 const { loadConfig } = require('./lib/config');
 const { AgentHub } = require('./lib/agent-hub');
 const { buildMessages } = require('./lib/sender');
@@ -308,6 +309,8 @@ function publicUser(u) {
     productEnabled: u.role === 'admin' ? true : !!Number(u.product_enabled),
     // 交易市场页权限（同上，独立开关）
     marketEnabled: u.role === 'admin' ? true : !!Number(u.market_enabled),
+    // 账单页权限（同上，独立开关）
+    billingEnabled: u.role === 'admin' ? true : !!Number(u.billing_enabled),
     lastLoginAt: u.last_login_at,
     createdAt: u.created_at,
   };
@@ -2111,7 +2114,7 @@ async function listUsers() {
   const users = await db.query(`
     SELECT u.id, u.username, u.role, u.status, u.company_name, u.tax_no, u.email, u.display_name, u.note,
            u.must_change_password, u.last_login_at, u.created_at, u.updated_at,
-           u.qnh_refund_enabled, u.qnh_profit_enabled, u.product_enabled, u.market_enabled,
+           u.qnh_refund_enabled, u.qnh_profit_enabled, u.product_enabled, u.market_enabled, u.billing_enabled,
            (SELECT COUNT(*) FROM invoice_order o WHERE o.user_id = u.id)              AS order_count,
            (SELECT COUNT(DISTINCT o.seller_company) FROM invoice_order o WHERE o.user_id = u.id) AS company_count,
            (SELECT COUNT(*) FROM issued_invoice i WHERE i.user_id = u.id)             AS invoice_rows,
@@ -2129,6 +2132,7 @@ async function listUsers() {
     pddEnabled: u.role === 'admin' ? true : !!Number(u.pdd_enabled),
     productEnabled: u.role === 'admin' ? true : !!Number(u.product_enabled),
     marketEnabled: u.role === 'admin' ? true : !!Number(u.market_enabled),
+    billingEnabled: u.role === 'admin' ? true : !!Number(u.billing_enabled),
     lastLoginAt: u.last_login_at, createdAt: u.created_at, updatedAt: u.updated_at,
     orderCount: Number(u.order_count) || 0,
     companyCount: Number(u.company_count) || 0,
@@ -2496,12 +2500,14 @@ const server = http.createServer(async (req, res) => {
     const tenantId = tenantOf(req, url, user);
     const isAdmin = user.role === 'admin';
     const writeGuard = () => assertWritable(user, tenantId);
-    // ── 菜单权限：商品列表 / 交易市场（v0.2.38；默认所有普通用户关闭，超管始终可用）──
+    // ── 菜单权限：商品列表 / 交易市场 / 账单（v0.2.39；默认所有普通用户关闭，超管始终可用）──
     //    菜单隐藏只是体验，接口这里才是真正的放行判断（含补货、齐货通加购、商品导入）
     const canProduct = isAdmin || !!Number(user.product_enabled);
     const canMarket = isAdmin || !!Number(user.market_enabled);
+    const canBilling = isAdmin || !!Number(user.billing_enabled);
     const denyProduct = () => sendJson(res, 403, { error: '未开启商品列表权限，请联系超级管理员' });
     const denyMarket = () => sendJson(res, 403, { error: '未开启交易市场权限，请联系超级管理员' });
+    const denyBilling = () => sendJson(res, 403, { error: '未开启账单权限，请联系超级管理员' });
 
     // ── 助手安装包重新打包（仅超级管理员；系统管理页一键触发）──
     if (p === '/api/agent/build') {
@@ -3084,6 +3090,31 @@ const server = http.createServer(async (req, res) => {
       writeGuard();
       const body = await readBody(req);
       return sendJson(res, 200, await products.publishToMarket(user.id, body.skus, body.discount));
+    }
+
+    // ── 账单（按月收支；1688 / 拼多多金额由系统实时统计，其余手工录入）──
+    if (method === 'GET' && p === '/api/billing') {
+      if (!canBilling) return denyBilling();
+      const months = url.searchParams.get('months');
+      return sendJson(res, 200, await billing.overview(tenantId, { months }));
+    }
+    if (method === 'POST' && p === '/api/billing/cell') {
+      if (!canBilling) return denyBilling();
+      writeGuard();
+      try {
+        return sendJson(res, 200, await billing.saveCell(tenantId, await readBody(req)));
+      } catch (e) {
+        return sendJson(res, 200, { error: String((e && e.message) || e) });
+      }
+    }
+    if (method === 'POST' && p === '/api/billing/month') {
+      if (!canBilling) return denyBilling();
+      writeGuard();
+      try {
+        return sendJson(res, 200, await billing.addMonth(tenantId, await readBody(req)));
+      } catch (e) {
+        return sendJson(res, 200, { error: String((e && e.message) || e) });
+      }
     }
 
     // 订单级开票状态
@@ -4019,6 +4050,7 @@ const server = http.createServer(async (req, res) => {
           profit: { col: 'qnh_profit_enabled', label: '实时毛利监控', field: 'qnhProfitEnabled' },
           product: { col: 'product_enabled', label: '商品列表', field: 'productEnabled' },
           market: { col: 'market_enabled', label: '交易市场', field: 'marketEnabled' },
+          billing: { col: 'billing_enabled', label: '账单', field: 'billingEnabled' },
         };
         const m = MENU[menu];
         if (!m) return sendJson(res, 400, { error: '未知的菜单：' + menu });

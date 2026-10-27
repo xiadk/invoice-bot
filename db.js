@@ -381,6 +381,32 @@ async function ensureQnhSchema(q) {
       "  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP," +
       "  PRIMARY KEY (`user_id`,`key`)" +
       ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='牵牛花按用户配置（提醒/告警/拉取参数）'",
+
+    // ── 账单（按月统计收支）─────────────────────────────────────────────
+    // 一人一月一行：手工项存这里；1688/拼多多两项不落库，每次由 invoice_order / pdd_order 实时聚合。
+    // 收入 = 美团 + 淘宝 + 京东（全部手工）；支出 = 1688(自动) + 拼多多(自动) + 下列 11 项手工。
+    'CREATE TABLE IF NOT EXISTS `billing_month` (' +
+      "  `user_id` INT NOT NULL DEFAULT 1 COMMENT '数据归属用户（app_user.id）'," +
+      "  `month` CHAR(7) NOT NULL COMMENT '账期月份 YYYY-MM'," +
+      "  `income_meituan` DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT '收入：美团预计收入（手工）'," +
+      "  `income_taobao` DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT '收入：淘宝预计收入（手工）'," +
+      "  `income_jd` DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT '收入：京东预计收入（手工）'," +
+      "  `exp_rent` DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT '支出：房租（手工）'," +
+      "  `exp_utility` DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT '支出：水电（手工）'," +
+      "  `exp_labor` DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT '支出：人工（手工）'," +
+      "  `exp_delivery` DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT '支出：配送费（手工）'," +
+      "  `exp_promo` DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT '支出：推广费（手工）'," +
+      "  `exp_liquor` DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT '支出：自采酒水（手工）'," +
+      "  `exp_ice` DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT '支出：雪糕（手工）'," +
+      "  `exp_produce` DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT '支出：果蔬（手工）'," +
+      "  `exp_vat` DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT '支出：增值税（手工）'," +
+      "  `exp_cit` DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT '支出：企业所得税（手工）'," +
+      "  `exp_other` DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT '支出：其它（手工）'," +
+      "  `note` VARCHAR(255) DEFAULT NULL COMMENT '备注'," +
+      "  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP," +
+      "  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP," +
+      "  PRIMARY KEY (`user_id`,`month`)" +
+      ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='账单（按月收支；1688/拼多多金额实时统计不落库）'",
   ];
   for (const s of stmts) await q(s);
 }
@@ -509,6 +535,13 @@ async function migrate(conn, dbName) {
     await q(
       'ALTER TABLE `app_user` ADD COLUMN `market_enabled` TINYINT(1) NOT NULL DEFAULT 0 ' +
       "COMMENT '是否允许查看交易市场页（1=开启，超级管理员始终可见）'"
+    );
+  }
+  // ── 账单菜单权限（v0.2.39）：默认 0 = 所有用户默认不授权，由超管逐个开启
+  if (!(await colExists('app_user', 'billing_enabled'))) {
+    await q(
+      'ALTER TABLE `app_user` ADD COLUMN `billing_enabled` TINYINT(1) NOT NULL DEFAULT 0 ' +
+      "COMMENT '是否允许查看账单页（1=开启，超级管理员始终可见）'"
     );
   }
   // ── 齐货通登录态（v0.2.31）：用户在「商品列表 / 补货」页粘贴自己的 x-token 与 x-user（手机号）

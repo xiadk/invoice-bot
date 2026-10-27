@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS `app_user` (
   `qht_x_user`           VARCHAR(64)   DEFAULT NULL            COMMENT '齐货通接口登录态 x-user（一般是登录手机号）',
   `product_enabled`      TINYINT(1)    NOT NULL DEFAULT 0      COMMENT '是否允许查看商品列表页（含补货/齐货通；1=开启，超级管理员始终可见）',
   `market_enabled`       TINYINT(1)    NOT NULL DEFAULT 0      COMMENT '是否允许查看交易市场页（1=开启，超级管理员始终可见）',
+  `billing_enabled`      TINYINT(1)    NOT NULL DEFAULT 0      COMMENT '是否允许查看账单页（1=开启，超级管理员始终可见）',
   `token_version`        INT           NOT NULL DEFAULT 1      COMMENT '会话版本：改密/禁用时 +1，旧登录态立即失效',
   `must_change_password` TINYINT(1)    NOT NULL DEFAULT 0      COMMENT '是否强制下次登录修改密码',
   `created_by`           INT           DEFAULT NULL            COMMENT '创建者（管理员ID）',
@@ -414,3 +415,36 @@ CREATE TABLE IF NOT EXISTS `market_listing` (
   KEY `idx_ml_price` (`sku`, `discount_price`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   COMMENT='交易市场发布记录（跨用户共享，报价汇集）';
+
+-- ----------------------------------------------------------------------------
+-- billing_month —— 账单（按月统计收支）
+--   一人一月一行（唯一键 user_id + month）；month 形如 '2026-10'
+--   手工项：美团/淘宝/京东预计收入 + 房租/水电/人工/配送费/推广费/自采酒水/雪糕/果蔬/
+--           增值税/企业所得税/其它
+--   自动项（不落库，每次由业务表实时聚合）：
+--     1688 订单当月总金额 = SUM(invoice_order.pay_amount) 按 pay_time 归月（空则 created_at）
+--     拼多多当月实付     = SUM(pdd_order.pay_amount)    按 order_time 归月
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `billing_month` (
+  `user_id`        INT           NOT NULL DEFAULT 1     COMMENT '数据归属用户（app_user.id）',
+  `month`          CHAR(7)       NOT NULL               COMMENT '账期月份 YYYY-MM',
+  `income_meituan` DECIMAL(14,2) NOT NULL DEFAULT 0     COMMENT '收入：美团预计收入（手工）',
+  `income_taobao`  DECIMAL(14,2) NOT NULL DEFAULT 0     COMMENT '收入：淘宝预计收入（手工）',
+  `income_jd`      DECIMAL(14,2) NOT NULL DEFAULT 0     COMMENT '收入：京东预计收入（手工）',
+  `exp_rent`       DECIMAL(14,2) NOT NULL DEFAULT 0     COMMENT '支出：房租（手工）',
+  `exp_utility`    DECIMAL(14,2) NOT NULL DEFAULT 0     COMMENT '支出：水电（手工）',
+  `exp_labor`      DECIMAL(14,2) NOT NULL DEFAULT 0     COMMENT '支出：人工（手工）',
+  `exp_delivery`   DECIMAL(14,2) NOT NULL DEFAULT 0     COMMENT '支出：配送费（手工）',
+  `exp_promo`      DECIMAL(14,2) NOT NULL DEFAULT 0     COMMENT '支出：推广费（手工）',
+  `exp_liquor`     DECIMAL(14,2) NOT NULL DEFAULT 0     COMMENT '支出：自采酒水（手工）',
+  `exp_ice`        DECIMAL(14,2) NOT NULL DEFAULT 0     COMMENT '支出：雪糕（手工）',
+  `exp_produce`    DECIMAL(14,2) NOT NULL DEFAULT 0     COMMENT '支出：果蔬（手工）',
+  `exp_vat`        DECIMAL(14,2) NOT NULL DEFAULT 0     COMMENT '支出：增值税（手工）',
+  `exp_cit`        DECIMAL(14,2) NOT NULL DEFAULT 0     COMMENT '支出：企业所得税（手工）',
+  `exp_other`      DECIMAL(14,2) NOT NULL DEFAULT 0     COMMENT '支出：其它（手工）',
+  `note`           VARCHAR(255)  DEFAULT NULL           COMMENT '备注',
+  `created_at`     DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  `updated_at`     DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+  PRIMARY KEY (`user_id`, `month`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  COMMENT='账单（按月收支；1688/拼多多金额实时统计不落库）';
