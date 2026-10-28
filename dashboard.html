@@ -2173,6 +2173,13 @@
             </template>
             切换账号后，每个账号各自首次全量。
           </div>
+          <!-- 操作列两个催收入口的区别，避免「为什么有的单没有发送按钮」的疑问 -->
+          <div class="form-tip" style="margin-top:6px">
+            <i class="el-icon-chat-dot-round"></i>
+            操作列：「<b>商家处理中</b>」的单可直接<b>发送催收消息</b>（助手内自动逐条发）；
+            「<b>已完成 + 未同步开票</b>」的单，平台已关闭其开票入口、订单接口也拿不到商家会话 ID，
+            自动发送发不出去，请点<b>去平台催</b>打开平台订单页，在页面里点「联系商家」走线下开票。
+          </div>
         </el-card>
 
         <el-alert v-if="qnhNeedPick" type="warning" :closable="false" show-icon style="margin-bottom:12px"
@@ -2332,7 +2339,14 @@
                            @click="applyPddRows([p.row])">申请发票</el-button>
                 <el-button v-if="p.row.chatable" type="text" size="mini" :disabled="pd.applying"
                            style="color:#e6a23c" @click="sendPddMsgRows([p.row])">发送催收消息</el-button>
-                <span v-if="!p.row.applyable && !p.row.chatable" class="loginid">—</span>
+                <!-- 已完成 + 未同步开票：平台已关闭开票入口、且订单接口拿不到数字 mall_id（聊天页必须要它），
+                     自动催收发不出去 → 给「去平台催」，在平台订单页里点「联系商家」走线下开票 -->
+                <el-tooltip v-if="!p.row.applyable && !p.row.chatable && p.row.manualChat" placement="top"
+                            content="这单已超过平台开票期限（入口已关闭），且订单接口拿不到商家会话 ID，无法自动发送。点这里打开平台订单页，在页面里点「联系商家」催其线下开票。">
+                  <el-button type="text" size="mini" style="color:#e6a23c"
+                             @click="openPddOrder(p.row)">去平台催</el-button>
+                </el-tooltip>
+                <span v-if="!p.row.applyable && !p.row.chatable && !p.row.manualChat" class="loginid">—</span>
               </template>
             </el-table-column>
           </el-table>
@@ -4490,6 +4504,14 @@ const vm = new Vue({
 
     // ── 拼多多「催商家开票」（商家处理中订单；行内单个 / 勾选批量，同一入口） ──
     sendPddBatch() { this.sendPddMsgRows(this.pd.selected); },
+    /** 打开拼多多订单页：已完成但「未同步开票」的单，平台已关开票入口、又没有商家会话 ID，
+     *  只能在平台页面里点「联系商家」走线下开票（不伪造状态、不发注定失败的消息） */
+    openPddOrder(row) {
+      const sn = row && row.orderSn;
+      if (!sn) { this.$message.warning('缺少订单号'); return; }
+      window.open('https://mobile.yangkeduo.com/order.html?order_sn=' + encodeURIComponent(sn),
+        '_blank', 'noopener');
+    },
     async sendPddMsgRows(rows) {
       const list = (rows || []).filter((r) => r && r.chatable);
       if (!list.length) { this.$message.warning('请先勾选「商家处理中」的订单'); return; }
