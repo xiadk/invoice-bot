@@ -35,7 +35,7 @@ const PROTOCOL = 'xsh';
 const VERSION = (() => { try { return require('../package.json').version; } catch (e) { return '0.1.0'; } })();
 // 品牌图标：必须放在 electron/ 下才会被 electron-builder 打进 asar（顶层 assets/ 不在打包清单里）
 const ASSETS = path.join(__dirname, 'assets');
-const APP_ICON = path.join(ASSETS, 'logo.ico');
+const APP_ICON = path.join(ASSETS, 'app-icon-mascot.ico');
 
 // 程序已改名「催收小助手」，Electron 默认的 userData 目录会跟着产品名走
 // （%APPDATA%\催收小助手），老用户升级上来会丢掉设备令牌和本机登录态 ——
