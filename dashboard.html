@@ -39,6 +39,11 @@
   .el-checkbox__input.is-checked + .el-checkbox__label { color: var(--brand); }
   .el-radio__input.is-checked .el-radio__inner { background: var(--brand); border-color: var(--brand); }
   .el-radio__input.is-checked + .el-radio__label { color: var(--brand); }
+  /* 分段按钮（如「未核对 / 已核对」）也用品牌色，避免与其它控件蓝橙混搭 */
+  .el-radio-button__orig-radio:checked + .el-radio-button__inner {
+    background-color: var(--brand); border-color: var(--brand); color: #fff;
+    box-shadow: -1px 0 0 0 var(--brand);
+  }
   .el-tabs__item.is-active { color: var(--brand); }
   .el-tabs__active-bar { background-color: var(--brand); }
   .el-pagination.is-background .el-pager li:not(.disabled).active { background-color: var(--brand); }
@@ -56,31 +61,54 @@
          background: var(--bg); color: var(--text-1); -webkit-font-smoothing: antialiased; }
   #app { min-height: 100vh; }
 
-  /* ── 骨架：左侧 232px 侧边栏 + 右侧 56px 顶栏（设计稿全局布局）───── */
-  .app-shell { display: flex; min-height: 100vh; }
+  /* ── 骨架：上下两段（参考 1688 工作台）─────────────────────────
+     上段 = 一条通栏吸顶栏：左上角品牌 + 当前页标题 + 右侧账号/助手操作；
+     下段 = 左菜单 232px + 右内容区。菜单从顶栏下方开始，可整体收起。 */
+  .app-shell { display: flex; flex-direction: column; min-height: 100vh; }
+  .app-header { height: var(--topbar-h); flex: none; background: var(--surface);
+                border-bottom: 1px solid var(--line); padding: 0 20px;
+                display: flex; align-items: center; gap: 14px;
+                position: sticky; top: 0; z-index: 30; }
+  .app-header .brand { display: flex; align-items: center; gap: 10px; height: 34px;
+                       padding-right: 16px; border-right: 1px solid var(--line); flex: none; }
+  .app-header .brand-logo { height: 30px; width: 30px; object-fit: contain; flex: none; }
+  .app-header .brand-name { font-size: 15px; font-weight: 700; color: var(--text-1); line-height: 1.3; white-space: nowrap; }
+  .app-header .brand-ver { font-size: 11px; color: var(--text-3); line-height: 1.3; white-space: nowrap; }
+  .app-header .page-ident { min-width: 0; overflow: hidden; flex: 1 1 auto; }
+  .app-body { flex: 1 1 auto; display: flex; align-items: stretch; min-width: 0; }
   .sidebar { width: var(--sb-w); flex: none; background: var(--surface);
              border-right: 1px solid var(--line); padding: 12px;
              display: flex; flex-direction: column; gap: 2px;
-             position: sticky; top: 0; height: 100vh; overflow-y: auto; }
-  .sidebar .brand { display: flex; align-items: center; gap: 10px; padding: 6px 6px 16px 6px; }
-  .sidebar .brand-logo { height: 32px; width: 32px; object-fit: contain; flex: none; }
-  .sidebar .brand-name { font-size: 15px; font-weight: 700; color: var(--text-1); line-height: 1.4; }
-  .sidebar .brand-ver { font-size: 11px; color: var(--text-3); line-height: 1.4; }
-  .nav-group { font-size: 11px; color: var(--text-3); padding: 12px 16px 4px 16px; letter-spacing: .2px; }
+             position: sticky; top: var(--topbar-h); height: calc(100vh - var(--topbar-h));
+             overflow-y: auto; overflow-x: hidden;
+             transition: width .18s ease, padding .18s ease, border-color .18s ease; }
+  /* 收起态：宽度连同内边距/描边一起归零，菜单整体滑出；左缘留一枚把手可再展开 */
+  .app-body.is-collapsed .sidebar { width: 0; padding-left: 0; padding-right: 0; border-right-color: transparent; }
+  /* 折叠把手：贴侧边栏右缘、垂直居中（截图红框位置） */
+  .sb-toggle { position: fixed; left: calc(var(--sb-w) - 11px); top: calc(50% + 28px);
+               transform: translateY(-50%); z-index: 40; width: 22px; height: 46px; padding: 0;
+               border-radius: 11px; border: 1px solid var(--line); background: var(--surface);
+               color: var(--text-3); display: flex; align-items: center; justify-content: center;
+               cursor: pointer; box-shadow: 0 2px 8px rgba(16,24,40,.10);
+               transition: left .18s ease, color .15s, border-color .15s; }
+  .sb-toggle:hover { color: var(--brand); border-color: var(--brand-line); }
+  .sb-toggle i { font-size: 12px; }
+  .app-body.is-collapsed .sb-toggle { left: 2px; background: var(--brand-tint);
+               border-color: var(--brand-line); color: var(--brand); }
+  .nav-group { font-size: 11px; color: var(--text-3); padding: 12px 16px 4px 16px;
+               letter-spacing: .2px; white-space: nowrap; }
   .nav-item { display: flex; align-items: center; gap: 10px; padding: 10px 16px;
               border-radius: var(--radius-sm); font-size: 14px; color: var(--text-2);
-              cursor: pointer; user-select: none; transition: background .15s, color .15s; }
+              cursor: pointer; user-select: none; white-space: nowrap;
+              transition: background .15s, color .15s; }
   .nav-item:hover { background: var(--surface-2); color: var(--text-1); }
   .nav-item.is-active { background: var(--brand-tint); color: var(--brand); font-weight: 500; }
   .nav-item i { font-size: 16px; width: 18px; text-align: center; flex: none; }
   .main-col { flex: 1; min-width: 0; display: flex; flex-direction: column; }
-  .topbar { height: var(--topbar-h); flex: none; background: var(--surface);
-            border-bottom: 1px solid var(--line); padding: 0 20px;
-            display: flex; align-items: center; justify-content: space-between; gap: 12px;
-            position: sticky; top: 0; z-index: 20; }
-  .topbar > div:first-child { min-width: 0; overflow: hidden; }
-  .topbar-title { font-size: 16px; font-weight: 700; color: var(--text-1); line-height: 1.35; }
-  .topbar-sub { font-size: 12px; color: var(--text-3); line-height: 1.4; margin-top: 1px; }
+  .topbar-title { font-size: 16px; font-weight: 700; color: var(--text-1); line-height: 1.35;
+                  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .topbar-sub { font-size: 12px; color: var(--text-3); line-height: 1.4; margin-top: 1px;
+                white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .pill { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px;
           border-radius: var(--radius-pill); font-size: 12px; font-weight: 500; white-space: nowrap; }
   .pill-ok { background: var(--ok-bg); color: var(--ok); }
@@ -206,8 +234,9 @@
   @media (max-width: 1180px) {
     :root { --sb-w: 64px; }
     .sidebar { padding: 8px; }
-    .sidebar .brand { padding: 6px 0 14px 0; justify-content: center; }
-    .sidebar .brand-text, .nav-group, .nav-item span { display: none; }
+    .app-header { padding: 0 12px; gap: 10px; }
+    .app-header .brand { padding-right: 10px; }
+    .app-header .brand-text, .nav-group, .nav-item span { display: none; }
     .nav-item { justify-content: center; padding: 10px 0; }
   }
   @media (max-width: 900px) { .el-main { padding: 12px; } }
@@ -307,8 +336,8 @@
 <body>
 <div id="app" v-cloak>
   <div class="app-shell">
-    <!-- ── 侧边栏：232px，分组导航（条目由 navGroups 按权限下发）── -->
-    <aside class="sidebar">
+    <!-- ── 上段：通栏吸顶栏。左上角品牌与右侧操作同处一条，滚动时一起固定 ── -->
+    <header class="app-header">
       <div class="brand">
         <img class="brand-logo" src="/assets/logo-icon.png" alt="发票催收">
         <div class="brand-text">
@@ -316,48 +345,54 @@
           <div class="brand-ver">v{{ serverVersion || '—' }}</div>
         </div>
       </div>
-      <template v-for="g in navGroups">
-        <div class="nav-group" :key="'g-' + g.title">{{ g.title }}</div>
-        <div class="nav-item" v-for="it in g.items" :key="it.key" :title="it.label"
-             :class="{ 'is-active': page === it.key }" @click="switchPage(it.key)">
-          <i :class="it.icon"></i><span>{{ it.label }}</span>
-        </div>
-      </template>
-    </aside>
-
-    <div class="main-col">
-      <!-- ── 顶栏：56px，左侧页面标题/副标题，右侧助手与账号操作 ── -->
-      <header class="topbar">
-        <div>
-          <div class="topbar-title">{{ pageTitle }}</div>
-          <div class="topbar-sub">{{ pageSub }}</div>
-        </div>
-        <div class="nav-right">
-          <el-button size="small" plain @click="openDownload"
-                     title="下载 Windows 版本机助手（已内置服务器地址），下载后双击运行">⬇ 下载本机助手</el-button>
-          <!-- 绑定按钮与连接状态合一：未连接可点、已连接变绿色状态且不可点 -->
-          <el-button size="small" :class="['agent-bind-btn', { 'is-bound': agent.online }]"
-                     :type="agent.online ? 'success' : 'primary'" :plain="!agent.online"
-                     :loading="guide.binding" :disabled="agent.online || guide.binding"
-                     :title="agentBindTitle" @click="bindAgent">{{ agentBindText }}</el-button>
-          <!-- 版本体检不通过才出现：宽限期内橙色提醒，已停用则红色 -->
-          <el-button v-if="agentUpdate" size="small" class="agent-upd-btn"
-                     :class="{ 'is-blocking': agentUpdate.blocking }"
-                     :type="agentUpdate.blocking ? 'danger' : 'warning'"
-                     :plain="!agentUpdate.blocking" :title="agentUpdate.title" @click="promptAgentUpdate">
-            ⬆ {{ agentUpdate.text }}
-          </el-button>
-          <div class="user-chip">
-            <div class="avatar">{{ avatarText }}</div>
-            <div>
-              <div class="uname">{{ userName }}</div>
-              <div class="urole">{{ userRoleText }}</div>
-            </div>
-            <el-button size="mini" @click="openPwdModal" title="修改当前账号密码">改密</el-button>
-            <el-button size="mini" @click="logout">退出</el-button>
+      <div class="page-ident">
+        <div class="topbar-title">{{ pageTitle }}</div>
+        <div class="topbar-sub">{{ pageSub }}</div>
+      </div>
+      <div class="nav-right">
+        <el-button size="small" plain @click="openDownload"
+                   title="下载 Windows 版本机助手（已内置服务器地址），下载后双击运行">⬇ 下载本机助手</el-button>
+        <!-- 绑定按钮与连接状态合一：未连接可点、已连接变绿色状态且不可点 -->
+        <el-button size="small" :class="['agent-bind-btn', { 'is-bound': agent.online }]"
+                   :type="agent.online ? 'success' : 'primary'" :plain="!agent.online"
+                   :loading="guide.binding" :disabled="agent.online || guide.binding"
+                   :title="agentBindTitle" @click="bindAgent">{{ agentBindText }}</el-button>
+        <!-- 版本体检不通过才出现：宽限期内橙色提醒，已停用则红色 -->
+        <el-button v-if="agentUpdate" size="small" class="agent-upd-btn"
+                   :class="{ 'is-blocking': agentUpdate.blocking }"
+                   :type="agentUpdate.blocking ? 'danger' : 'warning'"
+                   :plain="!agentUpdate.blocking" :title="agentUpdate.title" @click="promptAgentUpdate">
+          ⬆ {{ agentUpdate.text }}
+        </el-button>
+        <div class="user-chip">
+          <div class="avatar">{{ avatarText }}</div>
+          <div>
+            <div class="uname">{{ userName }}</div>
+            <div class="urole">{{ userRoleText }}</div>
           </div>
+          <el-button size="mini" @click="openPwdModal" title="修改当前账号密码">改密</el-button>
+          <el-button size="mini" @click="logout">退出</el-button>
         </div>
-      </header>
+      </div>
+    </header>
+
+    <!-- ── 下段：左菜单 + 右内容。菜单可点把手收起，点右侧内容或滚动也会自动收起 ── -->
+    <div class="app-body" :class="{ 'is-collapsed': sidebarCollapsed }">
+      <aside class="sidebar">
+        <template v-for="g in navGroups">
+          <div class="nav-group" :key="'g-' + g.title">{{ g.title }}</div>
+          <div class="nav-item" v-for="it in g.items" :key="it.key" :title="it.label"
+               :class="{ 'is-active': page === it.key }" @click="switchPage(it.key)">
+            <i :class="it.icon"></i><span>{{ it.label }}</span>
+          </div>
+        </template>
+      </aside>
+      <button class="sb-toggle" type="button" @click="toggleSidebar"
+              :title="sidebarCollapsed ? '展开菜单' : '收起菜单（点右侧内容或滚动页面也会自动收起）'">
+        <i :class="sidebarCollapsed ? 'el-icon-arrow-right' : 'el-icon-arrow-left'"></i>
+      </button>
+
+      <div class="main-col">
 
       <div class="banner" v-if="readonly" style="background:#e3f2fd;color:#0d47a1;border-bottom:1px solid #bbdefb">
         👁 正在以超级管理员身份查看 <b>{{ tenantLabel }}</b> 的「1688发票」数据（<b>只读</b>，不能发送/修改）。
@@ -369,17 +404,18 @@
       </div>
 
       <el-main>
-      <!-- ══════════ 1688发票 ══════════ -->
-      <div v-show="page === 'board'" id="page-board">
-        <!-- 页内 Tab（设计稿：发票工作台 / 税名核对同屏）：第二个 Tab 只是切到现有税名核对页，业务不变 -->
+      <!-- ══════════ 1688发票 / 税名核对（同一屏的两个 Tab；侧边栏只留 1688发票 一个入口）══════════ -->
+      <div v-show="page === 'board' || page === 'mapping'">
         <div class="inv-tabs">
-          <div class="inv-tab is-active">发票工作台</div>
-          <div class="inv-tab" @click="switchPage('mapping')">税名核对</div>
+          <div class="inv-tab" :class="{ 'is-active': page === 'board' }" @click="switchPage('board')">发票工作台</div>
+          <div class="inv-tab" :class="{ 'is-active': page === 'mapping' }" @click="switchPage('mapping')">税名核对</div>
         </div>
+      </div>
 
+      <div v-show="page === 'board'" id="page-board">
         <!-- 统计卡 -->
         <el-row :gutter="12" class="section-card">
-          <el-col :xs="12" :sm="8" :md="4" v-for="s in statCards" :key="s.key">
+          <el-col :xs="12" :sm="8" :md="8" v-for="s in statCards" :key="s.key">
             <el-card shadow="hover" :class="['stat-card', s.cls, s.click ? 'clickable' : '']" :body-style="{ padding: '12px 16px' }"
                      @click.native="s.click ? openDetail(s.click) : null" :title="s.tip">
               <div class="num">{{ s.num }}</div>
@@ -391,7 +427,7 @@
 
         <!-- 趋势图（Element UI 卡片 + ECharts；点某一天可查看当天明细） -->
         <el-row :gutter="12" class="section-card">
-          <el-col :xs="24" :sm="12" v-for="c in charts" :key="c.key">
+          <el-col :xs="24" :sm="24" v-for="c in charts" :key="c.key">
             <el-card shadow="hover" :body-style="{ padding: '8px 10px 4px' }">
               <div slot="header" style="display:flex;align-items:center;justify-content:space-between;gap:8px">
                 <span class="trend-title">{{ c.title }}</span>
@@ -667,19 +703,34 @@
             <div>
               <b>把税务局已开票、但系统认不出的销方名称，手工匹配到 1688 商家。</b>
               <span class="steps">
-                ① 看「待人工比对」—— 那是系统认不出来的发票名称；
+                ① 默认只看「未核对」—— 那是系统认不出来的发票名称；
                 ② 右边输入 1688 商家名字，从下拉里选中，点「保存」；
                 ③ 确实不是 1688 上任何一家店就点「忽略」（不再出现、也不计入统计）。
-                配对成功的会移到「已维护映射」；
+                核对过的会落到「已核对」；
               </span>
             </div>
           </div>
         </div>
         <el-card shadow="never" class="section-card">
-          <div slot="header"><b>待人工比对</b> <span class="loginid">（{{ map.unmatched.length }} 个销方名称未匹配）</span></div>
-          <el-alert v-if="!map.unmatched.length" type="success" :closable="false" show-icon
-                    title="✓ 所有销方名称都已处理（已匹配或已忽略）"></el-alert>
-          <template v-else>
+          <div slot="header">
+            <b>税名核对表</b>
+            <span class="loginid">（未核对 {{ map.unmatched.length }} 个 · 已核对 {{ map.mappings.length }} 条）</span>
+          </div>
+          <div class="filter-bar">
+            <span class="fb-label">核对状态</span>
+            <el-radio-group v-model="mapFilter" size="small">
+              <el-radio-button label="unmatched">未核对（{{ map.unmatched.length }}）</el-radio-button>
+              <el-radio-button label="matched">已核对（{{ map.mappings.length }}）</el-radio-button>
+            </el-radio-group>
+            <span class="fb-spacer"></span>
+            <span class="loginid">默认只看未核对，核对完的会移到「已核对」</span>
+          </div>
+
+          <!-- 未核对：系统认不出来的税务局销方名称 -->
+          <template v-if="mapFilter === 'unmatched'">
+            <el-alert v-if="!map.unmatched.length" type="success" :closable="false" show-icon
+                      title="✓ 所有销方名称都已处理（已匹配或已忽略）"></el-alert>
+            <template v-else>
             <el-table :data="unmatchedPage" size="small" border style="width:100%">
               <el-table-column label="税务局销方名称" min-width="180"><template slot-scope="p"><span class="company">{{ p.row.tax_seller_name }}</span></template></el-table-column>
               <el-table-column label="销方税号" width="150"><template slot-scope="p"><span class="loginid">{{ p.row.seller_tax_no || '' }}</span></template></el-table-column>
@@ -718,14 +769,14 @@
                              :page-size="unSize" :current-page="unPage" :page-sizes="pageSizes"
                              @size-change="v => { unSize = v; unPage = 1; }" @current-change="v => unPage = v"></el-pagination>
             </div>
+            </template>
           </template>
-        </el-card>
 
-        <el-card shadow="never" class="section-card">
-          <div slot="header"><b>已维护映射</b> <span class="loginid">（{{ map.mappings.length }} 条）</span></div>
-          <el-alert v-if="!map.mappings.length" type="info" :closable="false" show-icon title="暂无已维护映射"></el-alert>
+          <!-- 已核对：原先的映射明细（同一批数据，只是换成筛选后的视图） -->
           <template v-else>
-            <el-table :data="mappingPage" size="small" border style="width:100%">
+            <el-alert v-if="!map.mappings.length" type="info" :closable="false" show-icon
+                      title="暂无已核对的销方名称"></el-alert>
+            <el-table v-else :data="mappingPage" size="small" border style="width:100%">
               <el-table-column prop="tax_seller_name" label="税务局销方名称" min-width="170"></el-table-column>
               <el-table-column label="对应的 1688 商家" min-width="170">
                 <template slot-scope="p"><span class="company" v-if="p.row.seller_company">{{ p.row.seller_company }}</span><el-tag v-else size="mini" type="danger">未映射</el-tag></template>
@@ -757,7 +808,7 @@
                 </template>
               </el-table-column>
             </el-table>
-            <div class="pager-wrap">
+            <div class="pager-wrap" v-if="map.mappings.length">
               <el-pagination background layout="sizes, prev, pager, next" :total="map.mappings.length"
                              :page-size="mapSize" :current-page="mapPage" :page-sizes="pageSizes"
                              @size-change="v => { mapSize = v; mapPage = 1; }" @current-change="v => mapPage = v"></el-pagination>
@@ -1281,28 +1332,19 @@
           </el-col>
           <el-col :xs="24" :md="12">
             <el-card shadow="never" class="section-card">
-              <div slot="header"><b>本机助手 · 全局服务器地址</b></div>
+              <div slot="header"><b>本机助手 · 服务器地址 · 版本治理</b></div>
               <el-form label-position="top" size="small">
                 <el-form-item label="服务器地址（所有用户共用）">
                   <el-input v-model="cfg.serverUrl" placeholder="http://你的服务器:8787 或 https://invoice.example.com"></el-input>
                   <div class="form-tip">本机助手连接系统时使用的地址。在此统一配置后，用户下载的助手里会<b>自动内置</b>该地址，无需手动填写；留空则用户需手动输入。</div>
                 </el-form-item>
               </el-form>
-              <div style="margin-top:6px">
-                <el-button type="primary" size="small" @click="openDownload">⬇ 下载本机助手（Windows）</el-button>
-                <span class="form-tip" style="display:inline;margin-left:8px">用户下载到的助手已内置全局地址；在网页登录后点右上角「绑定本机助手」即可完成绑定（设备令牌，无需填税号）。</span>
-              </div>
 
               <el-divider style="margin:14px 0 10px"></el-divider>
-              <div style="margin-bottom:6px">
-                <b>助手安装包</b>
-                <span class="loginid" style="margin-left:6px">
-                  <template v-if="build.installer">当前最新：{{ build.installer.file }}（{{ (build.installer.sizeBytes / 1048576).toFixed(1) }} MB）</template>
-                  <template v-else>dist/ 里没有可用安装包</template>
-                </span>
+              <div style="margin-bottom:8px">
+                <b>安装包上传</b>
+                <span class="loginid" style="margin-left:6px">Linux 容器里无法打包时用；上传即覆盖同名文件，版本策略随之生效</span>
               </div>
-
-              <!-- 上传：Linux 容器无法 npm run agent:dist 时的替代方案 -->
               <div style="margin-bottom:8px">
                 <label class="el-button el-button--primary el-button--small" style="position:relative;overflow:hidden;cursor:pointer">
                   <input ref="installerFile" type="file" accept=".exe" style="position:absolute;inset:0;opacity:0;cursor:pointer" @change="onInstallerFile">
@@ -1310,41 +1352,6 @@
                 </label>
                 <span v-if="uploading" style="margin-left:10px;color:#2b7de9">{{ uploadProgress }}%</span>
                 <span v-if="uploadMsg" style="margin-left:10px" :style="{ color: uploadMsg.startsWith('✓') ? '#34a853' : '#e53935' }">{{ uploadMsg }}</span>
-              </div>
-
-              <!-- 已上传清单 -->
-              <el-table v-if="build.installers && build.installers.length" :data="build.installers" size="mini" max-height="200" style="margin-top:4px">
-                <el-table-column label="文件" min-width="200">
-                  <template slot-scope="s"><span class="loginid">{{ s.row.file }}</span></template>
-                </el-table-column>
-                <el-table-column label="版本" width="90">
-                  <template slot-scope="s">v{{ s.row.version || '—' }}</template>
-                </el-table-column>
-                <el-table-column label="大小" width="100">
-                  <template slot-scope="s">{{ (s.row.size / 1048576).toFixed(1) }} MB</template>
-                </el-table-column>
-                <el-table-column label="操作" width="150">
-                  <template slot-scope="s">
-                    <el-button type="text" size="mini" @click="downloadInstaller(s.row.file)">下载</el-button>
-                    <el-button type="text" size="mini" style="color:#e53935" @click="deleteInstaller(s.row.file)">删除</el-button>
-                  </template>
-                </el-table-column>
-              </el-table>
-
-              <div style="margin-top:8px">
-                <el-button type="warning" size="small" :loading="build.running" @click="rebuildAgent">
-                  {{ build.running ? '打包中…（约 1~2 分钟）' : '🔨 重新打包最新助手' }}
-                </el-button>
-                <el-tag v-if="build.ok === true" type="success" size="small" style="margin-left:8px">✓ 打包完成</el-tag>
-                <el-tag v-else-if="build.ok === false" type="danger" size="small" style="margin-left:8px">✗ 打包失败</el-tag>
-              </div>
-              <div v-if="build.log.length" class="preview-box"
-                   style="max-height:170px;overflow:auto;font-size:11px;line-height:1.6;margin-top:8px;white-space:pre-wrap;word-break:break-all">{{ build.log.join('\n') }}</div>
-              <div class="form-tip" style="margin-top:6px">
-                <b>Windows 服务器</b>：点「重新打包」一键构建（需本机 Windows 环境）。<br>
-                <b>Linux 容器</b>：无法在本机打包，请在本机 Windows 跑 <code>npm run agent:dist</code>，
-                把生成的 <code>催收小助手-Setup-x.x.x.exe</code>（和 portable 版）上传到此。上传即覆盖同名文件，
-                版本策略随之生效；到宽限期后旧助手会被硬拦并可直接「一键更新」下载这里的最新包。
               </div>
 
               <el-divider style="margin:14px 0 10px"></el-divider>
@@ -1365,43 +1372,9 @@
                   </el-form-item></el-col>
                 </el-row>
               </el-form>
-              <div v-if="cfg.agentVerPol" class="form-tip" style="margin-top:2px">
-                服务端 v{{ cfg.agentVerPol.latest }} · 最低要求 v{{ cfg.agentVerPol.min }}
-                <template v-if="cfg.agentVerPol.packOk">
-                  · 可分发
-                  <b v-if="cfg.agentVerPol.source === 'dist'">dist 里的 v{{ cfg.agentVerPol.packVersion }}</b>
-                  <b v-else>外部直链</b>
-                  <el-tag size="mini" :type="cfg.agentVerPol.expired ? 'danger' : 'success'" style="margin-left:6px">
-                    {{ cfg.agentVerPol.expired ? '已开始拦截旧版' : '宽限中，剩 ' + verDaysLeft + ' 天' }}
-                  </el-tag>
-                </template>
-                <template v-else>
-                  <el-tag size="mini" type="warning" style="margin-left:6px">拿不到新版安装包 → 只提示、不拦截</el-tag>
-                  <div style="color:#d1580a;margin-top:4px">
-                    ⚠ 容器里 <code>dist/</code> 通常是空的（它在 .gitignore 里，<code>git pull</code> 拿不到）。
-                    要么在本处机器上重新打包，要么填一个外部直链，否则「强制更新」不会生效。
-                  </div>
-                </template>
-              </div>
-              <el-table v-if="cfg.agentVerPol && cfg.agentVerPol.devices && cfg.agentVerPol.devices.length"
-                        :data="cfg.agentVerPol.devices" size="mini" max-height="220" style="margin-top:8px">
-                <el-table-column label="设备" min-width="130">
-                  <template slot-scope="s"><span class="loginid">{{ s.row.name || '未命名' }}</span></template>
-                </el-table-column>
-                <el-table-column label="版本" width="90">
-                  <template slot-scope="s"><span :style="{ color: s.row.outdated ? '#e53935' : '', fontWeight: s.row.outdated ? '600' : '' }">v{{ s.row.agentVer || '—' }}</span></template>
-                </el-table-column>
-                <el-table-column label="状态" width="140">
-                  <template slot-scope="s">
-                    <el-tag size="mini" :type="s.row.online ? 'success' : 'info'">{{ s.row.online ? '在线' : '离线' }}</el-tag>
-                    <el-tag v-if="s.row.outdated" size="mini" type="danger" style="margin-left:4px">需更新</el-tag>
-                  </template>
-                </el-table-column>
-                <el-table-column label="最后活动" min-width="120">
-                  <template slot-scope="s"><span class="form-tip" style="display:inline">{{ s.row.lastSeenAt || '—' }}</span></template>
-                </el-table-column>
-              </el-table>
-              <div v-else-if="cfg.agentVerPol" class="form-tip" style="margin-top:6px">还没有设备绑定过本机助手。</div>
+              <el-button type="primary" size="small" @click="saveConfig">保存配置</el-button>
+              <el-button size="small" @click="loadConfigUI">放弃修改</el-button>
+              <el-tag v-if="saveOk" type="success" size="small" style="margin-left:10px">✓ 已保存</el-tag>
             </el-card>
           </el-col>
         </el-row>
@@ -1486,22 +1459,9 @@
       <!-- ══════════ 用户管理（仅超级管理员；账号 / 抬头 / 逐项菜单权限） ══════════ -->
       <div v-show="page === 'users'" id="page-users">
         <div class="page-bar">
-          <span class="pb-info">
-            账号 · 开票抬头 · 菜单权限。<b>登录账号 = 公司全称</b>，抬头里的 {companyName} / {taxNo} / {email}
-            按该账号自己的值填充；菜单权限是<b>逐项开关</b>（退单 / 毛利 / 商品 / 市场 / 账单），没有模板角色。
-          </span>
           <span class="pb-actions">
-            <el-button size="small" @click="loadUsers">刷新</el-button>
+            <el-button size="small" type="primary" @click="openUserCreate">+ 新增用户</el-button>
           </span>
-        </div>
-
-        <div class="stat-row">
-          <el-card v-for="s in userStatCards" :key="s.key" shadow="never" class="stat-card"
-                   :body-style="{ padding: '14px 16px' }" style="flex:1;min-width:150px">
-            <div class="num">{{ s.num }}</div>
-            <div class="label">{{ s.label }}</div>
-            <div class="sub">{{ s.sub }}</div>
-          </el-card>
         </div>
 
         <el-card shadow="never" class="section-card">
@@ -1509,11 +1469,20 @@
             <b>用户列表</b> <span class="loginid">（{{ users.length }} 个账号）</span>
             <el-button size="mini" style="margin-left:10px" @click="loadUsers">刷新</el-button>
           </div>
+          <!-- 搜索：公司名称 / 税号 / 账号，三者任一模糊命中即显示 -->
+          <div class="filter-bar">
+            <span class="fb-label">搜索</span>
+            <el-input v-model="userKw" size="small" style="width:300px" clearable
+                      placeholder="公司名称 / 税号 / 账号（模糊匹配）"></el-input>
+            <el-button size="small" @click="userKw = ''">重置</el-button>
+            <span class="fb-spacer"></span>
+            <span class="loginid">显示 {{ filteredUsers.length }} / {{ users.length }} 个账号</span>
+          </div>
           <div class="form-tip" style="margin-bottom:10px">
             开票抬头属于<b>用户信息</b>，在这里按账号逐个维护：<b>登录账号 = 公司全称</b>，点某行的「编辑」即可改公司全称 / 纳税人识别号 / 收票邮箱。
             催收话术里的 {companyName} / {taxNo} / {email} 会按<b>该账号自己的抬头</b>取值。
           </div>
-          <el-table :data="users" size="small" border style="width:100%" empty-text="加载中...">
+          <el-table :data="filteredUsers" size="small" border style="width:100%" empty-text="加载中...">
             <el-table-column prop="id" label="ID" width="56"></el-table-column>
             <el-table-column label="账号" width="150">
               <template slot-scope="p"><b>{{ p.row.username }}</b><div v-if="p.row.mustChangePassword" class="loginid">需改密</div></template>
@@ -1557,8 +1526,8 @@
           </el-table>
         </el-card>
 
-        <el-card shadow="never" class="section-card">
-          <div slot="header"><b>新增用户</b></div>
+        <!-- 新增用户：内容收进弹框（原先是页面底部一整块常驻表单） -->
+        <el-dialog title="新增用户" :visible.sync="newUserDlg" width="640px" top="10vh" append-to-body>
           <el-form label-position="top" size="small">
             <el-row :gutter="12">
               <el-col :xs="24" :md="16"><el-form-item label="公司全称（= 登录账号）*"><el-input v-model="newUser.company" placeholder="如：中山仕赫贸易有限公司"></el-input></el-form-item></el-col>
@@ -1571,10 +1540,13 @@
               <el-col :xs="24"><el-form-item label="备注"><el-input v-model="newUser.note" placeholder="可选"></el-input></el-form-item></el-col>
             </el-row>
           </el-form>
-          <el-button type="primary" size="small" :loading="creatingUser" @click="createUser">创建用户</el-button>
-          <el-tag v-if="createOk" type="success" size="small" style="margin-left:10px">✓ 已创建</el-tag>
-          <div class="form-tip" style="margin-top:8px">账号 = 公司全称（业务账号才需要抬头）。若「角色」选<b>超级管理员</b>，只需填「公司全称」与初始密码，税号 / 邮箱会被忽略。</div>
-        </el-card>
+          <div class="form-tip">账号 = 公司全称（业务账号才需要抬头）。若「角色」选<b>超级管理员</b>，只需填「公司全称」与初始密码，税号 / 邮箱会被忽略。</div>
+          <span slot="footer">
+            <el-tag v-if="createOk" type="success" size="small" style="margin-right:10px">✓ 已创建</el-tag>
+            <el-button size="small" @click="newUserDlg = false">取消</el-button>
+            <el-button size="small" type="primary" :loading="creatingUser" @click="createUser">创建用户</el-button>
+          </span>
+        </el-dialog>
       </div>
 
       <!-- ══════════ 操作日志（仅超级管理员可见） ══════════ -->
@@ -2367,6 +2339,7 @@
       </div>
     </el-main>
     </div><!-- /.main-col -->
+    </div><!-- /.app-body -->
   </div><!-- /.app-shell -->
 
   <!-- ══════════ 退单日志（订单日志 / 配送日志） ══════════ -->
@@ -2578,7 +2551,6 @@ Vue.use(ELEMENT);
 Vue.config.productionTip = false;
 
 const TREND_CHARTS = [
-  { key: 'orders', title: '最近 30 天 · 每日支付订单总金额', amtKey: 'orderAmount', cntKey: 'orderCount', unit: '单', color: '#2563eb' },
   { key: 'invoices', title: '最近 30 天 · 每日已开票金额（税务局）', amtKey: 'invoiceAmount', cntKey: 'invoiceCount', unit: '张', color: '#059669' },
 ];
 const UP_GUIDES = {
@@ -2758,6 +2730,8 @@ const vm = new Vue({
     return {
       // 账号
       me: null, page: 'board', viewTenant: null,
+      // 侧边栏折叠：点把手切换；点右侧内容区、滚动页面都会自动折叠
+      sidebarCollapsed: false,
       // 牵牛花：以哪个账号的身份查看（管理员必选；普通用户 = 自己）
       qnhTenant: null, qnhUsers: [], qnhSessions: [],
       // 拼多多发票：复用牵牛花的「查看身份」（同一个账号），但两套登录态各自独立
@@ -2779,7 +2753,7 @@ const vm = new Vue({
         applyDialog: { visible: false, running: false, kind: '', status: '', message: '', progress: null, log: [], startedAt: 0 },
       },
       // 1688发票数据
-      companies: [], sent: {}, invSummary: null, unmatchedCnt: 0, ignoredCnt: 0, manualCnt: 0, boardLoading: false,
+      companies: [], sent: {}, invSummary: null, boardLoading: false,
       // 商品列表（前置仓补货参考）
       product: {
         loading: false, rows: [], total: 0, page: 1, size: 20,
@@ -2825,6 +2799,8 @@ const vm = new Vue({
       // 商家候选下拉：按关键词向服务端要前 50 条（不再整表下发），cache 用于「选中后取会员名」
       mapSeller: { q: '', opts: [], cache: {}, loading: false, timer: null },
       mapDraft: {}, unPage: 1, unSize: 20, mapPage: 1, mapSize: 20, igPage: 1, igSize: 20,
+      // 税名核对表默认只看「未核对」；已核对 = 原「已维护映射」那批数据
+      mapFilter: 'unmatched',
       // 系统管理
       cfg: {
         gapMin: 15, gapMax: 30, chunkMax: 450, template: '', orderItem: '', reminder: '', serverUrl: '',
@@ -2845,6 +2821,8 @@ const vm = new Vue({
         + '税号：{taxNo}，邮箱：{email}，非常感谢，已经在平台申请！！！',
       previewText: '', saveOk: false,
       users: [], newUser: { company: '', password: '', role: 'user', taxNo: '', email: '', note: '' },
+      // 新增用户收进弹框 + 用户列表按 公司名/税号/账号 模糊搜索
+      newUserDlg: false, userKw: '',
       build: { running: false, ok: null, error: '', version: '', installer: null, installers: [], platform: '', log: [] },
       uploading: false, uploadProgress: 0, uploadMsg: '',
       creatingUser: false, createOk: false,
@@ -2892,7 +2870,6 @@ const vm = new Vue({
         { title: '发票', items: [
           { key: 'board', label: '1688发票', icon: 'el-icon-document' },
           { key: 'pdd', label: '拼多多发票', icon: 'el-icon-s-order' },
-          { key: 'mapping', label: '税名核对', icon: 'el-icon-edit-outline' },
         ] },
         { title: '核对与商品', items: [
           this.canProduct ? { key: 'product', label: '商品列表', icon: 'el-icon-goods' } : null,
@@ -3045,12 +3022,6 @@ const vm = new Vue({
     // 拼多多发票对所有用户开放，不需要单独配置菜单权限
     // 卖家发送间隔低于 15 秒时给个橙色警示：这个值直接决定会不会被平台判定为机器群发
     gapTooSmall() { return Number(this.cfg.gapMin) < 15 || Number(this.cfg.gapMax) < 15; },
-    // 助手版本宽限期还剩几天（系统管理「助手版本治理」卡片里显示）
-    verDaysLeft() {
-      const p = this.cfg && this.cfg.agentVerPol;
-      if (!p || !p.graceUntil) return 0;
-      return Math.max(0, Math.ceil((p.graceUntil - Date.now()) / 86400000));
-    },
     // 管理员必须先选定一个账号，才能看该账号的牵牛花数据
     qnhNeedPick() { return this.isAdmin && this.qnhTenant == null; },
     // 拼多多催收话术预览：用当前查看账号的抬头填充（「1688发票」页里各账号抬头不同）
@@ -3211,17 +3182,13 @@ const vm = new Vue({
           sub: '启用 ' + this.users.filter((u) => u.status === 'active').length + ' 个' },
       ];
     },
-    /** 用户管理统计卡：总数 / 启用 / 超管 / 需改密 */
-    userStatCards() {
+    /** 用户列表搜索：公司名称 / 税号 / 账号，任一模糊命中即保留（不区分大小写） */
+    filteredUsers() {
+      const kw = String(this.userKw || '').trim().toLowerCase();
       const list = this.users || [];
-      const n = (f) => list.filter(f).length;
-      return [
-        { key: 'all', label: '用户总数', num: list.length + ' 人', sub: '含超级管理员' },
-        { key: 'active', label: '启用账号', num: n((u) => u.status === 'active') + ' 个',
-          sub: '停用 ' + n((u) => u.status !== 'active') + ' 个' },
-        { key: 'admin', label: '超级管理员', num: n((u) => u.role === 'admin') + ' 个', sub: '可见全部菜单' },
-        { key: 'pwd', label: '需改密', num: n((u) => u.mustChangePassword) + ' 个', sub: '登录后强制改密' },
-      ];
+      if (!kw) return list;
+      return list.filter((u) => [u.username, u.companyName, u.taxNo]
+        .some((v) => String(v || '').toLowerCase().includes(kw)));
     },
     /** 操作日志统计卡：后端全量只读汇总，不随筛选变化 */
     opStatCards() {
@@ -3239,20 +3206,19 @@ const vm = new Vue({
       if (t === 'order' || t === 'delivery') return rows.filter((r) => r.logType === t);
       return rows;
     },
-    /** 拼多多汇总卡：条数 + 金额（金额只在有意义时展示，避免全是 0 干扰阅读） */
+    /** 拼多多汇总卡：只留三张金额卡（总金额 / 已开票 / 未开票），数据全部来自现有 /api/pdd/summary */
     pddStats() {
       const s = this.pd.summary || {};
-      const n = (o) => ((o && o.count) || 0);
-      const a = (o) => ((o && o.amount) || 0);
+      const a = (o) => Number((o && o.amount) || 0);
+      const n = (o) => Number((o && o.count) || 0);
+      const total = Number(s.totalAmount || 0);
+      const issued = a(s.issued);
+      const unissued = Math.round((total - issued) * 100) / 100;
       return [
-        { label: '订单总数', value: (s.totalCount || 0) + ' 单',
-          sub: '金额合计 ' + yuan(s.totalAmount || 0) + (n(s.unsynced) ? '｜未同步开票 ' + n(s.unsynced) + ' 单' : '') },
-        { label: '待申请', value: n(s.pending) + ' 单', sub: '可开票 ' + yuan(a(s.pending)) },
-        { label: '已申请', value: n(s.applied) + ' 单', sub: '已提交，等商家开票' },
-        { label: '开票中', value: n(s.issuing) + ' 单', sub: yuan(a(s.issuing)) },
-        { label: '已开票', value: n(s.issued) + ' 单', sub: yuan(a(s.issued)) },
-        { label: '商家处理中', value: n(s.mallProcessing) + ' 单', sub: yuan(a(s.mallProcessing)) },
-        { label: '暂不可开票', value: n(s.unavailable) + ' 单', sub: '全额退款等' },
+        { label: '总金额', value: yuan(total), sub: (s.totalCount || 0) + ' 单（含全部开票状态）' },
+        { label: '已开票总金额', value: yuan(issued), sub: n(s.issued) + ' 单已开票' },
+        { label: '未开票总金额', value: yuan(unissued),
+          sub: '待申请 ' + n(s.pending) + ' · 开票中 ' + n(s.issuing) + ' · 商家处理 ' + n(s.mallProcessing) },
       ];
     },
     readonly() {
@@ -3274,15 +3240,10 @@ const vm = new Vue({
       const invAmt = this.invSummary ? Number(this.invSummary.amount) : 0;
       const pendingAmt = this.companies.reduce((a, c) => a + Number(c.pendingAmount), 0);
       const hasPending = this.companies.filter(c => Number(c.pendingAmount) > 0).length;
-      const members = this.companies.flatMap(c => c.members);
-      const sentCnt = members.filter(m => m.sendCount > 0).length;
       return [
         { key: 'o', cls: '', num: yuan(orderAmt), label: '订单总金额', sub: `共 ${orderCnt} 单 / ${this.companies.length} 家公司`, click: 'orders', tip: '点击查看订单明细' },
         { key: 'i', cls: 's-info', num: yuan(invAmt), label: '已开票金额（税务局）', sub: `共 ${this.invSummary ? this.invSummary.invoice_count : 0} 张发票 / ${this.invSummary ? this.invSummary.rows_count : 0} 行明细`, click: 'invoices', tip: '点击查看发票明细' },
         { key: 'p', cls: 's-warn', num: yuan(pendingAmt), label: '待开票金额', sub: `${hasPending} 家公司有待开票` },
-        { key: 'm', cls: 's-done', num: this.manualCnt, label: '人工确认已开票', sub: '订单数（商家线下开票）' },
-        { key: 's', cls: '', num: sentCnt, label: '已催收会员名', sub: `累计成功 ${members.reduce((a, m) => a + (m.sendCount || 0), 0)} 次（失败不计）` },
-        { key: 'u', cls: this.unmatchedCnt > 0 ? 's-warn' : 's-done', num: this.unmatchedCnt, label: '未匹配销方名称', sub: this.unmatchedCnt > 0 ? '需人工比对' : (this.ignoredCnt > 0 ? `已匹配或已忽略（忽略 ${this.ignoredCnt} 个）` : '全部已匹配') },
       ];
     },
     charts() {
@@ -3393,6 +3354,10 @@ const vm = new Vue({
     this.calcTblH();
     window.addEventListener('resize', this.onResize);
     document.addEventListener('click', this.onDocClick);   // 全局按钮点击埋点（操作日志）
+    // 侧边栏自动收起：点右侧内容区、滚动页面各挂一个监听
+    // 点击用捕获阶段——Element UI 的排序箭头/下拉等会 @click.stop，冒泡监听会漏掉这些位置
+    document.addEventListener('click', this.onLayoutClick, true);
+    window.addEventListener('scroll', this.onAnyScroll, { passive: true });
     // 助手连接状态：导航栏常驻展示，每 10 秒轻量刷新一次
     this.agentTimer = setInterval(() => { this.refreshAgent(); }, 10000);
     this.boot();
@@ -3400,6 +3365,8 @@ const vm = new Vue({
   beforeDestroy() {
     window.removeEventListener('resize', this.onResize);
     document.removeEventListener('click', this.onDocClick);
+    document.removeEventListener('click', this.onLayoutClick, true);
+    window.removeEventListener('scroll', this.onAnyScroll);
     if (this.agentTimer) { clearInterval(this.agentTimer); this.agentTimer = null; }
   },
   methods: {
@@ -3456,6 +3423,24 @@ const vm = new Vue({
       this._agentTimer = setInterval(this.refreshAgent, 5000);
       if (this.isAdmin) { this.loadUsers(); }
     },
+    // ── 侧边栏折叠 ──
+    /** 统一的展开/收起入口：改完状态后等宽度动画结束，再让图表和表格按新宽度重排 */
+    setSidebar(v) {
+      const next = !!v;
+      if (this.sidebarCollapsed === next) return;
+      this.sidebarCollapsed = next;
+      setTimeout(() => this.onResize(), 220);
+    },
+    toggleSidebar() { this.setSidebar(!this.sidebarCollapsed); },
+    /** 点右侧内容区（.main-col 内任意位置）自动收起；点左侧菜单、顶栏、弹窗都不触发 */
+    onLayoutClick(e) {
+      if (this.sidebarCollapsed) return;
+      const main = this.$el && this.$el.querySelector('.main-col');
+      if (!main || !e.target || !main.contains(e.target)) return;
+      this.setSidebar(true);
+    },
+    /** 滚动页面自动收起（侧边栏自身的内部滚动不冒泡到这里，不会误触发） */
+    onAnyScroll() { if (!this.sidebarCollapsed) this.setSidebar(true); },
     // ── 页面切换 ──
     switchPage(p) {
       if (p === 'admin' && !this.isAdmin) p = 'board';
@@ -3498,9 +3483,6 @@ const vm = new Vue({
         this.sent = {};
         for (const k of (d.sentList || [])) this.$set(this.sent, k, true);
         this.invSummary = d.invoiceSummary || null;
-        this.unmatchedCnt = d.unmatchedNameCount || 0;
-        this.ignoredCnt = d.ignoredNameCount || 0;
-        this.manualCnt = d.manualIssuedCount || 0;
         const memberCnt = this.companies.reduce((a, c) => a + c.memberCount, 0);
         this.meta = '数据: ' + d.generatedAt + ' · ' + this.companies.length + ' 家公司 / ' + memberCnt + ' 个会员名'
           + (d.tenant ? ' · 租户: ' + d.tenant.username : '');
@@ -5213,9 +5195,16 @@ const vm = new Vue({
         if (d.error) { this.$message.error('创建失败: ' + d.error); this.creatingUser = false; return; }
         this.newUser = { company: '', password: '', role: 'user', taxNo: '', email: '', note: '' };
         this.createOk = true; setTimeout(() => { this.createOk = false; }, 2500);
+        this.newUserDlg = false;       // 创建成功即关弹框，列表在下方已刷新
         await this.loadUsers();
       } catch (e) { this.$message.error('创建失败: ' + e.message); }
       this.creatingUser = false;
+    },
+    /** 打开「新增用户」弹框：每次都是干净的空表单 */
+    openUserCreate() {
+      this.newUser = { company: '', password: '', role: 'user', taxNo: '', email: '', note: '' };
+      this.createOk = false;
+      this.newUserDlg = true;
     },
     viewUserData(u) { this.setTenantView(u.id, u.companyName || u.username); },
     openUserEdit(u) {
