@@ -353,6 +353,86 @@ async function ensureQnhSchema(q) {
       "  KEY `idx_pml_user_sn` (`user_id`,`order_sn`)" +
       ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='拼多多催收消息发送日志'",
 
+    // ── 闪电帮帮（美团 shandiancang）：可申请开票 / 已申请开票 两档订单 ────
+    // ⚠ 与拼多多最大的不同：该站点有 WAF 风控（mtgsig 签名），服务器直连会被 403。
+    //   请求必须发生在本机助手的真实浏览器里（页面上下文 fetch 会被风控 SDK 自动补签名），
+    //   所以这里只存结果，取数链路在 electron/agent/sdc.js。
+    // 数据来源两个端点（浏览器页内 fetch，参与者都是用户自己的登录态）：
+    //   · 可申请开票 stage=1 → /sdc-gw1/mallApi/invoiceTitle/queryInvoiceOrderPage
+    //   · 已申请开票 stage=2 → /sdc-gw1/mallApi/orderInvoice/queryOrderInvoiceForBuyer
+    // 同一订单在这两档之间会迁移（申请后从 1 变 2），故主键只留订单号，stage 每次覆盖。
+    'CREATE TABLE IF NOT EXISTS `sdc_order` (' +
+      "  `user_id` INT NOT NULL DEFAULT 1 COMMENT '数据归属用户'," +
+      "  `order_sn` VARCHAR(64) NOT NULL COMMENT '订单号'," +
+      "  `stage` TINYINT NOT NULL DEFAULT 1 COMMENT '所在档位：1=可申请开票 2=已申请开票'," +
+      "  `shop_id` VARCHAR(32) DEFAULT NULL COMMENT '店铺 ID（发消息用 im/shop/pub/select 换会话）'," +
+      "  `shop_name` VARCHAR(128) DEFAULT NULL COMMENT '店铺名称（卖家/供应商）'," +
+      "  `wm_poi_id` VARCHAR(64) DEFAULT NULL COMMENT '闪购门店 ID'," +
+      "  `wm_poi_name` VARCHAR(128) DEFAULT NULL COMMENT '闪购门店名称'," +
+      "  `invoice_apply_status` INT DEFAULT NULL COMMENT '开票申请状态（0未申请 1已申请；沿用平台取值）'," +
+      "  `invoice_apply_desc` VARCHAR(32) DEFAULT NULL COMMENT '开票申请状态文案'," +
+      "  `invoice_title` VARCHAR(200) DEFAULT NULL COMMENT '发票抬头'," +
+      "  `taxpayer_ident` VARCHAR(64) DEFAULT NULL COMMENT '纳税人识别号'," +
+      "  `taker_email` VARCHAR(128) DEFAULT NULL COMMENT '收票邮箱'," +
+      "  `invoice_type_desc` VARCHAR(32) DEFAULT NULL COMMENT '发票类型文案（电子普通发票等）'," +
+      "  `batch_no` VARCHAR(64) DEFAULT NULL COMMENT '开票申请批次号（已申请才有）'," +
+      "  `total_amount` DECIMAL(14,2) DEFAULT NULL COMMENT '订单总额（元）'," +
+      "  `payable_amount` DECIMAL(14,2) DEFAULT NULL COMMENT '可开票金额（元）'," +
+      "  `actual_pay_amount` DECIMAL(14,2) DEFAULT NULL COMMENT '实付金额（元）'," +
+      "  `after_total_amount` DECIMAL(14,2) DEFAULT NULL COMMENT '售后金额（元）'," +
+      "  `order_time` DATETIME DEFAULT NULL COMMENT '下单时间'," +
+      "  `pay_time` DATETIME DEFAULT NULL COMMENT '支付时间'," +
+      "  `finish_time` DATETIME DEFAULT NULL COMMENT '完成时间'," +
+      "  `apply_time` DATETIME DEFAULT NULL COMMENT '提交开票申请时间'," +
+      "  `trade_status_desc` VARCHAR(32) DEFAULT NULL COMMENT '交易状态文案（已完成等）'," +
+      "  `refund_status_desc` VARCHAR(32) DEFAULT NULL COMMENT '售后状态文案'," +
+      "  `item_count` INT DEFAULT NULL COMMENT '商品条目数'," +
+      "  `item_names` VARCHAR(500) DEFAULT NULL COMMENT '商品名摘要（展示用，不入 raw）'," +
+      "  `row_hash` VARCHAR(64) DEFAULT NULL COMMENT '关键字段指纹：没变就跳过更新（幂等重跑）'," +
+      "  `send_count` INT NOT NULL DEFAULT 0 COMMENT '已向该店铺发过催收的次数（按店铺累计，见 sdc_msg_log）'," +
+      "  `last_sent_at` DATETIME DEFAULT NULL COMMENT '最近一次催收时间'," +
+      "  `synced_at` DATETIME DEFAULT NULL COMMENT '本轮同步时间'," +
+      "  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP," +
+      "  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP," +
+      "  PRIMARY KEY (`user_id`,`order_sn`)," +
+      "  KEY `idx_sdo_stage` (`user_id`,`stage`)," +
+      "  KEY `idx_sdo_shop` (`user_id`,`shop_id`)," +
+      "  KEY `idx_sdo_time` (`pay_time`)" +
+      ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='闪电帮帮订单与开票申请状态'",
+
+    // 闪电帮帮登录态记录。这里**不存 Cookie** —— 拉取与发送都在本机助手的浏览器分区里完成，
+    // 服务器拿不到也不需要 Cookie；只记录「有没有登录 / 是哪个账号 / 最后同步时间」。
+    'CREATE TABLE IF NOT EXISTS `sdc_session` (' +
+      "  `user_id` INT NOT NULL DEFAULT 0 COMMENT '归属用户（每位登录过闪电帮帮的用户一行）'," +
+      "  `sub_user_id` VARCHAR(32) DEFAULT NULL COMMENT '闪电帮帮用户 ID（登录接口 getLoginInfo 返回的 userId）'," +
+      "  `account_name` VARCHAR(128) DEFAULT NULL COMMENT '账号名（如 SGzs1234567）'," +
+      "  `last_sync_at` DATETIME DEFAULT NULL COMMENT '最近一次成功拉取订单数据的时间'," +
+      "  `source` VARCHAR(32) DEFAULT NULL COMMENT '采集来源：本机助手'," +
+      "  `agent_ver` VARCHAR(32) DEFAULT NULL COMMENT '采集时助手版本'," +
+      "  `written_at` DATETIME DEFAULT NULL," +
+      "  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP," +
+      "  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP," +
+      "  PRIMARY KEY (`user_id`)," +
+      "  UNIQUE KEY `uk_ss_user` (`user_id`)" +
+      ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='闪电帮帮登录态台账（登录发生在本机助手）'",
+
+    // 闪电帮帮催收消息发送日志（按店铺一条）。发消息是真实对外打扰，必须留痕。
+    'CREATE TABLE IF NOT EXISTS `sdc_msg_log` (' +
+      "  `id` INT NOT NULL AUTO_INCREMENT," +
+      "  `user_id` INT NOT NULL COMMENT '归属用户（app_user.id）'," +
+      "  `shop_id` VARCHAR(32) DEFAULT NULL COMMENT '店铺 ID'," +
+      "  `shop_name` VARCHAR(128) DEFAULT NULL COMMENT '店铺名称'," +
+      "  `order_sns` TEXT COMMENT '本次催收包含的订单号（逗号分隔）'," +
+      "  `order_count` INT NOT NULL DEFAULT 0 COMMENT '本次催收包含的订单数'," +
+      "  `amount` DECIMAL(14,2) DEFAULT NULL COMMENT '本次催收的待开票总金额（元）'," +
+      "  `ok` TINYINT NOT NULL DEFAULT 0 COMMENT '是否发送成功 1是 0否'," +
+      "  `detail` VARCHAR(255) DEFAULT NULL COMMENT '结果说明（成功/失败原因）'," +
+      "  `content` VARCHAR(1000) DEFAULT NULL COMMENT '实际发送的消息内容（多条用 ␟ 分隔）'," +
+      "  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP," +
+      "  PRIMARY KEY (`id`)," +
+      "  KEY `idx_sml_user_shop` (`user_id`,`shop_id`)" +
+      ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='闪电帮帮催收消息发送日志'",
+
     // 牵牛花登录态（Cookies）。云端部署时不能落本机文件（容器目录会随重启丢失），
     // 故统一入库；登录态由「本机助手」采集后回传，服务器自己不再启动浏览器。
     'CREATE TABLE IF NOT EXISTS `qnh_session` (' +

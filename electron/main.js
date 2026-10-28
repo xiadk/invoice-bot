@@ -12,7 +12,7 @@
  *   · 1688 窗口 nodeIntegration:false + contextIsolation:true + sandbox:true
  *   · 除「连接你自己的服务器」外不发起任何网络请求
  */
-const { app, BrowserWindow, Tray, Menu, ipcMain, shell, nativeImage, session } = require('electron');
+const { app, BrowserWindow, Tray, Menu, ipcMain, shell, nativeImage, nativeTheme, session } = require('electron');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
@@ -25,6 +25,7 @@ const qnhLogin = require('./agent/qnh-login');
 const pddLogin = require('./agent/pdd-login');
 const pddApply = require('./agent/pdd-apply');
 const pddSend = require('./agent/pdd-send');
+const sdc = require('./agent/sdc');
 const logoutKernel = require('./agent/logout');
 
 // 隐藏自动化特征（navigator.webdriver=false），降低 1688 风控识别 Electron 的概率。
@@ -104,6 +105,8 @@ const LOGOUT_WINDOWS = {
   qnh: [() => qnhLogin.peekWindow()],
   // 1688 的发送窗没有 peek（getSendWindow 会懒创建），直接调 closeSendWindow 关掉
   1688: [() => { try { sender.closeSendWindow(); } catch (e) { /* 忽略 */ } return null; }],
+  // 闪电帮帮：登录窗口 + 承载页内请求的后台窗口 + 客服会话窗口
+  sdc: [() => sdc.peekWindow(), () => sdc.peekApiWindow(), () => sdc.peekChatWindow()],
 };
 
 /**
@@ -116,7 +119,8 @@ async function doLocalLogout(target) {
   if (busy.any) {
     return {
       ok: false,
-      error: '助手正在执行任务（' + (busy.sending ? '发送催收消息' : (busy.pdd ? '拼多多任务' : '牵牛花任务'))
+      error: '助手正在执行任务（' + (busy.sending ? '发送催收消息'
+        : (busy.pdd ? '拼多多任务' : (busy.qnh ? '牵牛花任务' : '闪电帮帮任务')))
         + '），请等任务结束后再退出登录态',
     };
   }
@@ -193,6 +197,7 @@ function refreshTray() {
     { label: '打开 1688 登录窗口', click: () => openLogin() },
     { label: '打开 牵牛花 登录窗口', click: () => qnhLogin.openLogin() },
   { label: '打开 拼多多 登录窗口', click: () => pddLogin.openLogin() },
+  { label: '打开 闪电帮帮 登录窗口', click: () => sdc.openLogin() },
     { type: 'separator' },
     ...(updater.info ? [{ label: `⚠ 安装助手更新 v${updater.info.latest || ''}`, click: () => { showStatusWin(); doSelfUpdate(); } }] : []),
     { label: '开机自启', type: 'checkbox', checked: !!store.get('autoStart'), click: (mi) => setAutoStart(mi.checked) },
@@ -204,15 +209,26 @@ function refreshTray() {
   } catch (e) { /* 图标缺失时忽略 */ }
 }
 
-/** 托盘图标：必须是位图 PNG（矢量不适用）。已连接=品牌彩色，未连接=中性灰。 */
+/** 托盘图标：必须是位图 PNG（矢量不适用）。透明底单色剪影随系统深浅主题切换：
+ *  深色任务栏用白狗（tray-on-dark-*），浅色用墨蓝狗（tray-on-light-*）。
+ *  kind：'color'=已连接（吊牌品牌橙），'grey'=未连接（整体灰化）。 */
 function trayIcon(kind) {
   if (trayIcon._cache === undefined) trayIcon._cache = {};
-  if (trayIcon._cache[kind]) return trayIcon._cache[kind];
-  const file = path.join(ASSETS, kind === 'color' ? 'tray-color.png' : 'tray-grey.png');
+  const dark = !!nativeTheme.shouldUseDarkColors;
+  const key = (dark ? 'dark' : 'light') + '-' + kind;
+  if (trayIcon._cache[key]) return trayIcon._cache[key];
+  const state = kind === 'color' ? 'on' : 'off';
+  const file = path.join(ASSETS, `tray-on-${dark ? 'dark' : 'light'}-${state}.png`);
+  const file16 = path.join(ASSETS, `tray-on-${dark ? 'dark' : 'light'}-${state}-16.png`);
   let img = nativeImage.createFromPath(file);
+  // 32px 主尺寸 + 16px 表示，避免任务栏自行缩放发糊
+  if (!img.isEmpty()) {
+    const im16 = nativeImage.createFromPath(file16);
+    if (!im16.isEmpty()) img.addRepresentation({ scaleFactor: 0.5, buffer: im16.toPNG() });
+  }
   // 文件缺失/损坏时再退一次，不让整个托盘创建失败
   if (img.isEmpty()) img = nativeImage.createFromPath(path.join(ASSETS, 'tray-grey.png'));
-  trayIcon._cache[kind] = img;
+  trayIcon._cache[key] = img;
   return img;
 }
 
@@ -300,6 +316,17 @@ function startAgent() {
   }));
   // 「拼多多催商家开票」内核：加载真实聊天页逐单发消息，anti-content 由页面自己生成。
   client.setPddSendHandler(pddSend.createSendHandler({
+    log: (m) => { log(m); pushState(); },
+  }));
+  // 「闪电帮帮」三个内核：该站点网关要求 mtgsig 签名，服务器直连一律 403，
+  // 所以登录、拉订单、发催收消息全部在本机真实页面里做（页内 fetch 会被风控 SDK 自动签名）。
+  client.setSdcLoginHandler(sdc.createLoginHandler({
+    log: (m) => { log(m); pushState(); },
+  }));
+  client.setSdcFetchHandler(sdc.createFetchHandler({
+    log: (m) => { log(m); pushState(); },
+  }));
+  client.setSdcSendHandler(sdc.createSendHandler({
     log: (m) => { log(m); pushState(); },
   }));
   // 「清除本机登录态」内核：看板点「退出拼多多 / 退出牵牛花账号」时，
@@ -396,6 +423,13 @@ app.whenReady().then(() => {
     tray.on('click', () => showStatusWin());
     refreshTray();
   } catch (e) { log('创建托盘失败: ' + e.message); }
+
+  // 系统深浅主题切换时重建托盘图标（白狗/墨蓝狗互换）
+  try {
+    nativeTheme.on('updated', () => {
+      try { refreshTray(); } catch (e) { /* 忽略 */ }
+    });
+  } catch (e) { /* 旧版 Electron 无此事件则跳过 */ }
 
   // 注册自定义协议（Windows 写 HKCU\Software\Classes\xsh，无需管理员；卸载时由安装器清理）
   try {

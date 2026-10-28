@@ -75,13 +75,12 @@
                        width: 1px; background: var(--line); pointer-events: none;
                        transition: opacity .18s ease; }
   .app-header.is-collapsed::after { opacity: 0; }
-  .app-header .brand { display: flex; align-items: center; gap: 10px; height: 34px; flex: none;
+  .app-header .brand { display: flex; align-items: center; gap: 12px; height: 42px; flex: none;
                        width: calc(var(--sb-w) - 20px); }
   /* 菜单收起后品牌区不再撑到 232（下方已无菜单可对齐），宽度回到内容宽 */
   .app-header.is-collapsed .brand { width: auto; }
-  .app-header .brand-logo { height: 30px; width: 30px; object-fit: contain; flex: none; }
-  .app-header .brand-name { font-size: 15px; font-weight: 700; color: var(--text-1); line-height: 1.3; white-space: nowrap; }
-  .app-header .brand-ver { font-size: 11px; color: var(--text-3); line-height: 1.3; white-space: nowrap; }
+  .app-header .brand-logo { height: 40px; width: 40px; object-fit: contain; flex: none; }
+  .app-header .brand-name { font-size: 20px; font-weight: 700; color: var(--text-1); line-height: 1.25; white-space: nowrap; }
   .app-header .page-ident { min-width: 0; overflow: hidden; flex: 1 1 auto; padding-left: 10px; }
   .app-body { flex: 1 1 auto; display: flex; align-items: stretch; min-width: 0; }
   .sidebar { width: var(--sb-w); flex: none; background: var(--surface);
@@ -338,8 +337,7 @@
       <div class="brand">
         <img class="brand-logo" src="/assets/logo-icon.png" alt="发票催收">
         <div class="brand-text">
-          <div class="brand-name">催收助手</div>
-          <div class="brand-ver">v{{ serverVersion || '—' }}</div>
+          <div class="brand-name">发票催收</div>
         </div>
       </div>
       <div class="page-ident">
@@ -400,14 +398,7 @@
       </div>
 
       <el-main>
-      <!-- ══════════ 1688发票 / 税名核对（同一屏的两个 Tab；侧边栏只留 1688发票 一个入口）══════════ -->
-      <div v-show="page === 'board' || page === 'mapping'">
-        <div class="inv-tabs">
-          <div class="inv-tab" :class="{ 'is-active': page === 'board' }" @click="switchPage('board')">发票工作台</div>
-          <div class="inv-tab" :class="{ 'is-active': page === 'mapping' }" @click="switchPage('mapping')">税名核对</div>
-        </div>
-      </div>
-
+      <!-- ══════════ 1688发票 ══════════ -->
       <div v-show="page === 'board'" id="page-board">
         <!-- 统计卡 -->
         <el-row :gutter="12" class="section-card">
@@ -2294,6 +2285,175 @@
         </el-card>
       </div>
 
+      <!-- ══════════ 闪电帮帮发票（对所有用户开放） ══════════ -->
+      <div v-show="page === 'sdc'" id="page-sdc">
+        <div class="page-head">
+          <h2>闪电帮帮发票</h2>
+          <div class="meta-line">
+            数据取自闪电帮帮「发票管理」：<b>可申请开票</b>与<b>已申请开票</b>两档。
+            该站点接口带风控签名、服务器直连会被拦截，所以拉取与催收都由<b>本机助手</b>在你自己的浏览器里完成 ——
+            先确认助手已连接，再点「登录闪电帮帮」。
+          </div>
+          <div class="pdd-warn">
+            <i class="el-icon-warning"></i>
+            <span>操作过程中请保持助手窗口不要关闭；若页面提示风控限速，隔几分钟再点刷新即可。</span>
+          </div>
+        </div>
+
+        <qnh-tenant-picker v-if="isAdmin" service="闪电帮帮" :users="sdcUsers" :value="qnhTenant"
+                           :sessions="sdcSessions" :self-id="me && me.id"
+                           @change="onQnhTenantChange"></qnh-tenant-picker>
+
+        <el-card class="section-card" shadow="never" :body-style="{ padding: '12px 14px' }">
+          <qnh-login-bar service="闪电帮帮" :cookie="sdLoginCookie" action-text="刷新订单数据" hide-meta
+                         :action-loading="sd.syncing" :can-logout="true"
+                         @login="loginSdc" @logout="logoutSdc" @action="syncSdcOrders">
+            <template slot="actions">
+              <el-tag v-if="sd.login.lastSyncAt" size="small" type="info">
+                订单同步 {{ String(sd.login.lastSyncAt).slice(0, 16) }}
+              </el-tag>
+            </template>
+          </qnh-login-bar>
+          <div v-if="sd.agent.outdated" class="form-tip" style="margin-top:6px;color:#d1580a">
+            <i class="el-icon-warning"></i>
+            这台电脑上的助手是 v{{ sd.agent.agentVer }}，不支持闪电帮帮；请下载 v{{ sd.agent.minVer }} 及以上版本。
+          </div>
+          <div v-else-if="!sd.agent.online" class="form-tip" style="margin-top:6px;color:#d1580a">
+            <i class="el-icon-warning"></i>
+            本机助手未连接：登录、拉订单、发催收都要经由本机助手完成，请先启动并绑定助手。
+          </div>
+        </el-card>
+
+        <el-alert v-if="qnhNeedPick" type="warning" :closable="false" show-icon style="margin-bottom:12px"
+                  title="请先在上方选择要以哪个账号的身份查看"
+                  description="超级管理员自己没有独立的闪电帮帮数据；选定账号后，订单、登录与催收都属于该账号。"></el-alert>
+
+        <div class="stat-row">
+          <el-card v-for="s in sdcStats" :key="s.label" shadow="never" class="stat-card"
+                   :body-style="{ padding: '14px 16px' }" style="flex:1;min-width:150px">
+            <div class="num">{{ s.value }}</div>
+            <div class="label">{{ s.label }}</div>
+            <div class="sub" v-if="s.sub">{{ s.sub }}</div>
+          </el-card>
+        </div>
+
+        <!-- 取数 / 催收任务进度 -->
+        <el-card v-if="sd.task.visible" class="section-card" shadow="never" :body-style="{ padding: '14px 16px' }">
+          <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px">
+            <span style="font-size:13px">{{ sd.task.running ? (sd.task.progress || sd.task.message || '执行中…') : (sd.task.message || '任务结束') }}</span>
+            <span style="flex:1"></span>
+            <el-button v-if="sd.task.running" size="mini" type="danger" plain @click="stopSdcTask">停止</el-button>
+            <el-button v-else size="mini" plain @click="sd.task.visible = false">关闭</el-button>
+          </div>
+          <el-progress :percentage="sdcTaskPercent" :stroke-width="10" :show-text="false"></el-progress>
+          <div class="log-panel" v-html="sdcLogHtml"></div>
+          <el-alert v-if="!sd.task.running && sd.task.status === 'failed'" type="error" :closable="false" show-icon
+                    style="margin-top:10px" :title="'任务失败：' + (sd.task.message || '未知原因')"
+                    description="常见原因：闪电帮帮登录态过期（重新登录再试）、站点风控限速（隔几分钟再试）、助手版本过旧（升级助手）。已入库的部分不受影响。"></el-alert>
+          <el-alert v-else-if="!sd.task.running && sd.task.status === 'done'" type="success" :closable="false" show-icon
+                    style="margin-top:10px" :title="sd.task.message || '任务完成'"></el-alert>
+        </el-card>
+
+        <!-- 筛选 + 列表 -->
+        <el-card class="section-card" shadow="never">
+          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px">
+            <el-select v-model="sd.filter.stage" size="small" style="width:150px" placeholder="开票档位">
+              <el-option label="全部档位" value=""></el-option>
+              <el-option label="可申请开票" value="1"></el-option>
+              <el-option label="已申请开票" value="2"></el-option>
+            </el-select>
+            <el-input v-model="sd.filter.keyword" size="small" clearable style="width:250px"
+                      placeholder="订单号 / 店铺 / 门店 / 抬头 / 批次" @keyup.enter.native="applySdcFilter"></el-input>
+            <el-button size="small" type="primary" @click="applySdcFilter">查询</el-button>
+            <el-button size="small" @click="resetSdcFilter">重置</el-button>
+            <el-button size="small" type="warning" plain :disabled="!sdcSelCount"
+                       :loading="sd.sending" @click="sendSdcBatch(false)">
+              发送催收消息{{ sdcSelCount ? '（' + sdcSelCount + '）' : '' }}
+            </el-button>
+            <el-button size="small" plain :disabled="!sdcSelCount"
+                       :loading="sd.sending" @click="sendSdcBatch(true)"
+                       title="只把内容填进会话输入框、不点发送，用来先确认助手能正确打开会话">
+              演练{{ sdcSelCount ? '（' + sdcSelCount + '）' : '' }}
+            </el-button>
+            <span style="flex:1"></span>
+            <span class="loginid">共 {{ sd.total }} 条 · {{ sdcStageAmount }} 元</span>
+          </div>
+
+          <el-table ref="sdcTable" :data="sd.rows" size="small" border style="width:100%" v-loading="sd.loading"
+                    row-key="order_sn" :default-sort="sdcDefaultSort" empty-text="暂无订单数据"
+                    @selection-change="onSdcSelChange" @sort-change="onSdcSortChange">
+            <el-table-column type="selection" width="42" :reserve-selection="true"
+                             :selectable="(row) => !!row.chatable"></el-table-column>
+            <el-table-column label="订单号" prop="order_sn" min-width="170" sortable="custom" show-overflow-tooltip>
+              <template slot-scope="p"><span class="loginid">{{ p.row.order_sn }}</span></template>
+            </el-table-column>
+            <el-table-column label="档位" width="110">
+              <template slot-scope="p">
+                <el-tag size="mini" :type="p.row.stage === 1 ? 'warning' : 'info'">{{ p.row.stageText }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="下单时间" prop="pay_time" width="140" sortable="custom">
+              <template slot-scope="p">
+                <span class="loginid">{{ String(p.row.pay_time || '').slice(0, 16) || '—' }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="可开票金额" prop="payable_amount" width="120" sortable="custom">
+              <template slot-scope="p">¥{{ p.row.payable_amount }}</template>
+            </el-table-column>
+            <el-table-column label="订单总额" width="110">
+              <template slot-scope="p">¥{{ p.row.total_amount }}</template>
+            </el-table-column>
+            <!-- 店铺名列：铃铛图标 = 直接催这一家（平台上的同款入口） -->
+            <el-table-column label="店铺名称" min-width="200" show-overflow-tooltip>
+              <template slot-scope="p">
+                <span>{{ p.row.shop_name || '—' }}</span>
+                <el-tooltip v-if="p.row.chatable" placement="top"
+                            content="打开这家店的客服会话并发催收消息（等价于平台上点铃铛后发消息）">
+                  <el-button type="text" size="mini" style="padding:0 2px;color:#E85F00;vertical-align:middle"
+                             icon="el-icon-bell" :loading="sd.sending" @click="sendSdcRows([p.row])"></el-button>
+                </el-tooltip>
+              </template>
+            </el-table-column>
+            <el-table-column label="闪购门店" min-width="170" show-overflow-tooltip>
+              <template slot-scope="p"><span class="loginid">{{ p.row.wm_poi_name || '—' }}</span></template>
+            </el-table-column>
+            <el-table-column label="发票类型" width="130">
+              <template slot-scope="p"><span class="loginid">{{ p.row.invoice_type_desc || '—' }}</span></template>
+            </el-table-column>
+            <el-table-column label="批次号" width="150" show-overflow-tooltip>
+              <template slot-scope="p"><span class="loginid">{{ p.row.batch_no || '—' }}</span></template>
+            </el-table-column>
+            <el-table-column label="交易状态" width="100">
+              <template slot-scope="p"><span class="loginid">{{ p.row.trade_status_desc || '—' }}</span></template>
+            </el-table-column>
+            <el-table-column label="催收" width="130">
+              <template slot-scope="p">
+                <span v-if="p.row.sendCount" class="loginid">
+                  已催 {{ p.row.sendCount }} 次<template v-if="p.row.lastSentAt"> · {{ String(p.row.lastSentAt).slice(5, 16) }}</template>
+                </span>
+                <span v-else class="loginid">—</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" width="120" fixed="right">
+              <template slot-scope="p">
+                <el-button v-if="p.row.chatable" type="text" size="mini" :loading="sd.sending"
+                           style="color:#e6a23c" @click="sendSdcRows([p.row])">发送催收消息</el-button>
+                <span v-else class="loginid">—</span>
+              </template>
+            </el-table-column>
+          </el-table>
+
+          <div style="margin-top:12px;display:flex;align-items:center;gap:8px">
+            <el-pagination small layout="sizes, prev, pager, next" :total="sd.total"
+                           :current-page.sync="sd.page" :page-size="sd.size" :page-sizes="pageSizes"
+                           @current-change="onSdcPage" @size-change="onSdcSize"></el-pagination>
+            <span class="total">共 {{ sd.total }} 条</span>
+            <span style="flex:1"></span>
+            <span class="loginid">未勾选任何订单时点「发送催收消息」= 对所有<b>可申请开票</b>订单按店铺批量催收</span>
+          </div>
+        </el-card>
+      </div>
+
       <!-- 全局页脚：版权归属（主体来自 config.json 的 copyright，缺省回退系统名；年份服务端按当年生成） -->
       <div class="app-footer">
         <span v-if="copyright">{{ copyright }}</span>
@@ -2720,6 +2880,19 @@ const vm = new Vue({
         selected: [], picked: {}, applying: false, applyTaskId: '',
         applyDialog: { visible: false, running: false, kind: '', status: '', message: '', progress: null, log: [], startedAt: 0 },
       },
+      // 闪电帮帮发票：同样用 pd.picked 那套跨页多选（selected 是当前选中行数组）
+      sd: {
+        loading: false, syncing: false, sending: false,
+        rows: [], total: 0, amount: 0, page: 1, size: 20,
+        filter: { stage: '', keyword: '', sort: 'time_desc' },
+        selected: [], picked: {},
+        login: { logined: false, accountName: '', subUserId: '', lastSyncAt: null, writtenAt: null },
+        agent: { online: false, agentVer: '', minVer: '', outdated: false },
+        users: [], sessions: [],
+        summary: null,
+        task: { visible: false, taskId: '', kind: '', status: '', running: false, message: '', progress: '', log: [], startedAt: 0 },
+      },
+      sdcDefaultSort: { prop: 'pay_time', order: 'descending' },
       // 1688发票数据
       companies: [], sent: {}, invSummary: null, boardLoading: false,
       // 商品列表（前置仓补货参考）
@@ -2838,6 +3011,8 @@ const vm = new Vue({
         { title: '发票', items: [
           { key: 'board', label: '1688发票', icon: 'el-icon-document' },
           { key: 'pdd', label: '拼多多发票', icon: 'el-icon-s-order' },
+          { key: 'sdc', label: '闪电帮帮发票', icon: 'el-icon-truck' },
+          { key: 'mapping', label: '税名核对', icon: 'el-icon-edit-outline' },
         ] },
         { title: '核对与商品', items: [
           this.canProduct ? { key: 'product', label: '商品列表', icon: 'el-icon-goods' } : null,
@@ -3163,6 +3338,56 @@ const vm = new Vue({
           sub: '待申请 ' + n(s.pending) + ' · 开票中 ' + n(s.issuing) + ' · 商家处理 ' + n(s.mallProcessing) },
       ];
     },
+    /** 闪电帮帮：金额三卡（可申请 / 已申请 / 合计），口径与拼多多页保持一致 */
+    sdcStats() {
+      const s = this.sd.summary || {};
+      const a = (o) => Number((o && o.amount) || 0);
+      const n = (o) => Number((o && o.count) || 0);
+      const applyable = s.applyable || { count: 0, amount: 0, shops: 0 };
+      const applied = s.applied || { count: 0, amount: 0, shops: 0 };
+      return [
+        { label: '可申请开票', value: yuan(a(applyable)), sub: `${n(applyable)} 单 / ${Number(applyable.shops) || 0} 家店铺` },
+        { label: '已申请开票', value: yuan(a(applied)), sub: `${n(applied)} 单 / ${Number(applied.shops) || 0} 家店铺` },
+        { label: '合计金额', value: yuan(a(applyable) + a(applied)), sub: `共 ${n(applyable) + n(applied)} 单` },
+      ];
+    },
+    sdcUsers() { return this.sd.users || []; },
+    sdcSessions() { return this.sd.sessions || []; },
+    sdcSelCount() { return (this.sd.selected || []).length; },
+    sdcStageAmount() { return Number(this.sd.amount || 0).toFixed(2); },
+    /** 登录条要一个 cookie 形的对象（复用牵牛花那个组件） */
+    sdLoginCookie() {
+      const l = this.sd.login || {};
+      return {
+        logined: !!l.logined,
+        loading: this.sd.syncing || this.sd.sending,
+        accountName: l.accountName || '',
+        message: l.lastSyncAt ? '' : '尚未拉取过订单数据',
+        writtenAt: l.writtenAt || null,
+      };
+    },
+    sdcTaskPercent() {
+      const t = this.sd.task;
+      if (!t.visible) return 0;
+      if (!t.running) return 100;
+      if (t.kind === 'send' && t.total) {
+        const done = (t.results || []).length;
+        return Math.min(99, Math.round((done / t.total) * 100));
+      }
+      return 50;
+    },
+    sdcLogHtml() {
+      const t = this.sd.task || {};
+      const logs = t.log || [];
+      const waiting = t.kind === 'send' ? '等待本机助手打开客服会话…' : '等待本机助手开始拉取…';
+      if (!logs.length) return '<div style="color:#8a8f98">' + waiting + '</div>';
+      return logs.map((l) => {
+        const bad = l.text.indexOf('✗') > -1 || l.text.indexOf('失败') > -1;
+        const good = l.text.indexOf('✓') > -1;
+        const color = bad ? '#ff8a80' : (good ? '#69f0ae' : '#b9f6ca');
+        return '<div style="color:' + color + '">' + this.esc(l.t) + ' ' + this.esc(l.text) + '</div>';
+      }).join('');
+    },
     readonly() {
       if (this.viewTenant == null || !this.me) return false;
       return Number(this.viewTenant) !== Number(this.me.id);
@@ -3292,6 +3517,7 @@ const vm = new Vue({
       if (p === 'product') { this.loadProducts(); this.loadProductTrend(); }
       if (p === 'market') this.loadMarket();
       if (p === 'billing') this.loadBilling();
+      if (p === 'sdc') { this.clearSdcPicked(); this.loadSdcStatus(); this.loadSdcOrders(); }
     },
     'detail.visible'(v) { if (!v) this.detail.q = ''; },
   },
@@ -3849,12 +4075,15 @@ const vm = new Vue({
       this.pd.cookie = { logined: false, loading: false, message: '' };
       // 切换账号：上一个账号的申请结果不再适用（任务仍在跑的话保留卡片，避免误以为任务被停）
       if (!this.pd.applyDialog.running) this.pd.applyDialog.visible = false;
+      this.sd.rows = []; this.sd.total = 0; this.sd.page = 1; this.sd.summary = null;
+      this.clearSdcPicked();
       this.qnhReload();
     },
-    /** 按当前页面重载（退单 / 毛利 / 拼多多 三个页面共用同一套「身份 → 数据」流程） */
+    /** 按当前页面重载（退单 / 毛利 / 拼多多 / 闪电帮帮 四个页面共用同一套「身份 → 数据」流程） */
     qnhReload() {
       // 拼多多与牵牛花是两套独立登录态，进拼多多页不该去请求牵牛花状态
       if (this.page === 'pdd') { this.loadPddStatus(); this.loadPddOrders(); return; }
+      if (this.page === 'sdc') { this.loadSdcStatus(); this.loadSdcOrders(); return; }
       this.loadRefundStatus();
       if (this.page === 'refund') { this.loadRefunds(); this.loadRefundTrend(); }
       if (this.page === 'profit') { this.loadProfit(); }
@@ -4867,6 +5096,259 @@ const vm = new Vue({
     },
     refundLogCount(type) {
       return (this.rq.log.rows || []).filter((r) => r.logType === type).length;
+    },
+
+    // ══════ 闪电帮帮发票（登录 / 拉订单 / 按店铺批量催收；全部经本机助手） ══════
+    sdcApi(path, opts) { return this.qnhApi(path, opts); },
+
+    async loadSdcStatus() {
+      if (this.qnhNeedPick) return;
+      try {
+        const d = await this.sdcApi('/api/sdc/status');
+        if (d.error) { this.$message.error(d.error); return; }
+        const l = d.login || {};
+        this.sd.login = {
+          logined: !!l.logined,
+          accountName: l.accountName || (l.subUserId ? ('闪电帮帮用户 ' + l.subUserId) : ''),
+          subUserId: l.subUserId || '',
+          lastSyncAt: l.lastSyncAt || null,
+          writtenAt: l.writtenAt || null,
+        };
+        this.sd.summary = d.summary || null;
+        this.sd.agent = d.agent || this.sd.agent;
+        if (Array.isArray(d.sessions)) this.sd.sessions = d.sessions.map(Number);
+        if (Array.isArray(d.users)) {
+          this.sd.users = d.users;
+          if (!this.qnhUsers.length) this.qnhUsers = d.users;
+        }
+      } catch (e) {
+        this.$message.error('获取闪电帮帮状态失败：' + e.message);
+      }
+    },
+
+    async loadSdcOrders() {
+      if (this.qnhNeedPick) return;
+      this.sd.loading = true;
+      try {
+        const q = new URLSearchParams();
+        const f = this.sd.filter || {};
+        if (f.stage !== '') q.set('stage', f.stage);
+        if (f.keyword) q.set('keyword', f.keyword);
+        if (f.sort) q.set('sort', f.sort);
+        q.set('page', this.sd.page);
+        q.set('size', this.sd.size);
+        const d = await this.sdcApi('/api/sdc/orders?' + q.toString());
+        if (d.error) { this.$message.error(d.error); return; }
+        this.sd.rows = d.rows || [];
+        this.sd.total = d.total || 0;
+        this.sd.amount = d.amount || 0;
+      } catch (e) {
+        this.$message.error('加载闪电帮帮订单失败：' + e.message);
+      } finally {
+        this.sd.loading = false;
+      }
+    },
+
+    /** 登录：把任务下发给本机助手，弹登录窗口给用户扫码/短信验证（与拼多多同一套路） */
+    async loginSdc() {
+      try {
+        const d = await this.sdcApi('/api/sdc/login', {
+          method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+        });
+        if (d.error) { this.$message.error(d.error); return; }
+        if (d.ok === false) { this.$message({ message: d.message || '登录失败', type: 'warning', duration: 6000 }); return; }
+        this.$message.info(d.message || '已在本机助手里打开登录窗口');
+        this.pollSdcLogin(d.taskId);
+      } catch (e) {
+        this.$message.error('下发登录任务失败：' + e.message);
+      }
+    },
+
+    pollSdcLogin(taskId) {
+      const timer = setInterval(async () => {
+        try {
+          const d = await this.sdcApi('/api/sdc/login-status?taskId=' + encodeURIComponent(taskId));
+          if (d.error) { clearInterval(timer); return; }
+          if (d.status === 'pending') return;
+          clearInterval(timer);
+          if (d.ok) {
+            this.$message.success('闪电帮帮登录成功：' + (d.accountName || ''));
+            await this.loadSdcStatus();
+          } else {
+            this.$message({ message: '登录未完成：' + (d.message || '未知原因'), type: 'warning', duration: 6000 });
+          }
+        } catch (e) { clearInterval(timer); }
+      }, 2000);
+    },
+
+    async logoutSdc() {
+      try {
+        const d = await this.sdcApi('/api/sdc/logout', {
+          method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+        });
+        this.$message({ message: d.message || '已退出', duration: 6000 });
+        this.clearSdcPicked();
+        await this.loadSdcStatus();
+        await this.loadSdcOrders();
+      } catch (e) {
+        this.$message.error('退出闪电帮帮失败：' + e.message);
+      }
+    },
+
+    /** 刷新订单数据：助手在真实页面里翻页拉取，这里只负责开卡片并轮询 */
+    async syncSdcOrders() {
+      this.sd.syncing = true;
+      try {
+        const d = await this.sdcApi('/api/sdc/sync', {
+          method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+        });
+        if (d.error) { this.$message.error(d.error); return; }
+        if (d.ok === false) {
+          this.$message({ message: d.message || '下单取数失败', type: 'warning', duration: 6000 });
+          return;
+        }
+        this.sd.task = {
+          visible: true, taskId: d.taskId, kind: 'sync', status: 'pending', running: true,
+          message: d.message || '', progress: '', log: [], startedAt: Date.now(), total: 0, results: [],
+        };
+        this.pollSdcTask(d.taskId, 'sync');
+      } catch (e) {
+        this.$message.error('下发取数任务失败：' + e.message);
+      } finally {
+        this.sd.syncing = false;
+      }
+    },
+
+    pollSdcTask(taskId, kind) {
+      const timer = setInterval(async () => {
+        try {
+          const d = await this.sdcApi('/api/sdc/task-status?taskId=' + encodeURIComponent(taskId));
+          if (d.error) { clearInterval(timer); return; }
+          const t = this.sd.task;
+          if (!t.visible || t.taskId !== taskId) { clearInterval(timer); return; }
+          t.kind = d.kind || kind;
+          t.status = d.status;
+          t.message = d.message || t.message;
+          t.progress = d.progress || '';
+          t.total = d.total || 0;
+          t.results = d.results || [];
+          t.running = d.status === 'pending';
+          const line = d.kind === 'send'
+            ? `已处理 ${(d.results || []).length}/${d.total || 0} 家店铺`
+            : (d.progress || '正在拉取…');
+          const last = t.log[t.log.length - 1];
+          const stamp = new Date().toISOString().slice(11, 19);
+          if (!last || last.text !== line) t.log.push({ t: stamp, text: line });
+          if (d.status !== 'pending') {
+            clearInterval(timer);
+            t.running = false;
+            t.log.push({ t: stamp, text: (d.ok ? '✓ ' : '✗ ') + (d.message || (d.ok ? '任务完成' : '任务失败')) });
+            this.clearSdcPicked();
+            await this.loadSdcStatus();
+            await this.loadSdcOrders();
+            if (d.loginish) this.$message({ message: '闪电帮帮登录态已失效，请重新登录', type: 'warning', duration: 6000 });
+          }
+        } catch (e) { clearInterval(timer); }
+      }, 2500);
+    },
+
+    async stopSdcTask() {
+      try {
+        await this.sdcApi('/api/sdc/task-stop', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ taskId: this.sd.task.taskId }),
+        });
+        this.$message.info('已请求停止：当前这一步处理完就停');
+      } catch (e) { /* 忽略 */ }
+    },
+
+    applySdcFilter() { this.sd.page = 1; this.clearSdcPicked(); this.loadSdcOrders(); },
+    resetSdcFilter() {
+      this.sd.filter = { stage: '', keyword: '', sort: 'time_desc' };
+      this.sd.page = 1;
+      this.clearSdcPicked();
+      this.loadSdcOrders();
+    },
+    onSdcPage(p) { this.sd.page = p; this.loadSdcOrders(); },
+    onSdcSize(s) { this.sd.size = s; this.sd.page = 1; this.loadSdcOrders(); },
+    onSdcSortChange({ prop, order }) {
+      const map = {
+        pay_time: order === 'ascending' ? 'time_asc' : 'time_desc',
+        payable_amount: order === 'ascending' ? 'amount_asc' : 'amount_desc',
+      };
+      this.sd.filter.sort = map[prop] || 'time_desc';
+      this.sd.page = 1;
+      this.loadSdcOrders();
+    },
+    /**
+     * 跨页多选：Element 的 selection-change 只给「当前页选中行」，
+     * 这里按 {order_sn: row} 累积（当前页没勾的摘掉、勾上的写入、其余页保留）。
+     */
+    onSdcSelChange(rows) {
+      const picked = this.sd.picked || {};
+      const nowPage = {};
+      for (const r of this.sd.rows) nowPage[r.order_sn] = r;
+      const pageSns = new Set(this.sd.rows.map((r) => r.order_sn));
+      const got = new Set((rows || []).map((r) => r.order_sn));
+      for (const sn of pageSns) { if (!got.has(sn)) delete picked[sn]; }
+      for (const r of rows || []) picked[r.order_sn] = r;
+      this.sd.picked = picked;
+      this.sd.selected = Object.values(picked);
+    },
+    clearSdcPicked() {
+      this.sd.picked = {};
+      this.sd.selected = [];
+      const t = this.$refs.sdcTable;
+      if (t && typeof t.clearSelection === 'function') { try { t.clearSelection(); } catch (e) { /* 忽略 */ } }
+    },
+
+    /** 批量催收（不勾选 = 对所有「可申请开票」订单按店铺催收） */
+    async sendSdcBatch(dryRun) {
+      const sns = (this.sd.selected || []).map((r) => r.order_sn);
+      if (!sns.length) {
+        try {
+          await this.$confirm(
+            '没有勾选订单：将对库里所有「可申请开票」的订单按店铺批量催收。是否继续？',
+            '批量催收确认', { type: 'warning' }
+          );
+        } catch (e) { return; }
+      } else if (!dryRun) {
+        try {
+          await this.$confirm(
+            `将对勾选的 ${sns.length} 单所属店铺发送催收消息（同一家店合并成一条）。是否继续？`,
+            '发送确认', { type: 'warning' }
+          );
+        } catch (e) { return; }
+      }
+      await this.doSendSdc(sns, dryRun);
+    },
+
+    async sendSdcRows(rows) {
+      const sns = (rows || []).map((r) => r.order_sn).filter(Boolean);
+      if (!sns.length) return;
+      await this.doSendSdc(sns, false);
+    },
+
+    async doSendSdc(sns, dryRun) {
+      this.sd.sending = true;
+      try {
+        const d = await this.sdcApi('/api/sdc/send', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ orderSns: sns, dryRun: !!dryRun }),
+        });
+        if (d.error) { this.$message.error(d.error); return; }
+        if (d.ok === false) { this.$message({ message: d.message || '下发催收任务失败', type: 'warning', duration: 6000 }); return; }
+        this.sd.task = {
+          visible: true, taskId: d.taskId, kind: 'send', status: 'pending', running: true,
+          message: d.message || '', progress: '', log: [], startedAt: Date.now(),
+          total: d.total || 0, results: [],
+        };
+        this.pollSdcTask(d.taskId, 'send');
+      } catch (e) {
+        this.$message.error('下发催收任务失败：' + e.message);
+      } finally {
+        this.sd.sending = false;
+      }
     },
 
     // ══════ 税名核对（所有人可用；普通用户只见自己发票里的销方，映射全平台共享） ══════

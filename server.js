@@ -70,6 +70,7 @@ const qagent = require('./lib/qnh-agent');
 const pdd = require('./lib/pdd');
 const pddOrders = require('./lib/pdd-orders');
 const psync = require('./lib/pdd-sync');
+const sdc = require('./lib/sdc');
 
 const PORT = Number(process.env.PORT) || 8787;
 const ROOT = __dirname;
@@ -126,14 +127,18 @@ function sendVendor(res, rel) {
 // 品牌静态资源（logo / favicon）—— 与 vendor 一样白名单式下发，杜绝路径穿越
 const ASSETS_DIR = path.join(ROOT, 'assets');
 const ASSETS_MIME = { '.png': 'image/png', '.ico': 'image/x-icon', '.svg': 'image/svg+xml' };
-function sendAsset(res, rel) {
+function sendAsset(req, res, rel) {
   const target = path.normalize(path.join(ASSETS_DIR, rel));
   if (!target.startsWith(ASSETS_DIR + path.sep)) { res.writeHead(403); return res.end('forbidden'); }
   const ext = path.extname(target).toLowerCase();
   if (!ASSETS_MIME[ext]) { res.writeHead(403); return res.end('forbidden'); }
   let buf;
   try { buf = fs.readFileSync(target); } catch (e) { res.writeHead(404); return res.end('not found'); }
-  res.writeHead(200, { 'content-type': ASSETS_MIME[ext], 'cache-control': 'public, max-age=604800' });
+  // 协商缓存：内容变则 URL 立即生效（否则浏览器会按 max-age 把旧图标赖一周），
+  // 内容没变则回 304，不重传。品牌资源必须走这条路而不是长 max-age。
+  const etag = '"' + crypto.createHash('md5').update(buf).digest('hex') + '"';
+  if (req.headers['if-none-match'] === etag) { res.writeHead(304, { etag }); return res.end(); }
+  res.writeHead(200, { 'content-type': ASSETS_MIME[ext], 'cache-control': 'no-cache', etag });
   res.end(buf);
 }
 function redirect(res, to) {
@@ -810,6 +815,19 @@ const OP_ACTIONS = {
     + (d.accountName ? `「${d.accountName}」` : '')
     + (d.pdduid ? `（ID ${d.pdduid}）` : '')
     + (d.agentCleared ? '（含本机登录态）' : '（本机助手未同步清除）'),
+  'sdc.view': () => '打开了闪电帮帮发票页',
+  'sdc.login.start': (d) => `发起了「登录闪电帮帮」（${d.tenantId ? '用户 ' + d.tenantId : '本人'}）`,
+  'sdc.login': (d) => `登录闪电帮帮${d.ok ? '（成功）' : '（失败）'}`,
+  'sdc.logout': (d) => `退出了闪电帮帮账号`
+    + (d.accountName ? `「${d.accountName}」` : '')
+    + (d.agentCleared ? '（含本机登录态）' : '（本机助手未同步清除）'),
+  'sdc.sync': (d) => d.ok === false
+    ? `拉取闪电帮帮订单失败${d.reason ? '：' + d.reason : ''}`
+    : `拉取了闪电帮帮订单（可申请 ${d.applyable || 0} 单、已申请 ${d.applied || 0} 单）`,
+  'sdc.send.start': (d) => `发起了闪电帮帮批量催收（${d.total || 0} 家店铺${d.dryRun ? '，演练模式' : ''}）`,
+  'sdc.send': (d) => d.ok === false
+    ? `闪电帮帮批量催收失败${d.reason ? '：' + d.reason : ''}`
+    : `闪电帮帮批量催收完成（成功 ${d.okCount || 0} 家、失败 ${d.failCount || 0} 家${d.dryRun ? '，演练模式未点发送' : ''}）`,
 };
 
 // 前端下拉是「值」，日志里要显示人能看懂的「文案」，在服务端做映射，避免客户端乱传
@@ -1083,6 +1101,17 @@ const PDD_APPLY_MIN_AGENT = '0.2.21';   // 0.2.21 起：CDP 抓包判成败 + �
 // 支持「催商家开票」的最低助手版本（0.2.23 起才有 pdd_send 内核）
 const PDD_SEND_MIN_AGENT = '0.2.23';
 
+// ── 闪电帮帮任务：登录 / 拉订单 / 批量催收（三项都必须在本机助手的浏览器里跑）──
+//    原因：该站点网关要 mtgsig 签名，服务器直连 403；只有页面上下文的 fetch 会自动被签名。
+const SDC_LOGINS = new Map();                  // taskId -> ctx（登录）
+const SDC_TASKS = new Map();                   // taskId -> ctx（sync 取数 / send 催收）
+const SDC_LOGIN_TIMEOUT_MS = Number(process.env.SDC_LOGIN_TIMEOUT_MS) || 5 * 60 * 1000;
+const SDC_LOGIN_TTL_MS = SDC_LOGIN_TIMEOUT_MS + 60 * 1000;
+const SDC_TASK_TIMEOUT_MS = Number(process.env.SDC_TASK_TIMEOUT_MS) || 15 * 60 * 1000;
+const SDC_TASK_TTL_MS = SDC_TASK_TIMEOUT_MS + 5 * 60 * 1000;
+// 支持闪电帮帮三项能力的最低助手版本（0.2.55 起才有 sdc_login / sdc_fetch / sdc_send 内核）
+const SDC_MIN_AGENT = '0.2.55';
+
 // ── 「清除本机登录态」──────────────────────────────────────────────
 // 看板点「退出 XX 账号」时，光删数据库里的 Cookie 不够：助手那边的登录窗口用的是
 // Electron 持久分区（persist:pdd / persist:qnh），Cookie 还在用户本机上，下次点「登录」
@@ -1197,6 +1226,8 @@ const qnhLoginSweeper = setInterval(() => {
   for (const [id, c] of QNH_LOGINS) if (now > c.expiresAt) QNH_LOGINS.delete(id);
   for (const [id, c] of PDD_LOGINS) if (now > c.expiresAt) PDD_LOGINS.delete(id);
   for (const [id, c] of PDD_TASKS) if (now > c.expiresAt && c.status !== 'pending') PDD_TASKS.delete(id);
+  for (const [id, c] of SDC_LOGINS) if (now > c.expiresAt) SDC_LOGINS.delete(id);
+  for (const [id, c] of SDC_TASKS) if (now > c.expiresAt && c.status !== 'pending') SDC_TASKS.delete(id);
 }, 60000);
 if (qnhLoginSweeper.unref) qnhLoginSweeper.unref();
 
@@ -1405,6 +1436,101 @@ function onPddSendDone(uid, msg) {
 }
 
 /**
+ * 助手回报「登录闪电帮帮」结果：写台账（不写 Cookie，登录态始终留在本机浏览器分区里）。
+ */
+function onSdcLoginDone(uid, msg) {
+  const ctx = SDC_LOGINS.get(String((msg && msg.taskId) || ''));
+  if (!ctx || ctx.userId !== Number(uid) || ctx.status !== 'pending') return;
+  if (!msg.ok) {
+    ctx.status = 'failed';
+    ctx.message = String(msg.error || '助手执行登录失败').slice(0, 300);
+    ctx.finishedAt = new Date();
+    logOp(Number(uid), 'sdc.login', { ok: false, tenantId: ctx.userId, reason: ctx.message });
+    return;
+  }
+  ctx.status = 'done';
+  ctx.subUserId = String(msg.subUserId || '');
+  ctx.accountName = String(msg.accountName || '');
+  ctx.finishedAt = new Date();
+  ctx.message = `登录成功${ctx.accountName ? '：' + ctx.accountName : ''}`;
+  sdc.upsertSession(ctx.userId, { subUserId: ctx.subUserId, accountName: ctx.accountName, agentVer: msg.agentVer || '', source: '本机助手' })
+    .catch((e) => console.warn(`[sdc] 登录台账写入失败：${(e && e.message) || e}`));
+  logOp(Number(uid), 'sdc.login', { ok: true, tenantId: ctx.userId, accountName: ctx.accountName });
+}
+
+/**
+ * 助手分批回传订单行：边收边入库（避免等全部拉完才写，中途失败也留住已拿到的部分）。
+ */
+function onSdcFetchPage(uid, msg) {
+  const ctx = SDC_TASKS.get(String((msg && msg.taskId) || ''));
+  if (!ctx || ctx.kind !== 'sync' || ctx.userId !== Number(uid) || ctx.status !== 'pending') return;
+  const rows = Array.isArray(msg.rows) ? msg.rows : [];
+  if (!rows.length) return;
+  ctx.received += rows.length;
+  sdc.saveOrders(ctx.userId, rows)
+    .then((r) => {
+      ctx.inserted += r.inserted; ctx.updated += r.updated; ctx.skipped += r.skipped;
+      ctx.progress = `已回传 ${ctx.received} 单（新增 ${ctx.inserted} / 更新 ${ctx.updated} / 无变化 ${ctx.skipped}）`;
+    })
+    .catch((e) => { ctx.lastError = String((e && e.message) || e).slice(0, 200); });
+}
+
+/** 助手跑完取数：收尾 + 写同步时间 + 留痕 */
+function onSdcFetchDone(uid, msg) {
+  const ctx = SDC_TASKS.get(String((msg && msg.taskId) || ''));
+  if (!ctx || ctx.kind !== 'sync' || ctx.userId !== Number(uid) || ctx.status !== 'pending') return;
+  const tally = msg.tally || {};
+  const gotAny = Object.values(tally).some((t) => t && Number(t.rows) > 0);
+  sdc.touchSync(ctx.userId).catch(() => null);
+  if (!msg.ok && !gotAny) {
+    ctx.status = 'failed';
+    ctx.message = String(msg.error || '助手拉取订单失败').slice(0, 300);
+    ctx.finishedAt = new Date();
+    logOp(Number(uid), 'sdc.sync', { ok: false, tenantId: ctx.userId, reason: ctx.message });
+    return;
+  }
+  ctx.status = 'done';
+  ctx.finishedAt = new Date();
+  ctx.tally = tally;
+  ctx.loginish = !!msg.loginish;
+  ctx.message = String(msg.error || '')
+    ? `拉取完成（部分档位失败：${String(msg.error).slice(0, 120)}）`
+    : `拉取完成：新增 ${ctx.inserted} 单、更新 ${ctx.updated} 单`;
+  logOp(Number(uid), 'sdc.sync', {
+    ok: true, tenantId: ctx.userId,
+    applyable: (tally['1'] && tally['1'].rows) || 0,
+    applied: (tally['2'] && tally['2'].rows) || 0,
+  });
+}
+
+/** 助手回报「闪电帮帮批量催收」结果：逐店铺落 sdc_msg_log，并按店铺回写订单的催收次数 */
+function onSdcSendDone(uid, msg) {
+  const ctx = SDC_TASKS.get(String((msg && msg.taskId) || ''));
+  if (!ctx || ctx.kind !== 'send' || ctx.userId !== Number(uid) || ctx.status !== 'pending') return;
+  const results = Array.isArray(msg.results) ? msg.results : [];
+  ctx.results = results;
+  ctx.okCount = Number(msg.okCount) || results.filter((r) => r.ok).length;
+  ctx.failCount = Number(msg.failCount) || (results.length - ctx.okCount);
+  ctx.dryRun = !!msg.dryRun;
+  sdc.logMsg(ctx.userId, results).catch((e) => console.warn(`[sdc] 催收日志写入失败：${(e && e.message) || e}`));
+  if (!msg.ok && !results.length) {
+    ctx.status = 'failed';
+    ctx.message = String(msg.error || '助手执行催收失败').slice(0, 300);
+    ctx.finishedAt = new Date();
+    logOp(Number(uid), 'sdc.send', { ok: false, tenantId: ctx.userId, reason: ctx.message });
+    return;
+  }
+  ctx.status = 'done';
+  ctx.finishedAt = new Date();
+  ctx.message = (ctx.dryRun ? '演练完成（未点发送）：' : '催收消息发送完成：')
+    + `成功 ${ctx.okCount} 家店铺、失败 ${ctx.failCount} 家` + (msg.stopped ? '（中途停止）' : '');
+  logOp(Number(uid), 'sdc.send', {
+    ok: ctx.okCount > 0, okCount: ctx.okCount, failCount: ctx.failCount,
+    tenantId: ctx.userId, dryRun: !!ctx.dryRun,
+  });
+}
+
+/**
  * 把任务进度推送给本机助手（供助手状态面板的实时发送面板渲染）
  * 推送失败（通道已断）无所谓：助手面板只是旁观，断线时看板仍能看到状态。
  */
@@ -1433,6 +1559,11 @@ function handleAgentMessage(uid, msg) {
   if (msg.type === 'pdd_apply_progress') { onPddApplyProgress(uid, msg); return; }
   if (msg.type === 'pdd_send_done') { onPddSendDone(uid, msg); return; }
   if (msg.type === 'pdd_send_progress') { onPddApplyProgress(uid, msg); return; }
+  // ── 闪电帮帮：登录 / 取数（分批回传）/ 批量催收 ──
+  if (msg.type === 'sdc_login_done') { onSdcLoginDone(uid, msg); return; }
+  if (msg.type === 'sdc_fetch_page') { onSdcFetchPage(uid, msg); return; }
+  if (msg.type === 'sdc_fetch_done') { onSdcFetchDone(uid, msg); return; }
+  if (msg.type === 'sdc_send_done') { onSdcSendDone(uid, msg); return; }
   // 「牵牛花页内签名请求」：助手回传配送日志 / 毛利明细等接口结果
   if (msg.type === 'qnh_fetch_done') { qagent.onDone(uid, msg); return; }
   // 「清除本机登录态」：助手清掉本机浏览器分区后回执
@@ -2299,8 +2430,9 @@ const server = http.createServer(async (req, res) => {
     }
     if (method === 'GET' && p === '/healthz') return sendJson(res, 200, { ok: true, ts: new Date().toISOString() });
     // 品牌图标：浏览器默认会请求 /favicon.ico，这里给真实图标而不是一条 404
-    if (method === 'GET' && p === '/favicon.ico') return sendAsset(res, 'logo.ico');
-    if (method === 'GET' && p.startsWith('/assets/')) return sendAsset(res, decodeURIComponent(p.slice('/assets/'.length)));
+    // 直接复用桌面端那套 ICO（内含 16/20/24 的简化帧，小尺寸不糊）
+    if (method === 'GET' && p === '/favicon.ico') return sendAsset(req, res, 'app-icon-mascot.ico');
+    if (method === 'GET' && p.startsWith('/assets/')) return sendAsset(req, res, decodeURIComponent(p.slice('/assets/'.length)));
     // 前端本地依赖（免外网 CDN）：/vendor/vue.min.js、/vendor/echarts.min.js、/vendor/element-ui/*
     if (method === 'GET' && p.startsWith('/vendor/')) return sendVendor(res, decodeURIComponent(p.slice('/vendor/'.length)));
     if (method === 'GET' && (p === '/' || p === '/index.html')) {
@@ -4029,6 +4161,315 @@ const server = http.createServer(async (req, res) => {
       }
 
       return sendJson(res, 404, { error: '未知拼多多接口' });
+    }
+
+    // ── 闪电帮帮发票（/api/sdc/*）────────────────────────────────────
+    // ⚠ 与拼多多不同：该站点网关要 mtgsig 签名，服务器直连 403。
+    //   所以「登录 / 拉订单 / 发催收」三个动作都是：服务器下发任务 → 本机助手在真实页面里执行
+    //   → 结果回传服务器入库。服务器从不用自己的网络去碰这个站点。
+    if (p.startsWith('/api/sdc/')) {
+      const sdcUid = tenantId;   // 本块所有读写的「数据归属用户」
+
+      // 概况：登录台账 + 汇总 + 助手状态；管理员额外拿账号列表以便「代入」
+      if (method === 'GET' && p === '/api/sdc/status') {
+        const [sess, sum] = await Promise.all([
+          sdc.sessionInfo(sdcUid).catch(() => ({ logined: false })),
+          sdc.summary(sdcUid).catch(() => null),
+        ]);
+        const aUid = agentUidFor(user, sdcUid);
+        const out = {
+          logged: !!sess.logined,
+          login: sess,
+          summary: sum,
+          stageText: sdc.STAGE_TEXT,
+          agent: {
+            online: !!(aUid && agentHub.isOnline(aUid)),
+            agentVer: aUid ? (agentHub.status(aUid).agentVer || '') : '',
+            minVer: SDC_MIN_AGENT,
+            outdated: !!(aUid && agentHub.isOnline(aUid) && agentHub.status(aUid).agentVer
+              && !verGte(agentHub.status(aUid).agentVer || '', SDC_MIN_AGENT)),
+          },
+          isAdmin,
+          tenantId: sdcUid,
+        };
+        if (isAdmin) {
+          try {
+            out.sessions = await sdc.usersWithSession();
+            out.users = (await listUsers()).map((u) => ({
+              id: u.id, username: u.username, companyName: u.companyName, role: u.role,
+            }));
+          } catch (e) { /* 列表拿不到不影响主流程 */ }
+        }
+        return sendJson(res, 200, out);
+      }
+
+      if (method === 'GET' && p === '/api/sdc/orders') {
+        const q = url.searchParams;
+        const base = {
+          userId: sdcUid,
+          stage: q.get('stage') || '',
+          keyword: q.get('keyword') || '',
+          shopId: q.get('shopId') || '',
+          sort: q.get('sort') || 'time_desc',
+          page: q.get('page'),
+          size: q.get('size'),
+        };
+        const [rows, cnt] = await Promise.all([
+          sdc.list(base),
+          sdc.count(base),
+        ]);
+        return sendJson(res, 200, { rows, total: cnt.count, amount: cnt.amount, stageText: sdc.STAGE_TEXT });
+      }
+
+      if (method === 'GET' && p === '/api/sdc/summary') {
+        return sendJson(res, 200, await sdc.summary(sdcUid));
+      }
+
+      if (method === 'GET' && p === '/api/sdc/msg-history') {
+        return sendJson(res, 200, { rows: await sdc.msgHistory(sdcUid, Number(url.searchParams.get('limit')) || 20) });
+      }
+
+      // 「登录闪电帮帮」：下发任务给本机助手 → 助手开窗口让用户登录 → 回传账号标识
+      if (method === 'POST' && p === '/api/sdc/login') {
+        const aUid = agentUidFor(user, sdcUid);
+        const onMyPc = aUid && Number(aUid) !== Number(sdcUid);
+        if (!aUid) {
+          return sendJson(res, 200, {
+            ok: false, needAgent: true,
+            message: '本机助手未连接：请先在电脑上启动「催收小助手」并点页面右上角「绑定本机助手」完成绑定。'
+              + '闪电帮帮登录只在本机完成，服务器不会代你登录。',
+          });
+        }
+        if (!agentVersionGate(res, aUid, '登录闪电帮帮')) return;
+        const agentVer = agentHub.status(aUid).agentVer || '';
+        if (agentVer && !verGte(agentVer, SDC_MIN_AGENT)) {
+          return sendJson(res, 200, {
+            ok: false, needAgent: true, agentOutdated: true,
+            message: `这台电脑上的催收小助手是 v${agentVer}，还不支持闪电帮帮。请下载安装 v${SDC_MIN_AGENT} 及以上版本。`,
+          });
+        }
+        const taskId = 'sdc-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+        const ctx = {
+          taskId, userId: Number(sdcUid), status: 'pending', message: '',
+          accountName: '', subUserId: '', createdAt: Date.now(),
+          expiresAt: Date.now() + SDC_LOGIN_TTL_MS,
+        };
+        const sent = agentHub.send(aUid, {
+          type: 'sdc_login',
+          taskId,
+          timeoutMs: SDC_LOGIN_TIMEOUT_MS,
+        });
+        if (!sent) {
+          return sendJson(res, 200, {
+            ok: false, needAgent: true,
+            message: '下发登录任务失败：本机助手连接已断开，请确认助手正在运行。',
+          });
+        }
+        SDC_LOGINS.set(taskId, ctx);
+        await logOp(user, 'sdc.login.start', { tenantId: sdcUid, agentUid: aUid });
+        return sendJson(res, 200, {
+          ok: true, pending: true, taskId,
+          message: (onMyPc ? '已在你本机的助手窗口里打开闪电帮帮登录（登录态记在「' + ((await tenantLabelOf(sdcUid)) || '该账号') + '」名下），'
+            : '已在该用户电脑上打开闪电帮帮登录窗口，')
+            + '请在弹出的助手窗口里完成登录（支持扫码/短信验证）。',
+        });
+      }
+
+      if (method === 'GET' && p === '/api/sdc/login-status') {
+        const ctx = SDC_LOGINS.get(String(url.searchParams.get('taskId') || ''));
+        const mine = ctx && (ctx.userId === Number(user.id) || (isAdmin && ctx.userId === Number(sdcUid)));
+        if (!mine) return sendJson(res, 404, { error: '登录任务不存在或已结束' });
+        return sendJson(res, 200, {
+          status: ctx.status,
+          ok: ctx.status === 'done',
+          message: ctx.message || '',
+          accountName: ctx.accountName || '',
+          subUserId: ctx.subUserId || '',
+        });
+      }
+
+      // 退出登录：删台账 + 让助手把本机浏览器分区一起清掉（否则下次登录会免登进旧账号）
+      if (method === 'POST' && p === '/api/sdc/logout') {
+        const info = await sdc.sessionInfo(sdcUid).catch(() => null);
+        await sdc.clearSession(sdcUid);
+        const agent = await agentLogout(agentUidFor(user, sdcUid) || sdcUid, 'sdc');
+        await logOp(user, 'sdc.logout', {
+          tenantId: sdcUid, accountName: (info && info.accountName) || '', agentCleared: !!agent.ok,
+        });
+        return sendJson(res, 200, {
+          ok: true,
+          accountName: (info && info.accountName) || '',
+          agentCleared: !!agent.ok,
+          agentOffline: !!agent.offline,
+          message: '已退出闪电帮帮账号'
+            + (info && info.accountName ? `「${info.accountName}」` : '')
+            + '。' + logoutAgentNote(agent, '闪电帮帮'),
+        });
+      }
+
+      // 「刷新订单数据」：下发任务给助手 → 助手在真实页面里翻页 fetch → 分批回传入库
+      if (method === 'POST' && p === '/api/sdc/sync') {
+        const running = [...SDC_TASKS.values()].find(
+          (c) => c.kind === 'sync' && c.userId === Number(sdcUid) && c.status === 'pending'
+        );
+        if (running) {
+          return sendJson(res, 200, {
+            ok: true, pending: true, taskId: running.taskId, already: true,
+            message: '正在拉取订单数据，继续展示进度…',
+          });
+        }
+        const sess = await sdc.sessionInfo(sdcUid).catch(() => null);
+        if (!sess || !sess.logined) {
+          return sendJson(res, 200, { ok: false, loginish: true, message: '尚未登录闪电帮帮，请先登录' });
+        }
+        const aUid = agentUidFor(user, sdcUid);
+        if (!aUid) {
+          return sendJson(res, 200, {
+            ok: false, needAgent: true,
+            message: '本机助手未连接：闪电帮帮的订单接口带风控签名，只能由助手在真实页面里拉取。',
+          });
+        }
+        if (!agentVersionGate(res, aUid, '拉取闪电帮帮订单')) return;
+        const taskId = 'sdcs-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+        const ctx = {
+          taskId, kind: 'sync', userId: Number(sdcUid), status: 'pending', message: '',
+          received: 0, inserted: 0, updated: 0, skipped: 0, tally: {}, progress: '', progressLog: [],
+          createdAt: Date.now(), expiresAt: Date.now() + SDC_TASK_TTL_MS,
+        };
+        const sent = agentHub.send(aUid, { type: 'sdc_fetch', taskId, stages: [1, 2], pageSize: 50 });
+        if (!sent) {
+          return sendJson(res, 200, { ok: false, needAgent: true, message: '下发取数任务失败：本机助手连接已断开。' });
+        }
+        SDC_TASKS.set(taskId, ctx);
+        return sendJson(res, 200, { ok: true, pending: true, taskId, message: '已下发取数任务，正在本机助手里拉取…' });
+      }
+
+      // 「批量催收」：按店铺合并成一条消息交给助手逐店发送（可勾选订单，也可不勾=全部可申请开票）
+      if (method === 'POST' && p === '/api/sdc/send') {
+        const b = await readBody(req).catch(() => ({}));
+        const sns = Array.isArray(b.orderSns) ? b.orderSns.map(String).filter(Boolean) : [];
+        const dryRun = b.dryRun === true || b.dryRun === 'true';
+        const sess = await sdc.sessionInfo(sdcUid).catch(() => null);
+        if (!sess || !sess.logined) {
+          return sendJson(res, 200, { ok: false, loginish: true, message: '尚未登录闪电帮帮，请先登录' });
+        }
+        const sendUid = agentUidFor(user, sdcUid);
+        if (!sendUid) {
+          return sendJson(res, 200, {
+            ok: false, needAgent: true,
+            message: '本机助手未连接：发催收消息要在本机助手里打开真实客服会话（消息签名由页面生成），请先启动并绑定助手。',
+          });
+        }
+        if (!agentVersionGate(res, sendUid, '发送催收消息')) return;
+        const agentVer = agentHub.status(sendUid).agentVer || '';
+        if (agentVer && !verGte(agentVer, SDC_MIN_AGENT)) {
+          return sendJson(res, 200, {
+            ok: false, needAgent: true, agentOutdated: true,
+            message: `这台电脑上的催收小助手是 v${agentVer}，还不支持闪电帮帮催收。请升级到 v${SDC_MIN_AGENT} 及以上。`,
+          });
+        }
+
+        const shops = await sdc.shopsToChat(sdcUid, sns);
+        if (!shops.length) {
+          return sendJson(res, 200, {
+            ok: false,
+            message: '没有可催收的订单：只能对有店铺 ID 的订单催开票'
+              + (sns.length ? '（勾选的订单里没有可用店铺）' : '（库里暂无「可申请开票」的订单，先点刷新拉取）'),
+          });
+        }
+        // 消息内容与 1688 完全同源（config.messages 那套模板：抬头/税号/邮箱/金额 + 订单清单），
+        // 只是把「1688 卖家」换成「闪电帮帮店铺」，话术不用另配一套。
+        const cfg = loadConfig();
+        const buyer = await buyerInfoOf(Number(sdcUid));
+        const runConfig = Object.assign({}, cfg, { buyerInfo: buyer });
+        const items = [];
+        for (const s of shops) {
+          const contents = buildMessages(
+            { loginId: s.shopId, amount: s.amount, orders: s.orders.map((o) => ({ orderId: o.orderId, amount: Number(o.amount).toFixed(2) })) },
+            runConfig
+          );
+          if (!contents.length) continue;   // 模板为空绝不发空消息
+          items.push({
+            shopId: s.shopId, shopName: s.shopName, amount: s.amount,
+            orderSns: s.orders.map((o) => o.orderId), contents,
+          });
+        }
+        if (!items.length) {
+          return sendJson(res, 200, {
+            ok: false,
+            message: '催收消息内容为空：请到「系统管理 → 消息模板」里配置模板文案（抬头/税号/邮箱/订单清单）',
+          });
+        }
+
+        const taskId = 'sdcm-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+        const ctx = {
+          taskId, kind: 'send', userId: Number(sdcUid), status: 'pending', message: '',
+          total: items.length, results: [], okCount: 0, failCount: 0, dryRun,
+          orderCount: items.reduce((a, it) => a + it.orderSns.length, 0),
+          createdAt: Date.now(), expiresAt: Date.now() + SDC_TASK_TTL_MS,
+        };
+        const sent = agentHub.send(sendUid, {
+          type: 'sdc_send', taskId, items, dryRun,
+          gapMs: 6000,   // 店铺之间的间隔，别把风控惹急
+        });
+        if (!sent) {
+          return sendJson(res, 200, { ok: false, needAgent: true, message: '下发催收任务失败：本机助手连接已断开。' });
+        }
+        SDC_TASKS.set(taskId, ctx);
+        await logOp(user, 'sdc.send.start', { tenantId: sdcUid, total: items.length, dryRun });
+        return sendJson(res, 200, {
+          ok: true, pending: true, taskId,
+          total: items.length,
+          orderCount: ctx.orderCount,
+          dryRun,
+          preview: items[0] ? items[0].contents[0] : '',
+          message: dryRun
+            ? `已下发演练任务（${items.length} 家店铺）：只会把内容填进会话输入框，不会点发送。`
+            : `已下发催收任务（${items.length} 家店铺 / 共 ${ctx.orderCount} 单），正在本机助手里逐条发送…`,
+        });
+      }
+
+      // 停止「取数 / 催收」任务
+      if (method === 'POST' && p === '/api/sdc/task-stop') {
+        const b = await readBody(req).catch(() => ({}));
+        const ctx = SDC_TASKS.get(String(b.taskId || ''));
+        const mine = ctx && (ctx.userId === Number(user.id) || (isAdmin && ctx.userId === Number(sdcUid)));
+        if (!mine) return sendJson(res, 404, { error: '任务不存在或已结束' });
+        if (ctx.status !== 'pending') return sendJson(res, 200, { ok: false, message: '任务已结束，无需停止' });
+        ctx.stopping = true;
+        const sent = agentHub.send(ctx.userId, { type: 'stop' });
+        return sendJson(res, 200, {
+          ok: true,
+          message: sent ? '已发送停止指令：当前这一家/这一页处理完就停' : '助手连接已断开，任务会随连接中断结束',
+        });
+      }
+
+      // 轮询「取数 / 催收」进度
+      if (method === 'GET' && p === '/api/sdc/task-status') {
+        const ctx = SDC_TASKS.get(String(url.searchParams.get('taskId') || ''));
+        const mine = ctx && (ctx.userId === Number(user.id) || (isAdmin && ctx.userId === Number(sdcUid)));
+        if (!mine) return sendJson(res, 404, { error: '任务不存在或已结束' });
+        return sendJson(res, 200, {
+          kind: ctx.kind,
+          status: ctx.status,
+          ok: ctx.status === 'done',
+          message: ctx.message || '',
+          received: ctx.received || 0,
+          inserted: ctx.inserted || 0,
+          updated: ctx.updated || 0,
+          skipped: ctx.skipped || 0,
+          tally: ctx.tally || {},
+          progress: ctx.progress || '',
+          total: ctx.total || 0,
+          results: ctx.results || [],
+          okCount: ctx.okCount || 0,
+          failCount: ctx.failCount || 0,
+          dryRun: !!ctx.dryRun,
+          loginish: !!ctx.loginish,
+        });
+      }
+
+      return sendJson(res, 404, { error: '未知闪电帮帮接口' });
     }
 
     // ── 系统管理（仅超级管理员） ──
