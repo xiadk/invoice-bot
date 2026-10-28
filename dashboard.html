@@ -1236,7 +1236,7 @@
           <span class="pb-info">
             平台配置 · 消息模板 · 助手版本治理（仅超级管理员可见）。
             账号与菜单权限在<b>「用户管理」</b>页维护；这里是全局项：发送参数、助手地址与版本要求、
-            拼多多拉取范围与催收话术。
+            拼多多翻页上限与催收话术。
           </span>
           <span class="pb-actions">
             <el-tag size="small" type="info">服务端 v{{ serverVersion || '—' }}</el-tag>
@@ -1457,23 +1457,23 @@
 
         <el-card shadow="never" class="section-card">
           <div slot="header">
-            <b>拼多多订单数据 · 拉取范围</b>
-            <span class="loginid">（拼多多发票页「获取订单数据」按钮）</span>
+            <b>拼多多 · 翻页上限</b>
+            <span class="loginid">（「刷新发票状态」与「获取订单数据」共用）</span>
           </div>
           <el-form label-position="top" size="small">
             <el-row :gutter="12">
               <el-col :xs="24" :md="12">
-                <el-form-item label="首次全量只拉取最近（月）">
-                  <el-input-number v-model="cfg.pddOrderMonths" :min="1" :max="36" :step="1"
+                <el-form-item label="最多翻多少页（防死循环的安全阀）">
+                  <el-input-number v-model="cfg.pddMaxPages" :min="20" :max="2000" :step="100"
                                    controls-position="right" style="width:100%"></el-input-number>
                 </el-form-item>
               </el-col>
             </el-row>
             <div class="form-tip">
-              只影响<b>每个账号第一次</b>点「获取订单数据」时的回溯范围（默认 <b>3</b> 个月），更早的订单不拉取、也不入库；
-              拼多多发票页的列表、订单状态与实付金额也只会有这个范围内的数据。<br>
-              <b>增量拉取不受此限制</b>：某个账号首次同步过之后，再点按钮只从最新订单往前补齐新数据，翻到「整页都已入库」就停。<br>
-              保存后<b>立即生效</b>（下一次点「获取订单数据」就按新值计算），不需要重启服务。
+              默认 <b>300</b> 页。发票刷新一页 20 条（约 6000 单）、「获取订单数据」一页 50 条（约 15000 单），
+              两者都是<b>翻到空页才停</b>，这个上限只用于防止接口异常时无限翻页。<br>
+              撞到上限时页面会明确提示「已到翻页上限」，不会静默少拉；若确认还有更早的订单没拉到，把这里调大即可。<br>
+              保存后<b>立即生效</b>（下一次同步就读新值），不需要重启服务。
             </div>
           </el-form>
           <el-button type="primary" size="small" @click="saveConfig">保存配置</el-button>
@@ -2152,8 +2152,8 @@
               <el-button size="small" type="success" plain :loading="pd.orderSyncing"
                          @click="syncPddOrders"
                          :title="pd.orderSync && pd.orderSync.synced
-                           ? '从最新订单往前增量拉取，追平即停（增量不受时间范围限制）'
-                           : ('首次同步：只拉取最近 ' + pd.orderMonths + ' 个月的订单（可在「系统管理」调整）')">
+                           ? '从最新订单往前增量拉取，追平即停'
+                           : '首次同步：不限时间范围，一直往前翻到空页为止'">
                 {{ pd.orderSync && pd.orderSync.synced ? '获取订单数据' : '获取订单数据（首次全量）' }}
               </el-button>
               <el-tag v-if="pd.orderSync && pd.orderSync.lastAt" size="small" type="info">
@@ -2161,16 +2161,15 @@
               </el-tag>
             </template>
           </qnh-login-bar>
-          <!-- 拉取范围说明：新手最容易误以为「点了就能看到全部历史」，这里写清楚 -->
+          <!-- 拉取口径：新手最容易误以为「点了就能看到全部历史」，这里写清楚 -->
           <div class="form-tip" style="margin-top:8px">
             <i class="el-icon-info"></i>
             <template v-if="pd.orderSync && pd.orderSync.synced">
-              订单数据已同步过：点「获取订单数据」为<b>增量拉取</b>，只补新订单，<b>不受时间范围限制</b>
-              （该账号首次全量时只回溯了最近 {{ pd.orderMonths }} 个月，更早的订单不会出现在列表里）。
+              订单数据已同步过：点「获取订单数据」为<b>增量拉取</b>，只补新订单，一页页往前追、追平即停。
             </template>
             <template v-else>
-              首次点「获取订单数据」<b>只拉取最近 {{ pd.orderMonths }} 个月</b>的订单，更早的不拉取、也不入库；
-              之后再点按钮为<b>增量拉取</b>，不受时间范围限制。
+              首次点「获取订单数据」为<b>全量拉取：不限时间范围</b>，一直往前翻到空页为止（翻页上限
+              {{ pd.maxPages }} 页，可在「系统管理」调整）；之后再点按钮为<b>增量拉取</b>，追平即停。
             </template>
             切换账号后，每个账号各自首次全量。
           </div>
@@ -2759,8 +2758,8 @@ const vm = new Vue({
         summary: null, lastRun: null, syncing: false,
         cookie: { logined: false, loading: false, message: '', accountName: '', pdduid: '', writtenAt: null },
         // 「获取订单数据」（订单列表接口）：首次全量、之后增量；orderSync 来自 /api/pdd/status
-        // orderMonths = 首次全量只回溯最近几个月（系统管理可配，默认 3）
-        orderSyncing: false, orderTaskId: '', orderSync: null, orderMonths: 3,
+        // maxPages = 翻页上限（与发票刷新共用，系统管理可配，默认 300）
+        orderSyncing: false, orderTaskId: '', orderSync: null, maxPages: 300,
         // 批量申请发票
         selected: [], applying: false, applyTaskId: '',
         applyDialog: { visible: false, running: false, kind: '', status: '', message: '', progress: null, log: [], startedAt: 0 },
@@ -2817,8 +2816,8 @@ const vm = new Vue({
         gapMin: 15, gapMax: 30, chunkMax: 450, template: '', orderItem: '', reminder: '', serverUrl: '',
         // 拼多多催收话术（与 1688 的 templates 完全分开，只有一条）
         pddChat: '', pddGapSec: 4,
-        // 「获取订单数据」首次全量只回溯最近 N 个月（默认 3）
-        pddOrderMonths: 3,
+        // 拼多多翻页上限（发票刷新与订单同步共用，默认 300 页）
+        pddMaxPages: 300,
         // 发完一家后，是否在上家的间隔等待里提前加载下一家的会话（默认开）
         prefetch: true,
         // ── 助手版本治理 ──
@@ -3087,9 +3086,9 @@ const vm = new Vue({
         s = (ad.running ? name + '：' : name + '（已结束）：')
           + '第 ' + (Number(p && p.page) || 0) + ' 页 · 已拉 ' + (Number(p && p.fetched) || 0) + ' 单'
           + ' · 入库 ' + (Number(p && p.saved) || 0) + ' 条（新增 ' + (Number(p && p.newCount) || 0) + '）';
-        // 全量有时间窗口，写在进度标题上，避免用户以为「怎么只有这些订单」
-        if (ad.full) s += ' · 仅最近 ' + (Number(ad.months) || this.pd.orderMonths) + ' 个月';
-        else if (ad.running) s += ' · 增量（不限时间范围）';
+        // 全量不再限时间：进度标题上写清翻页上限，撞上限时用户能看到原因
+        if (ad.full) s += ' · 全量（翻到空页为止，上限 ' + (this.pd.maxPages || 300) + ' 页）';
+        else if (ad.running) s += ' · 增量（追平即停）';
       } else {
         s = (ad.running ? name + '：' : name + '（已结束）：') + done + '/' + total;
         if (ad.running && p && p.current) s += ' · 当前: ' + p.current;
@@ -4241,7 +4240,7 @@ const vm = new Vue({
         };
         this.pd.summary = d.summary || null;
         this.pd.orderSync = d.orderSync || null;
-        this.pd.orderMonths = Number(d.orderMonths) > 0 ? Number(d.orderMonths) : 3;
+        this.pd.maxPages = Number(d.maxPages) > 0 ? Number(d.maxPages) : 300;
         if (Array.isArray(d.sessions)) this.pddSessions = d.sessions.map(Number);
         if (Array.isArray(d.users)) {
           this.pddUsers = d.users;
@@ -4338,15 +4337,15 @@ const vm = new Vue({
     async syncPddOrders() {
       if (this.pd.orderSyncing) { this.$message.info('正在同步中，请看下方进度'); return; }
       if (this.qnhNeedPick) { this.$message.warning('请先选择要以哪个账号的身份同步'); return; }
-      // 首次全量有时间窗口，先讲清楚范围再动手（增量不限范围，不用打扰）
+      // 首次全量不再限时间，但要讲清「会翻很久」，让用户有预期
       const first = !(this.pd.orderSync && this.pd.orderSync.synced);
       if (first) {
         try {
           await this.$confirm(
-            `首次同步只拉取最近 ${this.pd.orderMonths} 个月的订单，更早的订单不会拉取、也不会出现在列表里。`
-            + `\n\n之后再点「获取订单数据」为增量拉取（只补新订单，不受时间范围限制）。`
-            + `\n\n范围可在「系统管理 → 拼多多订单数据 · 拉取范围」调整。`,
-            '首次同步 · 拉取范围',
+            `首次同步为全量拉取：不限时间范围，会一直往前翻到空页为止，账号历史订单越多耗时越长。`
+            + `\n\n翻页上限 ${this.pd.maxPages} 页（发票一页 20 条 / 订单一页 50 条），撞上限时会明确提示。`
+            + `\n\n之后再点「获取订单数据」为增量拉取（只补新订单，追平即停）。`,
+            '首次同步 · 全量拉取',
             { confirmButtonText: '开始拉取', cancelButtonText: '取消', type: 'info' }
           );
         } catch (e) { return; }
@@ -4364,7 +4363,7 @@ const vm = new Vue({
         this.pd.orderTaskId = d.taskId || '';
         this.pd.applyDialog = {
           visible: true, running: true, kind: 'orders', status: '', message: '',
-          full: !!d.full, months: Number(d.months) || this.pd.orderMonths,
+          full: !!d.full,
           progress: { page: 0, fetched: 0, rows: 0, saved: 0, newCount: 0 }, log: [],
           startedAt: Date.now(),
         };
@@ -4398,7 +4397,6 @@ const vm = new Vue({
           d = null;
         }
         if (d && !d.error) {
-          if (d.months) this.pd.applyDialog.months = d.months;
           if (d.full !== undefined) this.pd.applyDialog.full = !!d.full;
           if (d.progress) this.pd.applyDialog.progress = d.progress;
           if (Array.isArray(d.progressLog)) this.pd.applyDialog.log = d.progressLog;
@@ -5073,8 +5071,8 @@ const vm = new Vue({
           // 拼多多话术：同样做字段级回退，避免把空值存回去
           pddChat: (typeof pm.chat === 'string' && pm.chat.trim()) ? pm.chat : (dpm.chat || this.defaultPddChat),
           pddGapSec: Math.max(2, Math.round((Number(pm.gapMs) || Number(dpm.gapMs) || 4000) / 1000)),
-          // 订单同步：首次全量回溯月数（空/非法 → 回退 3）
-          pddOrderMonths: Math.min(36, Math.max(1, Number(rt.pddOrdersFullMonths) || 3)),
+          // 拼多多翻页上限（发票刷新与订单同步共用；空/非法 → 回退 300）
+          pddMaxPages: Math.min(2000, Math.max(20, Number(rt.pddMaxPages) || 300)),
           // 「提前加载下一家会话」：缺省 true（没配过就是开）
           prefetch: String(rt.prefetchNextSeller) !== 'false',
           // 助手版本治理：最低要求留空=跟随服务端；宽限天数默认 3 天
@@ -5105,8 +5103,8 @@ const vm = new Vue({
           runtime: {
             sendGapMinSec: Number(this.cfg.gapMin) || 15,
             sendGapMaxSec: Number(this.cfg.gapMax) || 30,
-            // 拼多多「获取订单数据」首次全量的回溯月数（保存后下次同步即生效，无需重启）
-            pddOrdersFullMonths: Math.min(36, Math.max(1, Number(this.cfg.pddOrderMonths) || 3)),
+            // 拼多多翻页上限（发票刷新与订单同步共用，保存后下次同步即生效，无需重启）
+            pddMaxPages: Math.min(2000, Math.max(20, Number(this.cfg.pddMaxPages) || 300)),
             // 「提前加载下一家会话」开关（下次发送任务生效，无需重启）
             prefetchNextSeller: this.cfg.prefetch !== false,
             // 助手版本治理：最低要求留空=跟随服务端版本；宽限天数 0~30；外部直链兜底

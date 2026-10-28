@@ -69,6 +69,7 @@ const qnh = require('./lib/qnh');
 const qagent = require('./lib/qnh-agent');
 const pdd = require('./lib/pdd');
 const pddOrders = require('./lib/pdd-orders');
+const psync = require('./lib/pdd-sync');
 
 const PORT = Number(process.env.PORT) || 8787;
 const ROOT = __dirname;
@@ -802,7 +803,7 @@ const OP_ACTIONS = {
     ? `拼多多批量催收失败${d.reason ? '：' + d.reason : ''}`
     : `拼多多批量催收完成（成功 ${d.okCount || 0} 个商家、失败 ${d.failCount || 0} 个）`,
   'pdd.sync': (d) => `刷新了拼多多发票状态${d.ok ? '（' + (d.total || 0) + ' 条）' : '（失败）'}`,
-  'pdd.orders.sync': (d) => `拉取了拼多多全部订单${d.full ? `（全量·最近 ${d.months || 3} 个月）` : '（增量）'}`,
+  'pdd.orders.sync': (d) => `拉取了拼多多全部订单${d.full ? '（全量）' : '（增量）'}`, 
   'pdd.login.start': (d) => `发起了「登录拼多多」（${d.tenantId ? '用户 ' + d.tenantId : '本人'}）`,
   'pdd.login': (d) => `登录拼多多${d.ok ? '（成功）' : '（失败）'}`,
   'pdd.logout': (d) => `退出了拼多多账号`
@@ -2805,12 +2806,12 @@ const server = http.createServer(async (req, res) => {
       const old = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
       const merged = { ...old };
       merged.runtime = { ...(old.runtime || {}), ...(config.runtime || {}) };
-      // 拼多多「首次全量」回溯月数：夹在 1~36，非法值回默认 3（改完下次同步即生效，无需重启）
-      if (config.runtime && config.runtime.pddOrdersFullMonths !== undefined) {
-        const n = Number(config.runtime.pddOrdersFullMonths);
-        merged.runtime.pddOrdersFullMonths = Number.isFinite(n) && n > 0
-          ? Math.min(pddOrders.MAX_FULL_MONTHS, Math.max(pddOrders.MIN_FULL_MONTHS, Math.round(n)))
-          : pddOrders.DEFAULT_FULL_MONTHS;
+      // 拼多多翻页上限（发票刷新与订单同步共用）：夹在 20~2000，非法值回默认 300（改完下次同步即生效）
+      if (config.runtime && config.runtime.pddMaxPages !== undefined) {
+        const n = Number(config.runtime.pddMaxPages);
+        merged.runtime.pddMaxPages = Number.isFinite(n) && n > 0
+          ? Math.min(psync.MAX_MAX_PAGES, Math.max(psync.MIN_MAX_PAGES, Math.round(n)))
+          : psync.DEFAULT_MAX_PAGES;
       }
       merged.messages = { ...(old.messages || {}), ...(config.messages || {}) };
       // 「提前加载下一家会话」开关：布尔，缺省 true（下次发送任务生效，无需重启）
@@ -3629,8 +3630,8 @@ const server = http.createServer(async (req, res) => {
           cookie,
           summary: sum,
           orderSync,
-          // 「获取订单数据」首次全量的时间窗口（月），页面上的说明文案用它，改配置后刷新即变
-          orderMonths: pddOrders.getFullMonths(),
+          // 「获取订单数据」首次全量不再限时间，一直翻到空页；这里给页面用的翻页上限（系统管理可改）
+          maxPages: psync.getMaxPages(),
           statusText: pdd.STATUS_TEXT,
           isAdmin,
           tenantId: pddUid,
@@ -3690,13 +3691,10 @@ const server = http.createServer(async (req, res) => {
         // 首次（库里还没有订单列表同步过的数据）自动全量；之后默认增量
         let full = b.full === true || b.full === 'true';
         if (!(await pddOrders.hasOrderData(pddUid))) full = true;
-        // 全量只回溯最近 N 个月（系统管理可配，默认 3）；增量不受限制
-        const months = pddOrders.getFullMonths();
-        const cutoff = full ? pddOrders.cutoffOf(months).slice(0, 10) : null;
 
         const taskId = 'pddord-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
         const ctx = {
-          taskId, kind: 'orders', full, months, cutoff, userId: Number(pddUid), status: 'pending', message: '',
+          taskId, kind: 'orders', full, userId: Number(pddUid), status: 'pending', message: '',
           total: 0, results: [], okCount: 0, failCount: 0,
           progress: { page: 0, fetched: 0, rows: 0, saved: 0, newCount: 0, current: '' },
           progressLog: [], createdAt: Date.now(), expiresAt: Date.now() + 30 * 60 * 1000,
@@ -3709,13 +3707,12 @@ const server = http.createServer(async (req, res) => {
         };
         PDD_TASKS.set(taskId, ctx);
         pushLog(full
-          ? `开始全量拉取订单（只回溯最近 ${months} 个月：${cutoff} 起，更早的不拉取、不入库）…`
-          : '开始增量拉取订单（从最新往前翻，追平即停；不受时间范围限制）…');
+          ? '开始全量拉取订单（不限时间范围，一直往前翻到空页为止）…'
+          : '开始增量拉取订单（从最新往前翻，追平即停）…');
 
         pddOrders.syncOrders({
           userId: pddUid,
           full,
-          months,
           onProgress: (pr) => {
             ctx.progress = Object.assign({}, ctx.progress, pr);
             ctx.total = pr.fetched || 0;
@@ -3725,7 +3722,8 @@ const server = http.createServer(async (req, res) => {
         }).then((out) => {
           ctx.status = out.ok ? 'done' : 'failed';
           ctx.message = out.message || '';
-          ctx.reachedCutoff = !!out.reachedCutoff;
+          ctx.truncated = !!out.truncated;
+          ctx.maxPages = out.maxPages || null;
           ctx.progress = Object.assign({}, ctx.progress, {
             page: out.pages || ctx.progress.page,
             fetched: out.fetched || 0, rows: out.rows || 0,
@@ -3734,7 +3732,7 @@ const server = http.createServer(async (req, res) => {
           ctx.total = out.fetched || ctx.total;
           ctx.finishedAt = Date.now();
           ctx.expiresAt = Date.now() + PDD_APPLY_TTL_MS;
-          if (ctx.reachedCutoff) pushLog(`已到时间窗口下限（${cutoff} 之前的不再拉取）`);
+          if (ctx.truncated) pushLog(`已到翻页上限（${out.maxPages} 页），更早的订单未拉取，可在系统管理调大上限`);
           pushLog((out.ok ? '✓ ' : '✗ ') + (out.message || ''));
         }).catch((e) => {
           ctx.status = 'failed';
@@ -3743,12 +3741,12 @@ const server = http.createServer(async (req, res) => {
           pushLog('✗ 同步异常：' + ctx.message);
         });
 
-        await logOp(user, 'pdd.orders.sync', { tenantId: pddUid, full, months });
+        await logOp(user, 'pdd.orders.sync', { tenantId: pddUid, full });
         return sendJson(res, 200, {
-          ok: true, pending: true, taskId, full, months, cutoff,
+          ok: true, pending: true, taskId, full,
           message: full
-            ? `已开始全量拉取订单（只回溯最近 ${months} 个月：${cutoff} 起），进度见下方…`
-            : '已开始增量拉取订单（不受时间范围限制），进度见下方…',
+            ? '已开始全量拉取订单（不限时间范围），进度见下方…'
+            : '已开始增量拉取订单（追平即停），进度见下方…',
         });
       }
 
@@ -4019,9 +4017,8 @@ const server = http.createServer(async (req, res) => {
           ok: ctx.status === 'done',
           message: ctx.message || '',
           full: !!ctx.full,
-          months: ctx.months || null,
-          cutoff: ctx.cutoff || null,
-          reachedCutoff: !!ctx.reachedCutoff,
+          maxPages: ctx.maxPages || null,
+          truncated: !!ctx.truncated,
           total: ctx.total,
           results: ctx.results,
           okCount: ctx.okCount,

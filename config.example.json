@@ -41,8 +41,8 @@
     "agentMinVersion": "",
     "agentUpdateGraceDays": 3,
     "agentInstallerUrl": "",
-    "_commentPddOrders": "pddOrdersFullMonths = 拼多多「获取订单数据」首次全量只回溯最近几个月（默认 3，系统管理页可改，改完立即生效；增量拉取不受此限制）",
-    "pddOrdersFullMonths": 3
+    "_commentPddMaxPages": "pddMaxPages = 拼多多翻页上限（默认 300），「刷新发票状态」与「获取订单数据」共用。两个动作都是翻到空页才停，这个值只作防死循环的安全阀；撞上限时页面会明确提示。系统管理页可改（夹 20~2000），改完立即生效",
+    "pddMaxPages": 300
   },
   "mysql": {
     "_comment4": "看板数据源数据库。本机自带的 MariaDB 实例默认即为下列配置（启动: scripts/mysql-start.bat）。Docker 部署时本段可忽略——连接参数由 MYSQL_HOST/MYSQL_PORT/MYSQL_USER/MYSQL_PASSWORD/MYSQL_DATABASE 环境变量提供，优先级高于本文件（云端部署说明见 docs/使用说明.md）",
