@@ -266,6 +266,29 @@
   .warn-row .wv { font-size: 16px; font-weight: 700; color: var(--text-1); }
   .warn-row .wv.s-warn { color: #e53935; }
   .warn-row .wv.small { font-size: 12px; font-weight: 500; color: var(--text-2); }
+  /* 操作日志行展开：键值列表，长内容换行 */
+  .op-detail { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+               gap: 6px 24px; padding: 8px 16px 12px; font-size: 12px; line-height: 1.8; background: #FAFAFC; }
+  .op-detail .k { display: inline-block; width: 68px; color: var(--text-3); }
+  .op-detail .v { color: var(--text-1); word-break: break-all; }
+  /* 账单行展开：三段并排（收入 / 支出 / 净收入），窄屏自动叠放 */
+  .bill-detail { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+                 gap: 4px 28px; padding: 10px 18px 14px; background: #FAFAFC; font-size: 12px; }
+  .bill-detail .bd-title { font-weight: 600; color: var(--text-1); margin-bottom: 4px;
+                           padding-bottom: 4px; border-bottom: 1px solid var(--border); }
+  .bill-detail .bd-row { display: flex; justify-content: space-between; gap: 12px; line-height: 1.9; }
+  .bill-detail .bd-row .k { color: var(--text-2); }
+  .bill-detail .bd-row .v { color: var(--text-1); font-variant-numeric: tabular-nums; }
+  .bill-detail .bd-row.bd-sum .k, .bill-detail .bd-row.bd-sum .v { font-weight: 700; }
+  .bill-detail .bd-row.bd-tip { display: block; color: var(--text-3); line-height: 1.7; margin-top: 6px; }
+  /* 退单行展开：两列键值，地址等长文本占整行 */
+  .rf-detail { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+               gap: 2px 24px; padding: 10px 18px 14px; background: #FAFAFC; font-size: 12px; }
+  .rf-detail .rd-item { display: flex; gap: 10px; line-height: 1.9; }
+  .rf-detail .rd-item .k { flex: 0 0 72px; color: var(--text-3); }
+  .rf-detail .rd-item .v { color: var(--text-1); word-break: break-all; }
+  .rf-detail .rd-wide { grid-column: 1 / -1; }
+  .rf-detail .rd-actions { grid-column: 1 / -1; margin-top: 6px; }
   /* 独立配置页的返回入口（面包屑式，左侧页头内） */
   .back-link { color: var(--text-2); cursor: pointer; margin-right: 10px; transition: color .15s; }
   .back-link:hover { color: var(--brand); }
@@ -1101,8 +1124,42 @@
           </div>
           <el-table :data="billRowsDesc" size="small" border style="width:100%" v-loading="bill.loading"
                     class="bill-table" empty-text="正在加载账单…">
-            <!-- 一级列 1：数据日期（月份，固定在最左不随横向滚动） -->
-            <el-table-column label="数据日期" width="132" fixed>
+            <!-- 行展开：该月的收入 / 支出 / 净收入构成明细（全部来自本行已有数据，不改口径） -->
+            <el-table-column type="expand" width="40">
+              <template slot-scope="p">
+                <div class="bill-detail">
+                  <div>
+                    <div class="bd-title">收入项</div>
+                    <div class="bd-row" v-for="it in billIncomeItems" :key="it.key">
+                      <span class="k">{{ it.label }}</span>
+                      <span class="v">{{ yuan(p.row.cells[it.key]) }}</span>
+                    </div>
+                    <div class="bd-row bd-sum"><span class="k">收入合计</span><span class="v">{{ yuan(p.row.totals.income) }}</span></div>
+                  </div>
+                  <div>
+                    <div class="bd-title">支出项</div>
+                    <div class="bd-row" v-for="it in billExpenseItems" :key="it.key">
+                      <span class="k">{{ it.label }}<el-tag v-if="it.source === 'auto'" size="mini" type="info"
+                                              style="margin-left:4px">系统</el-tag></span>
+                      <span class="v">{{ yuan(it.source === 'auto' ? p.row.auto[it.key] : p.row.cells[it.key]) }}</span>
+                    </div>
+                    <div class="bd-row bd-sum"><span class="k">支出合计</span><span class="v">{{ yuan(p.row.totals.expense) }}</span></div>
+                  </div>
+                  <div>
+                    <div class="bd-title">净收入</div>
+                    <div class="bd-row"><span class="k">净利润</span><span class="v">{{ yuan(p.row.totals.net) }}</span></div>
+                    <div class="bd-row"><span class="k">净利率</span><span class="v">{{ p.row.totals.rate }}%</span></div>
+                    <div class="bd-row bd-tip">
+                      净利润 = 收入合计 − 支出合计；标「系统」的支出项按当月账单实时统计，不可手工修改。
+                    </div>
+                  </div>
+                </div>
+              </template>
+            </el-table-column>
+
+            <!-- 一级列 1：数据日期（月份）。刻意不加 fixed：Element UI 的 fixed 列会复制整个表格，
+                 导致行展开内容渲染两份并重叠；本表按月倒序、行数有限，不固定不影响使用 -->
+            <el-table-column label="数据日期" width="132">
               <template slot-scope="p"><b>{{ monthText(p.row.month) }}</b></template>
             </el-table-column>
 
@@ -1175,12 +1232,25 @@
 
       <!-- ══════════ 系统管理 ══════════ -->
       <div v-show="page === 'admin'" id="page-admin">
-        <div class="page-head">
-          <h2>系统管理</h2>
-          <div style="font-size:12px;color:var(--sub);line-height:1.8">
-            仅超级管理员可见。可在此维护账号（新增 / 重置密码 / 禁用 / 删除）与<b>每个账号的开票抬头</b>、查看业务账号的「1688发票」数据，以及调整全局发送参数与话术模板。<br>
-            超级管理员（<b>admin</b>）是<b>纯系统账号</b>，不承载业务数据，因此在列表中只提供「重置密码」。
-          </div>
+        <div class="page-bar">
+          <span class="pb-info">
+            平台配置 · 消息模板 · 助手版本治理（仅超级管理员可见）。
+            账号与菜单权限在<b>「用户管理」</b>页维护；这里是全局项：发送参数、助手地址与版本要求、
+            拼多多拉取范围与催收话术。
+          </span>
+          <span class="pb-actions">
+            <el-tag size="small" type="info">服务端 v{{ serverVersion || '—' }}</el-tag>
+          </span>
+        </div>
+
+        <!-- 统计卡（设计稿 4 卡）：全部取自现有状态，不新增接口 -->
+        <div class="stat-row">
+          <el-card v-for="s in adminStatCards" :key="s.key" shadow="never" class="stat-card"
+                   :body-style="{ padding: '14px 16px' }" style="flex:1;min-width:150px">
+            <div class="num">{{ s.num }}</div>
+            <div class="label">{{ s.label }}</div>
+            <div class="sub">{{ s.sub }}</div>
+          </el-card>
         </div>
 
         <el-row :gutter="14">
@@ -1411,9 +1481,32 @@
           <el-tag v-if="saveOk" type="success" size="small" style="margin-left:10px">✓ 已保存</el-tag>
         </el-card>
 
+      </div>
+
+      <!-- ══════════ 用户管理（仅超级管理员；账号 / 抬头 / 逐项菜单权限） ══════════ -->
+      <div v-show="page === 'users'" id="page-users">
+        <div class="page-bar">
+          <span class="pb-info">
+            账号 · 开票抬头 · 菜单权限。<b>登录账号 = 公司全称</b>，抬头里的 {companyName} / {taxNo} / {email}
+            按该账号自己的值填充；菜单权限是<b>逐项开关</b>（退单 / 毛利 / 商品 / 市场 / 账单），没有模板角色。
+          </span>
+          <span class="pb-actions">
+            <el-button size="small" @click="loadUsers">刷新</el-button>
+          </span>
+        </div>
+
+        <div class="stat-row">
+          <el-card v-for="s in userStatCards" :key="s.key" shadow="never" class="stat-card"
+                   :body-style="{ padding: '14px 16px' }" style="flex:1;min-width:150px">
+            <div class="num">{{ s.num }}</div>
+            <div class="label">{{ s.label }}</div>
+            <div class="sub">{{ s.sub }}</div>
+          </el-card>
+        </div>
+
         <el-card shadow="never" class="section-card">
           <div slot="header">
-            <b>用户管理</b> <span class="loginid">（{{ users.length }} 个账号）</span>
+            <b>用户列表</b> <span class="loginid">（{{ users.length }} 个账号）</span>
             <el-button size="mini" style="margin-left:10px" @click="loadUsers">刷新</el-button>
           </div>
           <div class="form-tip" style="margin-bottom:10px">
@@ -1486,35 +1579,65 @@
 
       <!-- ══════════ 操作日志（仅超级管理员可见） ══════════ -->
       <div v-show="page === 'audit'" id="page-audit">
-        <div class="page-head">
-          <h2>操作日志</h2>
-          <div class="meta-line">
-            记录全体用户在页面上的操作：按钮点击、发送催收、导入税务发票 / 1688订单、条件查询、按天查看金额、下载与绑定本机助手。
-            <b>按操作时间倒序</b>排列，可用用户名筛选。
-          </div>
+        <div class="page-bar">
+          <span class="pb-info">
+            审计轨迹 · 全量留痕，<b>按操作时间倒序</b>。记录按钮点击、发送催收、导入发票 / 订单、条件查询、
+            下载与绑定本机助手等动作；点行左侧箭头看完整内容与来源 IP。
+          </span>
+          <span class="pb-actions">
+            <el-button size="small" @click="loadOpLog">刷新</el-button>
+          </span>
         </div>
 
-        <el-card class="section-card" shadow="never" :body-style="{ padding: '12px 14px' }">
-          <div class="toolbar">
-            <span style="font-size:12px;color:var(--sub)">用户名</span>
-            <el-input v-model="opLog.draftUsername" size="small" style="width:230px" placeholder="按用户名筛选（留空 = 全部）"
-                      clearable @keyup.enter.native="applyOpLogFilter"></el-input>
-            <el-button size="small" type="primary" plain @click="applyOpLogFilter">查询</el-button>
-            <el-button size="small" @click="loadOpLog">刷新</el-button>
-          </div>
-        </el-card>
+        <!-- 统计卡（设计稿 4 卡）：后端只读汇总，口径为全量日志 -->
+        <div class="stat-row">
+          <el-card v-for="s in opStatCards" :key="s.key" shadow="never" class="stat-card"
+                   :body-style="{ padding: '14px 16px' }" style="flex:1;min-width:150px">
+            <div class="num">{{ s.num }}</div>
+            <div class="label">{{ s.label }}</div>
+            <div class="sub">{{ s.sub }}</div>
+          </el-card>
+        </div>
 
         <el-card shadow="never" class="section-card">
-          <el-table :data="opLog.rows" v-loading="opLog.loading" size="small" border stripe
+          <div class="filter-bar">
+            <span class="fb-label">操作人</span>
+            <el-input v-model="opLog.draftUsername" size="small" style="width:230px" placeholder="按用户名筛选（留空 = 全部）"
+                      clearable @keyup.enter.native="applyOpLogFilter"></el-input>
+            <el-button size="small" type="primary" @click="applyOpLogFilter">查询</el-button>
+            <el-button size="small" @click="resetOpLogFilter">重置</el-button>
+            <span class="fb-spacer"></span>
+            <span class="loginid">共 {{ opLog.total }} 条 · 保留 180 天</span>
+          </div>
+
+          <el-table :data="opLog.rows" v-loading="opLog.loading" size="small" border
                     empty-text="暂无操作记录">
-            <el-table-column prop="username" label="用户名" width="190" show-overflow-tooltip>
+            <!-- 行展开明细（设计稿「明细」）：完整内容 + 操作类型 + 来源 IP -->
+            <el-table-column type="expand" width="36">
+              <template slot-scope="s">
+                <div class="op-detail">
+                  <div><span class="k">操作类型</span><span class="v">{{ s.row.action || '—' }}</span></div>
+                  <div><span class="k">完整内容</span><span class="v">{{ s.row.content || '—' }}</span></div>
+                  <div><span class="k">来源 IP</span><span class="v">{{ s.row.ip || '—' }}</span></div>
+                  <div><span class="k">记录时间</span><span class="v">{{ s.row.createdAt || '—' }}</span></div>
+                </div>
+              </template>
+            </el-table-column>
+            <el-table-column label="操作时间" width="170">
+              <template slot-scope="s"><span class="loginid">{{ s.row.createdAt }}</span></template>
+            </el-table-column>
+            <el-table-column label="模块" width="110">
+              <template slot-scope="s">
+                <el-tag size="mini" :type="opModuleType(s.row.action)">{{ opModuleText(s.row.action) }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column prop="content" label="操作内容" min-width="420" show-overflow-tooltip></el-table-column>
+            <el-table-column label="操作人" width="170">
               <template slot-scope="s">
                 <span>{{ s.row.username }}</span>
                 <el-tag v-if="!s.row.userId" size="mini" type="info" style="margin-left:6px">匿名</el-tag>
               </template>
             </el-table-column>
-            <el-table-column prop="content" label="操作内容" min-width="380" show-overflow-tooltip></el-table-column>
-            <el-table-column prop="createdAt" label="操作时间" width="180"></el-table-column>
           </el-table>
           <div class="pager-wrap">
             <el-pagination background layout="total, sizes, prev, pager, next"
@@ -1608,6 +1731,28 @@
 
           <el-table :data="rq.rows" size="small" border style="width:100%" v-loading="rq.loading"
                     empty-text="暂无退单数据" :row-class-name="refundRowClass">
+            <!-- 行展开：14 列之外的完整信息（数字段全部来自接口已有字段，未新增统计） -->
+            <el-table-column type="expand" width="40">
+              <template slot-scope="p">
+                <div class="rf-detail">
+                  <div class="rd-item"><span class="k">退单号</span><span class="v">{{ p.row.refundNo || '—' }}</span></div>
+                  <div class="rd-item"><span class="k">订单号</span><span class="v">{{ p.row.orderNo || '—' }}</span></div>
+                  <div class="rd-item"><span class="k">序列号</span><span class="v">{{ p.row.serialNo || '—' }}</span></div>
+                  <div class="rd-item"><span class="k">退单数量</span><span class="v">{{ p.row.refundQty == null ? '—' : p.row.refundQty }}</span></div>
+                  <div class="rd-item"><span class="k">商品种类</span><span class="v">{{ p.row.itemKinds ? p.row.itemKinds + ' 种' : '—' }}</span></div>
+                  <div class="rd-item"><span class="k">申请来源</span><span class="v">{{ p.row.applySource || '—' }}</span></div>
+                  <div class="rd-item"><span class="k">支付时间</span><span class="v">{{ p.row.paidTime || '—' }}</span></div>
+                  <div class="rd-item"><span class="k">完成时间</span><span class="v">{{ p.row.finishTime || '—' }}</span></div>
+                  <div class="rd-item"><span class="k">日志</span>
+                    <span class="v">{{ p.row.logCount }} 条（其中配送 {{ p.row.deliveryCount }} 条）</span></div>
+                  <div class="rd-item rd-wide"><span class="k">配送地址</span><span class="v">{{ p.row.receiverAddress || '—' }}</span></div>
+                  <div class="rd-actions">
+                    <el-button size="mini" @click="openRefundLog(p.row)">查看配送日志与申诉记录</el-button>
+                  </div>
+                </div>
+              </template>
+            </el-table-column>
+
             <el-table-column label="订单号" width="180">
               <template slot-scope="p"><span class="loginid">{{ p.row.serialNo || p.row.orderNo || '—' }}</span></template>
             </el-table-column>
@@ -2695,7 +2840,7 @@ const vm = new Vue({
       menuPermit: { visible: false, id: null, username: '', refund: false, profit: false, product: false, market: false, billing: false, saving: false,
                     origin: { refund: false, profit: false, product: false, market: false, billing: false } },
       // 操作日志（仅超级管理员）
-      opLog: { draftUsername: '', username: '', page: 1, size: 20, total: 0, rows: [], loading: false },
+      opLog: { draftUsername: '', username: '', page: 1, size: 20, total: 0, rows: [], loading: false, summary: {} },
       // 退单列表（牵牛花）
       rq: {
         loading: false, rows: [], total: 0, page: 1, size: 20,
@@ -2747,6 +2892,7 @@ const vm = new Vue({
         ].filter(Boolean) },
         { title: '系统', items: [
           this.isAdmin ? { key: 'admin', label: '系统管理', icon: 'el-icon-setting' } : null,
+          this.isAdmin ? { key: 'users', label: '用户管理', icon: 'el-icon-user' } : null,
           this.isAdmin ? { key: 'audit', label: '操作日志', icon: 'el-icon-tickets' } : null,
         ].filter(Boolean) },
       ];
@@ -2767,6 +2913,7 @@ const vm = new Vue({
         refundalert: '退单提醒 · 企业微信推送',
         qnhcfg: '牵牛花配置 · 毛利告警与数据同步',
         admin: '平台配置 · 消息模板 · 助手治理',
+        users: '账号 · 角色 · 权限分配',
         audit: '审计轨迹 · 全量留痕',
       })[this.page] || '发票催收';
     },
@@ -2783,7 +2930,8 @@ const vm = new Vue({
         profit: '订单级实时毛利 · 低于阈值推送告警',
         refundalert: '机器人 webhook · 提醒模板 · 每账号独立',
         qnhcfg: '登录态 · 定时同步 · 毛利告警阈值',
-        admin: '助手版本治理 · 平台授权 · 用户与权限',
+        admin: '全局发送参数 · 助手版本治理 · 拼多多话术',
+        users: '登录账号 = 公司全称 · 逐项菜单开关',
         audit: '操作留痕 · 保留 180 天',
       })[this.page] || '';
     },
@@ -3019,8 +3167,7 @@ const vm = new Vue({
         { label: '已取货/送达', value: (s.picked || 0) + ' 单', sub: '有配送日志 ' + (s.delivered || 0) + ' 单' },
       ];
     },
-    /** 毛利统计卡（设计稿 4 卡）：订单级只读聚合，字段来自 /api/qnh/profit 的 summary */
-    profitStatCards() {
+    /** 毛利统计卡（设计稿 4 卡）：订单级只读聚合，字段来自 /api/qnh/profit 的 summary */    profitStatCards() {
       const s = this.rq.profit.summary || {};
       const money = (v) => (v == null ? '—' : yuan(Number(v) || 0));
       const today = Number(s.todayProfit) || 0;
@@ -3034,6 +3181,43 @@ const vm = new Vue({
         { key: 'neg', label: '负毛利订单', num: (s.negative || 0) + ' 单',
           sub: '已推送告警 ' + (this.rq.profit.alerts || 0) + ' 单',
           cls: (s.negative || 0) > 0 ? 's-warn' : '' },
+      ];
+    },
+    /** 系统管理统计卡：助手版本 / 版本要求 / 服务端版本 / 账号数，全部取自现有状态 */
+    adminStatCards() {
+      const v = this.agentVersion || {};
+      const online = !!(this.agent && this.agent.online);
+      const min = v.min ? ('v' + v.min) : '跟随服务端';
+      return [
+        { key: 'agent', label: '本机助手', num: this.agentVer ? ('v' + this.agentVer) : '未连接',
+          sub: online ? '已连接' : '未连接或未启动', cls: online ? 's-done' : '' },
+        { key: 'min', label: '最低要求版本', num: min,
+          sub: this.agentUpdate ? ('宽限剩 ' + this.agentUpdate.daysLeft + ' 天') : '低于此版本停用' },
+        { key: 'server', label: '服务端版本', num: this.serverVersion ? ('v' + this.serverVersion) : '—', sub: '当前运行版本' },
+        { key: 'users', label: '账号总数', num: (this.users.length || 0) + ' 个',
+          sub: '启用 ' + this.users.filter((u) => u.status === 'active').length + ' 个' },
+      ];
+    },
+    /** 用户管理统计卡：总数 / 启用 / 超管 / 需改密 */
+    userStatCards() {
+      const list = this.users || [];
+      const n = (f) => list.filter(f).length;
+      return [
+        { key: 'all', label: '用户总数', num: list.length + ' 人', sub: '含超级管理员' },
+        { key: 'active', label: '启用账号', num: n((u) => u.status === 'active') + ' 个',
+          sub: '停用 ' + n((u) => u.status !== 'active') + ' 个' },
+        { key: 'admin', label: '超级管理员', num: n((u) => u.role === 'admin') + ' 个', sub: '可见全部菜单' },
+        { key: 'pwd', label: '需改密', num: n((u) => u.mustChangePassword) + ' 个', sub: '登录后强制改密' },
+      ];
+    },
+    /** 操作日志统计卡：后端全量只读汇总，不随筛选变化 */
+    opStatCards() {
+      const m = this.opLog.summary || {};
+      return [
+        { key: 'today', label: '今日操作', num: (m.today || 0) + ' 次', sub: '今日 00:00 起' },
+        { key: 'users', label: '今日活跃账号', num: (m.todayUsers || 0) + ' 人', sub: '按操作人去重' },
+        { key: 'week', label: '近 7 日操作', num: (m.week || 0) + ' 次', sub: '含今日' },
+        { key: 'month', label: '本月累计', num: (m.month || 0) + ' 次', sub: '日志保留 180 天' },
       ];
     },
     refundLogRows() {
@@ -3262,6 +3446,7 @@ const vm = new Vue({
     // ── 页面切换 ──
     switchPage(p) {
       if (p === 'admin' && !this.isAdmin) p = 'board';
+      if (p === 'users' && !this.isAdmin) p = 'board';
       if (p === 'audit' && !this.isAdmin) p = 'board';
       if (p === 'refund' && !this.canRefund) p = 'board';
       if (p === 'refundalert' && !this.canRefund) p = 'board';
@@ -3272,6 +3457,7 @@ const vm = new Vue({
       if (p === 'billing' && !this.canBilling) p = 'board';
       this.page = p;
       if (p === 'admin') { this.loadConfigUI(); this.loadUsers(); this.loadBuildStatus(); this.loadAgentVersions(); }
+      if (p === 'users') { this.loadUsers(); }
       if (p === 'mapping') this.loadMapping();
       if (p === 'audit') this.loadOpLog();
       if (p === 'profit' || p === 'refund' || p === 'pdd' || p === 'qnhcfg' || p === 'refundalert') {
@@ -5119,8 +5305,8 @@ const vm = new Vue({
         const p = new URLSearchParams({ page: this.opLog.page, size: this.opLog.size });
         if (this.opLog.username) p.set('username', this.opLog.username);
         const d = await this.api('/api/admin/op-log?' + p.toString());
-        if (d.error) { this.$message.error(d.error); this.opLog.rows = []; this.opLog.total = 0; }
-        else { this.opLog.rows = d.logs || []; this.opLog.total = d.total || 0; }
+        if (d.error) { this.$message.error(d.error); this.opLog.rows = []; this.opLog.total = 0; this.opLog.summary = {}; }
+        else { this.opLog.rows = d.logs || []; this.opLog.total = d.total || 0; this.opLog.summary = d.summary || {}; }
       } catch (e) { this.$message.error('加载操作日志失败: ' + e.message); }
       this.opLog.loading = false;
     },
@@ -5128,6 +5314,31 @@ const vm = new Vue({
       this.opLog.username = (this.opLog.draftUsername || '').trim();
       this.opLog.page = 1;
       this.loadOpLog();
+    },
+    resetOpLogFilter() {
+      this.opLog.draftUsername = '';
+      this.opLog.username = '';
+      this.opLog.page = 1;
+      this.loadOpLog();
+    },
+    /** 操作日志「模块」列：按 action 前缀归类，未知的归「其他」 */
+    opModuleText(action) {
+      const a = String(action || '');
+      if (a.startsWith('qnh.')) return '牵牛花';
+      if (a.startsWith('pdd.')) return '拼多多';
+      if (a.startsWith('agent.')) return '本机助手';
+      if (a.startsWith('import.')) return '数据导入';
+      if (a.startsWith('query.')) return '条件查询';
+      if (a.startsWith('btn.')) return '按钮点击';
+      if (a.startsWith('view.')) return '查看明细';
+      return a ? '其他' : '—';
+    },
+    opModuleType(action) {
+      const a = String(action || '');
+      if (a.startsWith('qnh.')) return 'success';
+      if (a.startsWith('pdd.')) return 'warning';
+      if (a.startsWith('agent.')) return '';
+      return 'info';
     },
     onOpLogPage(p) { this.opLog.page = p; this.loadOpLog(); },
     onOpLogSize(s) { this.opLog.size = s; this.opLog.page = 1; this.loadOpLog(); },

@@ -4108,6 +4108,15 @@ const server = http.createServer(async (req, res) => {
         if (kw) { where.push('username LIKE ?'); args.push(`%${kw}%`); }
         const wsql = where.length ? ' WHERE ' + where.join(' AND ') : '';
         const total = (await db.query(`SELECT COUNT(*) AS n FROM operation_log${wsql}`, args))[0].n;
+        // 只读汇总（操作日志页 4 张统计卡）：今日操作 / 今日活跃账号 / 近 7 日 / 本月
+        // 口径固定为全量日志，不随用户名筛选变化（统计卡讲的是整体审计轨迹）
+        const agg = (await db.query(
+          `SELECT SUM(DATE(created_at) = CURDATE()) AS today,
+                  COUNT(DISTINCT CASE WHEN DATE(created_at) = CURDATE() THEN username END) AS today_users,
+                  SUM(created_at >= DATE_SUB(CURDATE(), INTERVAL 6 DAY)) AS week,
+                  SUM(DATE_FORMAT(created_at, '%Y-%m') = DATE_FORMAT(NOW(), '%Y-%m')) AS month
+             FROM operation_log`
+        ))[0] || {};
         const rows = await db.query(
           `SELECT id, user_id, username, action, content, ip, created_at FROM operation_log${wsql}
            ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`,
@@ -4115,6 +4124,12 @@ const server = http.createServer(async (req, res) => {
         );
         return sendJson(res, 200, {
           total, page, size,
+          summary: {
+            today: Number(agg.today) || 0,
+            todayUsers: Number(agg.today_users) || 0,
+            week: Number(agg.week) || 0,
+            month: Number(agg.month) || 0,
+          },
           logs: rows.map((r) => ({
             id: r.id, userId: r.user_id, username: r.username || '—',
             action: r.action, content: r.content, ip: r.ip || '',
