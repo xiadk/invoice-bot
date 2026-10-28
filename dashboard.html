@@ -69,8 +69,12 @@
                 border-bottom: 1px solid var(--line); padding: 0 20px;
                 display: flex; align-items: center; gap: 14px;
                 position: sticky; top: 0; z-index: 30; }
-  .app-header .brand { display: flex; align-items: center; gap: 10px; height: 34px;
-                       padding-right: 16px; border-right: 1px solid var(--line); flex: none; }
+  /* 品牌与标题之间的竖分隔线：固定落在 --sb-w 上，与下方菜单右缘（滚动条）一条线 */
+  .app-header::after { content: ''; position: absolute; left: var(--sb-w); top: 11px; bottom: 11px;
+                       width: 1px; background: var(--line); pointer-events: none;
+                       transition: opacity .18s ease; }
+  .app-header.is-collapsed::after { opacity: 0; }
+  .app-header .brand { display: flex; align-items: center; gap: 10px; height: 34px; flex: none; }
   .app-header .brand-logo { height: 30px; width: 30px; object-fit: contain; flex: none; }
   .app-header .brand-name { font-size: 15px; font-weight: 700; color: var(--text-1); line-height: 1.3; white-space: nowrap; }
   .app-header .brand-ver { font-size: 11px; color: var(--text-3); line-height: 1.3; white-space: nowrap; }
@@ -107,8 +111,6 @@
   .main-col { flex: 1; min-width: 0; display: flex; flex-direction: column; }
   .topbar-title { font-size: 16px; font-weight: 700; color: var(--text-1); line-height: 1.35;
                   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .topbar-sub { font-size: 12px; color: var(--text-3); line-height: 1.4; margin-top: 1px;
-                white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .pill { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px;
           border-radius: var(--radius-pill); font-size: 12px; font-weight: 500; white-space: nowrap; }
   .pill-ok { background: var(--ok-bg); color: var(--ok); }
@@ -235,7 +237,6 @@
     :root { --sb-w: 64px; }
     .sidebar { padding: 8px; }
     .app-header { padding: 0 12px; gap: 10px; }
-    .app-header .brand { padding-right: 10px; }
     .app-header .brand-text, .nav-group, .nav-item span { display: none; }
     .nav-item { justify-content: center; padding: 10px 0; }
   }
@@ -337,7 +338,7 @@
 <div id="app" v-cloak>
   <div class="app-shell">
     <!-- ── 上段：通栏吸顶栏。左上角品牌与右侧操作同处一条，滚动时一起固定 ── -->
-    <header class="app-header">
+    <header class="app-header" :class="{ 'is-collapsed': sidebarCollapsed }">
       <div class="brand">
         <img class="brand-logo" src="/assets/logo-icon.png" alt="发票催收">
         <div class="brand-text">
@@ -347,7 +348,6 @@
       </div>
       <div class="page-ident">
         <div class="topbar-title">{{ pageTitle }}</div>
-        <div class="topbar-sub">{{ pageSub }}</div>
       </div>
       <div class="nav-right">
         <el-button size="small" plain @click="openDownload"
@@ -2133,25 +2133,6 @@
               </el-tag>
             </template>
           </qnh-login-bar>
-          <!-- 拉取口径：新手最容易误以为「点了就能看到全部历史」，这里写清楚 -->
-          <div class="form-tip" style="margin-top:8px">
-            <i class="el-icon-info"></i>
-            <template v-if="pd.orderSync && pd.orderSync.synced">
-              订单数据已同步过：点「获取订单数据」为<b>增量拉取</b>，只补新订单，一页页往前追、追平即停。
-            </template>
-            <template v-else>
-              首次点「获取订单数据」为<b>全量拉取：不限时间范围</b>，一直往前翻到空页为止（翻页上限
-              {{ pd.maxPages }} 页，可在「系统管理」调整）；之后再点按钮为<b>增量拉取</b>，追平即停。
-            </template>
-            切换账号后，每个账号各自首次全量。
-          </div>
-          <!-- 操作列两个催收入口的区别，避免「为什么有的单没有发送按钮」的疑问 -->
-          <div class="form-tip" style="margin-top:6px">
-            <i class="el-icon-chat-dot-round"></i>
-            操作列：「<b>商家处理中</b>」的单可直接<b>发送催收消息</b>（助手内自动逐条发）；
-            「<b>已完成 + 未同步开票</b>」的单，平台已关闭其开票入口、订单接口也拿不到商家会话 ID，
-            自动发送发不出去，请点<b>去平台催</b>打开平台订单页，在页面里点「联系商家」走线下开票。
-          </div>
         </el-card>
 
         <el-alert v-if="qnhNeedPick" type="warning" :closable="false" show-icon style="margin-bottom:12px"
@@ -2889,41 +2870,15 @@ const vm = new Vue({
       // 整组条目被权限过滤光时，连分组标题一起隐藏，避免只剩个孤零零的小标题
       return groups.filter((g) => g.items.length);
     },
-    /** 顶栏主标题：对应设计稿每屏的「业务 · 视角」 */
+    /** 顶栏主标题：与左侧菜单同名（菜单改名时标题自动跟着变，不再另写一套文案） */
     pageTitle() {
-      return ({
-        board: '采购发票催收 · 工作台',
-        pdd: '采购发票催收 · 拼多多平台',
-        mapping: '税务局销方名称 · 与 1688 商家核对',
-        product: '补货参考 · 商品与库存',
-        market: '发布与报价 · 交易市场',
-        billing: '按月收支 · 净利润核算',
-        refund: '售后 / 退款订单 · 同步监控',
-        profit: '商品毛利 · 实时核算',
-        refundalert: '退单提醒 · 企业微信推送',
-        qnhcfg: '牵牛花配置 · 毛利告警与数据同步',
-        admin: '平台配置 · 消息模板 · 助手治理',
-        users: '账号 · 角色 · 权限分配',
-        audit: '审计轨迹 · 全量留痕',
-      })[this.page] || '发票催收';
-    },
-    /** 顶栏副标题：写清这一页的真实数据口径（不是设计稿的占位文案） */
-    pageSub() {
-      return ({
-        board: '1688 直连接口 · 票税核对 · 催收发送',
-        pdd: '拼多多商家后台 · 订单实付与开票状态',
-        mapping: '销方名称映射维护 · 人工确认与忽略',
-        product: '采购价 / 库存 / 补货建议 / 齐货通比价',
-        market: '内部报价市场 · 发布商品与报价',
-        billing: '总收入 − 总支出 = 净利润；1688 / 拼多多由系统实时统计',
-        refund: '牵牛花权益融合 · 退单明细与处理日志',
-        profit: '订单级实时毛利 · 低于阈值推送告警',
-        refundalert: '机器人 webhook · 提醒模板 · 每账号独立',
-        qnhcfg: '登录态 · 定时同步 · 毛利告警阈值',
-        admin: '全局发送参数 · 助手版本治理 · 拼多多话术',
-        users: '登录账号 = 公司全称 · 逐项菜单开关',
-        audit: '操作留痕 · 保留 180 天',
-      })[this.page] || '';
+      const noMenu = { mapping: '税名核对', qnhcfg: '牵牛花配置', refundalert: '退单提醒' };
+      if (noMenu[this.page]) return noMenu[this.page];
+      for (const g of this.navGroups) {
+        const hit = g.items.find((it) => it.key === this.page);
+        if (hit) return hit.label;
+      }
+      return '发票催收';
     },
     // 顶栏「绑定本机助手」按钮：未连接=动作，已连接=状态（文案与提示都跟着切）
     agentBindText() {
