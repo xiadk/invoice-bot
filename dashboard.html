@@ -6,7 +6,8 @@
 <title>发票催收</title>
 <!-- 品牌图标：/favicon.ico 与 /assets/* 由 server.js 白名单式下发 -->
 <link rel="icon" href="/favicon.ico" sizes="any">
-<link rel="apple-touch-icon" href="/assets/logo-icon.png">
+<link rel="icon" type="image/png" sizes="256x256" href="/assets/logo-icon.png">
+<link rel="apple-touch-icon" href="/assets/apple-touch-icon.png">
 <!-- Element UI 主题（本地 vendor，免外网 CDN）；须在本页自身样式之前加载，便于本页样式覆盖 -->
 <link rel="stylesheet" href="/vendor/element-ui/index.css">
 <style>
@@ -74,11 +75,14 @@
                        width: 1px; background: var(--line); pointer-events: none;
                        transition: opacity .18s ease; }
   .app-header.is-collapsed::after { opacity: 0; }
-  .app-header .brand { display: flex; align-items: center; gap: 10px; height: 34px; flex: none; }
+  .app-header .brand { display: flex; align-items: center; gap: 10px; height: 34px; flex: none;
+                       width: calc(var(--sb-w) - 20px); }
+  /* 菜单收起后品牌区不再撑到 232（下方已无菜单可对齐），宽度回到内容宽 */
+  .app-header.is-collapsed .brand { width: auto; }
   .app-header .brand-logo { height: 30px; width: 30px; object-fit: contain; flex: none; }
   .app-header .brand-name { font-size: 15px; font-weight: 700; color: var(--text-1); line-height: 1.3; white-space: nowrap; }
   .app-header .brand-ver { font-size: 11px; color: var(--text-3); line-height: 1.3; white-space: nowrap; }
-  .app-header .page-ident { min-width: 0; overflow: hidden; flex: 1 1 auto; }
+  .app-header .page-ident { min-width: 0; overflow: hidden; flex: 1 1 auto; padding-left: 10px; }
   .app-body { flex: 1 1 auto; display: flex; align-items: stretch; min-width: 0; }
   .sidebar { width: var(--sb-w); flex: none; background: var(--surface);
              border-right: 1px solid var(--line); padding: 12px;
@@ -159,7 +163,6 @@
   .stat-card.clickable .label::after { content: ' ⤢'; font-size: 11px; color: var(--sub); }
   .trend-chart { height: 200px; width: 100%; }
   .trend-title { font-size: 13px; font-weight: 600; }
-  .trend-tip { font-size: 11px; color: var(--sub); }
   .toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
   .toolbar .spacer { flex: 1; }
   .members-box { padding: 2px 0 6px; }
@@ -237,6 +240,7 @@
     :root { --sb-w: 64px; }
     .sidebar { padding: 8px; }
     .app-header { padding: 0 12px; gap: 10px; }
+    .app-header .brand { width: calc(var(--sb-w) - 12px); }
     .app-header .brand-text, .nav-group, .nav-item span { display: none; }
     .nav-item { justify-content: center; padding: 10px 0; }
   }
@@ -258,14 +262,6 @@
   .stat-card.clickable { cursor: pointer; }
   .stat-card .num { letter-spacing: -.2px; }
   .stat-row { display: flex; gap: 12px; flex-wrap: wrap; margin: 12px 0; }
-  /* 本机助手连接卡（设计稿：状态点 + 版本 + 待发队列，横向一条） */
-  .agent-card { display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
-                background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
-                padding: 12px 16px; margin-bottom: 14px; font-size: 12px; }
-  .agent-card .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-3); flex: none; }
-  .agent-card .dot.on { background: #2e7d32; box-shadow: 0 0 0 3px rgba(46,125,50,.12); }
-  .agent-card .kv { display: inline-flex; align-items: center; gap: 6px; color: var(--text-2); }
-  .agent-card .kv b { color: var(--text-1); font-weight: 600; }
   /* 税名核对：把原来占半屏的 el-alert 收敛成一条提示，四步说明一句不漏 */
   .map-tip { display: flex; gap: 8px; align-items: flex-start; background: var(--surface-2);
              border: 1px solid var(--line); border-radius: var(--radius-sm);
@@ -431,10 +427,6 @@
             <el-card shadow="hover" :body-style="{ padding: '8px 10px 4px' }">
               <div slot="header" style="display:flex;align-items:center;justify-content:space-between;gap:8px">
                 <span class="trend-title">{{ c.title }}</span>
-                <span>
-                  <el-tag size="mini" type="info" style="margin-right:6px">峰值 {{ c.peakText }}</el-tag>
-                  <span class="trend-tip">点柱子看当天明细</span>
-                </span>
               </div>
               <div class="trend-chart" :id="'trend-chart-' + c.key"></div>
             </el-card>
@@ -451,20 +443,6 @@
           <el-progress :percentage="taskPercent" :stroke-width="10" :show-text="false"></el-progress>
           <div class="log-panel" ref="logPanel" v-html="logHtml"></div>
         </el-card>
-
-        <!-- 本机助手连接（设计稿卡型）：在线才能发催收；待发队列 = 断线/中断后未发完的条数 -->
-        <div class="agent-card">
-          <span class="kv">
-            <span class="dot" :class="{ on: agent.online }"></span>
-            <b>{{ agent.online ? '本机助手已连接' : '本机助手未连接' }}</b>
-          </span>
-          <span class="kv" v-if="agentVer">版本 <b>{{ agentVer }}</b></span>
-          <span class="kv">待发队列 <b>{{ (resumable && resumable.pending) || 0 }}</b> 条</span>
-          <span class="kv" v-if="resumable && resumable.failed">上次失败 <b>{{ resumable.failed }}</b> 条</span>
-          <span style="flex:1"></span>
-          <el-button v-if="!agent.online" size="mini" type="primary" plain @click="bindAgent">连接助手</el-button>
-          <el-button v-else size="mini" @click="openDownload">下载最新版</el-button>
-        </div>
 
         <!-- 工具栏 -->
         <el-card class="section-card" shadow="never" :body-style="{ padding: '12px 14px' }">
@@ -2117,7 +2095,7 @@
         <!-- 顶部状态条：登录 / 刷新（与退单列表、毛利监控共用同一组件，只换服务名） -->
         <el-card class="section-card" shadow="never" :body-style="{ padding: '12px 14px' }">
           <qnh-login-bar service="拼多多" :cookie="pd.cookie" :last-run="pd.lastRun"
-                         :who-label="qnhWhoLabel" action-text="刷新发票状态"
+                         :who-label="qnhWhoLabel" action-text="刷新发票状态" hide-meta
                          :action-loading="pd.syncing" :can-logout="true"
                          @login="onPddLoginBtn" @logout="logoutPdd" @action="doPddSync">
             <template slot="actions">
@@ -2206,10 +2184,13 @@
             <span class="loginid">共 {{ pd.total }} 条</span>
           </div>
 
+          <!-- row-key + reserve-selection：翻页/排序后回来仍记得哪些行被勾过（跨页多选靠它恢复勾选态，
+               计数与批量操作则由 pd.picked 跨页累积维护） -->
           <el-table ref="pddTable" :data="pd.rows" size="small" border style="width:100%" v-loading="pd.loading"
+                    row-key="orderSn"
                     :default-sort="pddDefaultSort"
                     empty-text="暂无订单数据" @selection-change="onPddSelChange" @sort-change="onPddSortChange">
-            <el-table-column type="selection" width="42"
+            <el-table-column type="selection" width="42" :reserve-selection="true"
                              :selectable="(row) => !!(row.applyable || row.chatable)"></el-table-column>
             <el-table-column label="商品" min-width="260">
               <template slot-scope="p">
@@ -2595,6 +2576,8 @@ Vue.component('qnh-login-bar', {
     service: { type: String, default: '牵牛花' },
     // true=已登录时按钮变成「退出X账号」（点击触发 logout 事件）；false=保持原来的「已登录X」
     canLogout: { type: Boolean, default: false },
+    // true=不显示右侧「身份：xxx / 登录态失效提示」（页面上方已有身份选择器时可去重）
+    hideMeta: { type: Boolean, default: false },
   },
   computed: {
     logined() { return !!(this.cookie && this.cookie.logined); },
@@ -2656,8 +2639,10 @@ Vue.component('qnh-login-bar', {
       <i class="el-icon-user-solid" style="margin-right:3px"></i>{{ service }} {{ accountText }}
     </el-tag>
     <span style="flex:1"></span>
-    <span class="loginid" v-if="whoLabel">身份：{{ whoLabel }}</span>
-    <span class="loginid" v-if="cookie && cookie.message" style="color:#e6a23c">{{ cookie.message }}</span>
+    <template v-if="!hideMeta">
+      <span class="loginid" v-if="whoLabel">身份：{{ whoLabel }}</span>
+      <span class="loginid" v-if="cookie && cookie.message" style="color:#e6a23c">{{ cookie.message }}</span>
+    </template>
   </div>`,
 });
 
@@ -2730,7 +2715,9 @@ const vm = new Vue({
         // maxPages = 翻页上限（与发票刷新共用，系统管理可配，默认 300）
         orderSyncing: false, orderTaskId: '', orderSync: null, maxPages: 300,
         // 批量申请发票
-        selected: [], applying: false, applyTaskId: '',
+        // selected = 跨页累计的已勾选行（翻页不清空）；picked 是它的 {orderSn: row} 索引，
+        // 用来在 data 整页替换（后端分页）时把「本页取消勾选」的行摘掉、其余页的保留
+        selected: [], picked: {}, applying: false, applyTaskId: '',
         applyDialog: { visible: false, running: false, kind: '', status: '', message: '', progress: null, log: [], startedAt: 0 },
       },
       // 1688发票数据
@@ -3202,11 +3189,8 @@ const vm = new Vue({
       ];
     },
     charts() {
-      return TREND_CHARTS.map((c) => {
-        let peak = 0, peakDate = '—';
-        for (const d of this.trendDays) { const v = Number(d[c.amtKey]) || 0; if (v > peak) { peak = v; peakDate = d.date; } }
-        return Object.assign({}, c, { peakText: yuan(peak), peakDate });
-      });
+      // 图表配置是常量（数据在 trendDays 里），不再派生「峰值」文案 —— 卡片右上那两个小标签已删除
+      return TREND_CHARTS;
     },
     visibleCompanies() {
       const now = Date.now();
@@ -3296,7 +3280,13 @@ const vm = new Vue({
   watch: {
     trendDays() { this.$nextTick(() => this.renderTrend()); },
     page(p) {
-      if (p === 'board') this.$nextTick(() => this.renderTrend());
+      // v-show 切页：隐藏期间容器宽高为 0，切回来后 ECharts 还按旧宽度画 → 图表被压成一条。
+      // 等一帧（display 生效、动画起步）再统一 resize 所有图表实例；
+      if (p === 'board') {
+        this._trendRetry = {};
+        this.$nextTick(() => setTimeout(() => { if (this.page === 'board') this.renderTrend(); }, 60));
+      }
+      this.$nextTick(() => setTimeout(() => { if (this.page === p) this.onResize(); }, 60));
       if (p === 'refund') this.$nextTick(() => this.renderRefundTrend());
       if (p === 'profit') this.$nextTick(() => this.renderProfitTrend());
       if (p === 'product') { this.loadProducts(); this.loadProductTrend(); }
@@ -3754,7 +3744,29 @@ const vm = new Vue({
       this.charts.forEach((c, i) => {
         const dom = document.getElementById('trend-chart-' + c.key);
         if (!dom) return;
+        // 容器还没撑开（切页瞬间仍是 display:none → clientWidth 0）时绝不能 init，否则 ECharts 会把
+        // 画布尺寸锁死成 0/极窄，之后只能靠 resize 救回来。用 rAF 等它宽起来（隐藏页 rAF 自动暂停，
+        // 不会空转），最多等约 5 秒；同一容器只排一个等待，避免重复排队。
+        if (dom.clientWidth < 40) {
+          this._trendRetry = this._trendRetry || {};
+          if (this._trendRetry[c.key]) return;
+          this._trendRetry[c.key] = 1;
+          let frames = 0;
+          const waitWide = () => {
+            frames++;
+            if (this.page !== 'board' || frames > 300) { delete this._trendRetry[c.key]; return; }
+            const d2 = document.getElementById('trend-chart-' + c.key);
+            if (!d2) { delete this._trendRetry[c.key]; return; }
+            if (d2.clientWidth < 40) { requestAnimationFrame(waitWide); return; }
+            delete this._trendRetry[c.key];
+            this.renderTrend();
+          };
+          requestAnimationFrame(waitWide);
+          return;
+        }
         const ch = this._charts[i] || (this._charts[i] = EC.init(dom));
+        try { ch.resize(); } catch (e) {}   // 容器宽度变了（切页 / 折叠菜单 / 窗口缩放）先让实例跟上
+        this.watchTrendBox(dom);            // 之后容器再变形（菜单收起动画、窗口缩放）由 ResizeObserver 兜住
         const days = this.trendDays;
         ch.off('click');
         ch.on('click', (p) => {
@@ -3790,6 +3802,24 @@ const vm = new Vue({
         }, true);
       });
     },
+    /**
+     * 给趋势图容器挂 ResizeObserver：容器尺寸一变就同步 resize 实例。
+     * 覆盖「切页 / 收起菜单（180ms 过渡）/ 窗口缩放 / 表格挤动」等所有情况，
+     * 否则过渡结束后画布还停在中间宽度，柱子会挤在左边、日期标签叠成一团。
+     */
+    watchTrendBox(dom) {
+      if (dom.__tRo || typeof ResizeObserver === 'undefined') return;
+      let raf = 0;
+      dom.__tRo = new ResizeObserver(() => {
+        if (raf) return;
+        raf = requestAnimationFrame(() => {
+          raf = 0;
+          const inst = (this._charts || []).find((c) => c && typeof c.getDom === 'function' && c.getDom() === dom);
+          if (inst) { try { inst.resize(); } catch (e) {} }
+        });
+      });
+      dom.__tRo.observe(dom);
+    },
 
     // ══════ 牵牛花：两个页面共用（登录 / 状态 / 配置） ══════
     /**
@@ -3815,7 +3845,7 @@ const vm = new Vue({
       this.rq.profit = { loading: false, rows: [], total: 0, alerts: 0, error: '' };
       this.rq.profitTrend = [];
       this.pd.rows = []; this.pd.total = 0; this.pd.page = 1;
-      this.pd.summary = null; this.pd.lastRun = null; this.pd.selected = [];
+      this.pd.summary = null; this.pd.lastRun = null; this.clearPddPicked();
       this.pd.cookie = { logined: false, loading: false, message: '' };
       // 切换账号：上一个账号的申请结果不再适用（任务仍在跑的话保留卡片，避免误以为任务被停）
       if (!this.pd.applyDialog.running) this.pd.applyDialog.visible = false;
@@ -4222,7 +4252,7 @@ const vm = new Vue({
         this.pd.loading = false;
       }
     },
-    applyPddFilter() { this.pd.page = 1; this.loadPddOrders(); },
+    applyPddFilter() { this.pd.page = 1; this.clearPddPicked(); this.loadPddOrders(); },
     // 表头排序（下单时间 / 开票金额）：点一次降序、再点升序、第三次取消 → 回落到默认（时间倒序）
     onPddSortChange({ prop, order }) {
       const key = prop === 'invoiceAmount' ? 'amount' : 'time';
@@ -4245,6 +4275,7 @@ const vm = new Vue({
     resetPddFilter() {
       this.pd.filter = { status: '', keyword: '', sort: 'time_desc' };
       this.pd.page = 1;
+      this.clearPddPicked();
       // 排序箭头一起复位；el-table.sort() 会触发 sort-change，用标记跳过它自带的那次加载
       const t = this.$refs.pddTable;
       if (t && typeof t.sort === 'function') {
@@ -4385,7 +4416,26 @@ const vm = new Vue({
     },
 
     // ── 拼多多「申请发票」（勾选批量 / 行内单个，同一入口） ──
-    onPddSelChange(rows) { this.pd.selected = rows || []; },
+    /**
+     * 拼多多列表多选：跨页累计，翻页/排序不清空（用户要求「第一页全选 → 翻第二页接着选 → 一起批量操作」）。
+     * Element 的 selection-change 只给「当前页选中的行」，所以这里做增量合并：
+     *   当前页里没被选中的 → 从 picked 摘掉；当前页选中的 → 写入 picked；其余页的一律保留。
+     */
+    onPddSelChange(rows) {
+      const picked = this.pd.picked || (this.pd.picked = {});
+      const pageRows = this.pd.rows || [];
+      const selSns = new Set((rows || []).map((r) => r && r.orderSn).filter(Boolean));
+      pageRows.forEach((r) => { if (r && r.orderSn && !selSns.has(r.orderSn)) delete picked[r.orderSn]; });
+      (rows || []).forEach((r) => { if (r && r.orderSn) picked[r.orderSn] = r; });
+      this.pd.selected = Object.keys(picked).map((k) => picked[k]);
+    },
+    /** 清空拼多多跨页选中（换筛选条件/换账号/批量任务跑完后调用，避免「看不见的行还选着」） */
+    clearPddPicked() {
+      this.pd.picked = {};
+      this.pd.selected = [];
+      const t = this.$refs.pddTable;
+      if (t && typeof t.clearSelection === 'function') t.clearSelection();
+    },
     applyPddBatch() { this.applyPddRows(this.pd.selected); },
     async applyPddRows(rows) {
       const list = (rows || []).filter((r) => r && r.applyable);
@@ -4430,6 +4480,7 @@ const vm = new Vue({
           this.$message.warning('有 ' + d.skipped.length + ' 笔订单不可申请（非该账号或非待申请状态），已跳过');
         }
         this.$message.info(d.message || '已下发申请任务');
+        this.clearPddPicked();   // 已提交的单不必再勾着（避免重复提交同一批）
         await this.openPddTaskCard('apply', d.taskId, d.total || list.length);
       } catch (e) {
         this.$message.error('申请失败：' + e.message);
@@ -4498,6 +4549,7 @@ const vm = new Vue({
           this.$message.warning('有 ' + d.skipped.length + ' 笔订单不可催收（非该账号或非商家处理中），已跳过');
         }
         this.$message.info(d.message || '已下发催收任务');
+        this.clearPddPicked();   // 已提交的单不必再勾着（避免重复发送同一批）
         await this.openPddTaskCard('send', d.taskId, d.total || list.length);
       } catch (e) {
         this.$message.error('发送失败：' + e.message);
