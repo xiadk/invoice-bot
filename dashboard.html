@@ -243,6 +243,26 @@
   .map-tip > i { color: var(--brand); font-size: 14px; margin-top: 2px; flex: none; }
   .map-tip b { color: var(--text-1); font-weight: 600; }
   .map-tip .steps { color: var(--text-3); }
+  /* 页头操作行（设计稿 .s96）：左为口径信息，右为主操作按钮，标题已在顶栏 */
+  .page-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+  .page-bar .pb-info { font-size: 12px; color: var(--text-2); line-height: 1.7; }
+  .page-bar .pb-info b { color: var(--text-1); font-weight: 600; }
+  .page-bar .pb-actions { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+  /* 表格卡内筛选条（设计稿 .s125）：独立一行，与表头留一条分隔线 */
+  .filter-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+                padding-bottom: 12px; margin-bottom: 12px; border-bottom: 1px solid var(--line); }
+  .filter-bar .fb-label { font-size: 12px; color: var(--text-2); }
+  .filter-bar .fb-spacer { flex: 1; }
+  /* 账单两级表头：一级分组（收入 / 支出 / 净收入）压深一档，与二级细项区分。
+     vendor/element-ui 里给表头统一加了 th.el-table__cell{background:#F5F7FA}，
+     且固定列会复制一份表头，故这里两处都写并用 !important 压过库样式。 */
+  .bill-table .el-table__header th.bill-grp,
+  .bill-table .el-table__fixed-header-wrapper th.bill-grp {
+    background-color: #EDEDF2 !important; color: var(--text-1); font-weight: 600;
+  }
+  /* 1688 发票工具栏收成一行：label 与控件间距略紧，按钮文案取短名（全称留在 title） */
+  .toolbar.toolbar-tight { gap: 8px; }
+  .toolbar.toolbar-tight .tb-label { font-size: 12px; color: var(--text-2); flex: none; }
 </style>
 </head>
 <body>
@@ -373,9 +393,9 @@
 
         <!-- 工具栏 -->
         <el-card class="section-card" shadow="never" :body-style="{ padding: '12px 14px' }">
-          <div class="toolbar">
-            <span style="font-size:12px;color:var(--sub)">催收状态</span>
-            <el-select v-model="draftCollect" size="small" style="width:170px"
+          <div class="toolbar toolbar-tight">
+            <span class="tb-label">催收</span>
+            <el-select v-model="draftCollect" size="small" style="width:140px"
                        title="已催收 = 有成功催收记录的公司；未催收 = 最近 N 天没有成功催收记录（含从未催收）">
               <el-option label="已催收" value="collected"></el-option>
               <el-option label="最近一周未催收" value="7"></el-option>
@@ -383,19 +403,19 @@
               <el-option label="最近一个月未催收" value="30"></el-option>
               <el-option label="最近三个月未催收" value="90"></el-option>
             </el-select>
-            <span style="font-size:12px;color:var(--sub)">开票状态</span>
-            <el-select v-model="draftInvoice" size="small" style="width:180px">
+            <span class="tb-label">开票</span>
+            <el-select v-model="draftInvoice" size="small" style="width:150px">
               <el-option label="全部" value=""></el-option>
               <el-option label="已开票（待开票金额=0）" value="invoiced"></el-option>
               <el-option label="未开票（待开票金额>0）" value="pending"></el-option>
             </el-select>
-            <el-input v-model="draftKeyword" size="small" style="width:230px" placeholder="搜索卖家公司名 / 登录ID"
+            <el-input v-model="draftKeyword" size="small" style="width:190px" placeholder="搜索卖家公司名 / 登录ID"
                       clearable @keyup.enter.native="applyFilters"></el-input>
             <el-button size="small" type="primary" plain :loading="boardLoading" @click="applyFilters" title="重新请求数据并按当前条件刷新列表">查询</el-button>
             <el-button size="small" :loading="boardLoading" @click="loadData" title="重新拉取发票数据">刷新</el-button>
             <span class="spacer"></span>
-            <el-button size="small" @click="openUpload('orders')" title="上传从 1688 导出的订单 Excel 并导入（重复订单按最新数据更新）">导入1688订单数据</el-button>
-            <el-button size="small" @click="openUpload('invoices')" title="上传从电子税务局导出的发票 Excel 并导入（重复发票按最新数据更新）">导入税务局发票数据</el-button>
+            <el-button size="small" @click="openUpload('orders')" title="导入1688订单数据：上传从 1688 导出的订单 Excel 并导入（重复订单按最新数据更新）">导入订单</el-button>
+            <el-button size="small" @click="openUpload('invoices')" title="导入税务局发票数据：上传从电子税务局导出的发票 Excel 并导入（重复发票按最新数据更新）">导入发票</el-button>
             <el-button size="small" type="primary" :disabled="readonly" @click="batchSend">发送催收消息 ({{ selectedCount }})</el-button>
           </div>
         </el-card>
@@ -731,18 +751,28 @@
 
       <!-- ══════════ 商品列表 ══════════ -->
       <div v-show="page === 'product'" id="page-product">
-        <div class="page-head">
-          <h2>商品列表</h2>
-          <div style="display:flex;align-items:center;gap:10px;margin-top:8px;flex-wrap:wrap">
-            <el-button size="small" type="primary" plain :disabled="readonly"
+        <div class="page-bar">
+          <span class="pb-info">
+            补货参考 · 总货值口径 <b>Σ((可用库存 + 在途库存) × 采购价)</b>
+            <template v-if="product.latestBatch">
+              · 最近导入 {{ fmtMinute(product.latestBatch.imported_at) }}（{{ product.latestBatch.item_count }} 个商品 / {{ yuan(product.latestBatch.total_value) }}）
+            </template>
+          </span>
+          <span class="pb-actions">
+            <el-button size="small" type="primary" :disabled="readonly"
                        title="上传「前置仓补货参考批量导出」Excel（重复商品按本次文件内容更新）"
                        @click="openUpload('products')">导入补货参考文件</el-button>
-            <span class="loginid" v-if="product.latestBatch">
-              最近导入 {{ fmtMinute(product.latestBatch.imported_at) }} · {{ product.latestBatch.item_count }} 个商品 · 总货值 {{ yuan(product.latestBatch.total_value) }}
-            </span>
-            <span style="flex:1"></span>
-            <span class="loginid">总货值 = Σ((可用库存 + 在途库存) × 采购价)</span>
-          </div>
+          </span>
+        </div>
+
+        <!-- 统计卡（设计稿 4 卡）：全部取自现有接口字段，未新增接口 -->
+        <div class="stat-row">
+          <el-card v-for="s in productStatCards" :key="s.key" shadow="never" class="stat-card"
+                   :body-style="{ padding: '14px 16px' }" style="flex:1;min-width:150px">
+            <div class="num">{{ s.num }}</div>
+            <div class="label">{{ s.label }}</div>
+            <div class="sub">{{ s.sub }}</div>
+          </el-card>
         </div>
 
         <el-card shadow="never" class="section-card">
@@ -754,8 +784,17 @@
         </el-card>
 
         <el-card shadow="never" class="section-card">
-          <div slot="header" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <div slot="header" style="display:flex;align-items:center;gap:10px">
             <b>商品</b>
+            <span class="loginid">（勾选后可批量发布到交易市场）</span>
+            <span style="flex:1"></span>
+            <el-button size="small" type="success" :disabled="!product.selected.length || readonly"
+                       @click="openPublish(product.selected.map(r => r.sku))">
+              发布到交易市场({{ product.selected.length }})
+            </el-button>
+          </div>
+          <!-- 筛选条（设计稿 .s125）：独立一行，与表头留一条分隔线 -->
+          <div class="filter-bar">
             <el-input v-model="product.draftQ" size="small" clearable placeholder="搜商品SKU / 名称" style="width:220px"
                       @keyup.enter.native="loadProducts" @clear="loadProducts"></el-input>
             <el-select v-model="product.status" size="small" style="width:130px" @change="loadProducts">
@@ -767,12 +806,8 @@
               采购价{{ product.priceSort === 'desc' ? ' ↓' : (product.priceSort === 'asc' ? ' ↑' : '') }}
             </el-button>
             <el-button size="small" type="primary" plain :loading="product.loading" @click="loadProducts">查询</el-button>
-            <span style="flex:1"></span>
+            <span class="fb-spacer"></span>
             <span class="loginid">当前筛选总货值：{{ yuan(product.filteredValue) }}</span>
-            <el-button size="small" type="success" :disabled="!product.selected.length || readonly"
-                       @click="openPublish(product.selected.map(r => r.sku))">
-              发布到交易市场({{ product.selected.length }})
-            </el-button>
           </div>
           <el-table :data="product.rows" size="small" border style="width:100%" v-loading="product.loading"
                     empty-text="暂无商品（点「导入补货参考文件」上传 Excel）" @selection-change="v => product.selected = v">
@@ -967,19 +1002,30 @@
 
       <!-- ══════════ 交易市场 ══════════ -->
       <div v-show="page === 'market'" id="page-market">
-        <div class="page-head">
-          <h2>交易市场</h2>
-          <div style="font-size:12px;color:var(--sub);line-height:1.8;margin-top:8px">
-            所有用户在「商品列表」发布的报价在此汇集；同一 SKU 去重展示一条：数量为各用户发布数量合计，价格为当前最低报价。<br>
-            点击商品行可查看该 SKU 的全部报价（价格由低到高，同价按发布时间倒序）。
-          </div>
+        <div class="page-bar">
+          <span class="pb-info">
+            内部报价市场 · 同一 SKU 去重一条（<b>数量</b> = 各用户发布数量合计，<b>价格</b> = 当前最低报价）·
+            点商品行看该 SKU 全部报价（由低到高，同价按发布时间倒序）
+          </span>
+          <span class="pb-actions">
+            <el-button size="small" :loading="market.loading" @click="loadMarket">刷新</el-button>
+          </span>
         </div>
+
+        <!-- 统计卡（设计稿 4 卡）：在售 SKU 取列表 total，其余取接口下发的只读聚合 summary -->
+        <div class="stat-row">
+          <el-card v-for="s in marketStatCards" :key="s.key" shadow="never" class="stat-card"
+                   :body-style="{ padding: '14px 16px' }" style="flex:1;min-width:150px">
+            <div class="num">{{ s.num }}</div>
+            <div class="label">{{ s.label }}</div>
+            <div class="sub">{{ s.sub }}</div>
+          </el-card>
+        </div>
+
         <el-card shadow="never" class="section-card">
           <div slot="header" style="display:flex;align-items:center;gap:10px">
             <b>在售商品</b>
             <span class="loginid">（共 {{ market.total }} 个 SKU，同一 SKU 多人发布只显示一行）</span>
-            <span style="flex:1"></span>
-            <el-button size="small" :loading="market.loading" @click="loadMarket">刷新</el-button>
           </div>
           <el-table :data="market.rows" size="small" border style="width:100%" v-loading="market.loading"
                     empty-text="暂无商品发布（去「商品列表」把商品发布到交易市场）" highlight-current-row
@@ -1018,8 +1064,15 @@
 
       <!-- ══════════ 账单（按月统计收支） ══════════ -->
       <div v-show="page === 'billing'" id="page-billing">
-        <div class="page-head">
-          <h2>账单</h2>
+        <!-- 统计卡（设计稿 4 卡）：取最近月份，全部由现有 billing 数据算出，未新增接口。
+             按用户要求，本页不再放任何说明文字（v0.2.41 已删过）。 -->
+        <div class="stat-row">
+          <el-card v-for="s in billStatCards" :key="s.key" shadow="never" class="stat-card"
+                   :body-style="{ padding: '14px 16px' }" style="flex:1;min-width:150px">
+            <div class="num">{{ s.num }}</div>
+            <div class="label">{{ s.label }}</div>
+            <div class="sub">{{ s.sub }}</div>
+          </el-card>
         </div>
 
         <el-card shadow="never" class="section-card">
@@ -1038,7 +1091,7 @@
             </el-table-column>
 
             <!-- 一级列 2：收入（二级 = 各收入细项 + 收入合计） -->
-            <el-table-column label="收入">
+            <el-table-column label="收入" label-class-name="bill-grp">
               <el-table-column v-for="it in billIncomeItems" :key="it.key" :label="it.label" width="142">
                 <template slot-scope="p">
                   <el-input-number :value="p.row.cells[it.key]" :min="0" :precision="2" :controls="false"
@@ -1052,7 +1105,7 @@
             </el-table-column>
 
             <!-- 一级列 3：支出（二级 = 两个系统统计项 + 11 个手工项 + 支出合计） -->
-            <el-table-column label="支出">
+            <el-table-column label="支出" label-class-name="bill-grp">
               <el-table-column v-for="it in billExpenseItems" :key="it.key" :label="it.label"
                                :width="it.source === 'auto' ? 186 : 132">
                 <template slot="header">
@@ -1072,7 +1125,7 @@
             </el-table-column>
 
             <!-- 一级列 4：净收入（二级 = 净利润 / 净利率） -->
-            <el-table-column label="净收入">
+            <el-table-column label="净收入" label-class-name="bill-grp">
               <el-table-column label="净利润" width="132">
                 <template slot-scope="p">
                   <span class="amount" :class="p.row.totals.net < 0 ? '' : 'ok'">{{ yuan(p.row.totals.net) }}</span>
@@ -2474,7 +2527,7 @@ const vm = new Vue({
       // 发布到交易市场（单个/批量共用弹窗）
       publish: { visible: false, title: '', discount: 100, items: [], saving: false },
       // 交易市场
-      market: { loading: false, rows: [], total: 0, page: 1, size: 20 },
+      market: { loading: false, rows: [], total: 0, page: 1, size: 20, summary: {} },
       // 账单（按月）：cols = 每个月一列 { month, hasRow, cells(手工项), auto(1688/拼多多), totals }
       bill: { loading: false, items: [], cols: [] },
       billAdd: { visible: false, month: '', copyFrom: '', saving: false },
@@ -2594,8 +2647,8 @@ const vm = new Vue({
         board: '采购发票催收 · 工作台',
         pdd: '采购发票催收 · 拼多多平台',
         mapping: '税务局销方名称 · 与 1688 商家核对',
-        product: '在售商品 · SKU 与价格',
-        market: '采购降本 · 比价机会',
+        product: '补货参考 · 商品与库存',
+        market: '发布与报价 · 交易市场',
         billing: '按月收支 · 净利润核算',
         refund: '售后 / 退款订单 · 同步监控',
         profit: '商品毛利 · 实时核算',
@@ -2661,6 +2714,57 @@ const vm = new Vue({
     billExpenseItems() { return (this.bill.items || []).filter((i) => i.group === 'expense'); },
     /** 表格行：按月份倒序，最近的月份排在最上面 */
     billRowsDesc() { return [...(this.bill.cols || [])].reverse(); },
+    /** 账单统计卡（设计稿 4 卡）：取最近的月份，环比用上一月净利润算；无数据时给 — */
+    billStatCards() {
+      const cols = this.bill.cols || [];
+      const cur = cols.length ? cols[cols.length - 1] : null;
+      const prev = cols.length > 1 ? cols[cols.length - 2] : null;
+      if (!cur) {
+        return [
+          { key: 'net', num: '—', label: '本月净利润', sub: '还没有账单数据' },
+          { key: 'income', num: '—', label: '本月总收入', sub: '美团 / 淘宝 / 京东' },
+          { key: 'expense', num: '—', label: '本月总支出', sub: '含平台采购' },
+          { key: 'rate', num: '—', label: '本月净利率', sub: '净利润 ÷ 总收入' },
+        ];
+      }
+      const t = cur.totals || {};
+      const prevNet = prev && prev.totals ? Number(prev.totals.net) || 0 : null;
+      let mom = '较上月 —';
+      if (prevNet) {
+        const diff = ((Number(t.net) || 0) - prevNet) / Math.abs(prevNet) * 100;
+        mom = '较上月 ' + (diff >= 0 ? '+' : '') + diff.toFixed(1) + '%';
+      }
+      const auto = cur.auto || {};
+      const plat = (Number(auto.auto_1688) || 0) + (Number(auto.auto_pdd) || 0);
+      return [
+        { key: 'net', num: this.yuan(t.net), label: '本月净利润 · ' + this.monthText(cur.month), sub: mom },
+        { key: 'income', num: this.yuan(t.income), label: '本月总收入', sub: '美团 / 淘宝 / 京东' },
+        { key: 'expense', num: this.yuan(t.expense), label: '本月总支出', sub: '含平台采购 ' + this.yuan(plat) },
+        { key: 'rate', num: (Number(t.rate) || 0) + '%', label: '本月净利率', sub: '净利润 ÷ 总收入' },
+      ];
+    },
+    /** 商品列表统计卡（设计稿 4 卡）：全部取自现有接口字段，未新增接口 */
+    productStatCards() {
+      const p = this.product;
+      const lb = p.latestBatch;
+      return [
+        { key: 'total', num: p.total, label: '商品总数', sub: '按当前筛选条件统计' },
+        { key: 'value', num: this.yuan(p.filteredValue), label: '当前筛选总货值', sub: 'Σ(可用 + 在途) × 采购价' },
+        { key: 'batch', num: lb ? lb.item_count : '—', label: '最近导入商品数', sub: lb ? this.fmtMinute(lb.imported_at) : '还没有导入记录' },
+        { key: 'bval', num: lb ? this.yuan(lb.total_value) : '—', label: '最近导入总货值', sub: '该批次导入时的货值' },
+      ];
+    },
+    /** 交易市场统计卡（设计稿 4 卡）：summary 由 /api/market 下发（一条只读聚合） */
+    marketStatCards() {
+      const s = this.market.summary || {};
+      const n = (v) => Number(v) || 0;
+      return [
+        { key: 'sku', num: n(this.market.total), label: '在售 SKU', sub: '同一 SKU 多人发布只算一条' },
+        { key: 'quotes', num: n(s.quotes), label: '报价条数', sub: '全部用户的发布记录' },
+        { key: 'sellers', num: n(s.sellers), label: '参与报价人数', sub: '去重后的发布人' },
+        { key: 'min', num: s.min_price == null ? '—' : this.yuan(s.min_price), label: '全站最低报价', sub: '折后价最低的一条' },
+      ];
+    },
     // 拼多多发票对所有用户开放，不需要单独配置菜单权限
     // 卖家发送间隔低于 15 秒时给个橙色警示：这个值直接决定会不会被平台判定为机器群发
     gapTooSmall() { return Number(this.cfg.gapMin) < 15 || Number(this.cfg.gapMax) < 15; },
@@ -5209,6 +5313,7 @@ const vm = new Vue({
         const d = await this.api('/api/market?page=' + this.market.page + '&size=' + this.market.size);
         this.market.rows = d.rows || [];
         this.market.total = Number(d.total) || 0;
+        this.market.summary = d.summary || {};
         // 越界回正（例如别人撤掉发布后当前页变空）
         const pages = Math.max(1, Math.ceil(this.market.total / this.market.size));
         if (this.market.page > pages) { this.market.page = pages; return this.loadMarket(); }
