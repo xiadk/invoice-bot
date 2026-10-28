@@ -211,6 +211,38 @@
     .nav-item { justify-content: center; padding: 10px 0; }
   }
   @media (max-width: 900px) { .el-main { padding: 12px; } }
+
+  /* ══ 第 2 批：发票组（1688发票 / 拼多多发票 / 税名核对）══════════════ */
+  /* 页内 Tab 壳：设计稿把「税名核对」并作发票屏的第二个 Tab。
+     这里只做壳，侧边栏入口照旧保留，两处互通（点 Tab = 切 page='mapping'）。 */
+  .inv-tabs { display: flex; gap: 24px; border-bottom: 1px solid var(--line); margin-bottom: 14px; }
+  .inv-tab { position: relative; padding: 10px 2px 12px; font-size: 14px; color: var(--text-2);
+             cursor: pointer; user-select: none; transition: color .15s; }
+  .inv-tab:hover { color: var(--text-1); }
+  .inv-tab.is-active { color: var(--brand); font-weight: 600; }
+  .inv-tab.is-active::after { content: ''; position: absolute; left: 0; right: 0; bottom: -1px;
+                              height: 2px; border-radius: 2px; background: var(--brand); }
+  /* 统计卡：设计稿卡型——白底 + 1px 边 + 圆角 10，数字 24/700，标签 12 次级色。
+     只有真正可点的卡（.clickable）才有手型与抬升，纯展示卡不误导。 */
+  .stat-card { background: var(--surface); cursor: default; }
+  .stat-card.clickable { cursor: pointer; }
+  .stat-card .num { letter-spacing: -.2px; }
+  .stat-row { display: flex; gap: 12px; flex-wrap: wrap; margin: 12px 0; }
+  /* 本机助手连接卡（设计稿：状态点 + 版本 + 待发队列，横向一条） */
+  .agent-card { display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
+                background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
+                padding: 12px 16px; margin-bottom: 14px; font-size: 12px; }
+  .agent-card .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-3); flex: none; }
+  .agent-card .dot.on { background: #2e7d32; box-shadow: 0 0 0 3px rgba(46,125,50,.12); }
+  .agent-card .kv { display: inline-flex; align-items: center; gap: 6px; color: var(--text-2); }
+  .agent-card .kv b { color: var(--text-1); font-weight: 600; }
+  /* 税名核对：把原来占半屏的 el-alert 收敛成一条提示，四步说明一句不漏 */
+  .map-tip { display: flex; gap: 8px; align-items: flex-start; background: var(--surface-2);
+             border: 1px solid var(--line); border-radius: var(--radius-sm);
+             padding: 10px 12px; font-size: 12px; color: var(--text-2); line-height: 1.85; margin-bottom: 14px; }
+  .map-tip > i { color: var(--brand); font-size: 14px; margin-top: 2px; flex: none; }
+  .map-tip b { color: var(--text-1); font-weight: 600; }
+  .map-tip .steps { color: var(--text-3); }
 </style>
 </head>
 <body>
@@ -280,6 +312,12 @@
       <el-main>
       <!-- ══════════ 1688发票 ══════════ -->
       <div v-show="page === 'board'" id="page-board">
+        <!-- 页内 Tab（设计稿：发票工作台 / 税名核对同屏）：第二个 Tab 只是切到现有税名核对页，业务不变 -->
+        <div class="inv-tabs">
+          <div class="inv-tab is-active">发票工作台</div>
+          <div class="inv-tab" @click="switchPage('mapping')">税名核对</div>
+        </div>
+
         <!-- 统计卡 -->
         <el-row :gutter="12" class="section-card">
           <el-col :xs="12" :sm="8" :md="4" v-for="s in statCards" :key="s.key">
@@ -318,6 +356,20 @@
           <el-progress :percentage="taskPercent" :stroke-width="10" :show-text="false"></el-progress>
           <div class="log-panel" ref="logPanel" v-html="logHtml"></div>
         </el-card>
+
+        <!-- 本机助手连接（设计稿卡型）：在线才能发催收；待发队列 = 断线/中断后未发完的条数 -->
+        <div class="agent-card">
+          <span class="kv">
+            <span class="dot" :class="{ on: agent.online }"></span>
+            <b>{{ agent.online ? '本机助手已连接' : '本机助手未连接' }}</b>
+          </span>
+          <span class="kv" v-if="agentVer">版本 <b>{{ agentVer }}</b></span>
+          <span class="kv">待发队列 <b>{{ (resumable && resumable.pending) || 0 }}</b> 条</span>
+          <span class="kv" v-if="resumable && resumable.failed">上次失败 <b>{{ resumable.failed }}</b> 条</span>
+          <span style="flex:1"></span>
+          <el-button v-if="!agent.online" size="mini" type="primary" plain @click="bindAgent">连接助手</el-button>
+          <el-button v-else size="mini" @click="openDownload">下载最新版</el-button>
+        </div>
 
         <!-- 工具栏 -->
         <el-card class="section-card" shadow="never" :body-style="{ padding: '12px 14px' }">
@@ -551,15 +603,18 @@
       <div v-if="page === 'mapping'" id="page-mapping" v-loading="map.loading">
         <div class="page-head">
           <h2>税名核对</h2>
-          <el-alert type="info" :closable="false" show-icon style="margin-top:8px"
-            title="本页面是处理税务已开票公司名称无法在 1688 商家匹配到的，需要你手动匹配，操作步骤如下">
-            <div style="font-size:12px;line-height:1.9">
-              ① 看下面「待人工比对」—— 那是系统认不出来的发票名称<br>
-              ② 在右边输入 1688 商家的名字，从下拉里选中，点「保存」<br>
-              ③ 如果这个名称确实不是 1688 上任何一家店，点「忽略」，它就不会再出现，也不会被统计进去<br>
-              配对成功的会移到下面「已维护映射」里；
+          <div class="map-tip">
+            <i class="el-icon-info"></i>
+            <div>
+              <b>把税务局已开票、但系统认不出的销方名称，手工匹配到 1688 商家。</b>
+              <span class="steps">
+                ① 看「待人工比对」—— 那是系统认不出来的发票名称；
+                ② 右边输入 1688 商家名字，从下拉里选中，点「保存」；
+                ③ 确实不是 1688 上任何一家店就点「忽略」（不再出现、也不计入统计）。
+                配对成功的会移到「已维护映射」；
+              </span>
             </div>
-          </el-alert>
+          </div>
         </div>
         <el-card shadow="never" class="section-card">
           <div slot="header"><b>待人工比对</b> <span class="loginid">（{{ map.unmatched.length }} 个销方名称未匹配）</span></div>
@@ -1815,13 +1870,13 @@
                   title="请先在上方选择要以哪个账号的身份查看"
                   description="超级管理员自己没有独立的拼多多数据；选定账号后，订单、登录与同步都属于该账号。"></el-alert>
 
-        <!-- 汇总 -->
-        <div style="display:flex;gap:12px;margin:12px 0;flex-wrap:wrap">
-          <el-card v-for="s in pddStats" :key="s.label" shadow="never" :body-style="{ padding: '12px 16px' }"
-                   style="flex:1;min-width:150px">
-            <div style="font-size:20px;font-weight:600;color:#26282c">{{ s.value }}</div>
-            <div class="loginid">{{ s.label }}</div>
-            <div class="loginid" v-if="s.sub">{{ s.sub }}</div>
+        <!-- 汇总（卡型与 1688发票页统计卡统一：数字 24/700、标签 12 次级色） -->
+        <div class="stat-row">
+          <el-card v-for="s in pddStats" :key="s.label" shadow="never" class="stat-card"
+                   :body-style="{ padding: '14px 16px' }" style="flex:1;min-width:150px">
+            <div class="num">{{ s.value }}</div>
+            <div class="label">{{ s.label }}</div>
+            <div class="sub" v-if="s.sub">{{ s.sub }}</div>
           </el-card>
         </div>
 
