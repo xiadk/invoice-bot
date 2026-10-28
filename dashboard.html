@@ -253,6 +253,22 @@
                 padding-bottom: 12px; margin-bottom: 12px; border-bottom: 1px solid var(--line); }
   .filter-bar .fb-label { font-size: 12px; color: var(--text-2); }
   .filter-bar .fb-spacer { flex: 1; }
+  /* 牵牛花：趋势图 + 预警面板左右两栏（窄屏自动上下叠） */
+  .qnh-split { display: flex; gap: 14px; align-items: stretch; flex-wrap: wrap; }
+  .qnh-split .split-main { flex: 1 1 460px; min-width: 0; }
+  .qnh-split .split-side { flex: 0 0 300px; }
+  @media (max-width: 1180px) { .qnh-split .split-side { flex: 1 1 100%; } }
+  .warn-kv { display: flex; flex-direction: column; gap: 8px; }
+  .warn-row { display: flex; align-items: baseline; justify-content: space-between; gap: 10px;
+              padding-bottom: 8px; border-bottom: 1px dashed var(--line); }
+  .warn-row:last-child { border-bottom: 0; padding-bottom: 0; }
+  .warn-row .wk { font-size: 12px; color: var(--text-2); }
+  .warn-row .wv { font-size: 16px; font-weight: 700; color: var(--text-1); }
+  .warn-row .wv.s-warn { color: #e53935; }
+  .warn-row .wv.small { font-size: 12px; font-weight: 500; color: var(--text-2); }
+  /* 独立配置页的返回入口（面包屑式，左侧页头内） */
+  .back-link { color: var(--text-2); cursor: pointer; margin-right: 10px; transition: color .15s; }
+  .back-link:hover { color: var(--brand); }
   /* 账单两级表头：一级分组（收入 / 支出 / 净收入）压深一档，与二级细项区分。
      vendor/element-ui 里给表头统一加了 th.el-table__cell{background:#F5F7FA}，
      且固定列会复制一份表头，故这里两处都写并用 !important 压过库样式。 */
@@ -1512,13 +1528,16 @@
 
       <!-- ══════════ 退单列表（牵牛花，需管理员开启权限） ══════════ -->
       <div v-show="page === 'refund'" id="page-refund">
-        <div class="page-head">
-          <h2>退单列表</h2>
-          <div class="meta-line">
-            数据来自美团牵牛花（qnh.meituan.com）的退单列表，每日自动增量同步，也可以随时点「立即刷新数据」。
-            牵牛花的登录由「催收小助手」在<b>该账号自己的电脑</b>上完成（服务器不打开浏览器），登录态存在数据库里。
-            标记为 <el-tag size="mini" type="warning">已取货/送达</el-tag> 的退单表示商品已经出库，请重点核查。
-          </div>
+        <!-- 页头操作行：口径说明在左，配置入口在右（标题已由顶栏承担） -->
+        <div class="page-bar">
+          <span class="pb-info">
+            美团牵牛花退单明细 · 每日自动增量同步，也可随时点「立即刷新数据」。
+            登录由「催收小助手」在<b>该账号自己的电脑</b>上完成（服务器不打开浏览器），登录态存数据库。
+            标记 <el-tag size="mini" type="warning">已取货/送达</el-tag> 表示商品已出库，请重点核查。
+          </span>
+          <span class="pb-actions">
+            <el-button size="small" icon="el-icon-bell" @click="switchPage('refundalert')">提醒配置</el-button>
+          </span>
         </div>
 
         <qnh-tenant-picker v-if="isAdmin" :users="qnhUsers" :value="qnhTenant"
@@ -1537,12 +1556,13 @@
                   title="请先在上方选择要以哪个账号的身份查看"
                   description="超级管理员自己没有独立的牵牛花数据；选定账号后，退单、毛利、登录与告警配置都属于该账号。"></el-alert>
 
-        <!-- 汇总 -->
-        <div style="display:flex;gap:12px;margin:12px 0;flex-wrap:wrap">
-          <el-card v-for="s in refundStats" :key="s.label" shadow="never" :body-style="{ padding: '12px 16px' }"
-                   style="flex:1;min-width:150px">
-            <div style="font-size:20px;font-weight:600;color:#26282c">{{ s.value }}</div>
-            <div class="loginid">{{ s.label }}</div>
+        <!-- 统计卡（设计稿 4 卡）：口径全部取自 /api/qnh/summary，未新增统计项 -->
+        <div class="stat-row">
+          <el-card v-for="s in refundStats" :key="s.label" shadow="never" class="stat-card"
+                   :body-style="{ padding: '14px 16px' }" style="flex:1;min-width:150px">
+            <div class="num">{{ s.value }}</div>
+            <div class="label">{{ s.label }}</div>
+            <div class="sub">{{ s.sub }}</div>
           </el-card>
         </div>
 
@@ -1561,9 +1581,9 @@
           <div id="refund-trend" style="height:200px"></div>
         </el-card>
 
-        <!-- 筛选 + 列表 -->
+        <!-- 筛选条（设计稿 .filter-bar）：独立一行，与表头留一条分隔线 -->
         <el-card class="section-card" shadow="never">
-          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px">
+          <div class="filter-bar">
             <el-date-picker v-model="rq.range" type="daterange" size="small" value-format="yyyy-MM-dd"
                             start-placeholder="申请开始" end-placeholder="申请结束"
                             style="width:250px" unlink-panels></el-date-picker>
@@ -1582,7 +1602,7 @@
             </el-select>
             <el-button size="small" type="primary" @click="applyRefundFilter">查询</el-button>
             <el-button size="small" @click="resetRefundFilter">重置</el-button>
-            <span style="flex:1"></span>
+            <span class="fb-spacer"></span>
             <span class="loginid">共 {{ rq.total }} 条</span>
           </div>
 
@@ -1651,6 +1671,164 @@
           </div>
         </el-card>
 
+        <!-- 退单提醒设置 → 独立页「退单提醒配置」（switchPage('refundalert')），字段与接口未变 -->
+        <!-- 定时同步设置 → 独立页「牵牛花配置」（switchPage('qnhcfg')），仅超级管理员可见 -->
+
+      </div>
+
+      <!-- ══════════ 实时毛利监控（按「菜单权限」开放） ══════════ -->
+      <div v-show="page === 'profit'" id="page-profit">
+        <!-- 页头操作行：口径说明在左，配置入口在右（标题已由顶栏承担） -->
+        <div class="page-bar">
+          <span class="pb-info">
+            牵牛花「订单毛利明细」· <b>订单级</b>口径，默认按线上毛利升序（亏钱/低毛利的排最前）。
+            接口需签名，由<b>本机助手</b>在该账号电脑的牵牛花页面里代拉（监控开启后每 10 分钟一次）。
+            登录方式与退单列表一致：点「登录牵牛花」，在「催收小助手」窗口里登录。
+          </span>
+          <span class="pb-actions">
+            <el-button size="small" icon="el-icon-setting" @click="switchPage('qnhcfg')">告警配置</el-button>
+          </span>
+        </div>
+
+        <qnh-tenant-picker v-if="isAdmin" :users="qnhUsers" :value="qnhTenant"
+                           :sessions="qnhSessions" :self-id="me && me.id"
+                           @change="onQnhTenantChange"></qnh-tenant-picker>
+
+        <!-- 顶部状态条：登录 / 拉取毛利 / 定时（与退单列表页共用同一组件） -->
+        <el-card class="section-card" shadow="never" :body-style="{ padding: '12px 14px' }">
+          <qnh-login-bar :cookie="rq.cookie" :last-run="rq.lastRun" :schedule="rq.config"
+                         :who-label="qnhWhoLabel" action-text="立即拉取毛利数据"
+                         :action-loading="rq.profit.loading" :can-logout="true"
+                         @login="onQnhLoginBtn" @logout="logoutQnh" @action="pullProfit"></qnh-login-bar>
+        </el-card>
+
+        <el-alert v-if="qnhNeedPick" type="warning" :closable="false" show-icon style="margin-bottom:12px"
+                  title="请先在上方选择要以哪个账号的身份查看"
+                  description="超级管理员自己没有独立的牵牛花数据；选定账号后，毛利数据、登录与告警配置都属于该账号。"></el-alert>
+
+        <!-- 统计卡（设计稿 4 卡）：订单级只读聚合，来自 /api/qnh/profit 的 summary 字段 -->
+        <div class="stat-row">
+          <el-card v-for="s in profitStatCards" :key="s.key" shadow="never" class="stat-card" :class="s.cls"
+                   :body-style="{ padding: '14px 16px' }" style="flex:1;min-width:150px">
+            <div class="num">{{ s.num }}</div>
+            <div class="label">{{ s.label }}</div>
+            <div class="sub">{{ s.sub }}</div>
+          </el-card>
+        </div>
+
+        <!-- 趋势 + 预警：设计稿左右两栏（左图右预警，窄屏自动上下叠） -->
+        <div class="qnh-split">
+          <el-card class="section-card split-main" shadow="never">
+            <div slot="header" style="display:flex;align-items:center;gap:10px">
+              <b>每天毛利总额趋势</b>
+              <el-radio-group v-model="rq.profitDays" size="mini" @change="loadProfitTrend">
+                <el-radio-button :label="7">近 7 天</el-radio-button>
+                <el-radio-button :label="30">近 30 天</el-radio-button>
+                <el-radio-button :label="90">近 90 天</el-radio-button>
+              </el-radio-group>
+              <span style="flex:1"></span>
+              <span class="loginid">柱子 = 当天入库订单的线上毛利合计（负值红色）</span>
+            </div>
+            <div id="profit-trend" style="height:220px"></div>
+          </el-card>
+
+          <el-card class="section-card split-side" shadow="never">
+            <div slot="header" style="display:flex;align-items:center;gap:8px">
+              <b>毛利预警</b>
+              <el-tag size="mini" :type="rq.config.profitEnabled ? 'success' : 'info'">
+                {{ rq.config.profitEnabled ? '监控运行中' : '监控已关闭' }}
+              </el-tag>
+            </div>
+            <div class="warn-kv">
+              <div class="warn-row"><span class="wk">负毛利订单</span><span class="wv s-warn">{{ (rq.profit.summary && rq.profit.summary.negative) || 0 }} 单</span></div>
+              <div class="warn-row"><span class="wk">已推送告警</span><span class="wv">{{ rq.profit.alerts || 0 }} 单</span></div>
+              <div class="warn-row"><span class="wk">入库订单总数</span><span class="wv">{{ rq.profit.total || 0 }} 单</span></div>
+              <div class="warn-row"><span class="wk">最近拉取</span><span class="wv small">{{ rq.config.profitLastPullAt ? (rq.config.profitLastPullAt + ' · ' + rq.config.profitLastPullCount + ' 条') : '尚未拉取' }}</span></div>
+            </div>
+            <el-alert v-if="channelIssues.length" type="warning" :closable="false" show-icon
+                      style="margin-top:10px"
+                      title="当前不会发送毛利告警"
+                      :description="channelIssues.join('；') + '。点右上「告警配置」补齐。'"></el-alert>
+            <el-alert v-else-if="!rq.config.profitEnabled" type="info" :closable="false" show-icon
+                      style="margin-top:10px"
+                      title="「监控开启」未打开：不会每 10 分钟自动拉取（手动拉取仍按阈值告警）"></el-alert>
+            <div v-else class="channel-ok" style="margin-top:10px">
+              <el-tag size="mini" type="success">告警通道已就绪</el-tag>
+              <div class="loginid" style="margin-top:6px">毛利专用群机器人 · 触发条件：{{ channelCondText }}</div>
+            </div>
+            <el-alert v-if="rq.profit.error" type="warning" :title="rq.profit.error" :closable="false" show-icon
+                      style="margin-top:10px"></el-alert>
+            <el-alert v-else-if="rq.config.profitLastError" type="error" :closable="false" show-icon
+                      style="margin-top:10px"
+                      :title="'最近一次拉取失败：' + rq.config.profitLastError"></el-alert>
+          </el-card>
+        </div>
+
+        <el-card class="section-card" shadow="never">
+          <div slot="header" style="display:flex;align-items:center;gap:10px">
+            <b>订单级毛利明细</b>
+            <span class="loginid">亏损/低毛利置顶 · 共 {{ rq.profit.total || 0 }} 单</span>
+            <span style="flex:1"></span>
+            <span class="loginid">线上毛利 = 预计收入 − 成本；告警按阈值推送，每单只推一次</span>
+          </div>
+          <el-table :data="rq.profit.rows" size="small" border max-height="440"
+                    :default-sort="{ prop: 'profit', order: 'ascending' }"
+                    empty-text="暂无毛利数据（点「立即拉取毛利数据」获取当天的订单毛利明细）">
+            <el-table-column label="订单编号" width="90" align="center" prop="orderSeq">
+              <template slot-scope="p"><span class="loginid">{{ p.row.orderSeq || '—' }}</span></template>
+            </el-table-column>
+            <el-table-column label="订单号" width="200"><template slot-scope="p"><span class="loginid">{{ p.row.orderNo }}</span></template></el-table-column>
+            <el-table-column label="渠道" width="110"><template slot-scope="p">{{ p.row.channelName || '—' }}</template></el-table-column>
+            <el-table-column label="门店" min-width="170"><template slot-scope="p">{{ p.row.storeName || '—' }}</template></el-table-column>
+            <el-table-column label="下单时间" width="160"><template slot-scope="p">{{ p.row.orderTime || '—' }}</template></el-table-column>
+            <el-table-column label="预计收入（元）" width="130" align="right">
+              <template slot-scope="p">{{ p.row.estIncome == null ? '—' : p.row.estIncome.toFixed(2) }}</template>
+            </el-table-column>
+            <el-table-column label="线上毛利（元）" width="130" align="right" prop="profit" sortable>
+              <template slot-scope="p">
+                <span :class="p.row.alerted ? 'amount' : 'amount ok'">{{ p.row.profit == null ? '—' : p.row.profit.toFixed(2) }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="线上毛利率" width="110" align="right">
+              <template slot-scope="p">{{ p.row.profitRate == null ? '—' : p.row.profitRate.toFixed(2) + '%' }}</template>
+            </el-table-column>
+            <el-table-column label="告警" width="90">
+              <template slot-scope="p">
+                <el-tag v-if="p.row.alerted" size="mini" type="danger">已告警</el-tag>
+                <el-tag v-else size="mini" type="success">正常</el-tag>
+              </template>
+            </el-table-column>
+          </el-table>
+        </el-card>
+      </div>
+
+      <!-- ══════════ 退单提醒配置（从退单列表「提醒配置」进入；侧边栏不新增项） ══════════ -->
+      <div v-show="page === 'refundalert'" id="page-refundalert">
+        <div class="page-bar">
+          <span class="pb-info">
+            <span class="back-link" @click="switchPage('refund')"><i class="el-icon-arrow-left"></i> 返回退单列表</span>
+            <b>退单提醒</b> · 企业微信推送设置（每个账号配自己的机器人与模板，互不影响）
+          </span>
+          <span class="pb-actions">
+            <el-tag size="small" type="info">当前账号：{{ qnhConfigOwner }}</el-tag>
+          </span>
+        </div>
+
+        <qnh-tenant-picker v-if="isAdmin" :users="qnhUsers" :value="qnhTenant"
+                           :sessions="qnhSessions" :self-id="me && me.id"
+                           @change="onQnhTenantChange"></qnh-tenant-picker>
+
+        <el-card class="section-card" shadow="never" :body-style="{ padding: '12px 14px' }">
+          <qnh-login-bar :cookie="rq.cookie" :last-run="rq.lastRun" :schedule="rq.config"
+                         :who-label="qnhWhoLabel" action-text="立即刷新数据"
+                         :action-loading="rq.syncing" :can-logout="true"
+                         @login="onQnhLoginBtn" @logout="logoutQnh" @action="doSync"></qnh-login-bar>
+        </el-card>
+
+        <el-alert v-if="qnhNeedPick" type="warning" :closable="false" show-icon style="margin-bottom:12px"
+                  title="请先在上方选择要以哪个账号的身份查看"
+                  description="超级管理员自己没有独立的牵牛花数据；选定账号后，提醒配置属于该账号。"></el-alert>
+
         <!-- 提醒设置（每个账号配自己的机器人与模板） -->
         <el-card class="section-card" shadow="never">
           <div slot="header"><b>退单提醒设置</b> <span class="loginid">（当前账号：{{ qnhConfigOwner }}）</span></div>
@@ -1689,6 +1867,43 @@
             提醒按退单号去重，同一笔退单只推一次；申请超 24 小时仍未处理的退单会另外推送超时提醒。
           </div>
         </el-card>
+      </div>
+
+      <!-- ══════════ 牵牛花配置（毛利告警 + 数据同步；从退单/毛利页按钮进入） ══════════ -->
+      <div v-show="page === 'qnhcfg'" id="page-qnhcfg">
+        <div class="page-bar">
+          <span class="pb-info">
+            <span class="back-link" @click="switchPage(canProfit ? 'profit' : 'refund')"><i class="el-icon-arrow-left"></i> 返回</span>
+            <b>牵牛花配置</b> · 毛利告警与数据同步设置（登录态、同步时间点与告警阈值都在这里）
+          </span>
+          <span class="pb-actions">
+            <el-tag size="small" type="info">当前账号：{{ qnhConfigOwner }}</el-tag>
+          </span>
+        </div>
+
+        <qnh-tenant-picker v-if="isAdmin" :users="qnhUsers" :value="qnhTenant"
+                           :sessions="qnhSessions" :self-id="me && me.id"
+                           @change="onQnhTenantChange"></qnh-tenant-picker>
+
+        <el-card class="section-card" shadow="never" :body-style="{ padding: '12px 14px' }">
+          <qnh-login-bar :cookie="rq.cookie" :last-run="rq.lastRun" :schedule="rq.config"
+                         :who-label="qnhWhoLabel"
+                         :action-text="canProfit ? '立即拉取毛利数据' : '立即刷新数据'"
+                         :action-loading="canProfit ? rq.profit.loading : rq.syncing" :can-logout="true"
+                         @login="onQnhLoginBtn" @logout="logoutQnh"
+                         @action="canProfit ? pullProfit : doSync">
+            <template slot="actions">
+              <el-button v-if="canProfit && canRefund" size="small" :loading="rq.syncing" @click="doSync"
+                         title="从牵牛花重新拉一轮当天退单（与退单列表页「立即刷新数据」同一个动作）">
+                立即刷新退单
+              </el-button>
+            </template>
+          </qnh-login-bar>
+        </el-card>
+
+        <el-alert v-if="qnhNeedPick" type="warning" :closable="false" show-icon style="margin-bottom:12px"
+                  title="请先在上方选择要以哪个账号的身份查看"
+                  description="超级管理员自己没有独立的牵牛花数据；选定账号后，登录、同步与告警配置都属于该账号。"></el-alert>
 
         <!-- 定时同步（全局，仅超级管理员） -->
         <el-card v-if="isAdmin" class="section-card" shadow="never">
@@ -1716,35 +1931,6 @@
             到点后由服务进程内的调度器对<b>每个已登录牵牛花的账号</b>各跑一轮当天增量同步；普通账号看不到这一块。
           </div>
         </el-card>
-
-      </div>
-
-      <!-- ══════════ 实时毛利监控（按「菜单权限」开放） ══════════ -->
-      <div v-show="page === 'profit'" id="page-profit">
-        <div class="page-head">
-          <h2>实时毛利监控</h2>
-          <div class="meta-line">
-            数据来自牵牛花「订单毛利明细」，默认按<b>线上毛利从小到大</b>排列，亏钱/低毛利的订单排在最前面。
-            接口需要签名，由<b>本机助手</b>在该账号电脑的牵牛花页面里代拉（监控开启后每 10 分钟自动拉一次）。
-            登录方式与退单列表完全一致：点「登录牵牛花」，在「催收小助手」弹出的窗口里登录。
-          </div>
-        </div>
-
-        <qnh-tenant-picker v-if="isAdmin" :users="qnhUsers" :value="qnhTenant"
-                           :sessions="qnhSessions" :self-id="me && me.id"
-                           @change="onQnhTenantChange"></qnh-tenant-picker>
-
-        <!-- 顶部状态条：登录 / 拉取毛利 / 定时（与退单列表页共用同一组件） -->
-        <el-card class="section-card" shadow="never" :body-style="{ padding: '12px 14px' }">
-          <qnh-login-bar :cookie="rq.cookie" :last-run="rq.lastRun" :schedule="rq.config"
-                         :who-label="qnhWhoLabel" action-text="立即拉取毛利数据"
-                         :action-loading="rq.profit.loading" :can-logout="true"
-                         @login="onQnhLoginBtn" @logout="logoutQnh" @action="pullProfit"></qnh-login-bar>
-        </el-card>
-
-        <el-alert v-if="qnhNeedPick" type="warning" :closable="false" show-icon style="margin-bottom:12px"
-                  title="请先在上方选择要以哪个账号的身份查看"
-                  description="超级管理员自己没有独立的牵牛花数据；选定账号后，毛利数据、登录与告警配置都属于该账号。"></el-alert>
 
         <!-- 告警配置项（每个账号配自己的机器人与阈值） -->
         <el-card class="section-card" shadow="never">
@@ -1790,80 +1976,6 @@
           <div class="form-tip" style="margin-top:8px">
             低于阈值的订单会推送企业微信，每单只告警一次。<b>阈值填 0 表示不启用该条件</b>，两个都为 0 则不产生告警。
           </div>
-        </el-card>
-
-        <el-card class="section-card" shadow="never">
-          <div slot="header" style="display:flex;align-items:center;gap:10px">
-            <b>实时毛利监控预警</b>
-            <el-tag size="mini" :type="rq.config.profitEnabled ? 'success' : 'info'">
-              {{ rq.config.profitEnabled ? '监控运行中' : '监控已关闭' }}
-            </el-tag>
-            <span style="flex:1"></span>
-            <span class="loginid" v-if="rq.config.profitLastPullAt">
-              最近拉取 {{ rq.config.profitLastPullAt }} · {{ rq.config.profitLastPullCount }} 条
-            </span>
-          </div>
-          <el-alert v-if="channelIssues.length" type="warning" :closable="false" show-icon
-                    style="margin-bottom:10px"
-                    title="当前不会发送毛利告警"
-                    :description="channelIssues.join('；') + '。在上方「毛利告警配置项」里补齐。'"></el-alert>
-          <el-alert v-else-if="!rq.config.profitEnabled" type="info" :closable="false" show-icon
-                    style="margin-bottom:10px"
-                    title="「监控开启」未打开：不会每 10 分钟自动拉取（手动拉取仍会按阈值告警）"></el-alert>
-          <div v-else class="channel-ok">
-            <el-tag size="mini" type="success">告警通道已就绪</el-tag>
-            <span class="loginid" style="margin-left:8px">
-              毛利专用群机器人 · 触发条件：{{ channelCondText }}
-            </span>
-          </div>
-          <el-alert v-if="rq.profit.error" type="warning" :title="rq.profit.error" :closable="false" show-icon
-                    style="margin-bottom:10px"></el-alert>
-          <el-alert v-else-if="rq.config.profitLastError" type="error" :closable="false" show-icon
-                    style="margin-bottom:10px"
-                    :title="'最近一次拉取失败：' + rq.config.profitLastError"></el-alert>
-          <el-table :data="rq.profit.rows" size="small" border max-height="440"
-                    :default-sort="{ prop: 'profit', order: 'ascending' }"
-                    empty-text="暂无毛利数据（点「立即拉取毛利数据」获取当天的订单毛利明细）">
-            <el-table-column label="订单编号" width="90" align="center" prop="orderSeq">
-              <template slot-scope="p"><span class="loginid">{{ p.row.orderSeq || '—' }}</span></template>
-            </el-table-column>
-            <el-table-column label="订单号" width="200"><template slot-scope="p"><span class="loginid">{{ p.row.orderNo }}</span></template></el-table-column>
-            <el-table-column label="渠道" width="110"><template slot-scope="p">{{ p.row.channelName || '—' }}</template></el-table-column>
-            <el-table-column label="门店" min-width="170"><template slot-scope="p">{{ p.row.storeName || '—' }}</template></el-table-column>
-            <el-table-column label="下单时间" width="160"><template slot-scope="p">{{ p.row.orderTime || '—' }}</template></el-table-column>
-            <el-table-column label="预计收入（元）" width="130" align="right">
-              <template slot-scope="p">{{ p.row.estIncome == null ? '—' : p.row.estIncome.toFixed(2) }}</template>
-            </el-table-column>
-            <el-table-column label="线上毛利（元）" width="130" align="right" prop="profit" sortable>
-              <template slot-scope="p">
-                <span :class="p.row.alerted ? 'amount' : 'amount ok'">{{ p.row.profit == null ? '—' : p.row.profit.toFixed(2) }}</span>
-              </template>
-            </el-table-column>
-            <el-table-column label="线上毛利率" width="110" align="right">
-              <template slot-scope="p">{{ p.row.profitRate == null ? '—' : p.row.profitRate.toFixed(2) + '%' }}</template>
-            </el-table-column>
-            <el-table-column label="告警" width="90">
-              <template slot-scope="p">
-                <el-tag v-if="p.row.alerted" size="mini" type="danger">已告警</el-tag>
-                <el-tag v-else size="mini" type="success">正常</el-tag>
-              </template>
-            </el-table-column>
-          </el-table>
-        </el-card>
-
-        <!-- 每天毛利总额趋势 -->
-        <el-card class="section-card" shadow="never">
-          <div slot="header" style="display:flex;align-items:center;gap:10px">
-            <b>每天毛利总额趋势</b>
-            <el-radio-group v-model="rq.profitDays" size="mini" @change="loadProfitTrend">
-              <el-radio-button :label="7">近 7 天</el-radio-button>
-              <el-radio-button :label="30">近 30 天</el-radio-button>
-              <el-radio-button :label="90">近 90 天</el-radio-button>
-            </el-radio-group>
-            <span style="flex:1"></span>
-            <span class="loginid">柱子 = 当天入库订单的线上毛利合计（负值红色），无数据的日期显示 0</span>
-          </div>
-          <div id="profit-trend" style="height:220px"></div>
         </el-card>
       </div>
 
@@ -2601,7 +2713,7 @@ const vm = new Vue({
           profitLastPullAt: '', profitLastPullCount: 0,
         },
         savingCfg: false, savedCfg: false,
-        profit: { loading: false, rows: [], total: 0, alerts: 0, error: '' },
+        profit: { loading: false, rows: [], total: 0, alerts: 0, summary: {}, error: '' },
         profitDays: 30, profitTrend: [],
         log: { visible: false, row: {}, rows: [], tab: 'all', loading: false },
       },
@@ -2652,6 +2764,8 @@ const vm = new Vue({
         billing: '按月收支 · 净利润核算',
         refund: '售后 / 退款订单 · 同步监控',
         profit: '商品毛利 · 实时核算',
+        refundalert: '退单提醒 · 企业微信推送',
+        qnhcfg: '牵牛花配置 · 毛利告警与数据同步',
         admin: '平台配置 · 消息模板 · 助手治理',
         audit: '审计轨迹 · 全量留痕',
       })[this.page] || '发票催收';
@@ -2667,6 +2781,8 @@ const vm = new Vue({
         billing: '总收入 − 总支出 = 净利润；1688 / 拼多多由系统实时统计',
         refund: '牵牛花权益融合 · 退单明细与处理日志',
         profit: '订单级实时毛利 · 低于阈值推送告警',
+        refundalert: '机器人 webhook · 提醒模板 · 每账号独立',
+        qnhcfg: '登录态 · 定时同步 · 毛利告警阈值',
         admin: '助手版本治理 · 平台授权 · 用户与权限',
         audit: '操作留痕 · 保留 180 天',
       })[this.page] || '';
@@ -2897,10 +3013,27 @@ const vm = new Vue({
     refundStats() {
       const s = this.rq.summary || {};
       return [
-        { label: '退单总数', value: (s.total || 0) + ' 单' },
-        { label: '退单金额合计', value: yuan(s.amount || 0) },
-        { label: '今日新增', value: (s.today || 0) + ' 单' },
-        { label: '已取货/送达', value: (s.picked || 0) + ' 单' },
+        { label: '退单总数', value: (s.total || 0) + ' 单', sub: '其中申诉 ' + (s.appeal || 0) + ' 单' },
+        { label: '退单金额合计', value: yuan(s.amount || 0), sub: '已同步入库的全部退单' },
+        { label: '今日新增', value: (s.today || 0) + ' 单', sub: '按申请时间统计' },
+        { label: '已取货/送达', value: (s.picked || 0) + ' 单', sub: '有配送日志 ' + (s.delivered || 0) + ' 单' },
+      ];
+    },
+    /** 毛利统计卡（设计稿 4 卡）：订单级只读聚合，字段来自 /api/qnh/profit 的 summary */
+    profitStatCards() {
+      const s = this.rq.profit.summary || {};
+      const money = (v) => (v == null ? '—' : yuan(Number(v) || 0));
+      const today = Number(s.todayProfit) || 0;
+      return [
+        { key: 'today', label: '今日毛利', num: money(today), sub: (s.todayCount || 0) + ' 单入库',
+          cls: today < 0 ? 's-warn' : (today > 0 ? 's-done' : '') },
+        { key: 'total', label: '累计毛利', num: money(s.totalProfit), sub: '订单级合计（全部已入库）' },
+        { key: 'rate', label: '平均毛利率',
+          num: s.avgRate == null ? '—' : (Number(s.avgRate).toFixed(1) + '%'),
+          sub: '按订单取均值，非加权' },
+        { key: 'neg', label: '负毛利订单', num: (s.negative || 0) + ' 单',
+          sub: '已推送告警 ' + (this.rq.profit.alerts || 0) + ' 单',
+          cls: (s.negative || 0) > 0 ? 's-warn' : '' },
       ];
     },
     refundLogRows() {
@@ -3131,6 +3264,8 @@ const vm = new Vue({
       if (p === 'admin' && !this.isAdmin) p = 'board';
       if (p === 'audit' && !this.isAdmin) p = 'board';
       if (p === 'refund' && !this.canRefund) p = 'board';
+      if (p === 'refundalert' && !this.canRefund) p = 'board';
+      if (p === 'qnhcfg' && !(this.canProfit || this.canRefund)) p = 'board';
       if (p === 'profit' && !this.canProfit) p = 'board';
       if (p === 'product' && !this.canProduct) p = 'board';
       if (p === 'market' && !this.canMarket) p = 'board';
@@ -3139,12 +3274,12 @@ const vm = new Vue({
       if (p === 'admin') { this.loadConfigUI(); this.loadUsers(); this.loadBuildStatus(); this.loadAgentVersions(); }
       if (p === 'mapping') this.loadMapping();
       if (p === 'audit') this.loadOpLog();
-      if (p === 'profit' || p === 'refund' || p === 'pdd') {
+      if (p === 'profit' || p === 'refund' || p === 'pdd' || p === 'qnhcfg' || p === 'refundalert') {
         if (p === 'refund') this.reportOp('qnh.view');
         this.enterQnhPage(p);
       }
     },
-    /** 进入退单列表 / 实时毛利监控 / 拼多多发票：先确定「以哪个账号的身份」，再拉该账号的数据 */
+    /** 进入退单列表 / 实时毛利监控 / 牵牛花配置 / 退单提醒配置 / 拼多多发票：先确定「以哪个账号的身份」，再拉该账号的数据 */
     async enterQnhPage(p) {
       await this.ensureQnhTenant();
       this.qnhReload();
@@ -4410,6 +4545,7 @@ const vm = new Vue({
         this.rq.profit.rows = d.rows || [];
         this.rq.profit.total = d.total || 0;
         this.rq.profit.alerts = d.alerts || 0;
+        this.rq.profit.summary = d.summary || {};
         this.rq.profit.error = '';
       } catch (e) {
         this.rq.profit.error = '毛利数据加载失败：' + e.message;
