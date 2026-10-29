@@ -413,14 +413,28 @@ function findEditorJs() {
         try { if (ifr[i].contentDocument) roots.push(ifr[i].contentDocument); } catch (e) {}
       }
     } catch (e) {}
+    var SEL = 'pre[contenteditable="true"], div[contenteditable="true"], '
+      + '[contenteditable="true"], textarea, input[type="text"]';
+    // 不能见到第一个就认：页面里常藏着表情/富文本用的隐藏 contenteditable，
+    // 右侧「搜索商品」也是 input[type=text]。取「可见 + contenteditable/textarea 优先 + 面积最大」的那个。
+    var best = null;
+    var bestScore = -1;
     for (var n = 0; n < roots.length; n++) {
-      var root = roots[n];
-      var el = root.querySelector('pre[contenteditable="true"], div[contenteditable="true"], '
-        + '[contenteditable="true"], textarea, input[type="text"]');
-      if (el) {
-        try { el.setAttribute('data-sdc-editor', '1'); } catch (e) {}
-        return { found: true, tag: el.tagName, cls: String(el.className || '').slice(0, 80) };
+      var list = Array.from(roots[n].querySelectorAll(SEL));
+      for (var j = 0; j < list.length; j++) {
+        var el = list[j];
+        var r = el.getBoundingClientRect();
+        var vis = !!(el.offsetParent || el.getClientRects().length) && r.width > 40 && r.height > 18;
+        if (!vis) continue;
+        var kind = (el.getAttribute('contenteditable') === 'true' || el.tagName === 'TEXTAREA') ? 1 : 0;
+        var score = kind * 1e9 + r.width * r.height;
+        if (score > bestScore) { best = el; bestScore = score; }
       }
+      if (best) break;   // 主框架里有就别翻 iframe 了
+    }
+    if (best) {
+      try { best.setAttribute('data-sdc-editor', '1'); } catch (e) {}
+      return { found: true, tag: best.tagName, cls: String(best.className || '').slice(0, 80) };
     }
     return { found: false };
   })()`;
@@ -448,8 +462,12 @@ function fillJs(text) {
         el.dispatchEvent(new Event('input', { bubbles: true }));
       }
     }
-    var got = String((el.innerText != null ? el.innerText : el.value) || '');
-    return { ok: got.indexOf(String(text).slice(0, 8)) >= 0, len: got.length };
+    // ⚠ textarea / input 的 innerText 是空字符串（不是 null），走「innerText != null」分支会取到空串，
+    //   明明内容已经进去了却被判「没填入」——表单元素必须读 value（0.2.58 及之前栽在这里）。
+    var form = el.tagName === 'TEXTAREA' || el.tagName === 'INPUT';
+    var got = String(form ? (el.value || '')
+      : (el.innerText !== null && el.innerText !== undefined && el.innerText !== '' ? el.innerText : (el.textContent || '')));
+    return { ok: got.indexOf(String(text).slice(0, 8)) >= 0, len: got.length, tag: el.tagName };
   })(${JSON.stringify(text)})`;
 }
 
@@ -517,6 +535,61 @@ async function hasText(wc, snippet) {
   return !!r;
 }
 
+/** 任一片段命中即算上屏：聊天区有时会把长消息折行/截断显示，头尾各取一段更稳 */
+async function hasAnyText(wc, snippets) {
+  for (const s of snippets || []) {
+    if (s && await hasText(wc, s)) return true;
+  }
+  return false;
+}
+
+/** 页面内合成回车（最后的兜底：某些 IM 只认 keyboard 事件） */
+function synthEnterJs() {
+  return `(function () {
+    var el = document.querySelector('[data-sdc-editor="1"]');
+    if (!el) return false;
+    try { el.focus(); } catch (e) {}
+    try {
+      el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }));
+    } catch (e) { return false; }
+    return true;
+  })()`;
+}
+
+/**
+ * 真实按键回车：走浏览器输入通道，React/Vue 受控组件也认，
+ * 比页面里 dispatchEvent 合成事件可靠得多（页面提示「Shift+Enter 换行」⇒ Enter 就是发送）。
+ */
+async function nativeEnter(w) {
+  try {
+    await w.webContents.executeJavaScript(
+      '(function () { var el = document.querySelector(\'[data-sdc-editor="1"]\'); if (el) { try { el.focus(); } catch (e) {} } return true; })()',
+      true
+    ).catch(() => null);
+  } catch (e) { /* 忽略 */ }
+  try { w.focus(); } catch (e) { /* 忽略 */ }
+  await sleep(180);
+  try {
+    const ev = { keyCode: 'Return', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13, isSystemKey: false };
+    w.webContents.sendInputEvent(Object.assign({ type: 'keyDown' }, ev));
+    await sleep(90);
+    w.webContents.sendInputEvent({ type: 'char', keyCode: 13, key: '\r', text: '\r' });
+    w.webContents.sendInputEvent(Object.assign({ type: 'keyUp' }, ev));
+    return true;
+  } catch (e) { return false; }
+}
+
+/** 聊天区最后几行文本（发送失败时回传，远程能看看到底出去的是什么） */
+function lastMsgsJs(n) {
+  return `(function () {
+    try {
+      var all = String(document.body.innerText || '').split('\\n')
+        .map(function (s) { return String(s).trim(); }).filter(Boolean);
+      return all.slice(-${Math.max(1, Number(n) || 6)}).map(function (s) { return s.slice(0, 60); });
+    } catch (e) { return []; }
+  })()`;
+}
+
 /**
  * 批量催收：逐店打开客服会话 → 逐条打字发送 → 回执。
  * @param {object} task { taskId, items:[{shopId, shopName, contents:[string], orderSns:[]}], gapMs, dryRun }
@@ -560,42 +633,47 @@ async function runSend(task, api) {
         api.log(`✗ ${it.shopName || it.shopId}：输入框 25 秒内未出现`);
         continue;
       }
+      api.log(`   输入框就绪：<${ed.tag}> ${String(ed.cls || '').slice(0, 40)}`);
       let sent = 0;
       let lastErr = '';
       for (const content of it.contents) {
         if (stopped()) break;
         const filled = await chat.webContents.executeJavaScript(fillJs(content), true).catch(() => ({ ok: false, err: '填入失败' }));
+        api.log(`   填入结果：${filled && filled.ok ? 'ok' : '失败'}（<${(filled && filled.tag) || '?'}> 长度 ${filled ? filled.len : 0}/${content.length}）`);
         if (!filled || !filled.ok) { lastErr = (filled && filled.err) || '内容没能填入输入框'; break; }
         if (dryRun) {
           sent += 1;
           await sleep(600);
           continue;
         }
-        const before = await hasText(chat.webContents, content.slice(0, 12));
+        // 头尾各取一段：长消息在聊天区里可能被折行/截断，只认开头容易漏判
+        const seen = [content.slice(0, 12), content.slice(-12)];
+        const before = await hasAnyText(chat.webContents, seen);
         const s = await chat.webContents.executeJavaScript(sendJs(), true).catch(() => ({ by: '' }));
         // 发送方式打到日志里：真机排查时一眼能看出是点了按钮、还是退到回车
         api.log(`   发送动作：${s && s.by ? `点按钮（${s.where}）` : (s && s.disabled ? '按钮不可用，改用回车' : '没找到发送按钮，改用回车')}`);
-        if (!s || !s.by) {
-          // 找不到发送按钮：多数 IM 支持 Enter 发送，退回到键盘事件
-          await chat.webContents.executeJavaScript(
-            `(function () {
-              var el = document.querySelector('[data-sdc-editor="1"]');
-              if (!el) return false;
-              try { el.focus(); } catch (e) {}
-              try {
-                el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }));
-              } catch (e) { return false; }
-              return true;
-            })()`, true
-          ).catch(() => null);
-        }
+        if (!s || !s.by) await nativeEnter(chat);
         let ok = false;
-        for (let k = 0; k < 16; k += 1) {
+        for (let k = 0; k < 30; k += 1) {          // 15 秒：长消息上屏有延迟
           await sleep(500);
-          if (await hasText(chat.webContents, content.slice(0, 12))) { ok = true; break; }
+          if (await hasAnyText(chat.webContents, seen)) { ok = true; break; }
+        }
+        if (!ok) {
+          // 按钮没点动、真实回车也没生效：再补一次页面内合成的回车（两条都不成功才补，避免重复发送）
+          api.log('   15 秒内没看到消息上屏，补一次页面内合成回车…');
+          await chat.webContents.executeJavaScript(synthEnterJs(), true).catch(() => null);
+          for (let k = 0; k < 16; k += 1) {
+            await sleep(500);
+            if (await hasAnyText(chat.webContents, seen)) { ok = true; break; }
+          }
         }
         if (!ok && before) ok = true;   // 发之前聊天记录里已经有同样内容（重复催收）也算成功
-        if (ok) { sent += 1; } else { lastErr = '发送后聊天记录里没找到这条消息'; break; }
+        if (ok) { sent += 1; } else {
+          lastErr = '发送后聊天记录里没找到这条消息';
+          const msgs = await chat.webContents.executeJavaScript(lastMsgsJs(6), true).catch(() => []);
+          api.log('   聊天区最后几行：' + (Array.isArray(msgs) && msgs.length ? msgs.join(' ␟ ').slice(0, 300) : '（取不到页面文本）'));
+          break;
+        }
         await sleep(900);
       }
       const okAll = sent === it.contents.length;

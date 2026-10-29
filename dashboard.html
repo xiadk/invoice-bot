@@ -5233,6 +5233,17 @@ const vm = new Vue({
           t.total = d.total || 0;
           t.results = d.results || [];
           t.running = d.status === 'pending';
+          // 助手侧的日志（打开了哪个会话、点的按钮还是回车、有没有报错）由服务端回传，
+          // 以前这里没有接，页面上只剩「已处理 x/y 家」，排查全靠猜。
+          const remote = Array.isArray(d.log) ? d.log : [];
+          if (remote.length) {
+            const seen = t.log.length ? t.log[t.log.length - 1].text : '';
+            let started = false;
+            for (const l of remote) {
+              if (!started) { if (l.text === seen) started = true; continue; }
+              t.log.push({ t: l.t || stamp, text: l.text });
+            }
+          }
           const line = d.kind === 'send'
             ? `已处理 ${(d.results || []).length}/${d.total || 0} 家店铺`
             : (d.progress || '正在拉取…');

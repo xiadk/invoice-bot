@@ -1110,7 +1110,7 @@ const SDC_LOGIN_TTL_MS = SDC_LOGIN_TIMEOUT_MS + 60 * 1000;
 const SDC_TASK_TIMEOUT_MS = Number(process.env.SDC_TASK_TIMEOUT_MS) || 15 * 60 * 1000;
 const SDC_TASK_TTL_MS = SDC_TASK_TIMEOUT_MS + 5 * 60 * 1000;
 // 支持闪电帮帮三项能力的最低助手版本（0.2.55 起才有 sdc_login / sdc_fetch / sdc_send 内核）
-const SDC_MIN_AGENT = '0.2.58';
+const SDC_MIN_AGENT = '0.2.59';
 
 // ── 「清除本机登录态」──────────────────────────────────────────────
 // 看板点「退出 XX 账号」时，光删数据库里的 Cookie 不够：助手那边的登录窗口用的是
@@ -1590,6 +1590,16 @@ function handleAgentMessage(uid, msg) {
         pctx.progressLog = pctx.progressLog || [];
         pctx.progressLog.push({ t: new Date().toISOString().slice(11, 19), text: String(msg.text || '').slice(0, 200) });
         if (pctx.progressLog.length > 300) pctx.progressLog.splice(0, pctx.progressLog.length - 300);
+      }
+      // 闪电帮帮（取数 / 催收）：助手日志必须进这里，否则页面上只看得到「已处理 x/y 家」，
+      // 助手到底有没有打开会话、点是按钮还是回车，全变成黑盒，线上无法排查。
+      const sctx = [...SDC_TASKS.values()]
+        .filter((c) => c.userId === Number(uid) && c.status === 'pending')
+        .sort((a, b) => b.createdAt - a.createdAt)[0];
+      if (sctx) {
+        sctx.progressLog = sctx.progressLog || [];
+        sctx.progressLog.push({ t: new Date().toISOString().slice(11, 19), text: String(msg.text || '').slice(0, 200) });
+        if (sctx.progressLog.length > 300) sctx.progressLog.splice(0, sctx.progressLog.length - 300);
       }
       console.log(`[agent] uid=${uid} · ${String(msg.text || '').slice(0, 200)}`);
     }
@@ -4469,6 +4479,7 @@ const server = http.createServer(async (req, res) => {
           failCount: ctx.failCount || 0,
           dryRun: !!ctx.dryRun,
           loginish: !!ctx.loginish,
+          log: ctx.progressLog || [],
         });
       }
 
