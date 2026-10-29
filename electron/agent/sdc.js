@@ -29,6 +29,10 @@ const LOGIN_URL = `https://${HOST}/`;
 const CHAT_URL = `https://${HOST}/customer-service/chat`;
 const APPKEY = 'fe_com.sankuai.sgshopcrm.fe.purchaseshandiancangpc';
 const QS = '?yodaReady=h5&csecplatform=4&csecversion=4.3.0';
+// 默认 UA 里带 "Electron/x"，美团系站点的风控会拿它当异常指纹（不装载风控 SDK、限制交互）。
+// 换成真实 Chrome UA（与牵牛花内核同款），登录弹窗才点得动。
+const REAL_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+  + '(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
 let apiWin = null;    // 承载「页内请求」的后台窗口（已登录的同源页面）
 let loginWin = null;  // 登录窗口（用户要看着操作，必须可见）
@@ -43,6 +47,16 @@ function isSdc(url) {
   const h = hostOf(url);
   return h === HOST || /(^|\.)waimai\.meituan\.com$/i.test(h);
 }
+/**
+ * 站内导航 / 弹窗白名单：美团域才放行。
+ * 登录页、扫码、短信验证会跳到 passport 等美团子域（不在 shandiancang 下），
+ * 只认本站的话，登录跳转会被拦掉。站外一律不放行，防钓鱼跳转。
+ */
+function isMeituanHost(url) {
+  const h = hostOf(url);
+  return !!h && /(^|\.)meituan\.com$/i.test(h);
+}
+
 /** 当前页面是不是站点首页（登录窗口的落点），是就别再刷新，免得把用户正在填的东西冲掉 */
 function atLoginHome(url) {
   try {
@@ -56,7 +70,22 @@ function peekWindow() { return (loginWin && !loginWin.isDestroyed()) ? loginWin 
 function peekApiWindow() { return (apiWin && !apiWin.isDestroyed()) ? apiWin : null; }
 function peekChatWindow() { return (chatWin && !chatWin.isDestroyed()) ? chatWin : null; }
 
+/**
+ * 给窗口装上「UA + 导航/弹窗限制」。登录弹窗、聊天窗、子窗口都要装。
+ * ⚠ 弹窗不能一律 deny：站点登录是用 window.open 弹扫码/短信窗的，
+ *   全 deny 的表现就是「点登录什么都没发生」（0.2.56 之前踩过）。
+ */
+function wireWindow(w) {
+  try { w.webContents.setUserAgent(REAL_UA); } catch (e) { /* 忽略 */ }
+  w.webContents.setWindowOpenHandler(({ url }) => ({ action: isMeituanHost(url) ? 'allow' : 'deny' }));
+  w.webContents.on('will-navigate', (e, url) => { if (!isMeituanHost(url)) e.preventDefault(); });
+  // 弹出来的子窗口（登录窗/扫码窗）继承同一分区，但要再装一遍限制，免得它自己跳去站外
+  w.webContents.on('did-create-window', (child) => { try { wireWindow(child); } catch (e) { /* 忽略 */ } });
+  return w;
+}
+
 function newBaseWindow(title, opts = {}) {
+  try { session.fromPartition(PARTITION).setUserAgent(REAL_UA); } catch (e) { /* 忽略 */ }
   const w = new BrowserWindow({
     show: !!opts.show,
     width: opts.width || 1440,
@@ -69,9 +98,7 @@ function newBaseWindow(title, opts = {}) {
       backgroundThrottling: false,   // 后台也要能跑页内 fetch / 打字，不能被节流
     },
   });
-  w.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
-  w.webContents.on('will-navigate', (e, url) => { if (!isSdc(url)) e.preventDefault(); });
-  return w;
+  return wireWindow(w);
 }
 
 function getLoginWindow() {
