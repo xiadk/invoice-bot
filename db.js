@@ -714,6 +714,14 @@ async function migrate(conn, dbName) {
     if (!(await idxExists('sdc_order', 'idx_sdo_invtime'))) {
       await q('ALTER TABLE `sdc_order` ADD KEY `idx_sdo_invtime` (`user_id`,`invoice_time`)');
     }
+    // 历史数据修正（幂等）：订单已关闭 = 开不出票，原来被当成「可申请开票」，
+    // 既虚增待开票金额又会被算进催收范围。这里一次性归到档位 5「已关闭·无法开票」。
+    // 只动 1/3 两档：2 已申请说明票在流程里、4 已开票是终态，都不该被抹掉。
+    await q(
+      `UPDATE \`sdc_order\` SET stage = 5
+        WHERE stage IN (1, 3)
+          AND IFNULL(trade_status_desc, '') IN ('已关闭', '已取消', '订单关闭')`
+    );
   }
 
   // ── 毛利明细补列（老库）：订单编号 / 渠道名称 / 预计收入 ──

@@ -1,6 +1,6 @@
 {
   "name": "invoice-bot",
-  "version": "0.2.69",
+  "version": "0.2.70",
   "description": "1688/拼多多采购发票催收自动化",
   "main": "server.js",
   "scripts": {
