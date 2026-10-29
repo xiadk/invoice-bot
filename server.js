@@ -1110,7 +1110,7 @@ const SDC_LOGIN_TTL_MS = SDC_LOGIN_TIMEOUT_MS + 60 * 1000;
 const SDC_TASK_TIMEOUT_MS = Number(process.env.SDC_TASK_TIMEOUT_MS) || 15 * 60 * 1000;
 const SDC_TASK_TTL_MS = SDC_TASK_TIMEOUT_MS + 5 * 60 * 1000;
 // 支持闪电帮帮三项能力的最低助手版本（0.2.55 起才有 sdc_login / sdc_fetch / sdc_send 内核）
-const SDC_MIN_AGENT = '0.2.57';
+const SDC_MIN_AGENT = '0.2.58';
 
 // ── 「清除本机登录态」──────────────────────────────────────────────
 // 看板点「退出 XX 账号」时，光删数据库里的 Cookie 不够：助手那边的登录窗口用的是

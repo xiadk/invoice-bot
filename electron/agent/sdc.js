@@ -453,15 +453,46 @@ function fillJs(text) {
   })(${JSON.stringify(text)})`;
 }
 
-/** 点发送（按按钮文字找；找不到就发回车） */
+/**
+ * 点发送。
+ * ⚠ 不能「全局第一个叫发送的按钮就点」：右侧「咨询商品」栏里每个商品都带一个黄色「发送」，
+ *   点了它只会把商品卡片发出去，话术原地不动（0.2.57 及之前的现象：内容填进去了却发不出去）。
+ * 策略：从输入框往上逐层找容器，越靠近输入框的「发送」越可信；再按可见性与商品栏排除兜底。
+ */
 function sendJs() {
   return `(function () {
-    var btns = Array.from(document.querySelectorAll('button, [class*="btn"], [class*="send"]'));
-    var hit = btns.filter(function (b) {
-      var t = String((b.innerText || b.textContent || '')).trim();
-      return /发送|Send/i.test(t) && t.length <= 6;
-    })[0];
-    if (hit) { hit.click(); return { by: 'button' }; }
+    var ed = document.querySelector('[data-sdc-editor="1"]');
+    var SIDEBAR = '[class*="goods"], [class*="product"], [class*="sku"], [class*="aside"]';
+    function visible(b) {
+      var r = b.getBoundingClientRect();
+      return !!(b.offsetParent || b.getClientRects().length) && r.width > 0 && r.height > 0;
+    }
+    function pick(root) {
+      var list = Array.from(root.querySelectorAll('button, [role="button"], [class*="btn"], [class*="send"]'));
+      for (var i = 0; i < list.length; i++) {
+        var b = list[i];
+        var t = String((b.innerText || b.textContent || '')).trim();
+        if (t !== '发送' && !/^send$/i.test(t)) continue;
+        if (!visible(b)) continue;
+        if (b.closest(SIDEBAR)) continue;              // 商品/侧栏里的「发送」是发商品的
+        return b;
+      }
+      return null;
+    }
+    var node = ed;
+    for (var k = 0; k < 10 && node; k++) {
+      var hit = pick(node);
+      if (hit) {
+        var off = hit.disabled || hit.getAttribute('disabled') !== null
+          || String(hit.className || '').indexOf('disabled') >= 0;
+        if (off) return { by: '', disabled: true, where: 'lvl' + k };
+        hit.click();
+        return { by: 'button', where: 'lvl' + k };
+      }
+      node = node.parentElement;
+    }
+    var hit2 = pick(document.body);
+    if (hit2) { hit2.click(); return { by: 'button', where: 'global' }; }
     return { by: '' };
   })()`;
 }
@@ -542,6 +573,8 @@ async function runSend(task, api) {
         }
         const before = await hasText(chat.webContents, content.slice(0, 12));
         const s = await chat.webContents.executeJavaScript(sendJs(), true).catch(() => ({ by: '' }));
+        // 发送方式打到日志里：真机排查时一眼能看出是点了按钮、还是退到回车
+        api.log(`   发送动作：${s && s.by ? `点按钮（${s.where}）` : (s && s.disabled ? '按钮不可用，改用回车' : '没找到发送按钮，改用回车')}`);
         if (!s || !s.by) {
           // 找不到发送按钮：多数 IM 支持 Enter 发送，退回到键盘事件
           await chat.webContents.executeJavaScript(
