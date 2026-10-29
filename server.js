@@ -4669,8 +4669,8 @@ const server = http.createServer(async (req, res) => {
       }
 
       // 「批量催收」：按店铺合并成一条消息交给助手逐店发送
-      // 口径（2026-10-29）：催的是「卡住的」两档 —— 已申请开票(2) + 不支持线上开票(3)；
-      // 标题/税号/邮箱取用户选中的抬头（不传就用默认抬头）。
+      // 口径（2026-10-29 起）：除已开票(4)外都催 —— 可申请开票(1) + 已申请开票(2) + 不支持线上开票(3)；
+      // 范围由 sdc.STAGES_TO_CHAT 单一来源决定。标题/税号/邮箱取用户选中的抬头（不传就用默认抬头）。
       if (method === 'POST' && p === '/api/sdc/send') {
         const b = await readBody(req).catch(() => ({}));
         const sns = Array.isArray(b.orderSns) ? b.orderSns.map(String).filter(Boolean) : [];
@@ -4701,8 +4701,8 @@ const server = http.createServer(async (req, res) => {
         if (!shops.length) {
           return sendJson(res, 200, {
             ok: false,
-            message: '没有可催收的订单：催收只针对「已申请开票」与「不支持线上开票」两档'
-              + (shopIds.length ? '（勾选的店铺在这两档下没有订单）' : '（库里暂无这两档订单，先点刷新拉取）'),
+            message: '没有可催收的订单：除「已开票」外，可申请开票 / 已申请开票 / 不支持线上开票 三档都会催'
+              + (shopIds.length ? '（勾选的店铺在这三档下没有订单）' : '（库里暂无这三档订单，先点刷新拉取）'),
           });
         }
         // 消息内容与 1688 完全同源（config.messages 那套模板：抬头/税号/邮箱/金额 + 订单清单），
