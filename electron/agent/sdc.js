@@ -24,6 +24,8 @@ const { BrowserWindow, session } = require('electron');
 const PARTITION = 'persist:sdc';
 const HOST = 'shandiancang.waimai.meituan.com';
 const HOME_URL = `https://${HOST}/personal-center/invoice-order-management?invoiceStage=1&pageNo=1&pageSize=10`;
+// 登录窗口落点：站点首页（用户自己点页面上的登录入口，扫码/短信都行）
+const LOGIN_URL = `https://${HOST}/`;
 const CHAT_URL = `https://${HOST}/customer-service/chat`;
 const APPKEY = 'fe_com.sankuai.sgshopcrm.fe.purchaseshandiancangpc';
 const QS = '?yodaReady=h5&csecplatform=4&csecversion=4.3.0';
@@ -40,6 +42,13 @@ function hostOf(url) {
 function isSdc(url) {
   const h = hostOf(url);
   return h === HOST || /(^|\.)waimai\.meituan\.com$/i.test(h);
+}
+/** 当前页面是不是站点首页（登录窗口的落点），是就别再刷新，免得把用户正在填的东西冲掉 */
+function atLoginHome(url) {
+  try {
+    const u = new URL(url);
+    return isSdc(url) && (u.pathname === '/' || u.pathname === '');
+  } catch (e) { return false; }
 }
 
 // ── 窗口 ────────────────────────────────────────────────────────────
@@ -156,16 +165,17 @@ async function pickAccountName(wc) {
 async function runLogin(task, api) {
   const timeoutMs = Number((task && task.timeoutMs) || 0) || 5 * 60 * 1000;
   const w = getLoginWindow();
-  api.log('已在本机打开闪电帮帮窗口，请在窗口里完成登录（扫码 / 短信均可）');
+  api.log('已在本机打开闪电帮帮首页，请在窗口里点登录入口完成登录（扫码 / 短信均可）');
   try {
     const cur = w.webContents.getURL();
-    if (!isSdc(cur)) await w.loadURL(HOME_URL).catch(() => {});
+    if (!atLoginHome(cur)) await w.loadURL(LOGIN_URL).catch(() => {});
   } catch (e) { /* 加载慢不影响后续轮询 */ }
   w.show();
   w.focus();
 
   const deadline = Date.now() + timeoutMs;
   let lastNote = 0;
+  let wafHits = 0;
   while (Date.now() < deadline) {
     if (api.isStopped && api.isStopped()) { api.report({ ok: false, error: '登录已被停止' }); return; }
     if (w.isDestroyed()) { api.report({ ok: false, error: '登录窗口被关闭，登录中止' }); return; }
@@ -181,6 +191,16 @@ async function runLogin(task, api) {
       api.log(`登录成功：${name || p.subUserId}`);
       return;
     }
+    // 兜底：首页若没装载风控 SDK，裸 fetch 会被 WAF 挡成 403，登录就永远检测不出来。
+    // 连续 3 次 403 就切到订单页（那个页面一定有 SDK），再接着等用户登录。
+    if (p.hint === 'HTTP 403') {
+      wafHits += 1;
+      if (wafHits === 3) {
+        api.log('首页页内请求被风控拦截，切到订单页继续检测登录…');
+        try { await w.loadURL(HOME_URL).catch(() => {}); } catch (e) { /* 忽略 */ }
+        await sleep(3500);
+      }
+    }
     const now = Date.now();
     if (now - lastNote > 20000) {
       lastNote = now;
@@ -194,7 +214,7 @@ async function runLogin(task, api) {
 /** 托盘菜单 / 状态面板：手动打开登录页 */
 function openLogin() {
   const w = getLoginWindow();
-  try { if (!isSdc(w.webContents.getURL())) w.loadURL(HOME_URL).catch(() => {}); } catch (e) { /* 忽略 */ }
+  try { if (!atLoginHome(w.webContents.getURL())) w.loadURL(LOGIN_URL).catch(() => {}); } catch (e) { /* 忽略 */ }
   w.show();
   w.focus();
   return true;
@@ -570,7 +590,7 @@ function createSendHandler({ log = () => {} } = {}) {
 }
 
 module.exports = {
-  PARTITION, HOST, HOME_URL, CHAT_URL,
+  PARTITION, HOST, HOME_URL, LOGIN_URL, CHAT_URL,
   createLoginHandler, createFetchHandler, createSendHandler,
   openLogin, peekWindow, peekApiWindow, peekChatWindow,
   probeLogin, runLogin, runFetch, runSend, selectSession,

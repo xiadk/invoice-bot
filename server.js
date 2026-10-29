@@ -1110,7 +1110,7 @@ const SDC_LOGIN_TTL_MS = SDC_LOGIN_TIMEOUT_MS + 60 * 1000;
 const SDC_TASK_TIMEOUT_MS = Number(process.env.SDC_TASK_TIMEOUT_MS) || 15 * 60 * 1000;
 const SDC_TASK_TTL_MS = SDC_TASK_TIMEOUT_MS + 5 * 60 * 1000;
 // 支持闪电帮帮三项能力的最低助手版本（0.2.55 起才有 sdc_login / sdc_fetch / sdc_send 内核）
-const SDC_MIN_AGENT = '0.2.55';
+const SDC_MIN_AGENT = '0.2.56';
 
 // ── 「清除本机登录态」──────────────────────────────────────────────
 // 看板点「退出 XX 账号」时，光删数据库里的 Cookie 不够：助手那边的登录窗口用的是
@@ -1503,7 +1503,7 @@ function onSdcFetchDone(uid, msg) {
   });
 }
 
-/** 助手回报「闪电帮帮批量催收」结果：逐店铺落 sdc_msg_log，并按店铺回写订单的催收次数 */
+/** 助手回报「闪电帮帮批量催收」结果：逐店铺落 sdc_msg_log，并按店铺回写订单的催收次数（演练不落库） */
 function onSdcSendDone(uid, msg) {
   const ctx = SDC_TASKS.get(String((msg && msg.taskId) || ''));
   if (!ctx || ctx.kind !== 'send' || ctx.userId !== Number(uid) || ctx.status !== 'pending') return;
@@ -1512,7 +1512,10 @@ function onSdcSendDone(uid, msg) {
   ctx.okCount = Number(msg.okCount) || results.filter((r) => r.ok).length;
   ctx.failCount = Number(msg.failCount) || (results.length - ctx.okCount);
   ctx.dryRun = !!msg.dryRun;
-  sdc.logMsg(ctx.userId, results).catch((e) => console.warn(`[sdc] 催收日志写入失败：${(e && e.message) || e}`));
+  // 演练（没真发消息）不落催收历史、也不加订单的催收次数，避免把真实数据记成「催过了」
+  if (!ctx.dryRun) {
+    sdc.logMsg(ctx.userId, results).catch((e) => console.warn(`[sdc] 催收日志写入失败：${(e && e.message) || e}`));
+  }
   if (!msg.ok && !results.length) {
     ctx.status = 'failed';
     ctx.message = String(msg.error || '助手执行催收失败').slice(0, 300);
