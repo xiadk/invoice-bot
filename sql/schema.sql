@@ -286,6 +286,8 @@ CREATE TABLE IF NOT EXISTS `agent_task` (
   `error`        VARCHAR(255) DEFAULT NULL COMMENT '中断/失败原因摘要',
   `resume_of`    BIGINT UNSIGNED DEFAULT NULL
                  COMMENT '断线续跑来源：被接续的任务 id（NULL=全新任务）',
+  `title_id`     INT UNSIGNED DEFAULT NULL
+                 COMMENT '发送时选用的发票抬头（app_invoice_title.id；NULL=用账号上的老字段）',
   `started_at`   DATETIME DEFAULT NULL,
   `finished_at`  DATETIME DEFAULT NULL,
   `created_at`   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,

@@ -471,7 +471,8 @@
             <span class="spacer"></span>
             <el-button size="small" @click="openUpload('orders')" title="导入1688订单数据：上传从 1688 导出的订单 Excel 并导入（重复订单按最新数据更新）">导入订单</el-button>
             <el-button size="small" @click="openUpload('invoices')" title="导入税务局发票数据：上传从电子税务局导出的发票 Excel 并导入（重复发票按最新数据更新）">导入发票</el-button>
-            <el-button size="small" type="primary" :disabled="readonly" @click="batchSend">发送催收消息 ({{ selectedCount }})</el-button>
+            <el-button size="small" type="primary" :disabled="readonly" @click="batchSend"
+                       title="发送前会先弹框选一条开票抬头（话术里的抬头/税号/邮箱取自选中的那条）">发送催收消息 ({{ selectedCount }})</el-button>
           </div>
           <!-- 订单同步进度：只在同步中/刚结束时出现，不占用常驻版面 -->
           <div v-if="aliSync.running || aliSync.text" class="ali-sync-bar">
@@ -2189,7 +2190,8 @@
               批量申请发票{{ applySelCount ? '（' + applySelCount + '）' : '' }}
             </el-button>
             <el-button size="small" type="warning" plain :disabled="!chatSelCount"
-                       :loading="pd.applying" @click="sendPddBatch">
+                       :loading="pd.applying" @click="sendPddBatch"
+                       title="发送前会先弹框选一条开票抬头（话术里的抬头/税号/邮箱取自选中的那条）">
               批量催商家开票{{ chatSelCount ? '（' + chatSelCount + '）' : '' }}
             </el-button>
             <span style="flex:1"></span>
@@ -2284,7 +2286,8 @@
                 <el-button v-if="p.row.applyable" type="text" size="mini" :disabled="pd.applying"
                            @click="applyPddRows([p.row])">申请发票</el-button>
                 <el-button v-if="p.row.chatable" type="text" size="mini" :disabled="pd.applying"
-                           style="color:#e6a23c" @click="sendPddMsgRows([p.row])">发送催收消息</el-button>
+                           style="color:#e6a23c" @click="sendPddMsgRows([p.row])"
+                           title="发送前会先弹框选一条开票抬头">发送催收消息</el-button>
                 <!-- 已完成 + 未同步开票：平台已关闭开票入口、且订单接口拿不到数字 mall_id（聊天页必须要它），
                      自动催收发不出去 → 给「去平台催」，在平台订单页里点「联系商家」走线下开票 -->
                 <el-tooltip v-if="!p.row.applyable && !p.row.chatable && p.row.manualChat" placement="top"
@@ -2534,28 +2537,6 @@
             <span class="loginid">未勾选店铺时点「发送催收消息」= 对所有店铺的<b>已申请开票 + 不支持线上开票</b>订单批量催收</span>
           </div>
         </el-card>
-
-        <!-- 催收前选抬头：一人可配多个抬头，选中的那条作为话术里的 {companyName}/{taxNo}/{email} -->
-        <el-dialog title="选择开票抬头" :visible.sync="sd.sendDialog" width="560px" append-to-body>
-          <div class="form-tip" style="margin-bottom:10px">{{ sd.sendScopeText }}</div>
-          <el-radio-group v-model="sd.sendTitleId" style="display:block">
-            <el-radio v-for="t in sd.titles" :key="t.id" :label="t.id" style="display:block;margin:0 0 10px;height:auto;line-height:1.6">
-              <b>{{ t.title }}</b>
-              <span v-if="t.isDefault" class="el-tag el-tag--mini" style="margin-left:6px">默认</span>
-              <div class="loginid" style="font-size:12px;color:#888">
-                税号 {{ t.taxNo || '未填' }} · 邮箱 {{ t.email || '未填' }}
-              </div>
-            </el-radio>
-          </el-radio-group>
-          <div class="form-tip" v-if="!sd.titles.length">
-            还没有抬头，去左侧「抬头配置」新增一条再回来。
-          </div>
-          <span slot="footer">
-            <el-button size="small" @click="sd.sendDialog = false">取消</el-button>
-            <el-button size="small" type="primary" :disabled="!sd.sendTitleId" :loading="sd.sending"
-                       @click="confirmSdcSend">按这个抬头发送</el-button>
-          </span>
-        </el-dialog>
       </div>
 
       <!-- ══════════ 抬头配置 ══════════ -->
@@ -2815,6 +2796,31 @@
       <el-button type="primary" :loading="pwd.saving" @click="submitPwd">确定修改</el-button>
     </div>
   </el-dialog>
+
+  <!-- ══════════ 发送前选开票抬头（1688 / 拼多多 / 闪电帮帮共用同一个弹框） ══════════ -->
+  <el-dialog :title="tp.title" :visible.sync="tp.visible" width="560px" append-to-body
+             :close-on-click-modal="false" @closed="cancelPickTitle">
+    <div class="form-tip" style="margin-bottom:10px" v-if="tp.desc">{{ tp.desc }}</div>
+    <div v-if="tp.previewTpl" class="preview-box" style="margin-bottom:12px">{{ tpPreviewText }}</div>
+    <el-radio-group v-model="tp.titleId" style="display:block" v-loading="tp.loading">
+      <el-radio v-for="t in tp.rows" :key="t.id" :label="t.id"
+                style="display:block;margin:0 0 10px;height:auto;line-height:1.6">
+        <b>{{ t.title }}</b>
+        <span v-if="t.isDefault" class="el-tag el-tag--mini" style="margin-left:6px">默认</span>
+        <div class="loginid" style="font-size:12px;color:#888">
+          税号 {{ t.taxNo || '未填' }} · 邮箱 {{ t.email || '未填' }}
+        </div>
+      </el-radio>
+    </el-radio-group>
+    <div class="form-tip" v-if="!tp.loading && !tp.rows.length">
+      还没有开票抬头：先到左侧「抬头配置」新增一条（抬头 / 税号 / 邮箱），再回来发送。
+    </div>
+    <span slot="footer">
+      <el-button size="small" @click="cancelPickTitle">取消</el-button>
+      <el-button size="small" type="primary" :disabled="!tp.titleId" :loading="tp.sending"
+                 @click="confirmPickTitle">{{ tp.confirmText }}</el-button>
+    </span>
+  </el-dialog>
 </div>
 
 <!-- 前端本地依赖（项目自带 vendor 目录，不依赖外网 CDN） -->
@@ -3048,8 +3054,6 @@ const vm = new Vue({
         // 主表是店铺维度：sort 用 SHOP_SORTS 那套（默认按可开票金额从高到低）
         filter: { stage: '', sent: '', invoice: '', keyword: '', sort: 'amount_desc' },
         selected: [], picked: {},
-        // 催收前的抬头选择（一人可多条抬头；标题/税号/邮箱取自选中的那条）
-        titles: [], sendDialog: false, sendIds: [], sendTitleId: 0, sendScopeText: '',
         login: { logined: false, accountName: '', subUserId: '', lastSyncAt: null, writtenAt: null },
         agent: { online: false, agentVer: '', minVer: '', outdated: false },
         users: [], sessions: [],
@@ -3063,6 +3067,12 @@ const vm = new Vue({
       it: {
         loading: false, saving: false, rows: [], dialog: false,
         form: { id: 0, title: '', taxNo: '', email: '', isDefault: false },
+      },
+      // 发送前选开票抬头：1688 / 拼多多 / 闪电帮帮共用一个弹框（话术变量同源，都是 {companyName}/{taxNo}/{email}）
+      tp: {
+        visible: false, loading: false, sending: false, rows: [], titleId: 0,
+        title: '选择开票抬头', desc: '', confirmText: '按这个抬头发送',
+        previewTpl: '',   // 有模板时按选中的抬头实时渲染预览（拼多多用；1688 无预览）
       },
       // 1688发票数据
       companies: [], sent: {}, invSummary: null, boardLoading: false,
@@ -3327,6 +3337,20 @@ const vm = new Vue({
         companyName: u.companyName || '（未设置公司全称）',
         taxNo: u.taxNo || '（未设置税号）',
         email: u.email || '（未设置邮箱）',
+        orderSn: '261022-076095220081773',
+        amount: '15.11',
+      };
+      return tpl.replace(/\{(companyName|taxNo|email|orderSn|amount)\}/g, (m, k) => vars[k] || '');
+    },
+    // 选抬头弹框里的实时预览：切换抬头时立刻按那条抬头重新渲染（示例订单号/金额固定）
+    tpPreviewText() {
+      const tpl = String(this.tp.previewTpl || '');
+      if (!tpl) return '';
+      const t = (this.tp.rows || []).find((r) => Number(r.id) === Number(this.tp.titleId)) || {};
+      const vars = {
+        companyName: t.title || '（未设置抬头）',
+        taxNo: t.taxNo || '（未设置税号）',
+        email: t.email || '（未设置邮箱）',
         orderSn: '261022-076095220081773',
         amount: '15.11',
       };
@@ -4192,15 +4216,31 @@ const vm = new Vue({
       } catch (e) { this.$message.error('停止失败：' + e.message); }
     },
     // ── 发送 ──
-    async sendOne(loginId) { if (this.readonly) return; await this.doSend([loginId]); },
+    async sendOne(loginId) {
+      if (this.readonly) return;
+      // 把会员名（= 1688 店铺）显示在弹框里，避免「点了哪家」记不清
+      const owner = (this.companies || []).find((c) => (c.members || []).some((x) => x.loginId === loginId));
+      const m = owner ? (owner.members || []).find((x) => x.loginId === loginId) : null;
+      const label = (m && (m.sellerLogin || m.loginId)) || loginId;
+      const titleId = await this.pickTitle({
+        desc: '给「' + label + '」发送催收消息前，先选一条发票抬头'
+          + '（话术里的 {companyName}/{taxNo}/{email} 取自这里）',
+        confirmText: '按这个抬头发送',
+      });
+      if (!titleId) return;
+      await this.doSend([loginId], titleId);
+    },
     async batchSend() {
       if (this.readonly) { this.$message.warning('只读模式下不能发送催收消息'); return; }
       if (this.selectedCount === 0) { this.$message.warning('请先勾选会员名（展开公司后可用公司/会员名复选框勾选）'); return; }
       const gap = await this.getGapHint();
-      try {
-        await this.$confirm(`确认给 ${this.selectedCount} 个会员名发送催收消息？\n每个会员名 3 条消息（模板+订单清单+提醒），金额与订单号按该会员名统计；间隔${gap}`, '确认发送', { type: 'warning' });
-      } catch (e) { return; }
-      await this.doSend(Object.keys(this.selected));
+      const titleId = await this.pickTitle({
+        desc: `将给 ${this.selectedCount} 个会员名发送催收消息：每个会员名 3 条消息（模板 + 订单清单 + 提醒），`
+          + `金额与订单号按该会员名统计；间隔 ${gap}。话术里的 {companyName}/{taxNo}/{email} 取自下面选中的抬头。`,
+        confirmText: `发送给 ${this.selectedCount} 个会员名`,
+      });
+      if (!titleId) return;
+      await this.doSend(Object.keys(this.selected), titleId);
     },
     async getGapHint() {
       try {
@@ -4215,7 +4255,7 @@ const vm = new Vue({
         return `${lo}~${hi}秒（已提前加载下一家，通常不再额外等待），预计总时长约${Math.round(this.selectedCount * perSeller / 60)}分钟`;
       } catch (e) { return '15~30秒'; }
     },
-    async doSend(ids) {
+    async doSend(ids, titleId) {
       if (!this.agent.online) {
         this.$message.info('正在启动本机助手…');
         const ok = await this.ensureAgentOnline();
@@ -4225,7 +4265,10 @@ const vm = new Vue({
         }
       }
       try {
-        const d = await this.api('/api/send', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ loginIds: ids }) });
+        const d = await this.api('/api/send', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ loginIds: ids, titleId: titleId || 0 }),
+        });
         if (d.error) { this.$message.error('启动失败: ' + d.error); return; }
         // 任务已交给本机助手去跑，勾选项的使命到此为止 → 立刻清空。
         // 原来发送完列表刷新了、顶部计数却还挂着旧数字，只有按 F5 刷新页面才归零。
@@ -5072,23 +5115,20 @@ const vm = new Vue({
       if (!list.length) { this.$message.warning('请先勾选「商家处理中」的订单'); return; }
       if (this.pd.applying) return;
       if (this.qnhNeedPick) { this.$message.warning('请先选择要以哪个账号的身份操作'); return; }
-      const preview = this.esc(this.pddMsgPreview);
-      try {
-        await this.$confirm(
-          '将给 <b>' + list.length + '</b> 个商家发送催收消息'
-          + '（同一商家的多笔订单会自动合并成一条，避免重复打扰）。实际发送内容：'
-          + '<div style="margin-top:8px;padding:8px 10px;background:#f6f7f9;border-radius:6px;'
-          + 'white-space:pre-wrap;word-break:break-all;font-size:12px;line-height:1.7">' + preview + '</div>',
-          '发送催收消息确认',
-          { dangerouslyUseHTMLString: true, confirmButtonText: '发送', cancelButtonText: '再想想', type: 'warning' }
-        );
-      } catch (e) { return; }
+      // 先选抬头：话术里的 {companyName}/{taxNo}/{email} 由选中的那条渲染，预览实时跟着变
+      const titleId = await this.pickTitle({
+        desc: '将给 ' + list.length + ' 个商家发送催收消息'
+          + '（同一商家的多笔订单会自动合并成一条，避免重复打扰）。下面话术按选中的抬头实时渲染：',
+        previewTpl: String(this.cfg.pddChat || ''),
+        confirmText: '发送给 ' + list.length + ' 个商家',
+      });
+      if (!titleId) return;
 
       this.pd.applying = true;
       try {
         let d = await this.pddApi('/api/pdd/send', {
           method: 'POST', headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ orderSns: list.map((r) => r.orderSn) }),
+          body: JSON.stringify({ orderSns: list.map((r) => r.orderSn), titleId }),
         });
         // 助手未连接 → 自动唤起（xsh://run 深链 + 等待重连），成功后重试一次
         if (d.needAgent) {
@@ -5101,7 +5141,7 @@ const vm = new Vue({
           this.$message.success('助手已连接，继续发送');
           d = await this.pddApi('/api/pdd/send', {
             method: 'POST', headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ orderSns: list.map((r) => r.orderSn) }),
+            body: JSON.stringify({ orderSns: list.map((r) => r.orderSn), titleId }),
           });
         }
         if (d.error || !d.ok) {
@@ -5701,31 +5741,15 @@ const vm = new Vue({
     async openSdcSend(rows) {
       const picked = Array.isArray(rows) ? rows : (this.sd.selected || []);
       const ids = picked.map((r) => r.shop_id).filter(Boolean);
-      this.sd.sendIds = ids;
-      this.sd.sendScopeText = ids.length
-        ? `将向勾选的 ${ids.length} 家店铺发送催收消息（同一家店合并成一条）`
-        : '没有勾选店铺：将对库里所有店铺的「已申请开票 + 不支持线上开票」订单批量催收';
-      try {
-        const d = await this.sdcApi('/api/sdc/titles');
-        this.sd.titles = (d && d.rows) || [];
-      } catch (e) {
-        this.sd.titles = [];
-      }
-      if (!this.sd.titles.length) {
-        this.$message({
-          message: '还没有配置开票抬头：先去「抬头配置」加一条（抬头/税号/邮箱），否则催收消息里没有抬头信息',
-          type: 'warning', duration: 6000,
-        });
-        return;
-      }
-      this.sd.sendTitleId = this.sd.titles[0].id;
-      this.sd.sendDialog = true;
-    },
-
-    async confirmSdcSend() {
-      const ids = this.sd.sendIds || [];
-      this.sd.sendDialog = false;
-      await this.doSendSdc(ids, this.sd.sendTitleId);
+      const titleId = await this.pickTitle({
+        desc: ids.length
+          ? `将向勾选的 ${ids.length} 家店铺发送催收消息（同一家店合并成一条）。`
+            + '话术里的 {companyName}/{taxNo}/{email} 取自下面选中的抬头：'
+          : '没有勾选店铺：将对库里所有店铺的「已申请开票 + 不支持线上开票」订单批量催收。'
+            + '话术里的 {companyName}/{taxNo}/{email} 取自下面选中的抬头：',
+      });
+      if (!titleId) return;
+      await this.doSendSdc(ids, titleId);
     },
 
     async doSendSdc(shopIds, titleId) {
@@ -5748,6 +5772,58 @@ const vm = new Vue({
       } finally {
         this.sd.sending = false;
       }
+    },
+
+    // ══════ 发送前选开票抬头（1688 / 拼多多 / 闪电帮帮 三处共用同一个弹框） ══════
+    /**
+     * 弹框选一条抬头：resolve 出抬头 id；用户取消 → resolve(0)，调用方据此 return。
+     * @param {{desc?:string, previewTpl?:string, confirmText?:string, title?:string}} opts
+     * @returns {Promise<number>}
+     */
+    pickTitle(opts) {
+      const o = opts || {};
+      return new Promise((resolve) => {
+        this._tpResolve = resolve;
+        this.tp.title = o.title || '选择开票抬头';
+        this.tp.desc = o.desc || '';
+        this.tp.previewTpl = o.previewTpl || '';
+        this.tp.confirmText = o.confirmText || '按这个抬头发送';
+        this.tp.rows = [];
+        this.tp.titleId = 0;
+        this.tp.sending = false;
+        this.tp.visible = true;
+        this.loadPickTitles();
+      });
+    },
+    async loadPickTitles() {
+      this.tp.loading = true;
+      try {
+        const d = await this.sdcApi('/api/sdc/titles');
+        if (d && d.error) { this.$message.error(d.error); this.tp.rows = []; return; }
+        this.tp.rows = (d && d.rows) || [];
+        // 默认选中「默认抬头」，没有默认就选第一条：避免用户以为已选中、点确认才发现没选
+        const def = this.tp.rows.find((t) => t.isDefault) || this.tp.rows[0];
+        this.tp.titleId = def ? def.id : 0;
+      } catch (e) {
+        this.tp.rows = [];
+        this.$message.error('加载抬头失败：' + e.message);
+      } finally { this.tp.loading = false; }
+    },
+    confirmPickTitle() {
+      const id = Number(this.tp.titleId) || 0;
+      this._tpResolveDone(id);
+      this.tp.visible = false;
+    },
+    /** 取消 / 右上角关闭：一律按「放弃发送」处理（resolve 0） */
+    cancelPickTitle() {
+      this._tpResolveDone(0);
+      if (this.tp.visible) this.tp.visible = false;
+    },
+    /** 只 resolve 一次：确认后再触发 @closed 不会把结果改写回 0 */
+    _tpResolveDone(id) {
+      const fn = this._tpResolve;
+      this._tpResolve = null;
+      if (fn) fn(id);
     },
 
     // ══════ 抬头配置（本账号可维护多条：抬头 / 税号 / 收票邮箱；催收时弹框选一条） ══════

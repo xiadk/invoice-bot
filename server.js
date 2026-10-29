@@ -747,6 +747,29 @@ async function buyerInfoOf(userId) {
   return { companyName: u.company_name || '', taxNo: u.tax_no || '', email: u.email || '' };
 }
 
+/**
+ * 发送时用哪条抬头：优先用户在下拉里选的那条（app_invoice_title），
+ * 没选就用默认抬头；一条都没有才回落到账号上的老字段（兼容升级前只配过一份抬头的账号）。
+ * 三个渠道（1688 / 拼多多 / 闪电帮帮）共用同一个口径，保证话术变量来源一致。
+ * @param {number} userId
+ * @param {number} [titleId] 0/缺省 = 默认抬头
+ * @returns {Promise<{companyName:string, taxNo:string, email:string, titleId:number}>}
+ */
+async function buyerOfSend(userId, titleId) {
+  // get() 传 0 时返回默认抬头（并按需从 app_user 播种），取不到才走老字段
+  const t = await invoiceTitles.get(Number(userId) || 0, Number(titleId) || 0).catch(() => null);
+  if (t) {
+    return { companyName: t.title || '', taxNo: t.taxNo || '', email: t.email || '', titleId: Number(t.id) || 0 };
+  }
+  const old = await buyerInfoOf(userId).catch(() => null);
+  return {
+    companyName: (old && old.companyName) || '',
+    taxNo: (old && old.taxNo) || '',
+    email: (old && old.email) || '',
+    titleId: 0,
+  };
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // 本机通道：连接中枢 + 设备令牌（2026-10-14 起替代「税号当配对码」）
 //   发送动作在用户本机（桌面助手/浏览器）完成；服务器只负责下发任务、记录结果、展示进度。
@@ -1892,7 +1915,7 @@ async function resumableTask(userId) {
  * @param {'pending'|'failed'|'both'} scope
  */
 async function resumeLoginIds(userId, taskId, scope) {
-  const rows = await db.query('SELECT id, items FROM agent_task WHERE id = ? AND user_id = ?', [taskId, userId]);
+  const rows = await db.query('SELECT id, items, title_id FROM agent_task WHERE id = ? AND user_id = ?', [taskId, userId]);
   const r = rows[0];
   if (!r) throw new Error('找不到该任务（可能不属于当前账号）');
   const sum = summarizeItems(r.items);
@@ -1906,14 +1929,19 @@ async function resumeLoginIds(userId, taskId, scope) {
     seen.add(it.loginId);
     loginIds.push(it.loginId);
   }
-  return { taskId: Number(r.id), loginIds, pending: sum.pending.length, failed: sum.failed.length };
+  return {
+    taskId: Number(r.id), loginIds, pending: sum.pending.length, failed: sum.failed.length,
+    titleId: Number(r.title_id) || 0,   // 续跑沿用原任务选的那条抬头
+  };
 }
 
 /**
  * 组装并下发一次「本机助手」发送任务
  * @param {number} userId
  * @param {string[]} loginIds 要发送的卖家内部 loginId
- * @param {{resumeOf?:number}} [opts] resumeOf=断线续跑时被接续的任务 id（仅用于审计与日志）
+ * @param {{resumeOf?:number, titleId?:number}} [opts]
+ *   resumeOf=断线续跑时被接续的任务 id（仅用于审计与日志）
+ *   titleId = 发送时选用的发票抬头（app_invoice_title.id），0/缺省=回落账号老字段
  */
 async function doClientSend(userId, loginIds, opts = {}) {
   const resumeOf = Number(opts.resumeOf) || null;
@@ -1928,7 +1956,8 @@ async function doClientSend(userId, loginIds, opts = {}) {
   // 「提前加载下一家会话」：把下一家的页面加载塞进两家之间的等待里，总时长下降但
   // 两家真实发送动作的间隔不会小于 gap。关掉则退回「先等够 gap 再加载下一家」的旧节拍。
   const prefetch = rt.prefetchNextSeller !== false;
-  const buyer = await buyerInfoOf(userId);
+  // 抬头：用户在下拉里选的那条（断线续跑沿用原任务的选择，不会中途换成默认抬头）
+  const buyer = await buyerOfSend(userId, opts.titleId);
   const runConfig = { ...config, buyerInfo: buyer };
   const data = await loadSellers(userId);
 
@@ -1967,10 +1996,11 @@ async function doClientSend(userId, loginIds, opts = {}) {
   }
 
   const created = await db.exec(
-    "INSERT INTO agent_task (user_id, status, total, items, resume_of, started_at) VALUES (?, 'running', ?, ?, ?, NOW())",
+    "INSERT INTO agent_task (user_id, status, total, items, resume_of, title_id, started_at)"
+      + " VALUES (?, 'running', ?, ?, ?, ?, NOW())",
     [userId, sellers.length, JSON.stringify(sellers.map((s) => ({
       loginId: s.loginId, company: s.company, amount: s.amount, orderNos: s.orderNos, status: 'pending',
-    }))), resumeOf]
+    }))), resumeOf, buyer.titleId || null]
   );
   const taskId = created.insertId;
 
@@ -3630,7 +3660,7 @@ const server = http.createServer(async (req, res) => {
       if (!agentHub.isOnline(user.id)) {
         throw new Error('本机助手未连接：请先在本机启动「催收小助手」桌面程序，再点「续跑」');
       }
-      doClientSend(tenantId, picked.loginIds, { resumeOf: picked.taskId }).catch((e) => {
+      doClientSend(tenantId, picked.loginIds, { resumeOf: picked.taskId, titleId: picked.titleId }).catch((e) => {
         const ts = taskFor(tenantId);
         ts.running = false;
         taskLog(ts, '✗ 续跑异常: ' + e.message);
@@ -3646,6 +3676,7 @@ const server = http.createServer(async (req, res) => {
       writeGuard();
       const body = await readBody(req);
       const { loginIds } = body || {};
+      const titleId = Number((body || {}).titleId) || 0;
       if (!Array.isArray(loginIds) || loginIds.length === 0) throw new Error('缺少 loginIds');
       const t = taskFor(tenantId);
       if (t.running) throw new Error('已有任务在运行中');
@@ -3658,7 +3689,7 @@ const server = http.createServer(async (req, res) => {
         throw new Error(`这台电脑上的催收小助手是 v${vchk.current}，版本过旧：发送催收消息需要 v${vchk.min} 及以上。`
           + '请先点页面右上角「下载本机助手」安装新版，新版的停止响应更快、发送也更快。');
       }
-      doClientSend(tenantId, loginIds).catch((e) => {
+      doClientSend(tenantId, loginIds, { titleId }).catch((e) => {
         const ts = taskFor(tenantId);
         ts.running = false;
         taskLog(ts, '✗ 任务异常: ' + e.message);
@@ -4251,6 +4282,7 @@ const server = http.createServer(async (req, res) => {
       if (method === 'POST' && p === '/api/pdd/send') {
         const b = await readBody(req);
         const sns = Array.isArray(b.orderSns) ? b.orderSns : [];
+        const pddTitleId = Number(b.titleId) || 0;
         if (!sns.length) return sendJson(res, 200, { ok: false, message: '请先勾选要催收的订单' });
 
         if (!(await pdd.cookieStatus(pddUid).catch(() => null) || {}).logined) {
@@ -4285,7 +4317,7 @@ const server = http.createServer(async (req, res) => {
         // 但如果模板里用了 {orderSn}，说明用户想逐单说明，就按订单逐条发。
         const cfg = loadConfig();
         const msgCfg = pdd.getPddMessageConfig(cfg);
-        const buyer = await buyerInfoOf(Number(pddUid));
+        const buyer = await buyerOfSend(Number(pddUid), pddTitleId);
         const perOrder = /\{orderSn\}/.test(msgCfg.chat);
         const items = [];
         const seenMall = new Set();
@@ -4319,12 +4351,17 @@ const server = http.createServer(async (req, res) => {
           return sendJson(res, 200, { ok: false, needAgent: true, message: '下发催收任务失败：本机助手连接已断开。' });
         }
         PDD_TASKS.set(taskId, ctx);
-        await logOp(user, 'pdd.send.start', { tenantId: pddUid, total: items.length, invalid: invalid.length });
+        await logOp(user, 'pdd.send.start', {
+          tenantId: pddUid, total: items.length, invalid: invalid.length,
+          titleId: buyer.titleId || 0, title: buyer.companyName || '',
+        });
         return sendJson(res, 200, {
           ok: true, pending: true, taskId,
           total: items.length,
           merged: orders.length - items.length,   // 同商家合并掉的单数
           skipped: invalid,
+          title: buyer.companyName || '',
+          titleId: buyer.titleId || 0,
           preview: items[0] ? items[0].content : '',
           message: `已下发催收任务（${items.length} 个商家${orders.length > items.length ? `，${orders.length - items.length} 单同商家已合并` : ''}），正在本机助手里逐条发送…`,
         });
@@ -4665,11 +4702,8 @@ const server = http.createServer(async (req, res) => {
         // 只是把「1688 卖家」换成「闪电帮帮店铺」，话术不用另配一套。
         // 抬头由用户在弹框里选（titleId），没选就用默认抬头，再没有才回落到 app_user 上的老字段。
         const cfg = loadConfig();
-        const pickedTitle = await invoiceTitles.get(Number(sdcUid), titleId).catch(() => null);
-        const fallback = pickedTitle ? null : await buyerInfoOf(Number(sdcUid));
-        const buyer = pickedTitle
-          ? { companyName: pickedTitle.title || '', taxNo: pickedTitle.taxNo || '', email: pickedTitle.email || '' }
-          : (fallback || { companyName: '', taxNo: '', email: '' });
+        // 抬头由用户在弹框里选（titleId），没选就用账号上的老字段——与 1688 / 拼多多同一口径
+        const buyer = await buyerOfSend(Number(sdcUid), titleId);
         const runConfig = Object.assign({}, cfg, { buyerInfo: buyer });
         const items = [];
         for (const s of shops) {

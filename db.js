@@ -1003,16 +1003,26 @@ async function migrate(conn, dbName) {
       '`ok` INT NOT NULL DEFAULT 0, `fail` INT NOT NULL DEFAULT 0,' +
       '`items` JSON DEFAULT NULL, `error` VARCHAR(255) DEFAULT NULL,' +
       '`resume_of` BIGINT UNSIGNED DEFAULT NULL,' +
+      '`title_id` INT UNSIGNED DEFAULT NULL,' +
       '`started_at` DATETIME DEFAULT NULL, `finished_at` DATETIME DEFAULT NULL,' +
       '`created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,' +
       '`updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,' +
       'PRIMARY KEY (`id`), KEY `idx_user_status` (`user_id`,`status`), KEY `idx_user_created` (`user_id`,`created_at`)) ' +
       "ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='本机浏览器通道的发送任务（方案C）'"
     );
-  } else if (!(await colExists('agent_task', 'resume_of'))) {
-    // 老库已有 agent_task 但缺 resume_of（断线续跑来源）
-    await q('ALTER TABLE `agent_task` ADD COLUMN `resume_of` BIGINT UNSIGNED DEFAULT NULL ' +
-      "COMMENT '断线续跑来源：被接续的任务 id（NULL=全新任务）'");
+  } else {
+    // 老库补列：这里必须用独立 if 逐个判断，不能写成 else if 链
+    // （写成链时只有第一个缺列会被补上，后面的永远轮不到）
+    if (!(await colExists('agent_task', 'resume_of'))) {
+      // 老库已有 agent_task 但缺 resume_of（断线续跑来源）
+      await q('ALTER TABLE `agent_task` ADD COLUMN `resume_of` BIGINT UNSIGNED DEFAULT NULL ' +
+        "COMMENT '断线续跑来源：被接续的任务 id（NULL=全新任务）'");
+    }
+    if (!(await colExists('agent_task', 'title_id'))) {
+      // 发送时选了哪条发票抬头：续跑要沿用它，否则同一批消息里会混进两个抬头
+      await q('ALTER TABLE `agent_task` ADD COLUMN `title_id` INT UNSIGNED DEFAULT NULL ' +
+        "COMMENT '发送时选用的发票抬头（app_invoice_title.id；NULL=用账号上的老字段）'");
+    }
   }
 
   // ── 种子化超级管理员 + 存量数据归属 ──
