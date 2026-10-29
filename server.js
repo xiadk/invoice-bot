@@ -1142,7 +1142,7 @@ const SDC_LOGIN_TTL_MS = SDC_LOGIN_TIMEOUT_MS + 60 * 1000;
 const SDC_TASK_TIMEOUT_MS = Number(process.env.SDC_TASK_TIMEOUT_MS) || 15 * 60 * 1000;
 const SDC_TASK_TTL_MS = SDC_TASK_TIMEOUT_MS + 5 * 60 * 1000;
 // 支持闪电帮帮三项能力的最低助手版本（0.2.55 起才有 sdc_login / sdc_fetch / sdc_send 内核）
-const SDC_MIN_AGENT = '0.2.64';
+const SDC_MIN_AGENT = '0.2.67';
 
 // ── 「清除本机登录态」──────────────────────────────────────────────
 // 看板点「退出 XX 账号」时，光删数据库里的 Cookie 不够：助手那边的登录窗口用的是
@@ -4649,6 +4649,13 @@ const server = http.createServer(async (req, res) => {
         };
         if (win && win.first) {
           ctx.progressLog.push({ t: new Date().toISOString().slice(11, 19), text: '库里还没有闪电帮帮订单：首次同步拉取近一年的订单' });
+        }
+        if (win && win.invoiceFull) {
+          ctx.progressLog.push({
+            t: new Date().toISOString().slice(11, 19),
+            text: '库里还没有任何「已开票」订单：这次把开票记录全量扫一遍'
+              + '（历史单的开票时间早于增量锚点，只靠增量补不回来）',
+          });
         }
         const sent = agentHub.send(aUid, {
           type: 'sdc_fetch', taskId, pageSize: 50,

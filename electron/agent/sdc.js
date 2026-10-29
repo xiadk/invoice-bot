@@ -325,6 +325,7 @@ function mapOrderRow(r) {
   const shop = r.shop || r.seller || {};
   const moneyCents = /fen|cent/i.test(Object.keys(r).join(','));
   return {
+    src: 'order',   // 订单列表接口不含发票字段，开票状态以开票接口为准（服务端据此做降级保护）
     stage: 1,
     order_sn: String(orderSn),
     shop_id: String(pickVal(r, ['shopId', 'shopIdStr', 'sellerId', 'sellerShopId']) || shop.id || '') || null,
@@ -366,9 +367,21 @@ function mapInvoiceRow(r) {
   const applyStatus = Number(pickVal(r, ['invoiceApplyStatus']) || 0);
   const desc = String(pickVal(r, ['invoiceStatusDesc', 'invoiceApplyStatusDesc']) || '');
   const invoiceNo = pickVal(r, ['invoiceNo', 'eInvoiceNo', 'invoiceNumber']);
-  // 有发票号，或状态文案是「已开票/已开具/开票成功/已下载」→ 认定开票完成
-  const done = !!invoiceNo || /已开票|已开具|开票成功|已下载|已发送/.test(desc);
+  const invoiceDateRaw = pickVal(r, ['invoiceDate', 'invoiceTime', 'issueTime']);
+  // 开票状态：实测字段名是 invoiceStatus（未开票时为 null），配上文案与下载标志一起判
+  const invoiceStatusNum = Number(pickVal(r, ['invoiceStatus']) || 0);
+  const downloadFlag = Number(pickVal(r, ['invoiceDownloadFlag']) || 0);
+  const invoiceUrl = pickVal(r, ['url', 'invoiceUrl', 'pdfUrl']);
+  // 「已开票」的判据（任意一条命中即可，宁可多认也不少认）：
+  //   ① 有发票号 ② 有开票日期 ③ invoiceStatus > 0 ④ 已下载过 ⑤ 有发票文件地址 ⑥ 状态文案命中
+  const done = !!invoiceNo
+    || !!invoiceDateRaw
+    || invoiceStatusNum > 0
+    || downloadFlag === 1
+    || !!invoiceUrl
+    || /已开票|已开具|开票成功|已下载|已发送/.test(desc);
   return {
+    src: 'invoice',   // 开票状态的权威来源
     stage: done ? 4 : 2,
     order_sn: String(orderSn),
     shop_id: String(pickVal(r, ['shopId', 'shopIdStr']) || '') || null,
@@ -469,15 +482,19 @@ async function fetchInvoiceRows(wc, { userId, pageSize, sinceMs, api, emit, isSt
   // 增量开关：有锚点就先带 billStartTime；若第 1 页返回 0 行，无法区分「真的没有新开票」
   // 和「时间格式不被接受」，所以回退成全量拉一次（宁可多一轮请求，也不要静默同步不到）
   let useSince = Number(sinceMs) > 0;
+  // ⚠ invoiceApplyStatusList:[1] 只覆盖「已申请」，订单一开票状态就不再是 1，
+  //   接口也就不再返回它 → 库里永远停在「已申请」（实测：全库 405 单没有一条「已开票」）。
+  //   所以默认不带这个条件（返回全部开票记录）；万一网关要求必填，退回 [1] 兜底。
+  let useApplyFilter = false;
   for (;;) {
     if (isStopped()) return { rows: total, pages, skipped, error: '已停止' };
     const body = {
       pageNo,
       pageSize,
       _t: Date.now(),
-      invoiceApplyStatusList: [1],
       userIdList: [Number(userId)],
     };
+    if (useApplyFilter) body.invoiceApplyStatusList = [1];
     // 传 0 有些网关会当成非法时间直接拒，所以首次同步干脆不传这个字段
     if (useSince) body.billStartTime = Number(sinceMs);
     const r = await pageFetch(wc, INVOICE_LIST_API, body);
@@ -487,9 +504,32 @@ async function fetchInvoiceRows(wc, { userId, pageSize, sinceMs, api, emit, isSt
     }
     const d = (r.json && r.json.data) || null;
     if (!d) {
+      // 不带 invoiceApplyStatusList 被网关拒了（结构异常 / 参数缺失）→ 退回只查「已申请」，
+      // 日志写明原因：这时已开票的行仍然拿不到，需要另找接口补。
+      if (!useApplyFilter) {
+        useApplyFilter = true;
+        pageNo = 1; total = 0; skipped = 0;
+        if (api && api.log) {
+          api.log('开票接口不接受「全状态」查询（' + String((r.json && r.json.msg) || r.text || '').slice(0, 60)
+            + '），退回只查「已申请」——已开票的订单可能仍然取不到');
+        }
+        continue;
+      }
       return { rows: total, pages, skipped, error: '开票接口返回结构异常（没有 data）：' + String((r.json && r.json.msg) || r.text || '').slice(0, 120) };
     }
     const list = Array.isArray(d.data) ? d.data : [];
+    // 首页把状态相关字段打出来：已开票到底靠哪个字段体现，一眼就能确认
+    if (pageNo === 1 && api && api.log) {
+      const f = list[0] || null;
+      if (f) {
+        api.log('开票第 1 页 ' + list.length + ' 行；首行状态快照：'
+          + 'invoiceApplyStatus=' + JSON.stringify(f.invoiceApplyStatus)
+          + ' invoiceStatus=' + JSON.stringify(f.invoiceStatus)
+          + ' invoiceNumber=' + JSON.stringify(f.invoiceNumber != null ? '有值' : null)
+          + ' invoiceDate=' + JSON.stringify(f.invoiceDate)
+          + ' downloadFlag=' + JSON.stringify(f.invoiceDownloadFlag));
+      }
+    }
     // 带了时间过滤却一行都没有 → 回退全量重试第 1 页
     if (pageNo === 1 && useSince && !list.length) {
       useSince = false;
@@ -912,4 +952,6 @@ module.exports = {
   probeLogin, runLogin, runFetch, runSend, selectSession,
   // 纯函数也导出：字段映射最容易写错（字段名一换就静默变 NULL），要能单独测
   mapOrderRow, mapInvoiceRow, detectBlocked,
+  // 取数函数导出（可注入假窗口测请求体，防止再出现「参数写死导致整类数据取不到」）
+  fetchOrderList, fetchInvoiceRows,
 };
