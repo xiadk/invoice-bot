@@ -2314,7 +2314,7 @@
         <div class="page-head">
           <h2>闪电帮帮发票</h2>
           <div class="meta-line">
-            数据取自闪电帮帮「发票管理」：<b>可申请开票</b>与<b>已申请开票</b>两档。
+            订单取自闪电帮帮「订单列表」，开票状态取自「发票管理」，分<b>可申请开票 / 已申请开票 / 不支持线上开票 / 已开票</b>四档。
             该站点接口带风控签名、服务器直连会被拦截，所以拉取与催收都由<b>本机助手</b>在你自己的浏览器里完成 ——
             先确认助手已连接，再点「登录闪电帮帮」。
           </div>
@@ -2375,14 +2375,6 @@
         <!-- 筛选 + 店铺列表（一行 = 一家店铺；订单明细与催收记录在展开行里） -->
         <el-card class="section-card" shadow="never">
           <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px">
-            <span class="tb-label">档位</span>
-            <el-select v-model="sd.filter.stage" size="small" style="width:150px" placeholder="全部档位">
-              <el-option label="全部档位" value=""></el-option>
-              <el-option label="可申请开票" value="1"></el-option>
-              <el-option label="已申请开票" value="2"></el-option>
-              <el-option label="不支持线上开票" value="3"></el-option>
-              <el-option label="已开票" value="4"></el-option>
-            </el-select>
             <span class="tb-label">催收</span>
             <el-select v-model="sd.filter.sent" size="small" style="width:160px"
                        title="已催收 = 有成功催收记录；最近 N 天未催收 = N 天内没有成功催收记录（含从未催收）">
@@ -2522,7 +2514,7 @@
             <el-table-column label="操作" width="150" fixed="right">
               <template slot-scope="p">
                 <el-button size="mini" type="primary" :disabled="!p.row.chatable || !p.row.chatCount"
-                           :loading="sd.sending" :title="p.row.chatCount ? '催这家店「已申请 + 不支持线上开票」的 ' + p.row.chatCount + ' 单' : '这家店没有「已申请」或「不支持线上开票」的订单，不用催'"
+                           :loading="sd.sending" :title="!p.row.chatable ? '这家店没有店铺 ID，换不到客服会话' : (p.row.chatCount ? '催这家店「可申请 + 已申请 + 不支持线上开票」的 ' + p.row.chatCount + ' 单' : '这家店的订单都已开票，不用催')"
                            @click="openSdcSend([p.row])">催收消息</el-button>
               </template>
             </el-table-column>
@@ -2534,7 +2526,7 @@
                            @current-change="onSdcPage" @size-change="onSdcSize"></el-pagination>
             <span class="total">共 {{ sd.total }} 家店铺</span>
             <span style="flex:1"></span>
-            <span class="loginid">未勾选店铺时点「发送催收消息」= 对所有店铺的<b>已申请开票 + 不支持线上开票</b>订单批量催收</span>
+            <span class="loginid">未勾选店铺时点「发送催收消息」= 对所有店铺的<b>可申请开票 + 已申请开票 + 不支持线上开票</b>订单批量催收（已开票的不催）</span>
           </div>
         </el-card>
       </div>
@@ -3052,7 +3044,8 @@ const vm = new Vue({
         loading: false, syncing: false, sending: false,
         rows: [], total: 0, amount: 0, page: 1, size: 20,
         // 主表是店铺维度：sort 用 SHOP_SORTS 那套（默认按可开票金额从高到低）
-        filter: { stage: '', sent: '', invoice: '', keyword: '', sort: 'amount_desc' },
+        // 档位不再作为筛选条件（2026-10-29 按要求删除），要看档位分布直接看列表里的「开票档位」列
+        filter: { sent: '', invoice: '', keyword: '', sort: 'amount_desc' },
         selected: [], picked: {},
         login: { logined: false, accountName: '', subUserId: '', lastSyncAt: null, writtenAt: null },
         agent: { online: false, agentVer: '', minVer: '', outdated: false },
@@ -3554,7 +3547,7 @@ const vm = new Vue({
         {
           label: '待开票金额',
           value: yuan(Math.max(0, a(applyable) + a(applied) + a(blocked))),
-          sub: `可催收 ${n(applied) + n(blocked)} 单（已申请 + 不支持线上）`,
+          sub: `可催收 ${n(applyable) + n(applied) + n(blocked)} 单（可申请 + 已申请 + 不支持线上）`,
         },
       ];
     },
@@ -5511,7 +5504,6 @@ const vm = new Vue({
       try {
         const q = new URLSearchParams();
         const f = this.sd.filter || {};
-        if (f.stage !== '') q.set('stage', f.stage);
         if (f.sent) q.set('sent', f.sent);
         if (f.invoice) q.set('invoice', f.invoice);
         if (f.keyword) q.set('keyword', f.keyword);
@@ -5539,7 +5531,6 @@ const vm = new Vue({
       try {
         const q = new URLSearchParams();
         const f = this.sd.filter || {};
-        if (f.stage !== '') q.set('stage', f.stage);
         if (f.keyword) q.set('keyword', f.keyword);
         q.set('shopId', row.shop_id || '__none__');   // 空串那组也要能展开看订单
         q.set('size', '200');
@@ -5691,7 +5682,7 @@ const vm = new Vue({
 
     applySdcFilter() { this.sd.page = 1; this.clearSdcPicked(); this.loadSdcOrders(); },
     resetSdcFilter() {
-      this.sd.filter = { stage: '', sent: '', invoice: '', keyword: '', sort: 'amount_desc' };
+      this.sd.filter = { sent: '', invoice: '', keyword: '', sort: 'amount_desc' };
       this.sd.page = 1;
       this.clearSdcPicked();
       this.loadSdcOrders();
@@ -5736,7 +5727,7 @@ const vm = new Vue({
 
     /**
      * 点「发送催收消息」：先弹框选抬头（一人可配多个抬头），确认后再下发。
-     * 没勾店铺 = 对库里所有店铺的「已申请 + 不支持线上开票」订单批量催。
+     * 没勾店铺 = 对库里所有店铺的「可申请 + 已申请 + 不支持线上开票」订单批量催（已开票不催）。
      */
     async openSdcSend(rows) {
       const picked = Array.isArray(rows) ? rows : (this.sd.selected || []);
@@ -5745,7 +5736,7 @@ const vm = new Vue({
         desc: ids.length
           ? `将向勾选的 ${ids.length} 家店铺发送催收消息（同一家店合并成一条）。`
             + '话术里的 {companyName}/{taxNo}/{email} 取自下面选中的抬头：'
-          : '没有勾选店铺：将对库里所有店铺的「已申请开票 + 不支持线上开票」订单批量催收。'
+          : '没有勾选店铺：将对库里所有店铺的「可申请开票 + 已申请开票 + 不支持线上开票」订单批量催收。'
             + '话术里的 {companyName}/{taxNo}/{email} 取自下面选中的抬头：',
       });
       if (!titleId) return;
