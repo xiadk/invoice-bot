@@ -2404,9 +2404,12 @@
             <span class="loginid">共 {{ sd.total }} 家店铺 · 待开票 {{ sdcPendingTotal }} 元</span>
           </div>
 
+          <!-- row-key + reserve-selection：与拼多多列表同一套多选（表头有全选/半选，翻页后仍记得勾过哪些店，
+               计数与发送范围则由 sd.picked 跨页累积维护） -->
           <el-table ref="sdcTable" :data="sd.rows" size="small" border style="width:100%" v-loading="sd.loading"
                     row-key="key" :default-sort="sdcDefaultSort" empty-text="暂无店铺数据"
                     @sort-change="onSdcSortChange"
+                    @selection-change="onSdcSelChange"
                     @expand-change="onSdcExpandChange">
             <el-table-column type="expand">
               <template slot-scope="p">
@@ -2457,12 +2460,8 @@
                 </div>
               </template>
             </el-table-column>
-            <el-table-column width="46">
-              <template slot-scope="p">
-                <el-checkbox :value="!!sd.picked[p.row.key]" :disabled="!p.row.chatable" @change="v => toggleSdcShop(p.row, v)"
-                             :title="p.row.chatable ? '勾选这家店（同一家店的订单合并成一条消息）' : '这家店的订单没有店铺 ID，换不到客服会话'"></el-checkbox>
-              </template>
-            </el-table-column>
+            <el-table-column type="selection" width="46" :reserve-selection="true"
+                             :selectable="(row) => !!row.chatable"></el-table-column>
             <el-table-column label="店铺名称" min-width="220">
               <template slot-scope="p">
                 <div class="company">{{ p.row.shopName }}</div>
@@ -2526,7 +2525,7 @@
                            @current-change="onSdcPage" @size-change="onSdcSize"></el-pagination>
             <span class="total">共 {{ sd.total }} 家店铺</span>
             <span style="flex:1"></span>
-            <span class="loginid">未勾选店铺时点「发送催收消息」= 对所有店铺的<b>可申请开票 + 已申请开票 + 不支持线上开票</b>订单批量催收（已开票的不催）</span>
+            <span class="loginid">表头复选框 = 全选当前页（翻页后已勾选的仍保留）；未勾选店铺时点「发送催收消息」= 对所有店铺的<b>可申请开票 + 已申请开票 + 不支持线上开票</b>订单批量催收（已开票的不催）</span>
           </div>
         </el-card>
       </div>
@@ -5700,10 +5699,13 @@ const vm = new Vue({
       this.sd.page = 1;
       this.loadSdcOrders();
     },
-    /** 清空已勾选的店铺（换筛选 / 翻页重置 / 任务结束时用） */
+    /** 清空已勾选的店铺（换筛选 / 翻页重置 / 任务结束时用）—— 同时清掉表格里的勾选态，
+     *  否则 reserve-selection 会把旧勾选在翻页回来后重新画出来，与 picked 对不上 */
     clearSdcPicked() {
       this.sd.picked = {};
       this.sd.selected = [];
+      const t = this.$refs.sdcTable;
+      if (t && typeof t.clearSelection === 'function') t.clearSelection();
     },
     /** 展开行里「这家店催收成功/失败次数」（必须放 methods：带参数调用，computed 会取成值） */
     sdcShopOk(k) { return ((this.sdDC[k] || {}).logs || []).filter((l) => l.ok).length; },
@@ -5716,13 +5718,19 @@ const vm = new Vue({
       if (s === 4) return 'success';
       return 'info';
     },
-    toggleSdcShop(row, v) {
-      // 没有店铺 ID 的「无店铺组」换不到客服会话，勾了也不能算（UI 上是禁用态，这里再兜一层）
-      if (!row || !row.chatable) return;
-      const picked = Object.assign({}, this.sd.picked);
-      if (v) picked[row.key] = row; else delete picked[row.key];
-      this.sd.picked = picked;
-      this.sd.selected = Object.values(picked);
+    /**
+     * 闪电帮帮店铺多选（与拼多多同构：表头全选 + 跨页累计）。
+     * Element 的 selection-change 只给「当前页选中的行」，所以做增量合并：
+     *   当前页里没选中的 → 从 picked 摘掉；当前页选中的 → 写入 picked；其它页的一律保留。
+     * picked 用 row.key（无店铺 ID 的那组是 __none__），与 row-key 一致。
+     */
+    onSdcSelChange(rows) {
+      const picked = this.sd.picked || (this.sd.picked = {});
+      const pageRows = this.sd.rows || [];
+      const selKeys = new Set((rows || []).map((r) => r && r.key).filter(Boolean));
+      pageRows.forEach((r) => { if (r && r.key && !selKeys.has(r.key)) delete picked[r.key]; });
+      (rows || []).forEach((r) => { if (r && r.key) picked[r.key] = r; });
+      this.sd.selected = Object.keys(picked).map((k) => picked[k]);
     },
 
     /**
