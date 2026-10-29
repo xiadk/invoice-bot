@@ -2486,12 +2486,14 @@
             <el-table-column label="订单总额" width="110">
               <template slot-scope="p">¥{{ yuan(p.row.totalAmount) }}</template>
             </el-table-column>
-            <el-table-column label="开票档位" width="200">
+            <el-table-column label="开票档位" width="250">
               <template slot-scope="p">
                 <el-tag size="mini" type="warning">可申请 {{ p.row.stage1Count }}</el-tag>
                 <el-tag size="mini" type="info">已申请 {{ p.row.stage2Count }}</el-tag>
                 <el-tag v-if="p.row.stage3Count" size="mini" type="danger">不支持线上 {{ p.row.stage3Count }}</el-tag>
                 <el-tag v-if="p.row.stage4Count" size="mini" type="success">已开票 {{ p.row.stage4Count }}</el-tag>
+                <el-tag v-if="p.row.stage5Count" size="mini" type="info" style="margin-left:2px"
+                        title="订单已关闭，平台不再支持开票：既不开票也不催收">已关闭 {{ p.row.stage5Count }}</el-tag>
               </template>
             </el-table-column>
             <el-table-column prop="last_pay_time" label="最近下单" width="130" sortable="custom"
@@ -3538,15 +3540,17 @@ const vm = new Vue({
       const applied = s.applied || { count: 0, amount: 0, shops: 0 };
       const blocked = s.blocked || { count: 0, amount: 0, shops: 0 };
       const issued = s.issued || { count: 0, amount: 0, shops: 0 };
+      const closed = s.closed || { count: 0, amount: 0, shops: 0 };
       return [
         { label: '可申请开票', value: yuan(a(applyable)), sub: `${n(applyable)} 单 / ${Number(applyable.shops) || 0} 家店铺` },
         { label: '已申请开票', value: yuan(a(applied)), sub: `${n(applied)} 单 / ${Number(applied.shops) || 0} 家店铺` },
         { label: '不支持线上开票', value: yuan(a(blocked)), sub: `${n(blocked)} 单 / ${Number(blocked.shops) || 0} 家店铺` },
         { label: '已开票', value: yuan(a(issued)), sub: `${n(issued)} 单 / ${Number(issued.shops) || 0} 家店铺` },
+        { label: '已关闭·无法开票', value: yuan(a(closed)), sub: `${n(closed)} 单 / ${Number(closed.shops) || 0} 家店铺` },
         {
           label: '待开票金额',
           value: yuan(Math.max(0, a(applyable) + a(applied) + a(blocked))),
-          sub: `可催收 ${n(applyable) + n(applied) + n(blocked)} 单（可申请 + 已申请 + 不支持线上）`,
+          sub: `可催收 ${n(applyable) + n(applied) + n(blocked)} 单（可申请 + 已申请 + 不支持线上，已关闭的不算）`,
         },
       ];
     },
@@ -5710,13 +5714,13 @@ const vm = new Vue({
     /** 展开行里「这家店催收成功/失败次数」（必须放 methods：带参数调用，computed 会取成值） */
     sdcShopOk(k) { return ((this.sdDC[k] || {}).logs || []).filter((l) => l.ok).length; },
     sdcShopFail(k) { return ((this.sdDC[k] || {}).logs || []).filter((l) => !l.ok).length; },
-    /** 档位标签配色：可申请=警告色、已申请=灰、不支持线上=红、已开票=绿 */
+    /** 档位标签配色：可申请=警告色、已申请=灰、不支持线上=红、已开票=绿、已关闭=灰 */
     sdcStageTag(stage) {
       const s = Number(stage);
       if (s === 1) return 'warning';
       if (s === 3) return 'danger';
       if (s === 4) return 'success';
-      return 'info';
+      return 'info';   // 2 已申请 / 5 已关闭
     },
     /**
      * 闪电帮帮店铺多选（与拼多多同构：表头全选 + 跨页累计）。
