@@ -11,8 +11,12 @@
  *   登录检测   POST /sdc-gw1/mallApi/login/getLoginInfo            {}                     → data.userId / data.shopId
  *   可申请开票 POST /sdc-gw1/mallApi/invoiceTitle/queryInvoiceOrderPage
  *                                                                  {pageNo,pageSize,subUserIds:[userId]}
+ *   订单列表   POST /mallApi/order/pcPageList  (无 sdc-gw1 前缀)
+ *                                                                  {searchKey,orderStatus:-1,orderStartTime,orderEndTime,pageNo,pageSize,_t,queryUnCommented}
+ *              ↓ 时间过滤 orderStartTime（毫秒）→ 回传里的订单时间字段是 orderDate
  *   已申请开票 POST /sdc-gw1/mallApi/orderInvoice/queryOrderInvoiceForBuyer
- *                                                                  {pageNo,pageSize,_t,invoiceApplyStatusList:[1],userIdList:[userId]}
+ *                                                                  {pageNo,pageSize,_t,invoiceApplyStatusList:[1],userIdList:[userId],billStartTime?}
+ *              ↓ 时间过滤 billStartTime（毫秒）→ 回传里的开票时间字段是 invoiceDate
  *   取会话     POST /mallApi/im/shop/pub/select                     {shopId}              → data = sessionId
  *   聊天页     https://shandiancang.waimai.meituan.com/customer-service/chat?sessionId=<id>
  *
@@ -339,8 +343,12 @@ function mapOrderRow(r) {
       || moneyOf(pickVal(r, ['totalAmount', 'orderAmount', 'totalFee']), moneyCents),
     actual_pay_amount: moneyOf(pickVal(r, ['actualPayAmount', 'payAmount']), moneyCents),
     after_total_amount: moneyOf(pickVal(r, ['afterTotalAmount', 'refundAmount']), moneyCents),
-    order_time: timeMs(pickVal(r, ['payDate', 'orderTime', 'createTime', 'orderCreateTime'])),
-    pay_time: timeMs(pickVal(r, ['payDate', 'payTime', 'paymentTime'])),
+    // 订单时间：接口实测字段是 orderDate（也是 orderStartTime 过滤所依据的那个时间）
+    order_time: timeMs(pickVal(r, ['orderDate', 'payDate', 'orderTime', 'createTime', 'orderCreateTime'])),
+    // 支付时间：有单独的支付字段就用它，没有则回落到订单时间
+    // （增量锚点取 MAX(pay_time)，若这里留空会让每次刷新都退回「拉近一年」的全量）
+    pay_time: timeMs(pickVal(r, ['payDate', 'payTime', 'paymentTime']))
+      || timeMs(pickVal(r, ['orderDate'])),
     finish_time: timeMs(pickVal(r, ['finishTime', 'completeTime'])),
     apply_time: timeMs(pickVal(r, ['applyTime', 'invoiceApplyTime'])),
     trade_status_desc: pickVal(r, ['tradeStatusDesc', 'orderStatusDesc', 'statusDesc']),
@@ -379,12 +387,13 @@ function mapInvoiceRow(r) {
     payable_amount: numOf(pickVal(r, ['payableAmount', 'totalAmount'])),
     actual_pay_amount: numOf(pickVal(r, ['actualPayAmount'])),
     after_total_amount: numOf(pickVal(r, ['afterTotalAmount'])),
-    order_time: timeMs(pickVal(r, ['tradeTime', 'orderTime'])),
-    pay_time: timeMs(pickVal(r, ['payTime'])),
+    order_time: timeMs(pickVal(r, ['orderDate', 'tradeTime', 'orderTime'])),
+    pay_time: timeMs(pickVal(r, ['payTime'])) || timeMs(pickVal(r, ['orderDate'])),
     finish_time: timeMs(pickVal(r, ['finishTime'])),
     apply_time: timeMs(pickVal(r, ['applyTime'])),
-    // 开票时间：优先 invoiceTime，其次 applyTime（申请即受理的场景）
-    invoice_time: timeMs(pickVal(r, ['invoiceTime', 'invoiceDate', 'issueTime'])) || timeMs(pickVal(r, ['applyTime'])),
+    // 开票时间：接口实测字段是 invoiceDate（也是 billStartTime 过滤所依据的那个时间）
+    // 没有则是「已申请未开票」，回落到申请时间只为让该行仍能被增量命中
+    invoice_time: timeMs(pickVal(r, ['invoiceDate', 'invoiceTime', 'issueTime'])) || timeMs(pickVal(r, ['applyTime'])),
     online_blocked: detectBlocked(r) ? 1 : 0,
     raw_json: rawOf(r),
   };
@@ -449,14 +458,18 @@ async function fetchOrderList(wc, { startMs, endMs, pageSize, api, emit, isStopp
 
 /**
  * ② 已申请/已开票：按开票时间增量回写开票状态。
- * 接口的开票时间过滤参数名尚未确认，这里采用「全量翻页 + 本地按 invoice_time 过滤」：
- * 只把比 sinceMs 新（或从未入库）的行回传，写库量与请求量都维持在可接受范围。
+ * 时间过滤字段是 billStartTime（与订单列表的 orderStartTime 同风格，毫秒时间戳）；
+ * 首次（sinceMs=0）不传该字段 = 全量拉一遍，之后只拉开票时间晚于锚点的。
+ * 仍保留本地按 invoice_time 过滤做兜底：万一平台忽略该参数，也不会把全量行重复回传。
  */
 async function fetchInvoiceRows(wc, { userId, pageSize, sinceMs, api, emit, isStopped }) {
   let pageNo = 1;
   let total = 0;
   let pages = 0;
   let skipped = 0;
+  // 增量开关：有锚点就先带 billStartTime；若第 1 页返回 0 行，无法区分「真的没有新开票」
+  // 和「时间格式不被接受」，所以回退成全量拉一次（宁可多一轮请求，也不要静默同步不到）
+  let useSince = Number(sinceMs) > 0;
   for (;;) {
     if (isStopped()) return { rows: total, pages, skipped, error: '已停止' };
     const body = {
@@ -466,6 +479,8 @@ async function fetchInvoiceRows(wc, { userId, pageSize, sinceMs, api, emit, isSt
       invoiceApplyStatusList: [1],
       userIdList: [Number(userId)],
     };
+    // 传 0 有些网关会当成非法时间直接拒，所以首次同步干脆不传这个字段
+    if (useSince) body.billStartTime = Number(sinceMs);
     const r = await pageFetch(wc, INVOICE_LIST_API, body);
     if (!r || r.error) return { rows: total, pages, skipped, error: String((r && r.error) || '页内请求失败') };
     if (Number(r.status) === 401 || Number(r.status) === 403) {
@@ -476,6 +491,12 @@ async function fetchInvoiceRows(wc, { userId, pageSize, sinceMs, api, emit, isSt
       return { rows: total, pages, skipped, error: '开票接口返回结构异常（没有 data）：' + String((r.json && r.json.msg) || r.text || '').slice(0, 120) };
     }
     const list = Array.isArray(d.data) ? d.data : [];
+    // 带了时间过滤却一行都没有 → 回退全量重试第 1 页
+    if (pageNo === 1 && useSince && !list.length) {
+      useSince = false;
+      if (api && api.log) api.log('开票接口带 billStartTime 返回 0 行（可能是时间格式不符），改为全量拉取后本地按开票时间过滤');
+      continue;
+    }
     pages = Number(d.pages) || pages;
     for (const raw of list) {
       const row = mapInvoiceRow(raw);
@@ -521,7 +542,7 @@ async function runFetch(task, api) {
   const invoiceSinceMs = Number(task.invoiceSinceMs) || 0;
   const stopped = () => (api.isStopped ? api.isStopped() : false);
 
-  api.log(`① 订单列表增量：${fmtMs(startMs)} ~ ${fmtMs(endMs)}`);
+  api.log(`① 订单列表增量（orderStartTime，按订单时间 orderDate）：${fmtMs(startMs)} ~ ${fmtMs(endMs)}`);
   const orders = await fetchOrderList(w.webContents, {
     startMs, endMs, pageSize, api, isStopped: stopped,
     emit: (row) => api.emitRow(row),
@@ -532,7 +553,7 @@ async function runFetch(task, api) {
   }
   api.log(`① 完成：${orders.rows} 单（${orders.pages || 1} 页）`);
 
-  api.log(`② 开票状态增量：${invoiceSinceMs ? '开票时间晚于 ' + fmtMs(invoiceSinceMs) : '全量（首次）'}`);
+  api.log(`② 开票状态增量（billStartTime，按开票时间 invoiceDate）：${invoiceSinceMs ? '晚于 ' + fmtMs(invoiceSinceMs) : '首次全量'}`);
   const inv = await fetchInvoiceRows(w.webContents, {
     userId: p.subUserId, pageSize, sinceMs: invoiceSinceMs, api, isStopped: stopped,
     emit: (row) => api.emitRow(row),
@@ -890,4 +911,6 @@ module.exports = {
   createLoginHandler, createFetchHandler, createSendHandler,
   openLogin, peekWindow, peekApiWindow, peekChatWindow,
   probeLogin, runLogin, runFetch, runSend, selectSession,
+  // 纯函数也导出：字段映射最容易写错（字段名一换就静默变 NULL），要能单独测
+  mapOrderRow, mapInvoiceRow, detectBlocked,
 };
