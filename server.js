@@ -72,6 +72,7 @@ const pddOrders = require('./lib/pdd-orders');
 const aliOrders = require('./lib/ali-orders');
 const psync = require('./lib/pdd-sync');
 const sdc = require('./lib/sdc');
+const invoiceTitles = require('./lib/invoice-titles');
 
 const PORT = Number(process.env.PORT) || 8787;
 const ROOT = __dirname;
@@ -826,10 +827,12 @@ const OP_ACTIONS = {
   'sdc.sync': (d) => d.ok === false
     ? `拉取闪电帮帮订单失败${d.reason ? '：' + d.reason : ''}`
     : `拉取了闪电帮帮订单（可申请 ${d.applyable || 0} 单、已申请 ${d.applied || 0} 单）`,
-  'sdc.send.start': (d) => `发起了闪电帮帮批量催收（${d.total || 0} 家店铺${d.dryRun ? '，演练模式' : ''}）`,
+  'sdc.title.save': (d) => `保存了开票抬头${d.title ? '「' + d.title + '」' : ''}`,
+  'sdc.title.delete': () => '删除了一条开票抬头',
+  'sdc.send.start': (d) => `发起了闪电帮帮批量催收（${d.total || 0} 家店铺${d.title ? '，抬头 ' + d.title : ''}）`,
   'sdc.send': (d) => d.ok === false
     ? `闪电帮帮批量催收失败${d.reason ? '：' + d.reason : ''}`
-    : `闪电帮帮批量催收完成（成功 ${d.okCount || 0} 家、失败 ${d.failCount || 0} 家${d.dryRun ? '，演练模式未点发送' : ''}）`,
+    : `闪电帮帮批量催收完成（成功 ${d.okCount || 0} 家、失败 ${d.failCount || 0} 家）`,
 };
 
 // 前端下拉是「值」，日志里要显示人能看懂的「文案」，在服务端做映射，避免客户端乱传
@@ -1116,7 +1119,7 @@ const SDC_LOGIN_TTL_MS = SDC_LOGIN_TIMEOUT_MS + 60 * 1000;
 const SDC_TASK_TIMEOUT_MS = Number(process.env.SDC_TASK_TIMEOUT_MS) || 15 * 60 * 1000;
 const SDC_TASK_TTL_MS = SDC_TASK_TIMEOUT_MS + 5 * 60 * 1000;
 // 支持闪电帮帮三项能力的最低助手版本（0.2.55 起才有 sdc_login / sdc_fetch / sdc_send 内核）
-const SDC_MIN_AGENT = '0.2.60';
+const SDC_MIN_AGENT = '0.2.61';
 
 // ── 「清除本机登录态」──────────────────────────────────────────────
 // 看板点「退出 XX 账号」时，光删数据库里的 Cookie 不够：助手那边的登录窗口用的是
@@ -2852,6 +2855,8 @@ const server = http.createServer(async (req, res) => {
       const ctx = {
         taskId, kind: 'ali-orders', userId: Number(tenantId), status: 'pending',
         message: '', startDateTime: forcedStart, createdAt: Date.now(),
+        // withInvoices：订单拉完顺带刷「已开票」状态（默认开；传 false 可只拉订单）
+        withInvoices: b.withInvoices !== false,
         progress: { page: 0, totalPages: 0, total: 0, fetched: 0, rows: 0, saved: 0, newCount: 0, current: '' },
         progressLog: [], expiresAt: Date.now() + ALI_TASK_TTL_MS,
       };
@@ -2880,10 +2885,11 @@ const server = http.createServer(async (req, res) => {
           }
         },
         shouldStop: () => !!ctx.stopping,
-      }).then((out) => {
+      }).then(async (out) => {
         ctx.status = out.ok ? 'done' : 'failed';
         ctx.message = out.message || '';
         ctx.needLogin = !!out.needLogin;
+        ctx.needImport = !!out.needImport;
         ctx.rawSample = out.rawSample || null;
         if (out.startDateTime) ctx.startDateTime = out.startDateTime;
         ctx.progress = Object.assign({}, ctx.progress, {
@@ -2895,6 +2901,41 @@ const server = http.createServer(async (req, res) => {
         ctx.expiresAt = Date.now() + ALI_TASK_TTL_MS;
         if (out.truncated) pushLog(`已到翻页上限（${out.maxPages} 页），更早的订单未拉取`);
         pushLog((out.ok ? '✓ ' : '✗ ') + (out.message || ''));
+
+        // 订单拉完接着刷「已开票」状态（第 9 条）：共用同一条进度条，前端不用串两个任务
+        if (out.ok && ctx.withInvoices && !ctx.stopping) {
+          ctx.status = 'pending';
+          ctx.phase = 'invoices';
+          pushLog('开始同步 1688 已开票状态（按开票时间增量）…');
+          try {
+            const inv = await aliOrders.syncInvoices({
+              userId: Number(tenantId),
+              onProgress: (p) => {
+                ctx.progress.invPage = p.page;
+                ctx.progress.invPages = p.totalPages || 0;
+                ctx.progress.invFetched = p.fetched;
+                pushLog(`发票同步第 ${p.page}${p.totalPages ? '/' + p.totalPages : ''} 页：接口 ${p.fetched} 条，命中 ${p.picked} 条`);
+              },
+              shouldStop: () => !!ctx.stopping,
+            });
+            ctx.invoice = {
+              fetched: inv.fetched || 0, matched: inv.matched || 0,
+              missing: inv.missing || 0, since: inv.since || null,
+            };
+            pushLog((inv.ok ? '✓ ' : '✗ ') + (inv.message || ''));
+            if (!inv.ok) {
+              ctx.status = 'failed';
+              ctx.message = [ctx.message, inv.message].filter(Boolean).join('；');
+              ctx.needLogin = ctx.needLogin || !!inv.needLogin;
+            } else {
+              ctx.status = 'done';
+            }
+          } catch (e) {
+            pushLog('✗ 发票同步异常：' + ((e && e.message) || e));
+          }
+          ctx.finishedAt = Date.now();
+          ctx.expiresAt = Date.now() + ALI_TASK_TTL_MS;
+        }
       }).catch((e) => {
         ctx.status = 'failed';
         ctx.message = (e && e.message) || String(e);
@@ -2922,7 +2963,9 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, {
         ok: true, status: ctx.status, message: ctx.message,
         needLogin: !!ctx.needLogin, rawSample: ctx.rawSample || null,
+        needImport: !!ctx.needImport,
         startDateTime: ctx.startDateTime || null,
+        phase: ctx.phase || 'orders', invoice: ctx.invoice || null,
         progress: ctx.progress, progressLog: ctx.progressLog,
       });
     }
@@ -4383,6 +4426,7 @@ const server = http.createServer(async (req, res) => {
           stage: q.get('stage') || '',
           keyword: q.get('keyword') || '',
           shopId: q.get('shopId') || '',
+          sent: q.get('sent') || '',
           sort: q.get('sort') || 'time_desc',
           page: q.get('page'),
           size: q.get('size'),
@@ -4401,6 +4445,7 @@ const server = http.createServer(async (req, res) => {
           userId: sdcUid,
           stage: q.get('stage') || '',
           keyword: q.get('keyword') || '',
+          sent: q.get('sent') || '',
           sort: q.get('sort') || 'amount_desc',
           page: q.get('page'),
           size: q.get('size'),
@@ -4414,6 +4459,44 @@ const server = http.createServer(async (req, res) => {
 
       if (method === 'GET' && p === '/api/sdc/summary') {
         return sendJson(res, 200, await sdc.summary(sdcUid));
+      }
+
+      // ── 开票抬头（一人多条，催收前选一条）──
+      // 归属跟随当前身份：普通用户是自己的 id；超级管理员切了身份就是被切换那个账号的
+      if (method === 'GET' && p === '/api/sdc/titles') {
+        return sendJson(res, 200, { rows: await invoiceTitles.list(Number(sdcUid)) });
+      }
+      if (method === 'POST' && p === '/api/sdc/titles') {
+        writeGuard();
+        const b = await readBody(req).catch(() => ({}));
+        try {
+          const out = await invoiceTitles.save(Number(sdcUid), b);
+          await logOp(user, 'sdc.title.save', { tenantId: sdcUid, id: out.id, title: String(b.title || '').slice(0, 60) });
+          return sendJson(res, 200, { ok: true, id: out.id, rows: await invoiceTitles.list(Number(sdcUid)) });
+        } catch (e) {
+          return sendJson(res, 200, { ok: false, message: (e && e.message) || '保存失败' });
+        }
+      }
+      if (method === 'POST' && p === '/api/sdc/titles/default') {
+        writeGuard();
+        const b = await readBody(req).catch(() => ({}));
+        try {
+          await invoiceTitles.setDefault(Number(sdcUid), b.id);
+          return sendJson(res, 200, { ok: true, rows: await invoiceTitles.list(Number(sdcUid)) });
+        } catch (e) {
+          return sendJson(res, 200, { ok: false, message: (e && e.message) || '设置失败' });
+        }
+      }
+      if (method === 'POST' && p === '/api/sdc/titles/delete') {
+        writeGuard();
+        const b = await readBody(req).catch(() => ({}));
+        try {
+          await invoiceTitles.remove(Number(sdcUid), b.id);
+          await logOp(user, 'sdc.title.delete', { tenantId: sdcUid, id: Number(b.id) || 0 });
+          return sendJson(res, 200, { ok: true, rows: await invoiceTitles.list(Number(sdcUid)) });
+        } catch (e) {
+          return sendJson(res, 200, { ok: false, message: (e && e.message) || '删除失败' });
+        }
       }
 
       if (method === 'GET' && p === '/api/sdc/msg-history') {
@@ -4524,12 +4607,20 @@ const server = http.createServer(async (req, res) => {
         }
         if (!agentVersionGate(res, aUid, '拉取闪电帮帮订单')) return;
         const taskId = 'sdcs-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+        const win = await sdc.syncWindow(sdcUid).catch(() => null);
         const ctx = {
           taskId, kind: 'sync', userId: Number(sdcUid), status: 'pending', message: '',
           received: 0, inserted: 0, updated: 0, skipped: 0, tally: {}, progress: '', progressLog: [],
+          startMs: win ? win.startMs : 0, invoiceSinceMs: win ? win.invoiceSinceMs : 0,
           createdAt: Date.now(), expiresAt: Date.now() + SDC_TASK_TTL_MS,
         };
-        const sent = agentHub.send(aUid, { type: 'sdc_fetch', taskId, stages: [1, 2], pageSize: 50 });
+        if (win && win.first) {
+          ctx.progressLog.push({ t: new Date().toISOString().slice(11, 19), text: '库里还没有闪电帮帮订单：首次同步拉取近一年的订单' });
+        }
+        const sent = agentHub.send(aUid, {
+          type: 'sdc_fetch', taskId, pageSize: 50,
+          startMs: ctx.startMs, endMs: win ? win.endMs : Date.now(), invoiceSinceMs: ctx.invoiceSinceMs,
+        });
         if (!sent) {
           return sendJson(res, 200, { ok: false, needAgent: true, message: '下发取数任务失败：本机助手连接已断开。' });
         }
@@ -4537,14 +4628,15 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 200, { ok: true, pending: true, taskId, message: '已下发取数任务，正在本机助手里拉取…' });
       }
 
-      // 「批量催收」：按店铺合并成一条消息交给助手逐店发送（可勾选订单，也可不勾=全部可申请开票）
+      // 「批量催收」：按店铺合并成一条消息交给助手逐店发送
+      // 口径（2026-10-29）：催的是「卡住的」两档 —— 已申请开票(2) + 不支持线上开票(3)；
+      // 标题/税号/邮箱取用户选中的抬头（不传就用默认抬头）。
       if (method === 'POST' && p === '/api/sdc/send') {
         const b = await readBody(req).catch(() => ({}));
         const sns = Array.isArray(b.orderSns) ? b.orderSns.map(String).filter(Boolean) : [];
         // 页面主表是店铺维度，勾选的单位就是店铺（旧的「勾选订单」仍然支持）
         const shopIds = Array.isArray(b.shopIds) ? b.shopIds.map(String).filter(Boolean) : [];
-        const stage = Number(b.stage);
-        const dryRun = b.dryRun === true || b.dryRun === 'true';
+        const titleId = Number(b.titleId) || 0;
         const sess = await sdc.sessionInfo(sdcUid).catch(() => null);
         if (!sess || !sess.logined) {
           return sendJson(res, 200, { ok: false, loginish: true, message: '尚未登录闪电帮帮，请先登录' });
@@ -4565,20 +4657,23 @@ const server = http.createServer(async (req, res) => {
           });
         }
 
-        const gotStage = stage === 1 || stage === 2 ? stage : '';
-        const shops = await sdc.shopsToChat(sdcUid, sns, { shopIds, stage: gotStage });
+        const shops = await sdc.shopsToChat(sdcUid, sns, { shopIds, stages: sdc.STAGES_TO_CHAT });
         if (!shops.length) {
           return sendJson(res, 200, {
             ok: false,
-            message: '没有可催收的订单：只能对有店铺 ID 的订单催开票'
-              + (shopIds.length ? '（勾选的店铺在当前档位下没有订单）'
-                : sns.length ? '（勾选的订单里没有可用店铺）' : '（库里暂无「可申请开票」的订单，先点刷新拉取）'),
+            message: '没有可催收的订单：催收只针对「已申请开票」与「不支持线上开票」两档'
+              + (shopIds.length ? '（勾选的店铺在这两档下没有订单）' : '（库里暂无这两档订单，先点刷新拉取）'),
           });
         }
         // 消息内容与 1688 完全同源（config.messages 那套模板：抬头/税号/邮箱/金额 + 订单清单），
         // 只是把「1688 卖家」换成「闪电帮帮店铺」，话术不用另配一套。
+        // 抬头由用户在弹框里选（titleId），没选就用默认抬头，再没有才回落到 app_user 上的老字段。
         const cfg = loadConfig();
-        const buyer = await buyerInfoOf(Number(sdcUid));
+        const pickedTitle = await invoiceTitles.get(Number(sdcUid), titleId).catch(() => null);
+        const fallback = pickedTitle ? null : await buyerInfoOf(Number(sdcUid));
+        const buyer = pickedTitle
+          ? { companyName: pickedTitle.title || '', taxNo: pickedTitle.taxNo || '', email: pickedTitle.email || '' }
+          : (fallback || { companyName: '', taxNo: '', email: '' });
         const runConfig = Object.assign({}, cfg, { buyerInfo: buyer });
         const items = [];
         for (const s of shops) {
@@ -4602,29 +4697,28 @@ const server = http.createServer(async (req, res) => {
         const taskId = 'sdcm-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
         const ctx = {
           taskId, kind: 'send', userId: Number(sdcUid), status: 'pending', message: '',
-          total: items.length, results: [], okCount: 0, failCount: 0, dryRun,
+          total: items.length, results: [], okCount: 0, failCount: 0, dryRun: false,
           doneIdx: 0, current: '',          // 当前在处理第几家 / 哪家店（进度面板要显示，像 1688 那样）
           orderCount: items.reduce((a, it) => a + it.orderSns.length, 0),
+          title: buyer.companyName || '', taxNo: buyer.taxNo || '',
           createdAt: Date.now(), expiresAt: Date.now() + SDC_TASK_TTL_MS,
         };
         const sent = agentHub.send(sendUid, {
-          type: 'sdc_send', taskId, items, dryRun,
+          type: 'sdc_send', taskId, items,
           gapMs: 6000,   // 店铺之间的间隔，别把风控惹急
         });
         if (!sent) {
           return sendJson(res, 200, { ok: false, needAgent: true, message: '下发催收任务失败：本机助手连接已断开。' });
         }
         SDC_TASKS.set(taskId, ctx);
-        await logOp(user, 'sdc.send.start', { tenantId: sdcUid, total: items.length, dryRun });
+        await logOp(user, 'sdc.send.start', { tenantId: sdcUid, total: items.length, title: ctx.title });
         return sendJson(res, 200, {
           ok: true, pending: true, taskId,
           total: items.length,
           orderCount: ctx.orderCount,
-          dryRun,
+          title: ctx.title,
           preview: items[0] ? items[0].contents[0] : '',
-          message: dryRun
-            ? `已下发演练任务（${items.length} 家店铺）：只会把内容填进会话输入框，不会点发送。`
-            : `已下发催收任务（${items.length} 家店铺 / 共 ${ctx.orderCount} 单），正在本机助手里逐条发送…`,
+          message: `已下发催收任务（${items.length} 家店铺 / 共 ${ctx.orderCount} 单，抬头：${ctx.title || '未配置'}），正在本机助手里逐条发送…`,
         });
       }
 

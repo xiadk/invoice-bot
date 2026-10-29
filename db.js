@@ -388,6 +388,9 @@ async function ensureQnhSchema(q) {
       "  `refund_status_desc` VARCHAR(32) DEFAULT NULL COMMENT '售后状态文案'," +
       "  `item_count` INT DEFAULT NULL COMMENT '商品条目数'," +
       "  `item_names` VARCHAR(500) DEFAULT NULL COMMENT '商品名摘要（展示用，不入 raw）'," +
+      "  `invoice_time` DATETIME DEFAULT NULL COMMENT '开票时间（已申请接口按开票时间增量刷新用）'," +
+      "  `online_blocked` TINYINT NOT NULL DEFAULT 0 COMMENT '平台限制线上开票（1=只能线下开票，催收按此走）'," +
+      "  `raw_json` TEXT COMMENT '平台原始行 JSON（接口改版/字段口径校准的兜底证据，不参与展示）'," +
       "  `row_hash` VARCHAR(64) DEFAULT NULL COMMENT '关键字段指纹：没变就跳过更新（幂等重跑）'," +
       "  `send_count` INT NOT NULL DEFAULT 0 COMMENT '已向该店铺发过催收的次数（按店铺累计，见 sdc_msg_log）'," +
       "  `last_sent_at` DATETIME DEFAULT NULL COMMENT '最近一次催收时间'," +
@@ -397,8 +400,25 @@ async function ensureQnhSchema(q) {
       "  PRIMARY KEY (`user_id`,`order_sn`)," +
       "  KEY `idx_sdo_stage` (`user_id`,`stage`)," +
       "  KEY `idx_sdo_shop` (`user_id`,`shop_id`)," +
-      "  KEY `idx_sdo_time` (`pay_time`)" +
+      "  KEY `idx_sdo_time` (`pay_time`)," +
+      "  KEY `idx_sdo_invtime` (`user_id`,`invoice_time`)" +
       ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='闪电帮帮订单与开票申请状态'",
+
+    // 用户自己的开票抬头（一人多条，催收前选一条）。app_user 里的 company_name/tax_no/email
+    // 保留为「默认抬头」的兼容字段，新表是唯一可维护入口。
+    'CREATE TABLE IF NOT EXISTS `app_invoice_title` (' +
+      "  `id` INT NOT NULL AUTO_INCREMENT," +
+      "  `user_id` INT NOT NULL COMMENT '归属用户（app_user.id）'," +
+      "  `title` VARCHAR(200) NOT NULL COMMENT '发票抬头（公司名称）'," +
+      "  `tax_no` VARCHAR(64) DEFAULT NULL COMMENT '纳税人识别号'," +
+      "  `email` VARCHAR(160) DEFAULT NULL COMMENT '收票邮箱'," +
+      "  `is_default` TINYINT NOT NULL DEFAULT 0 COMMENT '是否默认抬头（每用户最多一条为 1）'," +
+      "  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP," +
+      "  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP," +
+      "  PRIMARY KEY (`id`)," +
+      "  UNIQUE KEY `uk_ait_user_title` (`user_id`,`title`)," +
+      "  KEY `idx_ait_user` (`user_id`)" +
+      ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='用户开票抬头（催收消息里的 {companyName}/{taxNo}/{email}）'",
 
     // 闪电帮帮登录态记录。这里**不存 Cookie** —— 拉取与发送都在本机助手的浏览器分区里完成，
     // 服务器拿不到也不需要 Cookie；只记录「有没有登录 / 是哪个账号 / 最后同步时间」。
@@ -677,6 +697,22 @@ async function migrate(conn, dbName) {
     }
     if (!(await idxExists('pdd_order', 'idx_pdo_ostatus'))) {
       await q('ALTER TABLE `pdd_order` ADD KEY `idx_pdo_ostatus` (`user_id`,`order_status`)');
+    }
+  }
+
+  // ── 闪电帮帮订单补列（老库）：开票时间 / 限制线上开票 / 原始行 ──
+  if (await tableExists('sdc_order')) {
+    for (const [col, decl] of [
+      ['invoice_time', "DATETIME DEFAULT NULL COMMENT '开票时间（已申请接口按开票时间增量刷新用）'"],
+      ['online_blocked', "TINYINT NOT NULL DEFAULT 0 COMMENT '平台限制线上开票（1=只能线下开票）'"],
+      ['raw_json', "TEXT COMMENT '平台原始行 JSON（口径校准证据）'"],
+    ]) {
+      if (!(await colExists('sdc_order', col))) {
+        await q(`ALTER TABLE \`sdc_order\` ADD COLUMN \`${col}\` ${decl}`);
+      }
+    }
+    if (!(await idxExists('sdc_order', 'idx_sdo_invtime'))) {
+      await q('ALTER TABLE `sdc_order` ADD KEY `idx_sdo_invtime` (`user_id`,`invoice_time`)');
     }
   }
 

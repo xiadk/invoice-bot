@@ -29,6 +29,14 @@ const LOGIN_URL = `https://${HOST}/`;
 const CHAT_URL = `https://${HOST}/customer-service/chat`;
 const APPKEY = 'fe_com.sankuai.sgshopcrm.fe.purchaseshandiancangpc';
 const QS = '?yodaReady=h5&csecplatform=4&csecversion=4.3.0';
+// 订单列表（订单存量与支付时间口径的权威来源；注意**没有** sdc-gw1 前缀）
+const ORDER_LIST_API = '/mallApi/order/pcPageList' + QS;
+// 开票申请/已开票（开票状态口径的权威来源）
+const INVOICE_LIST_API = '/sdc-gw1/mallApi/orderInvoice/queryOrderInvoiceForBuyer' + QS;
+// 可申请开票（旧来源，保留给兜底与「平台限制线上开票」判断）
+const APPLY_LIST_API = '/sdc-gw1/mallApi/invoiceTitle/queryInvoiceOrderPage' + QS;
+/** 原始行只留这么多字符：够看清字段名，又不至于把 WS 消息撑爆 */
+const RAW_MAX = 2000;
 // 默认 UA 里带 "Electron/x"，美团系站点的风控会拿它当异常指纹（不装载风控 SDK、限制交互）。
 // 换成真实 Chrome UA（与牵牛花内核同款），登录弹窗才点得动。
 const REAL_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
@@ -248,115 +256,250 @@ function openLogin() {
 }
 
 // ── 拉订单数据 ──────────────────────────────────────────────────────
-/** 可申请开票（stage=1）的一行 → 库表列 */
-function pickStage1(r) {
-  const inv = r.orderInvoice || {};
+// 两个数据源、各管一段（2026-10-29 改造，口径以页面上能看到的为准）：
+//   ① 订单列表 /mallApi/order/pcPageList —— 订单存量与支付时间（按 orderStartTime~orderEndTime 增量翻页）
+//   ② 已申请/已开票 /sdc-gw1/mallApi/orderInvoice/queryOrderInvoiceForBuyer —— 开票状态（按开票时间增量回写）
+// 平台「不支持线上开票」的限制标记只在这两处的**原始行**里，所以每行都带 raw_json 回传，
+// 服务器侧据此归档证据（口径若变，照着真数据改，不用再猜）。
+
+const pickVal = (o, keys) => {
+  for (const k of keys) {
+    const v = o[k];
+    if (v !== undefined && v !== null && v !== '') return v;
+  }
+  return null;
+};
+const numOf = (v) => {
+  if (v === null || v === undefined || v === '') return null;
+  const n = Number(String(v).replace(/[^\d.\-]/g, ''));
+  return Number.isFinite(n) ? n : null;
+};
+/** 时间：兼容 13/10 位时间戳与 'YYYY-MM-DD HH:mm:ss'，统一输出毫秒（库里由服务器转 DATETIME） */
+const timeMs = (v) => {
+  if (v === null || v === undefined || v === '') return null;
+  const s = String(v).trim();
+  if (/^\d{13}$/.test(s)) return Number(s);
+  if (/^\d{10}$/.test(s)) return Number(s) * 1000;
+  const t = Date.parse(s.replace(' ', 'T'));
+  return Number.isFinite(t) ? t : null;
+};
+const rawOf = (r) => {
+  try { return JSON.stringify(r).slice(0, RAW_MAX); } catch (e) { return null; }
+};
+/** 金额：订单列表接口若给「分」，这里按数值量级判断（>10 万的分=1000 元，仍按分处理会明显失真） */
+const moneyOf = (v, hintCents) => {
+  const n = numOf(v);
+  if (n === null) return null;
+  return hintCents ? Math.round(n) / 100 : n;
+};
+
+/**
+ * 平台是否「不支持线上开票」。
+ * ⚠ 字段口径靠两处兜底判断（真机数据回来后按 raw_json 收敛成确定字段）：
+ *   1) 文案：任何短字符串里出现「不支持(线上)开票 / 不可线上开票 / 禁止线上开票」
+ *   2) 开关：键名带 invoice 且表达「不支持」的布尔/枚举
+ */
+const BLOCK_TEXT_RE = /不支持[^。]{0,6}开票|不可[^。]{0,4}线上开票|禁止[^。]{0,4}开票/;
+const BLOCK_KEY_RE = /(unsupport|notsupport|noinvoice|forbid|ban|limit|disabled|caninvoice|supportinvoice|onlineinvoice)/i;
+function detectBlocked(r) {
+  if (!r || typeof r !== 'object') return false;
+  for (const [k, v] of Object.entries(r)) {
+    if (typeof v === 'string' && v.length <= 60 && BLOCK_TEXT_RE.test(v)) return true;
+    if (!BLOCK_KEY_RE.test(k)) continue;
+    if (v === false) return true;
+    if (v === 0 || v === '0') return true;
+    if (typeof v === 'string' && /^(N|NO|false|不支持)$/i.test(v.trim())) return true;
+  }
+  return false;
+}
+
+/** 订单列表一行 → 库表列（字段名按候选取；新订单默认 stage=1，开票状态由第二个来源覆盖） */
+function mapOrderRow(r) {
+  const orderSn = pickVal(r, ['orderId', 'orderSn', 'orderNo', 'orderIdStr', 'idStr', 'id', 'bizOrderNo']);
+  if (!orderSn) return null;
+  const poi = r.wmPoi || r.poi || {};
+  const shop = r.shop || r.seller || {};
+  const moneyCents = /fen|cent/i.test(Object.keys(r).join(','));
   return {
     stage: 1,
-    order_sn: String(r.orderId || ''),
-    shop_id: r.shopId ? String(r.shopId) : null,
-    shop_name: r.shopName || '',
-    wm_poi_id: r.shangouShopId ? String(r.shangouShopId) : null,
-    wm_poi_name: r.wmPoiName || '',
-    invoice_apply_status: Number(r.invoiceApplyStatus) || 0,
-    invoice_apply_desc: r.invoiceApplyStatusDesc || null,
-    invoice_title: inv.invoiceTitle || null,
-    taxpayer_ident: inv.invoiceCode || null,
-    taker_email: inv.email || null,
-    invoice_type_desc: inv.invoiceTypeDesc || null,
-    batch_no: null,
-    total_amount: Number(r.totalAmount) || 0,
-    payable_amount: Number(r.payableAmount) || Number(r.totalAmount) || 0,
-    actual_pay_amount: null,
-    after_total_amount: Number(r.afterTotalAmount) || 0,
-    order_time: Number(r.payDate) || null,
-    pay_time: Number(r.payDate) || null,
-    finish_time: null,
-    apply_time: null,
-    trade_status_desc: null,
-    refund_status_desc: r.refundStatusDesc || r.orderRefundStatusDesc || null,
-    item_count: Number(r.totalItemCount) || null,
-    item_names: (Array.isArray(r.itemList) ? r.itemList.map((i) => i.productName) : []).filter(Boolean).slice(0, 8).join('、'),
+    order_sn: String(orderSn),
+    shop_id: String(pickVal(r, ['shopId', 'shopIdStr', 'sellerId', 'sellerShopId']) || shop.id || '') || null,
+    shop_name: pickVal(r, ['shopName', 'sellerName', 'shopNameStr']) || shop.name || '',
+    wm_poi_id: String(pickVal(r, ['shangouShopId', 'wmPoiId', 'poiId']) || poi.id || '') || null,
+    wm_poi_name: pickVal(r, ['wmPoiName', 'poiName']) || poi.name || '',
+    invoice_apply_status: Number(pickVal(r, ['invoiceApplyStatus', 'invoiceStatus']) || 0),
+    invoice_apply_desc: pickVal(r, ['invoiceApplyStatusDesc', 'invoiceStatusDesc']) || null,
+    invoice_title: (r.orderInvoice && r.orderInvoice.invoiceTitle) || pickVal(r, ['invoiceTitle']) || null,
+    taxpayer_ident: (r.orderInvoice && r.orderInvoice.invoiceCode) || pickVal(r, ['taxpayerIdent', 'invoiceCode']) || null,
+    taker_email: (r.orderInvoice && r.orderInvoice.email) || pickVal(r, ['takerEmail', 'email']) || null,
+    invoice_type_desc: (r.orderInvoice && r.orderInvoice.invoiceTypeDesc) || pickVal(r, ['invoiceTypeDesc']) || null,
+    batch_no: pickVal(r, ['batchNo']),
+    total_amount: moneyOf(pickVal(r, ['totalAmount', 'orderAmount', 'totalFee']), moneyCents),
+    payable_amount: moneyOf(pickVal(r, ['payableAmount', 'actualPayAmount', 'payAmount']), moneyCents)
+      || moneyOf(pickVal(r, ['totalAmount', 'orderAmount', 'totalFee']), moneyCents),
+    actual_pay_amount: moneyOf(pickVal(r, ['actualPayAmount', 'payAmount']), moneyCents),
+    after_total_amount: moneyOf(pickVal(r, ['afterTotalAmount', 'refundAmount']), moneyCents),
+    order_time: timeMs(pickVal(r, ['payDate', 'orderTime', 'createTime', 'orderCreateTime'])),
+    pay_time: timeMs(pickVal(r, ['payDate', 'payTime', 'paymentTime'])),
+    finish_time: timeMs(pickVal(r, ['finishTime', 'completeTime'])),
+    apply_time: timeMs(pickVal(r, ['applyTime', 'invoiceApplyTime'])),
+    trade_status_desc: pickVal(r, ['tradeStatusDesc', 'orderStatusDesc', 'statusDesc']),
+    refund_status_desc: pickVal(r, ['refundStatusDesc', 'orderRefundStatusDesc']),
+    item_count: numOf(pickVal(r, ['totalItemCount', 'itemCount'])),
+    item_names: (Array.isArray(r.itemList) ? r.itemList.map((i) => i && i.productName) : []).filter(Boolean).slice(0, 8).join('、'),
+    online_blocked: detectBlocked(r) ? 1 : 0,
+    raw_json: rawOf(r),
   };
 }
 
-/** 已申请开票（stage=2）的一行 → 库表列 */
-function pickStage2(r) {
+/** 已申请/已开票一行 → 库表列。开票时间用来做增量，完成状态用 stage=4（不再催） */
+function mapInvoiceRow(r) {
+  const orderSn = pickVal(r, ['orderNo', 'orderId', 'orderSn']);
+  if (!orderSn) return null;
+  const applyStatus = Number(pickVal(r, ['invoiceApplyStatus']) || 0);
+  const desc = String(pickVal(r, ['invoiceStatusDesc', 'invoiceApplyStatusDesc']) || '');
+  const invoiceNo = pickVal(r, ['invoiceNo', 'eInvoiceNo', 'invoiceNumber']);
+  // 有发票号，或状态文案是「已开票/已开具/开票成功/已下载」→ 认定开票完成
+  const done = !!invoiceNo || /已开票|已开具|开票成功|已下载|已发送/.test(desc);
   return {
-    stage: 2,
-    order_sn: String(r.orderNo || ''),
-    shop_id: r.shopId ? String(r.shopId) : null,
-    shop_name: r.shopName || '',
-    wm_poi_id: r.wmPoiId ? String(r.wmPoiId) : null,
-    wm_poi_name: r.wmPoiName || '',
-    invoice_apply_status: Number(r.invoiceApplyStatus) || 0,
-    invoice_apply_desc: r.invoiceApplyStatus === 1 ? '已申请' : (r.invoiceStatusDesc || null),
-    invoice_title: r.invoiceTitle || null,
-    taxpayer_ident: r.taxpayerIdent || null,
-    taker_email: r.takerEmail || null,
-    invoice_type_desc: r.invoiceTypeDesc || null,
-    batch_no: r.batchNo || null,
-    total_amount: Number(r.totalAmount) || 0,
-    payable_amount: Number(r.payableAmount) || Number(r.totalAmount) || 0,
-    actual_pay_amount: Number(r.actualPayAmount) || null,
-    after_total_amount: Number(r.afterTotalAmount) || 0,
-    order_time: Number(r.tradeTime) || null,
-    pay_time: Number(r.payTime) || null,
-    finish_time: Number(r.finishTime) || null,
-    apply_time: Number(r.applyTime) || null,
-    trade_status_desc: r.tradeStatusDesc || null,
-    refund_status_desc: r.refundStatusDesc || r.orderRefundStatusDesc || null,
-    item_count: null,
-    item_names: null,
+    stage: done ? 4 : 2,
+    order_sn: String(orderSn),
+    shop_id: String(pickVal(r, ['shopId', 'shopIdStr']) || '') || null,
+    shop_name: pickVal(r, ['shopName', 'sellerName']) || '',
+    wm_poi_id: String(pickVal(r, ['wmPoiId', 'shangouShopId']) || '') || null,
+    wm_poi_name: pickVal(r, ['wmPoiName', 'poiName']) || '',
+    invoice_apply_status: applyStatus,
+    invoice_apply_desc: desc || (applyStatus === 1 ? '已申请' : null),
+    invoice_title: pickVal(r, ['invoiceTitle']) || null,
+    taxpayer_ident: pickVal(r, ['taxpayerIdent']) || null,
+    taker_email: pickVal(r, ['takerEmail']) || null,
+    invoice_type_desc: pickVal(r, ['invoiceTypeDesc']) || null,
+    batch_no: pickVal(r, ['batchNo']),
+    total_amount: numOf(pickVal(r, ['totalAmount'])),
+    payable_amount: numOf(pickVal(r, ['payableAmount', 'totalAmount'])),
+    actual_pay_amount: numOf(pickVal(r, ['actualPayAmount'])),
+    after_total_amount: numOf(pickVal(r, ['afterTotalAmount'])),
+    order_time: timeMs(pickVal(r, ['tradeTime', 'orderTime'])),
+    pay_time: timeMs(pickVal(r, ['payTime'])),
+    finish_time: timeMs(pickVal(r, ['finishTime'])),
+    apply_time: timeMs(pickVal(r, ['applyTime'])),
+    // 开票时间：优先 invoiceTime，其次 applyTime（申请即受理的场景）
+    invoice_time: timeMs(pickVal(r, ['invoiceTime', 'invoiceDate', 'issueTime'])) || timeMs(pickVal(r, ['applyTime'])),
+    online_blocked: detectBlocked(r) ? 1 : 0,
+    raw_json: rawOf(r),
   };
+}
+
+/** 时间戳 → 'MM-DD HH:mm'（日志用） */
+function fmtMs(ms) {
+  if (!ms) return '—';
+  const d = new Date(Number(ms));
+  const p2 = (n) => String(n).padStart(2, '0');
+  return `${p2(d.getMonth() + 1)}-${p2(d.getDate())} ${p2(d.getHours())}:${p2(d.getMinutes())}`;
 }
 
 /**
- * 翻页拉某一档的全部订单，逐页回报（pageFn 负责把这一页带走，服务端边收边入库）。
- * @returns {Promise<{rows:number,pages:number,error?:string}>}
+ * ① 订单列表：按支付时间区间增量翻页（orderStartTime / orderEndTime，毫秒）
+ * @returns {Promise<{rows:number,pages:number,error?:string,firstKeys?:string[]}>}
  */
-async function fetchStage(wc, stage, userId, pageSize, api, pageFn, isStopped) {
+async function fetchOrderList(wc, { startMs, endMs, pageSize, api, emit, isStopped }) {
   let pageNo = 1;
   let total = 0;
   let pages = 0;
+  let firstKeys = null;
   for (;;) {
     if (isStopped()) return { rows: total, pages, error: '已停止' };
-    const body = stage === 2
-      ? { pageNo, pageSize, _t: Date.now(), invoiceApplyStatusList: [1], userIdList: [Number(userId)] }
-      : { pageNo, pageSize, _t: Date.now(), subUserIds: [Number(userId)] };
-    const path = stage === 2
-      ? '/sdc-gw1/mallApi/orderInvoice/queryOrderInvoiceForBuyer' + QS
-      : '/sdc-gw1/mallApi/invoiceTitle/queryInvoiceOrderPage' + QS;
-
-    const r = await pageFetch(wc, path, body);
+    const body = {
+      searchKey: '',
+      orderStatus: -1,               // -1 = 全部状态
+      orderStartTime: Number(startMs),
+      orderEndTime: Number(endMs),
+      pageNo,
+      pageSize,
+      _t: Date.now(),
+      queryUnCommented: false,
+    };
+    const r = await pageFetch(wc, ORDER_LIST_API, body);
     if (!r || r.error) return { rows: total, pages, error: String((r && r.error) || '页内请求失败') };
     if (Number(r.status) === 401 || Number(r.status) === 403) {
       return { rows: total, pages, error: `登录态失效或触发风控（HTTP ${r.status}）：请在本机重新登录后再试` };
     }
     const d = (r.json && r.json.data) || null;
-    if (!d) return { rows: total, pages, error: '返回结构异常（没有 data）：' + String(r.text || '').slice(0, 120) };
-    const list = Array.isArray(d.data) ? d.data : [];
-    pages = Number(d.pages) || pages;
+    if (!d) {
+      return { rows: total, pages, error: '订单列表返回结构异常（没有 data）：' + String((r.json && r.json.msg) || r.text || '').slice(0, 120) };
+    }
+    const list = Array.isArray(d.data) ? d.data : (Array.isArray(d.list) ? d.list : []);
+    pages = Number(d.pages || d.totalPage) || pages;
+    if (pageNo === 1) {
+      firstKeys = list[0] ? Object.keys(list[0]) : [];
+      api.log(`订单列表第 1 页 ${list.length} 行（共 ${pages || '?'} 页）；首单字段：${(firstKeys || []).slice(0, 14).join(', ') || '空'}`);
+    }
     for (const raw of list) {
-      const row = stage === 2 ? pickStage2(raw) : pickStage1(raw);
-      if (row.order_sn) { await pageFn(row); total += 1; }
+      const row = mapOrderRow(raw);
+      if (row && row.order_sn) { await emit(row); total += 1; }
     }
-    if (api && api.log && (pageNo === 1 || pageNo % 5 === 0)) {
-      api.log(`已拉取「${stage === 2 ? '已申请开票' : '可申请开票'}」第 ${pageNo}/${pages || '?'} 页，累计 ${total} 单`);
-    }
-    // 终止条件：够页数了 / 这一页是空的 / 拿不到下一页
     if (!list.length) break;
     if (pages && pageNo >= pages) break;
     pageNo += 1;
-    await sleep(320);   // 慢一点，别把风控惹急
+    if (pageNo > 400) break;      // 保险丝：别把风控惹急
+    await sleep(320);
   }
-  return { rows: total, pages };
+  return { rows: total, pages, firstKeys };
 }
 
 /**
- * 一次完整取数：登录检测 → 两档全量 → 逐页回报。
- * @param {object} task { taskId, stages:[1,2], pageSize }
- * @param {object} api  { log(text), isStopped(), report(payload), emitRows(stage, rows) }
+ * ② 已申请/已开票：按开票时间增量回写开票状态。
+ * 接口的开票时间过滤参数名尚未确认，这里采用「全量翻页 + 本地按 invoice_time 过滤」：
+ * 只把比 sinceMs 新（或从未入库）的行回传，写库量与请求量都维持在可接受范围。
+ */
+async function fetchInvoiceRows(wc, { userId, pageSize, sinceMs, api, emit, isStopped }) {
+  let pageNo = 1;
+  let total = 0;
+  let pages = 0;
+  let skipped = 0;
+  for (;;) {
+    if (isStopped()) return { rows: total, pages, skipped, error: '已停止' };
+    const body = {
+      pageNo,
+      pageSize,
+      _t: Date.now(),
+      invoiceApplyStatusList: [1],
+      userIdList: [Number(userId)],
+    };
+    const r = await pageFetch(wc, INVOICE_LIST_API, body);
+    if (!r || r.error) return { rows: total, pages, skipped, error: String((r && r.error) || '页内请求失败') };
+    if (Number(r.status) === 401 || Number(r.status) === 403) {
+      return { rows: total, pages, skipped, error: `登录态失效或触发风控（HTTP ${r.status}）：请在本机重新登录后再试` };
+    }
+    const d = (r.json && r.json.data) || null;
+    if (!d) {
+      return { rows: total, pages, skipped, error: '开票接口返回结构异常（没有 data）：' + String((r.json && r.json.msg) || r.text || '').slice(0, 120) };
+    }
+    const list = Array.isArray(d.data) ? d.data : [];
+    pages = Number(d.pages) || pages;
+    for (const raw of list) {
+      const row = mapInvoiceRow(raw);
+      if (!row || !row.order_sn) continue;
+      const t = Number(row.invoice_time || row.apply_time || 0);
+      if (sinceMs && t && t <= sinceMs) { skipped += 1; continue; }   // 没变化就不回传
+      await emit(row);
+      total += 1;
+    }
+    if (api && api.log && (pageNo === 1 || pageNo % 5 === 0)) {
+      api.log(`已拉取「已申请/已开票」第 ${pageNo}/${pages || '?'} 页，增量回传 ${total} 单（跳过 ${skipped} 单）`);
+    }
+    if (!list.length) break;
+    if (pages && pageNo >= pages) break;
+    pageNo += 1;
+    await sleep(320);
+  }
+  return { rows: total, pages, skipped };
+}
+
+/**
+ * 一次完整取数：登录检测 → ①订单列表（支付时间增量） → ②开票状态（开票时间增量）
+ * @param {object} task { startMs, endMs, invoiceSinceMs, pageSize }
+ * @param {object} api  { log(text), isStopped(), report(payload), emitRow(row) }
  */
 async function runFetch(task, api) {
   let w = null;
@@ -371,26 +514,38 @@ async function runFetch(task, api) {
     api.report({ ok: false, loginish: true, error: '本机浏览器里闪电帮帮未登录，请先在窗口里登录' });
     return;
   }
-  const stages = Array.isArray(task.stages) && task.stages.length ? task.stages.map(Number) : [1, 2];
-  const pageSize = Math.min(200, Math.max(10, Number(task.pageSize) || 50));
-  const tally = {};
-  let failed = '';
-  for (const st of stages) {
-    if (st !== 1 && st !== 2) continue;
-    const stopped = () => (api.isStopped ? api.isStopped() : false);
-    const res = await fetchStage(w.webContents, st, p.subUserId, pageSize, api, async (row) => {
-      // 一条一条交给调用方（ws-client 会按适度批量发给服务器，避免单条消息过大）
-      await api.emitRow(row);
-    }, stopped);
-    tally[st] = { rows: res.rows, pages: res.pages, error: res.error || '' };
-    if (res.error) failed = res.error;
+  const pageSize = Math.min(100, Math.max(10, Number(task.pageSize) || 50));
+  const endMs = Number(task.endMs) || Date.now();
+  // 首次同步（库里没订单）没有增量起点：默认拉近一年，日志里说清楚
+  const startMs = Number(task.startMs) || (endMs - 365 * 86400 * 1000);
+  const invoiceSinceMs = Number(task.invoiceSinceMs) || 0;
+  const stopped = () => (api.isStopped ? api.isStopped() : false);
+
+  api.log(`① 订单列表增量：${fmtMs(startMs)} ~ ${fmtMs(endMs)}`);
+  const orders = await fetchOrderList(w.webContents, {
+    startMs, endMs, pageSize, api, isStopped: stopped,
+    emit: (row) => api.emitRow(row),
+  });
+  if (orders.error && !orders.rows) {
+    api.report({ ok: false, subUserId: p.subUserId, tally: { orders: 0 }, agentVer: currentVersion(), error: orders.error });
+    return;
   }
+  api.log(`① 完成：${orders.rows} 单（${orders.pages || 1} 页）`);
+
+  api.log(`② 开票状态增量：${invoiceSinceMs ? '开票时间晚于 ' + fmtMs(invoiceSinceMs) : '全量（首次）'}`);
+  const inv = await fetchInvoiceRows(w.webContents, {
+    userId: p.subUserId, pageSize, sinceMs: invoiceSinceMs, api, isStopped: stopped,
+    emit: (row) => api.emitRow(row),
+  });
+  api.log(`② 完成：回传 ${inv.rows} 单，跳过未变化 ${inv.skipped || 0} 单`);
+
+  const errs = [orders.error, inv.error].filter(Boolean);
   api.report({
-    ok: !failed || Object.values(tally).some((t) => t.rows > 0),
+    ok: !errs.length || (orders.rows + inv.rows) > 0,
     subUserId: p.subUserId,
-    tally,
+    tally: { orders: orders.rows, invoice: inv.rows, skipped: inv.skipped || 0 },
     agentVer: currentVersion(),
-    error: failed || '',
+    error: errs.join('；'),
   });
 }
 

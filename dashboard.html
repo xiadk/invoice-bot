@@ -467,7 +467,7 @@
                       clearable @keyup.enter.native="applyFilters"></el-input>
             <el-button size="small" type="primary" plain :loading="boardLoading" @click="applyFilters" title="按当前筛选条件重新请求数据">查询</el-button>
             <el-button size="small" :loading="boardLoading || aliSync.running" @click="syncAliOrders"
-                       :title="aliSync.running ? '正在从 1688 拉取订单…' : '从 1688 拉取订单：以库中最近订单时间为起点（' + (aliSync.startDateTime || '自动') + '），翻页拉完全部订单后自动刷新列表'">刷新</el-button>
+                       :title="aliSync.running ? '正在从 1688 拉取订单…' : '从 1688 拉取订单：下单时间起点 ' + (aliSync.startDateTime || '库中最近下单时间（自动回退 1 天重叠）') + '，逐页拉到没有下一页为止；拉完再按开票时间增量刷新「已开票」状态'">刷新</el-button>
             <span class="spacer"></span>
             <el-button size="small" @click="openUpload('orders')" title="导入1688订单数据：上传从 1688 导出的订单 Excel 并导入（重复订单按最新数据更新）">导入订单</el-button>
             <el-button size="small" @click="openUpload('invoices')" title="导入税务局发票数据：上传从电子税务局导出的发票 Excel 并导入（重复发票按最新数据更新）">导入发票</el-button>
@@ -2372,26 +2372,34 @@
         <!-- 筛选 + 店铺列表（一行 = 一家店铺；订单明细与催收记录在展开行里） -->
         <el-card class="section-card" shadow="never">
           <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px">
-            <el-select v-model="sd.filter.stage" size="small" style="width:150px" placeholder="开票档位">
+            <span class="tb-label">档位</span>
+            <el-select v-model="sd.filter.stage" size="small" style="width:150px" placeholder="全部档位">
               <el-option label="全部档位" value=""></el-option>
               <el-option label="可申请开票" value="1"></el-option>
               <el-option label="已申请开票" value="2"></el-option>
+              <el-option label="不支持线上开票" value="3"></el-option>
+              <el-option label="已开票" value="4"></el-option>
             </el-select>
-            <el-input v-model="sd.filter.keyword" size="small" clearable style="width:250px"
-                      placeholder="店铺 / 订单号 / 门店 / 抬头 / 批次" @keyup.enter.native="applySdcFilter"></el-input>
+            <span class="tb-label">催收</span>
+            <el-select v-model="sd.filter.sent" size="small" style="width:160px"
+                       title="已催收 = 有成功催收记录；最近 N 天未催收 = N 天内没有成功催收记录（含从未催收）">
+              <el-option label="全部" value=""></el-option>
+              <el-option label="已催收" value="collected"></el-option>
+              <el-option label="最近一周未催收" value="7"></el-option>
+              <el-option label="最近半个月未催收" value="15"></el-option>
+              <el-option label="最近一个月未催收" value="30"></el-option>
+              <el-option label="最近三个月未催收" value="90"></el-option>
+            </el-select>
+            <el-input v-model="sd.filter.keyword" size="small" clearable style="width:230px"
+                      placeholder="店铺 / 订单号 / 门店" @keyup.enter.native="applySdcFilter"></el-input>
             <el-button size="small" type="primary" @click="applySdcFilter">查询</el-button>
             <el-button size="small" @click="resetSdcFilter">重置</el-button>
-            <el-button size="small" type="warning" plain :disabled="!sdcSelCount"
-                       :loading="sd.sending" @click="sendSdcBatch(false)">
-              发送催收消息{{ sdcSelCount ? '（' + sdcSelCount + ' 家）' : '' }}
-            </el-button>
-            <el-button size="small" plain :disabled="!sdcSelCount"
-                       :loading="sd.sending" @click="sendSdcBatch(true)"
-                       title="只把内容填进会话输入框、不点发送，用来先确认助手能正确打开会话">
-              演练{{ sdcSelCount ? '（' + sdcSelCount + ' 家）' : '' }}
+            <el-button size="small" type="warning" plain :disabled="sdcSelCount === 0 && !sd.total"
+                       :loading="sd.sending" @click="openSdcSend">
+              发送催收消息{{ sdcSelCount ? '（' + sdcSelCount + ' 家）' : '（全部）' }}
             </el-button>
             <span style="flex:1"></span>
-            <span class="loginid">共 {{ sd.total }} 家店铺 · {{ sdcStageAmount }} 元</span>
+            <span class="loginid">共 {{ sd.total }} 家店铺 · 待开票 {{ sdcPendingTotal }} 元</span>
           </div>
 
           <el-table ref="sdcTable" :data="sd.rows" size="small" border style="width:100%" v-loading="sd.loading"
@@ -2413,23 +2421,21 @@
                     </div>
                     <table class="mini-tbl">
                       <thead><tr>
-                        <th style="width:170px">订单号</th><th style="width:100px">档位</th><th style="width:130px">支付时间</th>
+                        <th style="width:180px">订单号</th><th style="width:110px">档位</th><th style="width:130px">支付时间</th>
                         <th style="width:100px">可开票金额</th><th style="width:150px">闪购门店</th><th>发票抬头</th>
-                        <th style="width:130px">批次号</th><th style="width:90px">状态</th><th style="width:80px">已催</th>
+                        <th style="width:80px">已催</th>
                       </tr></thead>
                       <tbody>
                         <tr v-for="o in sdDC[p.row.key].orders" :key="o.order_sn">
                           <td class="mono">{{ o.order_sn }}</td>
-                          <td><el-tag size="mini" :type="o.stage === 1 ? 'warning' : 'info'">{{ o.stageText }}</el-tag></td>
+                          <td><el-tag size="mini" :type="sdcStageTag(o.stage)">{{ o.stageText }}</el-tag></td>
                           <td>{{ fmtMinute(o.pay_time) }}</td>
                           <td class="amount">{{ yuan(o.payable_amount) }}</td>
                           <td class="muted">{{ o.wm_poi_name || '—' }}</td>
                           <td class="muted">{{ o.invoice_title || '—' }}</td>
-                          <td class="mono">{{ o.batch_no || '—' }}</td>
-                          <td class="muted">{{ o.trade_status_desc || '—' }}</td>
                           <td class="muted">{{ Number(o.send_count) || 0 }} 次</td>
                         </tr>
-                        <tr v-if="!(sdDC[p.row.key].orders || []).length"><td colspan="9" class="muted">无订单</td></tr>
+                        <tr v-if="!(sdDC[p.row.key].orders || []).length"><td colspan="7" class="muted">无订单</td></tr>
                       </tbody>
                     </table>
                     <div class="sec">催收记录（成功 {{ sdcShopOk(p.row.key) }} 次<span v-if="sdcShopFail(p.row.key)"> · 失败 {{ sdcShopFail(p.row.key) }} 次</span>）</div>
@@ -2469,13 +2475,22 @@
                 <div class="loginid">{{ p.row.orderCount }} 单</div>
               </template>
             </el-table-column>
+            <!-- 待开票 = 订单总金额 − 已申请开票金额（已申请/已开票的算「已有着落」） -->
+            <el-table-column label="待开票" width="120">
+              <template slot-scope="p">
+                <span class="amount" :style="p.row.pendingAmount > 0 ? 'color:#d1580a' : ''">{{ yuan(p.row.pendingAmount) }}</span>
+                <div class="loginid" v-if="p.row.appliedAmount">已申请 {{ yuan(p.row.appliedAmount) }}</div>
+              </template>
+            </el-table-column>
             <el-table-column label="订单总额" width="110">
               <template slot-scope="p">¥{{ yuan(p.row.totalAmount) }}</template>
             </el-table-column>
-            <el-table-column label="开票档位" width="180">
+            <el-table-column label="开票档位" width="200">
               <template slot-scope="p">
                 <el-tag size="mini" type="warning">可申请 {{ p.row.stage1Count }}</el-tag>
                 <el-tag size="mini" type="info">已申请 {{ p.row.stage2Count }}</el-tag>
+                <el-tag v-if="p.row.stage3Count" size="mini" type="danger">不支持线上 {{ p.row.stage3Count }}</el-tag>
+                <el-tag v-if="p.row.stage4Count" size="mini" type="success">已开票 {{ p.row.stage4Count }}</el-tag>
               </template>
             </el-table-column>
             <el-table-column prop="last_pay_time" label="最近下单" width="130" sortable="custom"
@@ -2496,10 +2511,9 @@
             </el-table-column>
             <el-table-column label="操作" width="150" fixed="right">
               <template slot-scope="p">
-                <el-button size="mini" type="primary" :disabled="!p.row.chatable" :loading="sd.sending"
-                           @click="sendSdcShops([p.row], false)">催收消息</el-button>
-                <el-button size="mini" plain :disabled="!p.row.chatable" :loading="sd.sending"
-                           title="只把内容填进会话输入框、不点发送" @click="sendSdcShops([p.row], true)">演练</el-button>
+                <el-button size="mini" type="primary" :disabled="!p.row.chatable || !p.row.chatCount"
+                           :loading="sd.sending" :title="p.row.chatCount ? '催这家店「已申请 + 不支持线上开票」的 ' + p.row.chatCount + ' 单' : '这家店没有「已申请」或「不支持线上开票」的订单，不用催'"
+                           @click="openSdcSend([p.row])">催收消息</el-button>
               </template>
             </el-table-column>
           </el-table>
@@ -2510,9 +2524,88 @@
                            @current-change="onSdcPage" @size-change="onSdcSize"></el-pagination>
             <span class="total">共 {{ sd.total }} 家店铺</span>
             <span style="flex:1"></span>
-            <span class="loginid">未勾选店铺时点「发送催收消息」= 对所有<b>可申请开票</b>订单按店铺批量催收</span>
+            <span class="loginid">未勾选店铺时点「发送催收消息」= 对所有店铺的<b>已申请开票 + 不支持线上开票</b>订单批量催收</span>
           </div>
         </el-card>
+
+        <!-- 催收前选抬头：一人可配多个抬头，选中的那条作为话术里的 {companyName}/{taxNo}/{email} -->
+        <el-dialog title="选择开票抬头" :visible.sync="sd.sendDialog" width="560px" append-to-body>
+          <div class="form-tip" style="margin-bottom:10px">{{ sd.sendScopeText }}</div>
+          <el-radio-group v-model="sd.sendTitleId" style="display:block">
+            <el-radio v-for="t in sd.titles" :key="t.id" :label="t.id" style="display:block;margin:0 0 10px;height:auto;line-height:1.6">
+              <b>{{ t.title }}</b>
+              <span v-if="t.isDefault" class="el-tag el-tag--mini" style="margin-left:6px">默认</span>
+              <div class="loginid" style="font-size:12px;color:#888">
+                税号 {{ t.taxNo || '未填' }} · 邮箱 {{ t.email || '未填' }}
+              </div>
+            </el-radio>
+          </el-radio-group>
+          <div class="form-tip" v-if="!sd.titles.length">
+            还没有抬头，去左侧「抬头配置」新增一条再回来。
+          </div>
+          <span slot="footer">
+            <el-button size="small" @click="sd.sendDialog = false">取消</el-button>
+            <el-button size="small" type="primary" :disabled="!sd.sendTitleId" :loading="sd.sending"
+                       @click="confirmSdcSend">按这个抬头发送</el-button>
+          </span>
+        </el-dialog>
+      </div>
+
+      <!-- ══════════ 抬头配置 ══════════ -->
+      <div v-show="page === 'invtitle'" id="page-invtitle">
+        <div class="page-head">
+          <h2>抬头配置</h2>
+          <div class="meta-line">
+            维护本账号的开票抬头（可多条）。催收消息里的 <b>公司名称 / 税号 / 邮箱</b> 取自发送时弹框里选中的那条；
+            标「默认」的那条会被自动预选。
+          </div>
+        </div>
+
+        <el-card class="section-card" shadow="never">
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+            <el-button size="small" type="primary" @click="openTitleForm()">新增抬头</el-button>
+            <span style="flex:1"></span>
+            <span class="loginid">共 {{ it.rows.length }} 条</span>
+          </div>
+          <el-table :data="it.rows" size="small" border v-loading="it.loading" empty-text="还没有抬头，点「新增抬头」加一条">
+            <el-table-column label="发票抬头" min-width="240">
+              <template slot-scope="p">
+                <span>{{ p.row.title }}</span>
+                <el-tag v-if="p.row.isDefault" size="mini" style="margin-left:6px">默认</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column prop="taxNo" label="纳税人识别号" width="230" show-overflow-tooltip></el-table-column>
+            <el-table-column prop="email" label="收票邮箱" min-width="200" show-overflow-tooltip></el-table-column>
+            <el-table-column label="操作" width="220" fixed="right">
+              <template slot-scope="p">
+                <el-button type="text" size="mini" @click="openTitleForm(p.row)">编辑</el-button>
+                <el-button type="text" size="mini" :disabled="!!p.row.isDefault" @click="setDefaultTitle(p.row)">设为默认</el-button>
+                <el-button type="text" size="mini" style="color:#e6a23c" @click="delTitle(p.row)">删除</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+        </el-card>
+
+        <el-dialog :title="it.form.id ? '编辑抬头' : '新增抬头'" :visible.sync="it.dialog" width="520px" append-to-body>
+          <el-form label-width="96px" size="small">
+            <el-form-item label="发票抬头" required>
+              <el-input v-model="it.form.title" maxlength="200" placeholder="公司名称（税局登记全称）"></el-input>
+            </el-form-item>
+            <el-form-item label="税号">
+              <el-input v-model="it.form.taxNo" maxlength="64" placeholder="纳税人识别号"></el-input>
+            </el-form-item>
+            <el-form-item label="收票邮箱">
+              <el-input v-model="it.form.email" maxlength="160" placeholder="电子发票接收邮箱"></el-input>
+            </el-form-item>
+            <el-form-item label="设为默认">
+              <el-switch v-model="it.form.isDefault"></el-switch>
+            </el-form-item>
+          </el-form>
+          <span slot="footer">
+            <el-button size="small" @click="it.dialog = false">取消</el-button>
+            <el-button size="small" type="primary" :loading="it.saving" @click="saveTitle">保存</el-button>
+          </span>
+        </el-dialog>
       </div>
 
       <!-- 全局页脚：版权归属（主体来自 config.json 的 copyright，缺省回退系统名；年份服务端按当年生成） -->
@@ -2946,8 +3039,10 @@ const vm = new Vue({
         loading: false, syncing: false, sending: false,
         rows: [], total: 0, amount: 0, page: 1, size: 20,
         // 主表是店铺维度：sort 用 SHOP_SORTS 那套（默认按可开票金额从高到低）
-        filter: { stage: '', keyword: '', sort: 'amount_desc' },
+        filter: { stage: '', sent: '', keyword: '', sort: 'amount_desc' },
         selected: [], picked: {},
+        // 催收前的抬头选择（一人可多条抬头；标题/税号/邮箱取自选中的那条）
+        titles: [], sendDialog: false, sendIds: [], sendTitleId: 0, sendScopeText: '',
         login: { logined: false, accountName: '', subUserId: '', lastSyncAt: null, writtenAt: null },
         agent: { online: false, agentVer: '', minVer: '', outdated: false },
         users: [], sessions: [],
@@ -2957,10 +3052,16 @@ const vm = new Vue({
       sdcDefaultSort: { prop: 'payable_amount', order: 'descending' },
       // 闪电帮帮展开行缓存（店铺 key → { loading, orders, logs, error }）——与 1688 的 detailCache 同构，放顶层才能正常响应
       sdDC: {},
+      // 抬头配置页（一人多条，催收前选一条）
+      it: {
+        loading: false, saving: false, rows: [], dialog: false,
+        form: { id: 0, title: '', taxNo: '', email: '', isDefault: false },
+      },
       // 1688发票数据
       companies: [], sent: {}, invSummary: null, boardLoading: false,
       // 1688 订单同步（刷新按钮拉 mtop 订单接口）
       aliSync: { running: false, taskId: '', page: 0, totalPages: 0, total: 0, fetched: 0, saved: 0, newCount: 0, text: '', startDateTime: '', timer: null },
+      aliSession: null,   // /api/ali/orders-session 结果：1688 登录态 + 增量起点
       // 商品列表（前置仓补货参考）
       product: {
         loading: false, rows: [], total: 0, page: 1, size: 20,
@@ -3079,6 +3180,7 @@ const vm = new Vue({
           { key: 'pdd', label: '拼多多发票', icon: 'el-icon-s-order' },
           { key: 'sdc', label: '闪电帮帮发票', icon: 'el-icon-truck' },
           { key: 'mapping', label: '税名核对', icon: 'el-icon-edit-outline' },
+          { key: 'invtitle', label: '抬头配置', icon: 'el-icon-postcard' },
         ] },
         { title: '核对与商品', items: [
           this.canProduct ? { key: 'product', label: '商品列表', icon: 'el-icon-goods' } : null,
@@ -3411,10 +3513,18 @@ const vm = new Vue({
       const n = (o) => Number((o && o.count) || 0);
       const applyable = s.applyable || { count: 0, amount: 0, shops: 0 };
       const applied = s.applied || { count: 0, amount: 0, shops: 0 };
+      const blocked = s.blocked || { count: 0, amount: 0, shops: 0 };
+      const issued = s.issued || { count: 0, amount: 0, shops: 0 };
       return [
         { label: '可申请开票', value: yuan(a(applyable)), sub: `${n(applyable)} 单 / ${Number(applyable.shops) || 0} 家店铺` },
         { label: '已申请开票', value: yuan(a(applied)), sub: `${n(applied)} 单 / ${Number(applied.shops) || 0} 家店铺` },
-        { label: '合计金额', value: yuan(a(applyable) + a(applied)), sub: `共 ${n(applyable) + n(applied)} 单` },
+        { label: '不支持线上开票', value: yuan(a(blocked)), sub: `${n(blocked)} 单 / ${Number(blocked.shops) || 0} 家店铺` },
+        { label: '已开票', value: yuan(a(issued)), sub: `${n(issued)} 单 / ${Number(issued.shops) || 0} 家店铺` },
+        {
+          label: '待开票金额',
+          value: yuan(Math.max(0, a(applyable) + a(applied) + a(blocked))),
+          sub: `可催收 ${n(applied) + n(blocked)} 单（已申请 + 不支持线上）`,
+        },
       ];
     },
     sdcUsers() { return this.sd.users || []; },
@@ -3422,6 +3532,10 @@ const vm = new Vue({
     /** 勾选/催收的最小单位是店铺（发送时同一家店合并成一条消息） */
     sdcSelCount() { return (this.sd.selected || []).length; },
     sdcStageAmount() { return Number(this.sd.amount || 0).toFixed(2); },
+    /** 当前页的待开票合计（订单总额 − 已申请开票金额） */
+    sdcPendingTotal() {
+      return (this.sd.rows || []).reduce((a, r) => a + (Number(r.pendingAmount) || 0), 0).toFixed(2);
+    },
     /** 登录条要一个 cookie 形的对象（复用牵牛花那个组件） */
     sdLoginCookie() {
       const l = this.sd.login || {};
@@ -3606,6 +3720,7 @@ const vm = new Vue({
       if (p === 'market') this.loadMarket();
       if (p === 'billing') this.loadBilling();
       if (p === 'sdc') { this.clearSdcPicked(); this.loadSdcStatus(); this.loadSdcOrders(); }
+      if (p === 'invtitle') this.loadTitles();
     },
     'detail.visible'(v) { if (!v) this.detail.q = ''; },
   },
@@ -3831,22 +3946,40 @@ const vm = new Vue({
         this.aliSync.newCount = p.newCount || 0;
         if (d.startDateTime) this.aliSync.startDateTime = d.startDateTime;
 
+        // 同一任务分两段跑：先订单（按下单时间增量），再已开票状态（按开票时间增量）
+        const invPhase = d.phase === 'invoices';
         if (d.status === 'pending') {
-          this.aliSync.text = p.page
-            ? '同步中 · 第 ' + p.page + (p.totalPages ? '/' + p.totalPages : '') + ' 页'
-              + (p.current ? ' · ' + p.current : '')
-            : '同步中…';
+          if (invPhase) {
+            this.aliSync.text = '正在同步开票状态 · 第 ' + (p.invPage || 0) + (p.invPages ? '/' + p.invPages : '') + ' 页'
+              + (p.invFetched ? ' · 接口 ' + p.invFetched + ' 条' : '');
+          } else {
+            this.aliSync.text = p.page
+              ? '同步中 · 第 ' + p.page + (p.totalPages ? '/' + p.totalPages : '') + ' 页'
+                + (p.current ? ' · ' + p.current : '')
+              : '同步中…';
+          }
           this.pollAliSync();
           return;
         }
 
         // 结束
         this.aliSync.running = false;
-        this.aliSync.text = d.message || (d.status === 'done' ? '同步完成' : '同步失败');
+        const invNote = (d.invoice && (d.invoice.matched || d.invoice.fetched))
+          ? ' · 开票状态：接口 ' + (d.invoice.fetched || 0) + ' 条，命中 ' + (d.invoice.matched || 0) + ' 单'
+          : '';
+        this.aliSync.text = (d.message || (d.status === 'done' ? '同步完成' : '同步失败')) + invNote;
         if (d.status === 'done') {
-          this.$message.success(d.message || '订单同步完成');
+          this.$message.success((d.message || '订单同步完成') + invNote);
           this.loadData();                     // 拉完立刻重读看板
+          this.loadAliSession();               // 起点已推进，按钮提示跟着更新
           setTimeout(() => { this.aliSync.text = ''; }, 8000);
+        } else if (d.needImport) {
+          // 首次使用：库里还没有任何订单，增量起点无从谈起 → 明确引导去用「导入订单」
+          this.$message({
+            message: d.message || '首次使用需要先点「导入订单」导入一次历史订单，之后「刷新」才会增量拉取',
+            type: 'warning', duration: 10000, showClose: true,
+          });
+          setTimeout(() => { this.aliSync.text = ''; }, 15000);
         } else {
           if (d.needLogin) this.$message.warning(d.message || '需要先登录 1688');
           else this.$message.error(d.message || '订单同步失败');
@@ -5332,6 +5465,7 @@ const vm = new Vue({
         const q = new URLSearchParams();
         const f = this.sd.filter || {};
         if (f.stage !== '') q.set('stage', f.stage);
+        if (f.sent) q.set('sent', f.sent);
         if (f.keyword) q.set('keyword', f.keyword);
         if (f.sort) q.set('sort', f.sort);
         q.set('page', this.sd.page);
@@ -5509,7 +5643,7 @@ const vm = new Vue({
 
     applySdcFilter() { this.sd.page = 1; this.clearSdcPicked(); this.loadSdcOrders(); },
     resetSdcFilter() {
-      this.sd.filter = { stage: '', keyword: '', sort: 'amount_desc' };
+      this.sd.filter = { stage: '', sent: '', keyword: '', sort: 'amount_desc' };
       this.sd.page = 1;
       this.clearSdcPicked();
       this.loadSdcOrders();
@@ -5535,6 +5669,14 @@ const vm = new Vue({
     /** 展开行里「这家店催收成功/失败次数」（必须放 methods：带参数调用，computed 会取成值） */
     sdcShopOk(k) { return ((this.sdDC[k] || {}).logs || []).filter((l) => l.ok).length; },
     sdcShopFail(k) { return ((this.sdDC[k] || {}).logs || []).filter((l) => !l.ok).length; },
+    /** 档位标签配色：可申请=警告色、已申请=灰、不支持线上=红、已开票=绿 */
+    sdcStageTag(stage) {
+      const s = Number(stage);
+      if (s === 1) return 'warning';
+      if (s === 3) return 'danger';
+      if (s === 4) return 'success';
+      return 'info';
+    },
     toggleSdcShop(row, v) {
       // 没有店铺 ID 的「无店铺组」换不到客服会话，勾了也不能算（UI 上是禁用态，这里再兜一层）
       if (!row || !row.chatable) return;
@@ -5544,40 +5686,46 @@ const vm = new Vue({
       this.sd.selected = Object.values(picked);
     },
 
-    /** 批量催收（不勾选 = 对所有「可申请开票」订单按店铺催收） */
-    async sendSdcBatch(dryRun) {
-      const ids = (this.sd.selected || []).map((r) => r.shop_id).filter(Boolean);
-      if (!ids.length) {
-        try {
-          await this.$confirm(
-            '没有勾选店铺：将对库里所有「可申请开票」的订单按店铺批量催收。是否继续？',
-            '批量催收确认', { type: 'warning' }
-          );
-        } catch (e) { return; }
-      } else if (!dryRun) {
-        try {
-          await this.$confirm(
-            `将对勾选的 ${ids.length} 家店铺发送催收消息（同一家店合并成一条）。是否继续？`,
-            '发送确认', { type: 'warning' }
-          );
-        } catch (e) { return; }
+    /**
+     * 点「发送催收消息」：先弹框选抬头（一人可配多个抬头），确认后再下发。
+     * 没勾店铺 = 对库里所有店铺的「已申请 + 不支持线上开票」订单批量催。
+     */
+    async openSdcSend(rows) {
+      const picked = Array.isArray(rows) ? rows : (this.sd.selected || []);
+      const ids = picked.map((r) => r.shop_id).filter(Boolean);
+      this.sd.sendIds = ids;
+      this.sd.sendScopeText = ids.length
+        ? `将向勾选的 ${ids.length} 家店铺发送催收消息（同一家店合并成一条）`
+        : '没有勾选店铺：将对库里所有店铺的「已申请开票 + 不支持线上开票」订单批量催收';
+      try {
+        const d = await this.sdcApi('/api/sdc/titles');
+        this.sd.titles = (d && d.rows) || [];
+      } catch (e) {
+        this.sd.titles = [];
       }
-      await this.doSendSdc(ids, dryRun);
+      if (!this.sd.titles.length) {
+        this.$message({
+          message: '还没有配置开票抬头：先去「抬头配置」加一条（抬头/税号/邮箱），否则催收消息里没有抬头信息',
+          type: 'warning', duration: 6000,
+        });
+        return;
+      }
+      this.sd.sendTitleId = this.sd.titles[0].id;
+      this.sd.sendDialog = true;
     },
 
-    /** 单店催收（列表行里的「催收消息 / 演练」按钮） */
-    async sendSdcShops(rows, dryRun) {
-      const ids = (rows || []).map((r) => r.shop_id).filter(Boolean);
-      if (!ids.length) { this.$message.warning('这家店的订单没有店铺 ID，换不到客服会话，无法催收'); return; }
-      await this.doSendSdc(ids, dryRun);
+    async confirmSdcSend() {
+      const ids = this.sd.sendIds || [];
+      this.sd.sendDialog = false;
+      await this.doSendSdc(ids, this.sd.sendTitleId);
     },
 
-    async doSendSdc(shopIds, dryRun) {
+    async doSendSdc(shopIds, titleId) {
       this.sd.sending = true;
       try {
         const d = await this.sdcApi('/api/sdc/send', {
           method: 'POST', headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ shopIds, dryRun: !!dryRun, stage: (this.sd.filter || {}).stage || '' }),
+          body: JSON.stringify({ shopIds, titleId: titleId || 0 }),
         });
         if (d.error) { this.$message.error(d.error); return; }
         if (d.ok === false) { this.$message({ message: d.message || '下发催收任务失败', type: 'warning', duration: 6000 }); return; }
@@ -5592,6 +5740,73 @@ const vm = new Vue({
       } finally {
         this.sd.sending = false;
       }
+    },
+
+    // ══════ 抬头配置（本账号可维护多条：抬头 / 税号 / 收票邮箱；催收时弹框选一条） ══════
+    async loadTitles() {
+      this.it.loading = true;
+      try {
+        const d = await this.sdcApi('/api/sdc/titles');
+        if (d && d.error) { this.$message.error(d.error); return; }
+        this.it.rows = (d && d.rows) || [];
+      } catch (e) {
+        this.$message.error('加载抬头失败：' + e.message);
+      } finally { this.it.loading = false; }
+    },
+    /** 传 row = 编辑；不传 = 新增（首条自动勾成默认，省得用户忘记设） */
+    openTitleForm(row) {
+      this.it.form = row
+        ? { id: row.id, title: row.title || '', taxNo: row.taxNo || '', email: row.email || '', isDefault: !!row.isDefault }
+        : { id: 0, title: '', taxNo: '', email: '', isDefault: this.it.rows.length === 0 };
+      this.it.dialog = true;
+    },
+    async saveTitle() {
+      const f = this.it.form;
+      if (!String(f.title || '').trim()) { this.$message.warning('请先填写发票抬头（公司全称）'); return; }
+      this.it.saving = true;
+      try {
+        const d = await this.sdcApi('/api/sdc/titles', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            id: Number(f.id) || 0,
+            title: f.title, taxNo: f.taxNo, email: f.email, isDefault: !!f.isDefault,
+          }),
+        });
+        if (d && d.error) { this.$message.error(d.error); return; }
+        if (d && d.ok === false) { this.$message({ message: d.message || '保存失败', type: 'warning', duration: 5000 }); return; }
+        this.it.rows = (d && d.rows) || [];
+        this.it.dialog = false;
+        this.$message.success(f.id ? '抬头已更新' : '抬头已新增');
+      } catch (e) {
+        this.$message.error('保存失败：' + e.message);
+      } finally { this.it.saving = false; }
+    },
+    async setDefaultTitle(row) {
+      if (!row || !row.id) return;
+      try {
+        const d = await this.sdcApi('/api/sdc/titles/default', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ id: row.id }),
+        });
+        if (d && d.error) { this.$message.error(d.error); return; }
+        if (d && d.ok === false) { this.$message({ message: d.message || '设置失败', type: 'warning', duration: 5000 }); return; }
+        this.it.rows = (d && d.rows) || [];
+        this.$message.success('已设为默认抬头');
+      } catch (e) { this.$message.error('设置失败：' + e.message); }
+    },
+    async delTitle(row) {
+      if (!row || !row.id) return;
+      try { await this.$confirm(`确定删除抬头「${row.title}」？`, '删除确认', { type: 'warning' }); } catch (e) { return; }
+      try {
+        const d = await this.sdcApi('/api/sdc/titles/delete', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ id: row.id }),
+        });
+        if (d && d.error) { this.$message.error(d.error); return; }
+        if (d && d.ok === false) { this.$message({ message: d.message || '删除失败', type: 'warning', duration: 5000 }); return; }
+        this.it.rows = (d && d.rows) || [];
+        this.$message.success('已删除');
+      } catch (e) { this.$message.error('删除失败：' + e.message); }
     },
 
     // ══════ 税名核对（所有人可用；普通用户只见自己发票里的销方，映射全平台共享） ══════
