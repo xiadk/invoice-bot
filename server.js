@@ -1549,7 +1549,7 @@ function guessSdcProgress(ctx, text) {
   }
 }
 
-/** 助手回报「闪电帮帮批量催收」结果：逐店铺落 sdc_msg_log，并按店铺回写订单的催收次数（演练不落库） */
+/** 助手回报「闪电帮帮批量催收」结果：逐店铺落 sdc_msg_log，并按店铺回写订单的催收次数 */
 function onSdcSendDone(uid, msg) {
   const ctx = SDC_TASKS.get(String((msg && msg.taskId) || ''));
   if (!ctx || ctx.kind !== 'send' || ctx.userId !== Number(uid) || ctx.status !== 'pending') return;
@@ -1557,11 +1557,7 @@ function onSdcSendDone(uid, msg) {
   ctx.results = results;
   ctx.okCount = Number(msg.okCount) || results.filter((r) => r.ok).length;
   ctx.failCount = Number(msg.failCount) || (results.length - ctx.okCount);
-  ctx.dryRun = !!msg.dryRun;
-  // 演练（没真发消息）不落催收历史、也不加订单的催收次数，避免把真实数据记成「催过了」
-  if (!ctx.dryRun) {
-    sdc.logMsg(ctx.userId, results).catch((e) => console.warn(`[sdc] 催收日志写入失败：${(e && e.message) || e}`));
-  }
+  sdc.logMsg(ctx.userId, results).catch((e) => console.warn(`[sdc] 催收日志写入失败：${(e && e.message) || e}`));
   if (!msg.ok && !results.length) {
     ctx.status = 'failed';
     ctx.message = String(msg.error || '助手执行催收失败').slice(0, 300);
@@ -1571,11 +1567,10 @@ function onSdcSendDone(uid, msg) {
   }
   ctx.status = 'done';
   ctx.finishedAt = new Date();
-  ctx.message = (ctx.dryRun ? '演练完成（未点发送）：' : '催收消息发送完成：')
+  ctx.message = '催收消息发送完成：'
     + `成功 ${ctx.okCount} 家店铺、失败 ${ctx.failCount} 家` + (msg.stopped ? '（中途停止）' : '');
   logOp(Number(uid), 'sdc.send', {
-    ok: ctx.okCount > 0, okCount: ctx.okCount, failCount: ctx.failCount,
-    tenantId: ctx.userId, dryRun: !!ctx.dryRun,
+    ok: ctx.okCount > 0, okCount: ctx.okCount, failCount: ctx.failCount, tenantId: ctx.userId,
   });
 }
 
@@ -4446,6 +4441,7 @@ const server = http.createServer(async (req, res) => {
           stage: q.get('stage') || '',
           keyword: q.get('keyword') || '',
           sent: q.get('sent') || '',
+          invoice: q.get('invoice') || '',
           sort: q.get('sort') || 'amount_desc',
           page: q.get('page'),
           size: q.get('size'),
@@ -4697,7 +4693,7 @@ const server = http.createServer(async (req, res) => {
         const taskId = 'sdcm-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
         const ctx = {
           taskId, kind: 'send', userId: Number(sdcUid), status: 'pending', message: '',
-          total: items.length, results: [], okCount: 0, failCount: 0, dryRun: false,
+          total: items.length, results: [], okCount: 0, failCount: 0,
           doneIdx: 0, current: '',          // 当前在处理第几家 / 哪家店（进度面板要显示，像 1688 那样）
           orderCount: items.reduce((a, it) => a + it.orderSns.length, 0),
           title: buyer.companyName || '', taxNo: buyer.taxNo || '',
@@ -4759,7 +4755,6 @@ const server = http.createServer(async (req, res) => {
           current: ctx.current || '',
           okCount: ctx.okCount || 0,
           failCount: ctx.failCount || 0,
-          dryRun: !!ctx.dryRun,
           loginish: !!ctx.loginish,
           log: ctx.progressLog || [],
         });

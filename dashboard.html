@@ -2390,6 +2390,13 @@
               <el-option label="最近一个月未催收" value="30"></el-option>
               <el-option label="最近三个月未催收" value="90"></el-option>
             </el-select>
+            <span class="tb-label">开票</span>
+            <el-select v-model="sd.filter.invoice" size="small" style="width:170px"
+                       title="与 1688 发票页同一条口径：已开票 = 该店待开票金额为 0；未开票 = 待开票金额大于 0">
+              <el-option label="全部" value=""></el-option>
+              <el-option label="已开票（待开票金额=0）" value="invoiced"></el-option>
+              <el-option label="未开票（待开票金额>0）" value="pending"></el-option>
+            </el-select>
             <el-input v-model="sd.filter.keyword" size="small" clearable style="width:230px"
                       placeholder="店铺 / 订单号 / 门店" @keyup.enter.native="applySdcFilter"></el-input>
             <el-button size="small" type="primary" @click="applySdcFilter">查询</el-button>
@@ -3039,7 +3046,7 @@ const vm = new Vue({
         loading: false, syncing: false, sending: false,
         rows: [], total: 0, amount: 0, page: 1, size: 20,
         // 主表是店铺维度：sort 用 SHOP_SORTS 那套（默认按可开票金额从高到低）
-        filter: { stage: '', sent: '', keyword: '', sort: 'amount_desc' },
+        filter: { stage: '', sent: '', invoice: '', keyword: '', sort: 'amount_desc' },
         selected: [], picked: {},
         // 催收前的抬头选择（一人可多条抬头；标题/税号/邮箱取自选中的那条）
         titles: [], sendDialog: false, sendIds: [], sendTitleId: 0, sendScopeText: '',
@@ -5466,6 +5473,7 @@ const vm = new Vue({
         const f = this.sd.filter || {};
         if (f.stage !== '') q.set('stage', f.stage);
         if (f.sent) q.set('sent', f.sent);
+        if (f.invoice) q.set('invoice', f.invoice);
         if (f.keyword) q.set('keyword', f.keyword);
         if (f.sort) q.set('sort', f.sort);
         q.set('page', this.sd.page);
@@ -5643,7 +5651,7 @@ const vm = new Vue({
 
     applySdcFilter() { this.sd.page = 1; this.clearSdcPicked(); this.loadSdcOrders(); },
     resetSdcFilter() {
-      this.sd.filter = { stage: '', sent: '', keyword: '', sort: 'amount_desc' };
+      this.sd.filter = { stage: '', sent: '', invoice: '', keyword: '', sort: 'amount_desc' };
       this.sd.page = 1;
       this.clearSdcPicked();
       this.loadSdcOrders();

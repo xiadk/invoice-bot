@@ -747,12 +747,11 @@ function lastMsgsJs(n) {
 
 /**
  * 批量催收：逐店打开客服会话 → 逐条打字发送 → 回执。
- * @param {object} task { taskId, items:[{shopId, shopName, contents:[string], orderSns:[]}], gapMs, dryRun }
+ * @param {object} task { taskId, items:[{shopId, shopName, contents:[string], orderSns:[]}], gapMs }
  */
 async function runSend(task, api) {
   const items = Array.isArray(task.items) ? task.items : [];
   if (!items.length) { api.report({ ok: false, error: '没有需要催收的店铺' }); return; }
-  const dryRun = !!task.dryRun;
   const gap = Number(task.gapMs) || 6000;
   const results = [];
   const stopped = () => (api.isStopped ? api.isStopped() : false);
@@ -768,7 +767,6 @@ async function runSend(task, api) {
   }
 
   const chat = getChatWindow();
-  if (dryRun) api.log('演练模式：只会把内容填进会话输入框，**不会点发送**');
 
   for (let i = 0; i < items.length; i += 1) {
     const it = items[i];
@@ -796,11 +794,6 @@ async function runSend(task, api) {
         const filled = await chat.webContents.executeJavaScript(fillJs(content), true).catch(() => ({ ok: false, err: '填入失败' }));
         api.log(`   填入结果：${filled && filled.ok ? 'ok' : '失败'}（<${(filled && filled.tag) || '?'}> 长度 ${filled ? filled.len : 0}/${content.length}）`);
         if (!filled || !filled.ok) { lastErr = (filled && filled.err) || '内容没能填入输入框'; break; }
-        if (dryRun) {
-          sent += 1;
-          await sleep(600);
-          continue;
-        }
         // 头尾各取一段：长消息在聊天区里可能被折行/截断，只认开头容易漏判
         const seen = [content.slice(0, 12), content.slice(-12)];
         const before = await hasAnyText(chat.webContents, seen);
@@ -835,8 +828,8 @@ async function runSend(task, api) {
       results.push({
         ok: okAll, shopId: it.shopId, shopName: it.shopName,
         sent, total: it.contents.length, orderSns: it.orderSns || [], amount: it.amount || null,
-        contents: dryRun ? [] : it.contents,
-        detail: okAll ? `已发送 ${sent} 条${dryRun ? '（演练，未点发送）' : ''}` : (lastErr || `只发出 ${sent}/${it.contents.length} 条`),
+        contents: it.contents,
+        detail: okAll ? `已发送 ${sent} 条` : (lastErr || `只发出 ${sent}/${it.contents.length} 条`),
       });
       api.log(`${okAll ? '✓' : '✗'} ${it.shopName || it.shopId}：${okAll ? `已发送 ${sent} 条` : (lastErr || '未完成')}`);
       if (typeof api.progress === 'function') {
@@ -862,7 +855,6 @@ async function runSend(task, api) {
     results,
     okCount,
     failCount: results.length - okCount,
-    dryRun,
     stopped: stopped(),
   });
 }
