@@ -2476,8 +2476,10 @@
                 <div class="loginid">{{ p.row.orderCount }} 单</div>
               </template>
             </el-table-column>
-            <!-- 待开票 = 订单总金额 − 已申请开票金额（已申请/已开票的算「已有着落」） -->
-            <el-table-column label="待开票" width="120">
+            <!-- 待开票 = 可催收金额 = Σ应付(可申请+已申请+不支持线上)，
+                 与概况卡「待开票金额」、催收实际发送金额同一把尺子；已开票/已关闭的不计 -->
+            <el-table-column label="待开票" width="120"
+                             title="可申请 + 已申请 + 不支持线上开票 三档的应付金额合计，等于点「催收消息」时发出的金额；已开票与已关闭的不计入">
               <template slot-scope="p">
                 <span class="amount" :style="p.row.pendingAmount > 0 ? 'color:#d1580a' : ''">{{ yuan(p.row.pendingAmount) }}</span>
                 <div class="loginid" v-if="p.row.appliedAmount">已申请 {{ yuan(p.row.appliedAmount) }}</div>
@@ -3043,7 +3045,8 @@ const vm = new Vue({
       // 闪电帮帮发票：同样用 pd.picked 那套跨页多选（selected 是当前选中行数组）
       sd: {
         loading: false, syncing: false, sending: false,
-        rows: [], total: 0, amount: 0, page: 1, size: 20,
+        // pendingTotal = 筛选后的全量待开票合计（后端聚合；必须在这里声明，Vue 2 对新增属性不做响应式）
+        rows: [], total: 0, amount: 0, pendingTotal: 0, page: 1, size: 20,
         // 主表是店铺维度：sort 用 SHOP_SORTS 那套（默认按可开票金额从高到低）
         // 档位不再作为筛选条件（2026-10-29 按要求删除），要看档位分布直接看列表里的「开票档位」列
         filter: { sent: '', invoice: '', keyword: '', sort: 'amount_desc' },
@@ -3550,7 +3553,7 @@ const vm = new Vue({
         {
           label: '待开票金额',
           value: yuan(Math.max(0, a(applyable) + a(applied) + a(blocked))),
-          sub: `可催收 ${n(applyable) + n(applied) + n(blocked)} 单（可申请 + 已申请 + 不支持线上，已关闭的不算）`,
+          sub: `可催收 ${n(applyable) + n(applied) + n(blocked)} 单（可申请 + 已申请 + 不支持线上；已开票与已关闭的不算，金额与实际发送的催收金额一致）`,
         },
       ];
     },
@@ -3559,9 +3562,9 @@ const vm = new Vue({
     /** 勾选/催收的最小单位是店铺（发送时同一家店合并成一条消息） */
     sdcSelCount() { return (this.sd.selected || []).length; },
     sdcStageAmount() { return Number(this.sd.amount || 0).toFixed(2); },
-    /** 当前页的待开票合计（订单总额 − 已申请开票金额） */
+    /** 筛选后的全量待开票合计（后端聚合，翻页不跳变；口径与概况卡、催收发送金额一致） */
     sdcPendingTotal() {
-      return (this.sd.rows || []).reduce((a, r) => a + (Number(r.pendingAmount) || 0), 0).toFixed(2);
+      return Number(this.sd.pendingTotal || 0).toFixed(2);
     },
     /** 登录条要一个 cookie 形的对象（复用牵牛花那个组件） */
     sdLoginCookie() {
@@ -5518,6 +5521,8 @@ const vm = new Vue({
         this.sd.rows = d.rows || [];
         this.sd.total = d.total || 0;
         this.sd.amount = d.amount || 0;
+        // 筛选后的全量待开票合计（后端按当前筛选条件聚合，不是当前页累加）
+        this.sd.pendingTotal = d.pending || 0;
       } catch (e) {
         this.$message.error('加载闪电帮帮店铺失败：' + e.message);
       } finally {

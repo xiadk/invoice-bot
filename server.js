@@ -4487,7 +4487,7 @@ const server = http.createServer(async (req, res) => {
           sdc.shops(base),
           sdc.countShops(base),
         ]);
-        return sendJson(res, 200, { rows, total: cnt.count, amount: cnt.amount });
+        return sendJson(res, 200, { rows, total: cnt.count, amount: cnt.amount, pending: cnt.pending });
       }
 
       if (method === 'GET' && p === '/api/sdc/summary') {
