@@ -684,6 +684,17 @@ async function runSend(task, api) {
         detail: okAll ? `已发送 ${sent} 条${dryRun ? '（演练，未点发送）' : ''}` : (lastErr || `只发出 ${sent}/${it.contents.length} 条`),
       });
       api.log(`${okAll ? '✓' : '✗'} ${it.shopName || it.shopId}：${okAll ? `已发送 ${sent} 条` : (lastErr || '未完成')}`);
+      if (typeof api.progress === 'function') {
+        // 逐店回执：服务端的 SDC_TASKS 据此实时更新「第 N/M 家 · 当前店名 · 成功x 失败y」，
+        // 老助手（没有这个通道）只能靠服务端从日志行兜底猜。
+        api.progress({
+          results: results.slice(),
+          done: results.length,
+          current: it.shopName || it.shopId,
+          okCount: results.filter((x) => x.ok).length,
+          failCount: results.filter((x) => !x.ok).length,
+        });
+      }
     } catch (e) {
       results.push({ ok: false, shopId: it.shopId, shopName: it.shopName, detail: String((e && e.message) || e).slice(0, 200) });
     }

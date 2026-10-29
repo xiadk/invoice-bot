@@ -327,6 +327,16 @@
   /* 1688 发票工具栏收成一行：label 与控件间距略紧，按钮文案取短名（全称留在 title） */
   .toolbar.toolbar-tight { gap: 8px; }
   .toolbar.toolbar-tight .tb-label { font-size: 12px; color: var(--text-2); flex: none; }
+  /* 1688 订单同步进度条（挂在工具栏卡片内，只在同步时出现） */
+  .ali-sync-bar { display: flex; align-items: center; gap: 8px; margin-top: 10px; padding-top: 9px;
+                  border-top: 1px dashed #eceef2; font-size: 12px; color: var(--text-2); }
+  .ali-sync-dot { width: 6px; height: 6px; border-radius: 50%; background: #c8ccd4; flex: none; }
+  .ali-sync-dot.on { background: var(--primary); animation: aliPulse 1.1s ease-in-out infinite; }
+  @keyframes aliPulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50%      { opacity: .3; transform: scale(.75); }
+  }
+  .ali-sync-meta { color: var(--text-3); font-variant-numeric: tabular-nums; }
 </style>
 </head>
 <body>
@@ -455,12 +465,23 @@
             </el-select>
             <el-input v-model="draftKeyword" size="small" style="width:190px" placeholder="搜索卖家公司名 / 登录ID"
                       clearable @keyup.enter.native="applyFilters"></el-input>
-            <el-button size="small" type="primary" plain :loading="boardLoading" @click="applyFilters" title="重新请求数据并按当前条件刷新列表">查询</el-button>
-            <el-button size="small" :loading="boardLoading" @click="loadData" title="重新拉取发票数据">刷新</el-button>
+            <el-button size="small" type="primary" plain :loading="boardLoading" @click="applyFilters" title="按当前筛选条件重新请求数据">查询</el-button>
+            <el-button size="small" :loading="boardLoading || aliSync.running" @click="syncAliOrders"
+                       :title="aliSync.running ? '正在从 1688 拉取订单…' : '从 1688 拉取订单：以库中最近订单时间为起点（' + (aliSync.startDateTime || '自动') + '），翻页拉完全部订单后自动刷新列表'">刷新</el-button>
             <span class="spacer"></span>
             <el-button size="small" @click="openUpload('orders')" title="导入1688订单数据：上传从 1688 导出的订单 Excel 并导入（重复订单按最新数据更新）">导入订单</el-button>
             <el-button size="small" @click="openUpload('invoices')" title="导入税务局发票数据：上传从电子税务局导出的发票 Excel 并导入（重复发票按最新数据更新）">导入发票</el-button>
             <el-button size="small" type="primary" :disabled="readonly" @click="batchSend">发送催收消息 ({{ selectedCount }})</el-button>
+          </div>
+          <!-- 订单同步进度：只在同步中/刚结束时出现，不占用常驻版面 -->
+          <div v-if="aliSync.running || aliSync.text" class="ali-sync-bar">
+            <span class="ali-sync-dot" :class="{ on: aliSync.running }"></span>
+            <span class="ali-sync-text">{{ aliSync.text }}</span>
+            <span class="ali-sync-meta" v-if="aliSync.fetched">
+              已拉 {{ aliSync.fetched }} 单 · 入库 {{ aliSync.saved }} · 新增 {{ aliSync.newCount }}
+            </span>
+            <span class="spacer" style="flex:1"></span>
+            <el-button v-if="aliSync.running" size="mini" type="text" @click="stopAliSync">停止</el-button>
           </div>
         </el-card>
 
@@ -2337,24 +2358,18 @@
           </el-card>
         </div>
 
-        <!-- 取数 / 催收任务进度 -->
-        <el-card v-if="sd.task.visible" class="section-card" shadow="never" :body-style="{ padding: '14px 16px' }">
+        <!-- 取数 / 催收任务进度（与 1688 发票页同一套：文案 + 剩余时间估算 + 完成后自动收起） -->
+        <el-card v-if="sdcTaskVisible" class="section-card" shadow="never" :body-style="{ padding: '14px 16px' }">
           <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px">
-            <span style="font-size:13px">{{ sd.task.running ? (sd.task.progress || sd.task.message || '执行中…') : (sd.task.message || '任务结束') }}</span>
+            <span style="font-size:13px">{{ sdcTaskText }}</span>
             <span style="flex:1"></span>
             <el-button v-if="sd.task.running" size="mini" type="danger" plain @click="stopSdcTask">停止</el-button>
-            <el-button v-else size="mini" plain @click="sd.task.visible = false">关闭</el-button>
           </div>
           <el-progress :percentage="sdcTaskPercent" :stroke-width="10" :show-text="false"></el-progress>
           <div class="log-panel" v-html="sdcLogHtml"></div>
-          <el-alert v-if="!sd.task.running && sd.task.status === 'failed'" type="error" :closable="false" show-icon
-                    style="margin-top:10px" :title="'任务失败：' + (sd.task.message || '未知原因')"
-                    description="常见原因：闪电帮帮登录态过期（重新登录再试）、站点风控限速（隔几分钟再试）、助手版本过旧（升级助手）。已入库的部分不受影响。"></el-alert>
-          <el-alert v-else-if="!sd.task.running && sd.task.status === 'done'" type="success" :closable="false" show-icon
-                    style="margin-top:10px" :title="sd.task.message || '任务完成'"></el-alert>
         </el-card>
 
-        <!-- 筛选 + 列表 -->
+        <!-- 筛选 + 店铺列表（一行 = 一家店铺；订单明细与催收记录在展开行里） -->
         <el-card class="section-card" shadow="never">
           <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px">
             <el-select v-model="sd.filter.stage" size="small" style="width:150px" placeholder="开票档位">
@@ -2363,82 +2378,128 @@
               <el-option label="已申请开票" value="2"></el-option>
             </el-select>
             <el-input v-model="sd.filter.keyword" size="small" clearable style="width:250px"
-                      placeholder="订单号 / 店铺 / 门店 / 抬头 / 批次" @keyup.enter.native="applySdcFilter"></el-input>
+                      placeholder="店铺 / 订单号 / 门店 / 抬头 / 批次" @keyup.enter.native="applySdcFilter"></el-input>
             <el-button size="small" type="primary" @click="applySdcFilter">查询</el-button>
             <el-button size="small" @click="resetSdcFilter">重置</el-button>
             <el-button size="small" type="warning" plain :disabled="!sdcSelCount"
                        :loading="sd.sending" @click="sendSdcBatch(false)">
-              发送催收消息{{ sdcSelCount ? '（' + sdcSelCount + '）' : '' }}
+              发送催收消息{{ sdcSelCount ? '（' + sdcSelCount + ' 家）' : '' }}
             </el-button>
             <el-button size="small" plain :disabled="!sdcSelCount"
                        :loading="sd.sending" @click="sendSdcBatch(true)"
                        title="只把内容填进会话输入框、不点发送，用来先确认助手能正确打开会话">
-              演练{{ sdcSelCount ? '（' + sdcSelCount + '）' : '' }}
+              演练{{ sdcSelCount ? '（' + sdcSelCount + ' 家）' : '' }}
             </el-button>
             <span style="flex:1"></span>
-            <span class="loginid">共 {{ sd.total }} 条 · {{ sdcStageAmount }} 元</span>
+            <span class="loginid">共 {{ sd.total }} 家店铺 · {{ sdcStageAmount }} 元</span>
           </div>
 
           <el-table ref="sdcTable" :data="sd.rows" size="small" border style="width:100%" v-loading="sd.loading"
-                    row-key="order_sn" :default-sort="sdcDefaultSort" empty-text="暂无订单数据"
-                    @selection-change="onSdcSelChange" @sort-change="onSdcSortChange">
-            <el-table-column type="selection" width="42" :reserve-selection="true"
-                             :selectable="(row) => !!row.chatable"></el-table-column>
-            <el-table-column label="订单号" prop="order_sn" min-width="170" sortable="custom" show-overflow-tooltip>
-              <template slot-scope="p"><span class="loginid">{{ p.row.order_sn }}</span></template>
-            </el-table-column>
-            <el-table-column label="档位" width="110">
+                    row-key="key" :default-sort="sdcDefaultSort" empty-text="暂无店铺数据"
+                    @sort-change="onSdcSortChange"
+                    @expand-change="onSdcExpandChange">
+            <el-table-column type="expand">
               <template slot-scope="p">
-                <el-tag size="mini" :type="p.row.stage === 1 ? 'warning' : 'info'">{{ p.row.stageText }}</el-tag>
+                <div class="members-box">
+                  <template v-if="!sdDC[p.row.key] || sdDC[p.row.key].loading">
+                    <div class="muted" style="font-size:12px">加载中...</div>
+                  </template>
+                  <template v-else-if="sdDC[p.row.key].error">
+                    <div style="color:#d32f2f;font-size:12px">加载失败：{{ sdDC[p.row.key].error }}</div>
+                  </template>
+                  <template v-else>
+                    <div class="sec">
+                      <span>订单明细（共 {{ (sdDC[p.row.key].orders || []).length }} 单）· 同一家店合并成一条消息发送</span>
+                    </div>
+                    <table class="mini-tbl">
+                      <thead><tr>
+                        <th style="width:170px">订单号</th><th style="width:100px">档位</th><th style="width:130px">支付时间</th>
+                        <th style="width:100px">可开票金额</th><th style="width:150px">闪购门店</th><th>发票抬头</th>
+                        <th style="width:130px">批次号</th><th style="width:90px">状态</th><th style="width:80px">已催</th>
+                      </tr></thead>
+                      <tbody>
+                        <tr v-for="o in sdDC[p.row.key].orders" :key="o.order_sn">
+                          <td class="mono">{{ o.order_sn }}</td>
+                          <td><el-tag size="mini" :type="o.stage === 1 ? 'warning' : 'info'">{{ o.stageText }}</el-tag></td>
+                          <td>{{ fmtMinute(o.pay_time) }}</td>
+                          <td class="amount">{{ yuan(o.payable_amount) }}</td>
+                          <td class="muted">{{ o.wm_poi_name || '—' }}</td>
+                          <td class="muted">{{ o.invoice_title || '—' }}</td>
+                          <td class="mono">{{ o.batch_no || '—' }}</td>
+                          <td class="muted">{{ o.trade_status_desc || '—' }}</td>
+                          <td class="muted">{{ Number(o.send_count) || 0 }} 次</td>
+                        </tr>
+                        <tr v-if="!(sdDC[p.row.key].orders || []).length"><td colspan="9" class="muted">无订单</td></tr>
+                      </tbody>
+                    </table>
+                    <div class="sec">催收记录（成功 {{ sdcShopOk(p.row.key) }} 次<span v-if="sdcShopFail(p.row.key)"> · 失败 {{ sdcShopFail(p.row.key) }} 次</span>）</div>
+                    <table class="mini-tbl">
+                      <tbody>
+                        <tr v-for="(l, li) in (sdDC[p.row.key].logs || [])" :key="li">
+                          <td style="width:150px">{{ fmtMinute(l.created_at) }}</td>
+                          <td style="width:80px"><el-tag size="mini" :type="l.ok ? 'success' : 'danger'">{{ l.ok ? '成功' : '失败' }}</el-tag></td>
+                          <td style="width:80px">{{ l.order_count }} 单</td>
+                          <td style="width:100px" class="amount">{{ yuan(l.amount) }}</td>
+                          <td class="muted">{{ l.ok ? '' : (l.detail || '') }}</td>
+                        </tr>
+                        <tr v-if="!(sdDC[p.row.key].logs || []).length"><td class="muted">从未催收</td></tr>
+                      </tbody>
+                    </table>
+                  </template>
+                </div>
               </template>
             </el-table-column>
-            <el-table-column label="下单时间" prop="pay_time" width="140" sortable="custom">
+            <el-table-column width="46">
               <template slot-scope="p">
-                <span class="loginid">{{ String(p.row.pay_time || '').slice(0, 16) || '—' }}</span>
+                <el-checkbox :value="!!sd.picked[p.row.key]" :disabled="!p.row.chatable" @change="v => toggleSdcShop(p.row, v)"
+                             :title="p.row.chatable ? '勾选这家店（同一家店的订单合并成一条消息）' : '这家店的订单没有店铺 ID，换不到客服会话'"></el-checkbox>
               </template>
             </el-table-column>
-            <el-table-column label="可开票金额" prop="payable_amount" width="120" sortable="custom">
-              <template slot-scope="p">¥{{ p.row.payable_amount }}</template>
+            <el-table-column label="店铺名称" min-width="220">
+              <template slot-scope="p">
+                <div class="company">{{ p.row.shopName }}</div>
+                <div class="loginid" v-if="p.row.shop_id">店铺 ID {{ p.row.shop_id }}<template v-if="p.row.poiCount"> · {{ p.row.poiCount }} 个门店</template></div>
+                <div class="loginid" v-else>订单里没有店铺 ID，无法发起客服会话</div>
+              </template>
+            </el-table-column>
+            <el-table-column prop="payable_amount" label="可开票金额" width="130" sortable="custom"
+                             :sort-orders="['descending', 'ascending', null]" :header-cell-style="{ cursor: 'pointer' }">
+              <template slot-scope="p">
+                <span class="amount">{{ yuan(p.row.payableAmount) }}</span>
+                <div class="loginid">{{ p.row.orderCount }} 单</div>
+              </template>
             </el-table-column>
             <el-table-column label="订单总额" width="110">
-              <template slot-scope="p">¥{{ p.row.total_amount }}</template>
+              <template slot-scope="p">¥{{ yuan(p.row.totalAmount) }}</template>
             </el-table-column>
-            <!-- 店铺名列：铃铛图标 = 直接催这一家（平台上的同款入口） -->
-            <el-table-column label="店铺名称" min-width="200" show-overflow-tooltip>
+            <el-table-column label="开票档位" width="180">
               <template slot-scope="p">
-                <span>{{ p.row.shop_name || '—' }}</span>
-                <el-tooltip v-if="p.row.chatable" placement="top"
-                            content="打开这家店的客服会话并发催收消息（等价于平台上点铃铛后发消息）">
-                  <el-button type="text" size="mini" style="padding:0 2px;color:#E85F00;vertical-align:middle"
-                             icon="el-icon-bell" :loading="sd.sending" @click="sendSdcRows([p.row])"></el-button>
-                </el-tooltip>
+                <el-tag size="mini" type="warning">可申请 {{ p.row.stage1Count }}</el-tag>
+                <el-tag size="mini" type="info">已申请 {{ p.row.stage2Count }}</el-tag>
               </template>
             </el-table-column>
-            <el-table-column label="闪购门店" min-width="170" show-overflow-tooltip>
-              <template slot-scope="p"><span class="loginid">{{ p.row.wm_poi_name || '—' }}</span></template>
+            <el-table-column prop="last_pay_time" label="最近下单" width="130" sortable="custom"
+                             :sort-orders="['descending', 'ascending', null]" :header-cell-style="{ cursor: 'pointer' }">
+              <template slot-scope="p"><span class="loginid">{{ fmtMinute(p.row.lastPayTime) }}</span></template>
             </el-table-column>
-            <el-table-column label="发票类型" width="130">
-              <template slot-scope="p"><span class="loginid">{{ p.row.invoice_type_desc || '—' }}</span></template>
-            </el-table-column>
-            <el-table-column label="批次号" width="150" show-overflow-tooltip>
-              <template slot-scope="p"><span class="loginid">{{ p.row.batch_no || '—' }}</span></template>
-            </el-table-column>
-            <el-table-column label="交易状态" width="100">
-              <template slot-scope="p"><span class="loginid">{{ p.row.trade_status_desc || '—' }}</span></template>
-            </el-table-column>
-            <el-table-column label="催收" width="130">
+            <el-table-column label="最近催收" width="150">
               <template slot-scope="p">
-                <span v-if="p.row.sendCount" class="loginid">
-                  已催 {{ p.row.sendCount }} 次<template v-if="p.row.lastSentAt"> · {{ String(p.row.lastSentAt).slice(5, 16) }}</template>
-                </span>
+                <span v-if="p.row.lastSentAt" class="loginid">{{ fmtMinute(p.row.lastSentAt) }}</span>
                 <span v-else class="loginid">—</span>
+                <el-tag v-if="p.row.failCount" size="mini" type="danger" style="margin-left:4px"
+                        :title="'最近一次尝试失败 ' + p.row.failCount + ' 次'">失败 {{ p.row.failCount }}</el-tag>
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="120" fixed="right">
+            <el-table-column prop="send_count" label="催收次数" width="100" sortable="custom"
+                             :sort-orders="['descending', 'ascending', null]" :header-cell-style="{ cursor: 'pointer' }">
+              <template slot-scope="p"><span :class="p.row.sendCount ? '' : 'loginid'">{{ p.row.sendCount }}</span></template>
+            </el-table-column>
+            <el-table-column label="操作" width="150" fixed="right">
               <template slot-scope="p">
-                <el-button v-if="p.row.chatable" type="text" size="mini" :loading="sd.sending"
-                           style="color:#e6a23c" @click="sendSdcRows([p.row])">发送催收消息</el-button>
-                <span v-else class="loginid">—</span>
+                <el-button size="mini" type="primary" :disabled="!p.row.chatable" :loading="sd.sending"
+                           @click="sendSdcShops([p.row], false)">催收消息</el-button>
+                <el-button size="mini" plain :disabled="!p.row.chatable" :loading="sd.sending"
+                           title="只把内容填进会话输入框、不点发送" @click="sendSdcShops([p.row], true)">演练</el-button>
               </template>
             </el-table-column>
           </el-table>
@@ -2447,9 +2508,9 @@
             <el-pagination small layout="sizes, prev, pager, next" :total="sd.total"
                            :current-page.sync="sd.page" :page-size="sd.size" :page-sizes="pageSizes"
                            @current-change="onSdcPage" @size-change="onSdcSize"></el-pagination>
-            <span class="total">共 {{ sd.total }} 条</span>
+            <span class="total">共 {{ sd.total }} 家店铺</span>
             <span style="flex:1"></span>
-            <span class="loginid">未勾选任何订单时点「发送催收消息」= 对所有<b>可申请开票</b>订单按店铺批量催收</span>
+            <span class="loginid">未勾选店铺时点「发送催收消息」= 对所有<b>可申请开票</b>订单按店铺批量催收</span>
           </div>
         </el-card>
       </div>
@@ -2884,17 +2945,22 @@ const vm = new Vue({
       sd: {
         loading: false, syncing: false, sending: false,
         rows: [], total: 0, amount: 0, page: 1, size: 20,
-        filter: { stage: '', keyword: '', sort: 'time_desc' },
+        // 主表是店铺维度：sort 用 SHOP_SORTS 那套（默认按可开票金额从高到低）
+        filter: { stage: '', keyword: '', sort: 'amount_desc' },
         selected: [], picked: {},
         login: { logined: false, accountName: '', subUserId: '', lastSyncAt: null, writtenAt: null },
         agent: { online: false, agentVer: '', minVer: '', outdated: false },
         users: [], sessions: [],
         summary: null,
-        task: { visible: false, taskId: '', kind: '', status: '', running: false, message: '', progress: '', log: [], startedAt: 0 },
+        task: { visible: false, taskId: '', kind: '', status: '', running: false, message: '', progress: '', log: [], startedAt: 0, finishedAt: 0 },
       },
-      sdcDefaultSort: { prop: 'pay_time', order: 'descending' },
+      sdcDefaultSort: { prop: 'payable_amount', order: 'descending' },
+      // 闪电帮帮展开行缓存（店铺 key → { loading, orders, logs, error }）——与 1688 的 detailCache 同构，放顶层才能正常响应
+      sdDC: {},
       // 1688发票数据
       companies: [], sent: {}, invSummary: null, boardLoading: false,
+      // 1688 订单同步（刷新按钮拉 mtop 订单接口）
+      aliSync: { running: false, taskId: '', page: 0, totalPages: 0, total: 0, fetched: 0, saved: 0, newCount: 0, text: '', startDateTime: '', timer: null },
       // 商品列表（前置仓补货参考）
       product: {
         loading: false, rows: [], total: 0, page: 1, size: 20,
@@ -3353,6 +3419,7 @@ const vm = new Vue({
     },
     sdcUsers() { return this.sd.users || []; },
     sdcSessions() { return this.sd.sessions || []; },
+    /** 勾选/催收的最小单位是店铺（发送时同一家店合并成一条消息） */
     sdcSelCount() { return (this.sd.selected || []).length; },
     sdcStageAmount() { return Number(this.sd.amount || 0).toFixed(2); },
     /** 登录条要一个 cookie 形的对象（复用牵牛花那个组件） */
@@ -3366,15 +3433,36 @@ const vm = new Vue({
         writtenAt: l.writtenAt || null,
       };
     },
+    /** 与 1688 看板同一套：跑着就显示，结束后再留 8 秒让人看清结果，随后自动收起 */
+    sdcTaskVisible() {
+      const t = this.sd.task;
+      if (!t || !t.visible) return false;
+      return !!t.running || !!(t.finishedAt && Date.now() - t.finishedAt < 8000);
+    },
     sdcTaskPercent() {
       const t = this.sd.task;
       if (!t.visible) return 0;
       if (!t.running) return 100;
-      if (t.kind === 'send' && t.total) {
-        const done = (t.results || []).length;
-        return Math.min(99, Math.round((done / t.total) * 100));
-      }
+      if (t.kind === 'send' && t.total) return Math.min(99, Math.round((t.done / t.total) * 100));
       return 50;
+    },
+    /** 「发送催收消息：3/12 · 当前: XX店 · 成功2 失败0 · 已用1分20秒 · 约剩4分」—— 与 1688 完全一致的口径 */
+    sdcTaskText() {
+      const t = this.sd.task;
+      if (!t) return '';
+      let time = '';
+      if (t.startedAt) {
+        const elapsed = Date.now() - t.startedAt;
+        time = ` · 已用${fmtDur(elapsed)}`;
+        const done = t.kind === 'send' ? (t.done || 0) : 0;
+        if (t.running && done > 0 && t.total > done) time += ` · 约剩${fmtDur((t.total - done) * (elapsed / done))}`;
+      }
+      const head = t.kind === 'send' ? '发送催收消息' : (t.kind === 'sync' ? '拉取订单数据' : '任务');
+      const tally = t.kind === 'send' ? ` · 成功${t.okCount || 0} 失败${t.failCount || 0}` : '';
+      const cur = t.kind === 'send' ? (t.current ? ` · 当前: ${t.current}` : '') : (t.progress ? ` · ${t.progress}` : '');
+      const cnt = t.kind === 'send' ? `${t.done || 0}/${t.total || 0}` : '';
+      const tail = t.running ? '' : (t.message ? ` · ${t.message}` : '');
+      return `${head}${cnt ? '：' + cnt : ''}${cur}${tally}${time}${tail}`;
     },
     sdcLogHtml() {
       const t = this.sd.task || {};
@@ -3531,6 +3619,7 @@ const vm = new Vue({
     window.addEventListener('scroll', this.onAnyScroll, { passive: true });
     // 助手连接状态：导航栏常驻展示，每 10 秒轻量刷新一次
     this.agentTimer = setInterval(() => { this.refreshAgent(); }, 10000);
+    this.loadAliSession();
     this.boot();
   },
   beforeDestroy() {
@@ -3600,6 +3689,9 @@ const vm = new Vue({
       const next = !!v;
       if (this.sidebarCollapsed === next) return;
       this.sidebarCollapsed = next;
+      // 收起/展开会引起布局重排，页面高度随之变化，浏览器会修正 scrollTop 并触发一次
+      // scroll 事件——若不设防，滚到页中时点「展开」会被这次事件立刻收回去。
+      this._sbGuardUntil = Date.now() + 450;
       setTimeout(() => this.onResize(), 220);
     },
     toggleSidebar() { this.setSidebar(!this.sidebarCollapsed); },
@@ -3610,8 +3702,12 @@ const vm = new Vue({
       if (!main || !e.target || !main.contains(e.target)) return;
       this.setSidebar(true);
     },
-    /** 滚动页面自动收起（侧边栏自身的内部滚动不冒泡到这里，不会误触发） */
-    onAnyScroll() { if (!this.sidebarCollapsed) this.setSidebar(true); },
+    /** 滚动页面自动收起（侧边栏自身的内部滚动不冒泡到这里，不会误触发）；
+     *  收起/展开后 450ms 内的 scroll 是布局重排的连带修正，不是用户行为，忽略 */
+    onAnyScroll() {
+      if (this._sbGuardUntil && Date.now() < this._sbGuardUntil) return;
+      if (!this.sidebarCollapsed) this.setSidebar(true);
+    },
     // ── 页面切换 ──
     switchPage(p) {
       if (p === 'admin' && !this.isAdmin) p = 'board';
@@ -3666,6 +3762,107 @@ const vm = new Vue({
         this.refreshOpenPanels();
       } catch (e) { this.$message.error('加载数据失败: ' + e.message); }
       finally { this.boardLoading = false; }
+    },
+    // ── 1688 订单同步：刷新按钮 ──
+    // 流程：POST 起任务 → 每 1.2s 轮询进度 → 结束后自动重读看板数据。
+    // 起点由服务端取「库中最近订单时间」，同一次同步里固定不变，避免边拉边改窗口。
+
+    // 读一次登录态与增量起点，单纯为了把「刷新」按钮的 title 说准（显示真实起点而不是"自动"）
+    async loadAliSession() {
+      try {
+        const d = await this.api('/api/ali/orders-session');
+        if (d && d.latestOrderTime) this.aliSync.startDateTime = d.latestOrderTime;
+        this.aliSession = d || null;
+      } catch (e) { /* 读不到就保持"自动"，不影响同步 */ }
+    },
+    async syncAliOrders() {
+      if (this.aliSync.running) return;
+      Object.assign(this.aliSync, {
+        running: true, taskId: '', page: 0, fetched: 0, saved: 0, newCount: 0,
+        text: '正在请求 1688 订单接口…',
+      });
+      try {
+        const d = await this.api('/api/ali/orders-sync', {
+          method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+        });
+        if (!d.ok) {
+          this.aliSync.running = false;
+          this.aliSync.text = d.message || d.error || '同步未开始';
+          // 登录态问题单独提示，避免用户以为功能坏了
+          if (d.needLogin) {
+            this.$message.warning(d.message || '需要先登录 1688');
+          } else {
+            this.$message.error(d.message || d.error || '同步未开始');
+          }
+          return;
+        }
+        this.aliSync.taskId = d.taskId || '';
+        if (d.already) this.aliSync.text = '同步任务已在运行，继续展示进度…';
+        this.pollAliSync();
+      } catch (e) {
+        this.aliSync.running = false;
+        this.aliSync.text = '';
+        this.$message.error('同步失败：' + e.message);
+      }
+    },
+    pollAliSync() {
+      if (!this.aliSync.taskId) return;
+      clearTimeout(this.aliSync.timer);
+      this.aliSync.timer = setTimeout(async () => {
+        let d;
+        try {
+          d = await this.api('/api/ali/orders-sync?id=' + encodeURIComponent(this.aliSync.taskId));
+        } catch (e) {
+          this.aliSync.running = false;
+          this.aliSync.text = '进度查询失败：' + e.message;
+          return;
+        }
+        if (!d || !d.ok) {
+          this.aliSync.running = false;
+          this.aliSync.text = (d && d.error) || '任务已过期';
+          return;
+        }
+        const p = d.progress || {};
+        this.aliSync.page = p.page || 0;
+        this.aliSync.totalPages = p.totalPages || 0;
+        this.aliSync.total = p.total || 0;
+        this.aliSync.fetched = p.fetched || 0;
+        this.aliSync.saved = p.saved || 0;
+        this.aliSync.newCount = p.newCount || 0;
+        if (d.startDateTime) this.aliSync.startDateTime = d.startDateTime;
+
+        if (d.status === 'pending') {
+          this.aliSync.text = p.page
+            ? '同步中 · 第 ' + p.page + (p.totalPages ? '/' + p.totalPages : '') + ' 页'
+              + (p.current ? ' · ' + p.current : '')
+            : '同步中…';
+          this.pollAliSync();
+          return;
+        }
+
+        // 结束
+        this.aliSync.running = false;
+        this.aliSync.text = d.message || (d.status === 'done' ? '同步完成' : '同步失败');
+        if (d.status === 'done') {
+          this.$message.success(d.message || '订单同步完成');
+          this.loadData();                     // 拉完立刻重读看板
+          setTimeout(() => { this.aliSync.text = ''; }, 8000);
+        } else {
+          if (d.needLogin) this.$message.warning(d.message || '需要先登录 1688');
+          else this.$message.error(d.message || '订单同步失败');
+          setTimeout(() => { this.aliSync.text = ''; }, 12000);
+        }
+      }, 1200);
+    },
+    async stopAliSync() {
+      if (!this.aliSync.taskId) return;
+      try {
+        await this.api('/api/ali/orders-sync-stop', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ taskId: this.aliSync.taskId }),
+        });
+        this.aliSync.text = '正在停止…';
+      } catch (e) { this.$message.error('停止失败：' + e.message); }
     },
     applyFilters() {
       this.keyword = this.draftKeyword.trim();
@@ -4076,6 +4273,7 @@ const vm = new Vue({
       // 切换账号：上一个账号的申请结果不再适用（任务仍在跑的话保留卡片，避免误以为任务被停）
       if (!this.pd.applyDialog.running) this.pd.applyDialog.visible = false;
       this.sd.rows = []; this.sd.total = 0; this.sd.page = 1; this.sd.summary = null;
+      this.sdDC = {};
       this.clearSdcPicked();
       this.qnhReload();
     },
@@ -5126,6 +5324,7 @@ const vm = new Vue({
       }
     },
 
+    /** 店铺维度主表（一行 = 一家店铺） */
     async loadSdcOrders() {
       if (this.qnhNeedPick) return;
       this.sd.loading = true;
@@ -5137,15 +5336,41 @@ const vm = new Vue({
         if (f.sort) q.set('sort', f.sort);
         q.set('page', this.sd.page);
         q.set('size', this.sd.size);
-        const d = await this.sdcApi('/api/sdc/orders?' + q.toString());
+        const d = await this.sdcApi('/api/sdc/shops?' + q.toString());
         if (d.error) { this.$message.error(d.error); return; }
         this.sd.rows = d.rows || [];
         this.sd.total = d.total || 0;
         this.sd.amount = d.amount || 0;
       } catch (e) {
-        this.$message.error('加载闪电帮帮订单失败：' + e.message);
+        this.$message.error('加载闪电帮帮店铺失败：' + e.message);
       } finally {
         this.sd.loading = false;
+      }
+    },
+
+    /** 展开某家店：拉它的订单明细 + 历史催收记录（只拉一次，之后走缓存） */
+    async onSdcExpandChange(row, expanded) {
+      if (!row || !expanded) return;
+      const k = row.key;
+      if (this.sdDC[k]) return;
+      this.$set(this.sdDC, k, { loading: true, orders: [], logs: [], error: '' });
+      try {
+        const q = new URLSearchParams();
+        const f = this.sd.filter || {};
+        if (f.stage !== '') q.set('stage', f.stage);
+        if (f.keyword) q.set('keyword', f.keyword);
+        q.set('shopId', row.shop_id || '__none__');   // 空串那组也要能展开看订单
+        q.set('size', '200');
+        const d = await this.sdcApi('/api/sdc/orders?' + q.toString());
+        if (d.error) throw new Error(d.error);
+        const hq = new URLSearchParams({ limit: '20' });
+        if (row.shop_id) hq.set('shopId', row.shop_id);
+        const h = row.shop_id ? await this.sdcApi('/api/sdc/msg-history?' + hq.toString()) : { rows: [] };
+        this.$set(this.sdDC, k, {
+          loading: false, orders: d.rows || [], logs: (h && h.rows) || [], error: '',
+        });
+      } catch (e) {
+        this.$set(this.sdDC, k, { loading: false, orders: [], logs: [], error: e.message || '加载失败' });
       }
     },
 
@@ -5209,7 +5434,8 @@ const vm = new Vue({
         }
         this.sd.task = {
           visible: true, taskId: d.taskId, kind: 'sync', status: 'pending', running: true,
-          message: d.message || '', progress: '', log: [], startedAt: Date.now(), total: 0, results: [],
+          message: d.message || '', progress: '', log: [], startedAt: Date.now(), finishedAt: 0,
+          total: 0, results: [], done: 0, current: '', okCount: 0, failCount: 0,
         };
         this.pollSdcTask(d.taskId, 'sync');
       } catch (e) {
@@ -5232,6 +5458,10 @@ const vm = new Vue({
           t.progress = d.progress || '';
           t.total = d.total || 0;
           t.results = d.results || [];
+          t.done = d.done || (d.results || []).length;      // 已处理家数（助手逐店回执）
+          t.current = d.current || '';                      // 当前在处理的那家店
+          t.okCount = d.okCount || 0;
+          t.failCount = d.failCount || 0;
           t.running = d.status === 'pending';
           // 助手侧的日志（打开了哪个会话、点的按钮还是回车、有没有报错）由服务端回传，
           // 以前这里没有接，页面上只剩「已处理 x/y 家」，排查全靠猜。
@@ -5244,16 +5474,20 @@ const vm = new Vue({
               t.log.push({ t: l.t || stamp, text: l.text });
             }
           }
-          const line = d.kind === 'send'
-            ? `已处理 ${(d.results || []).length}/${d.total || 0} 家店铺`
-            : (d.progress || '正在拉取…');
-          const last = t.log[t.log.length - 1];
           const stamp = new Date().toISOString().slice(11, 19);
-          if (!last || last.text !== line) t.log.push({ t: stamp, text: line });
+          // 「已处理 x/y 家」这类本地拼的进度行不再需要：上面的任务文案已经带 N/M 家 + 当前店名，
+          // 重复显示只会让日志区和进度条互相打架。
+          if (d.kind !== 'send' && d.progress) {
+            const last = t.log[t.log.length - 1];
+            if (!last || last.text !== d.progress) t.log.push({ t: stamp, text: d.progress });
+          }
           if (d.status !== 'pending') {
             clearInterval(timer);
             t.running = false;
+            t.finishedAt = Date.now();        // taskVisible 据此再留 8 秒后自动收起（1688 同款行为）
+            t.done = (d.results || []).length;
             t.log.push({ t: stamp, text: (d.ok ? '✓ ' : '✗ ') + (d.message || (d.ok ? '任务完成' : '任务失败')) });
+            this.sdDC = {};   // 店铺行里的订单/催收记录可能已变，展开时重新拉
             this.clearSdcPicked();
             await this.loadSdcStatus();
             await this.loadSdcOrders();
@@ -5275,7 +5509,7 @@ const vm = new Vue({
 
     applySdcFilter() { this.sd.page = 1; this.clearSdcPicked(); this.loadSdcOrders(); },
     resetSdcFilter() {
-      this.sd.filter = { stage: '', keyword: '', sort: 'time_desc' };
+      this.sd.filter = { stage: '', keyword: '', sort: 'amount_desc' };
       this.sd.page = 1;
       this.clearSdcPicked();
       this.loadSdcOrders();
@@ -5283,76 +5517,74 @@ const vm = new Vue({
     onSdcPage(p) { this.sd.page = p; this.loadSdcOrders(); },
     onSdcSize(s) { this.sd.size = s; this.sd.page = 1; this.loadSdcOrders(); },
     onSdcSortChange({ prop, order }) {
+      // 店铺树的可排序列 → SHOP_SORTS 的 key（不认识的列回到默认：按可开票金额倒序）
       const map = {
-        pay_time: order === 'ascending' ? 'time_asc' : 'time_desc',
         payable_amount: order === 'ascending' ? 'amount_asc' : 'amount_desc',
+        send_count: order === 'ascending' ? 'sent_asc' : 'sent_desc',
+        last_pay_time: order === 'ascending' ? 'time_asc' : 'time_desc',
       };
-      this.sd.filter.sort = map[prop] || 'time_desc';
+      this.sd.filter.sort = (order && map[prop]) || 'amount_desc';
       this.sd.page = 1;
       this.loadSdcOrders();
     },
-    /**
-     * 跨页多选：Element 的 selection-change 只给「当前页选中行」，
-     * 这里按 {order_sn: row} 累积（当前页没勾的摘掉、勾上的写入、其余页保留）。
-     */
-    onSdcSelChange(rows) {
-      const picked = this.sd.picked || {};
-      const nowPage = {};
-      for (const r of this.sd.rows) nowPage[r.order_sn] = r;
-      const pageSns = new Set(this.sd.rows.map((r) => r.order_sn));
-      const got = new Set((rows || []).map((r) => r.order_sn));
-      for (const sn of pageSns) { if (!got.has(sn)) delete picked[sn]; }
-      for (const r of rows || []) picked[r.order_sn] = r;
-      this.sd.picked = picked;
-      this.sd.selected = Object.values(picked);
-    },
+    /** 清空已勾选的店铺（换筛选 / 翻页重置 / 任务结束时用） */
     clearSdcPicked() {
       this.sd.picked = {};
       this.sd.selected = [];
-      const t = this.$refs.sdcTable;
-      if (t && typeof t.clearSelection === 'function') { try { t.clearSelection(); } catch (e) { /* 忽略 */ } }
+    },
+    /** 展开行里「这家店催收成功/失败次数」（必须放 methods：带参数调用，computed 会取成值） */
+    sdcShopOk(k) { return ((this.sdDC[k] || {}).logs || []).filter((l) => l.ok).length; },
+    sdcShopFail(k) { return ((this.sdDC[k] || {}).logs || []).filter((l) => !l.ok).length; },
+    toggleSdcShop(row, v) {
+      // 没有店铺 ID 的「无店铺组」换不到客服会话，勾了也不能算（UI 上是禁用态，这里再兜一层）
+      if (!row || !row.chatable) return;
+      const picked = Object.assign({}, this.sd.picked);
+      if (v) picked[row.key] = row; else delete picked[row.key];
+      this.sd.picked = picked;
+      this.sd.selected = Object.values(picked);
     },
 
     /** 批量催收（不勾选 = 对所有「可申请开票」订单按店铺催收） */
     async sendSdcBatch(dryRun) {
-      const sns = (this.sd.selected || []).map((r) => r.order_sn);
-      if (!sns.length) {
+      const ids = (this.sd.selected || []).map((r) => r.shop_id).filter(Boolean);
+      if (!ids.length) {
         try {
           await this.$confirm(
-            '没有勾选订单：将对库里所有「可申请开票」的订单按店铺批量催收。是否继续？',
+            '没有勾选店铺：将对库里所有「可申请开票」的订单按店铺批量催收。是否继续？',
             '批量催收确认', { type: 'warning' }
           );
         } catch (e) { return; }
       } else if (!dryRun) {
         try {
           await this.$confirm(
-            `将对勾选的 ${sns.length} 单所属店铺发送催收消息（同一家店合并成一条）。是否继续？`,
+            `将对勾选的 ${ids.length} 家店铺发送催收消息（同一家店合并成一条）。是否继续？`,
             '发送确认', { type: 'warning' }
           );
         } catch (e) { return; }
       }
-      await this.doSendSdc(sns, dryRun);
+      await this.doSendSdc(ids, dryRun);
     },
 
-    async sendSdcRows(rows) {
-      const sns = (rows || []).map((r) => r.order_sn).filter(Boolean);
-      if (!sns.length) return;
-      await this.doSendSdc(sns, false);
+    /** 单店催收（列表行里的「催收消息 / 演练」按钮） */
+    async sendSdcShops(rows, dryRun) {
+      const ids = (rows || []).map((r) => r.shop_id).filter(Boolean);
+      if (!ids.length) { this.$message.warning('这家店的订单没有店铺 ID，换不到客服会话，无法催收'); return; }
+      await this.doSendSdc(ids, dryRun);
     },
 
-    async doSendSdc(sns, dryRun) {
+    async doSendSdc(shopIds, dryRun) {
       this.sd.sending = true;
       try {
         const d = await this.sdcApi('/api/sdc/send', {
           method: 'POST', headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ orderSns: sns, dryRun: !!dryRun }),
+          body: JSON.stringify({ shopIds, dryRun: !!dryRun, stage: (this.sd.filter || {}).stage || '' }),
         });
         if (d.error) { this.$message.error(d.error); return; }
         if (d.ok === false) { this.$message({ message: d.message || '下发催收任务失败', type: 'warning', duration: 6000 }); return; }
         this.sd.task = {
           visible: true, taskId: d.taskId, kind: 'send', status: 'pending', running: true,
-          message: d.message || '', progress: '', log: [], startedAt: Date.now(),
-          total: d.total || 0, results: [],
+          message: d.message || '', progress: '', log: [], startedAt: Date.now(), finishedAt: 0,
+          total: d.total || 0, results: [], done: 0, current: '', okCount: 0, failCount: 0,
         };
         this.pollSdcTask(d.taskId, 'send');
       } catch (e) {
