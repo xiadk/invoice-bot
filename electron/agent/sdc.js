@@ -345,10 +345,9 @@ function mapOrderRow(r) {
     after_total_amount: moneyOf(pickVal(r, ['afterTotalAmount', 'refundAmount']), moneyCents),
     // 订单时间：接口实测字段是 orderDate（也是 orderStartTime 过滤所依据的那个时间）
     order_time: timeMs(pickVal(r, ['orderDate', 'payDate', 'orderTime', 'createTime', 'orderCreateTime'])),
-    // 支付时间：有单独的支付字段就用它，没有则回落到订单时间
-    // （增量锚点取 MAX(pay_time)，若这里留空会让每次刷新都退回「拉近一年」的全量）
-    pay_time: timeMs(pickVal(r, ['payDate', 'payTime', 'paymentTime']))
-      || timeMs(pickVal(r, ['orderDate'])),
+    // 支付时间：只取真正的支付字段，**不能**回落 orderDate——两者是不同的时间，
+    // 混用会让「支付时间」列显示成下单时间，也会误导增量锚点的判断（锚点只用 order_time）
+    pay_time: timeMs(pickVal(r, ['payDate', 'payTime', 'paymentTime'])),
     finish_time: timeMs(pickVal(r, ['finishTime', 'completeTime'])),
     apply_time: timeMs(pickVal(r, ['applyTime', 'invoiceApplyTime'])),
     trade_status_desc: pickVal(r, ['tradeStatusDesc', 'orderStatusDesc', 'statusDesc']),
@@ -388,7 +387,7 @@ function mapInvoiceRow(r) {
     actual_pay_amount: numOf(pickVal(r, ['actualPayAmount'])),
     after_total_amount: numOf(pickVal(r, ['afterTotalAmount'])),
     order_time: timeMs(pickVal(r, ['orderDate', 'tradeTime', 'orderTime'])),
-    pay_time: timeMs(pickVal(r, ['payTime'])) || timeMs(pickVal(r, ['orderDate'])),
+    pay_time: timeMs(pickVal(r, ['payTime'])),
     finish_time: timeMs(pickVal(r, ['finishTime'])),
     apply_time: timeMs(pickVal(r, ['applyTime'])),
     // 开票时间：接口实测字段是 invoiceDate（也是 billStartTime 过滤所依据的那个时间）
