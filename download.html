@@ -4,6 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>发票催收 · 本机助手（Windows）— 下载与安装</title>
+<!-- 品牌图标：/favicon.ico 与 /assets/* 由 server.js 白名单式下发 -->
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="icon" type="image/png" sizes="256x256" href="/assets/logo-icon.png">
+<link rel="apple-touch-icon" href="/assets/apple-touch-icon.png">
 <!-- Element UI（本地 vendor，免外网 CDN） -->
 <link rel="stylesheet" href="/vendor/element-ui/index.css">
 <style>
@@ -13,7 +17,7 @@
   body { font-family: "Microsoft YaHei", "PingFang SC", sans-serif; background: var(--bg); color: var(--text); line-height: 1.7; padding: 30px 20px 60px; }
   .wrap { max-width: 780px; margin: 0 auto; }
   header { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
-  .logo { width: 42px; height: 42px; border-radius: 11px; background: linear-gradient(135deg, #ff6a00, #ff9a3c); color: #fff; display: flex; align-items: center; justify-content: center; font-size: 20px; font-weight: 700; }
+  .logo { width: 42px; height: 42px; display: block; object-fit: contain; flex: none; }
   header h1 { font-size: 21px; }
   header .sub { color: var(--sub); font-size: 13px; }
   .card-title { font-size: 15px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
@@ -34,7 +38,7 @@
 <div id="app" v-cloak>
   <div class="wrap">
     <header>
-      <div class="logo">发</div>
+      <img class="logo" src="/assets/logo-icon.png" alt="">
       <div>
         <h1>发票催收 · 本机助手</h1>
         <div class="sub">Windows 桌面程序（Windows 10 / 11）· 发送只在你本机执行，登录凭据不出本机 · 断线续跑</div>

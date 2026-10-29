@@ -286,6 +286,8 @@ CREATE TABLE IF NOT EXISTS `agent_task` (
   `error`        VARCHAR(255) DEFAULT NULL COMMENT '中断/失败原因摘要',
   `resume_of`    BIGINT UNSIGNED DEFAULT NULL
                  COMMENT '断线续跑来源：被接续的任务 id（NULL=全新任务）',
+  `title_id`     INT UNSIGNED DEFAULT NULL
+                 COMMENT '发送时选用的发票抬头（app_invoice_title.id；NULL=用账号上的老字段）',
   `started_at`   DATETIME DEFAULT NULL,
   `finished_at`  DATETIME DEFAULT NULL,
   `created_at`   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -419,7 +421,7 @@ CREATE TABLE IF NOT EXISTS `market_listing` (
 -- ----------------------------------------------------------------------------
 -- billing_month —— 账单（按月统计收支）
 --   一人一月一行（唯一键 user_id + month）；month 形如 '2026-10'
---   手工项：美团/淘宝/京东预计收入 + 房租/水电/人工/配送费/推广费/自采酒水/雪糕/果蔬/
+--   手工项：美团/淘宝/京东预计收入 + 房租/水电/人工/中心仓/配送费/推广费/自采酒水/雪糕/果蔬/
 --           增值税/企业所得税/其它
 --   自动项（不落库，每次由业务表实时聚合）：
 --     1688 订单当月总金额 = SUM(invoice_order.pay_amount) 按 pay_time 归月（空则 created_at）
@@ -434,6 +436,7 @@ CREATE TABLE IF NOT EXISTS `billing_month` (
   `exp_rent`       DECIMAL(14,2) NOT NULL DEFAULT 0     COMMENT '支出：房租（手工）',
   `exp_utility`    DECIMAL(14,2) NOT NULL DEFAULT 0     COMMENT '支出：水电（手工）',
   `exp_labor`      DECIMAL(14,2) NOT NULL DEFAULT 0     COMMENT '支出：人工（手工）',
+  `exp_warehouse`  DECIMAL(14,2) NOT NULL DEFAULT 0     COMMENT '支出：中心仓（手工）',
   `exp_delivery`   DECIMAL(14,2) NOT NULL DEFAULT 0     COMMENT '支出：配送费（手工）',
   `exp_promo`      DECIMAL(14,2) NOT NULL DEFAULT 0     COMMENT '支出：推广费（手工）',
   `exp_liquor`     DECIMAL(14,2) NOT NULL DEFAULT 0     COMMENT '支出：自采酒水（手工）',

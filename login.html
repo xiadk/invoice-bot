@@ -4,6 +4,10 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>登录 · 发票催收</title>
+<!-- 品牌图标：/favicon.ico 与 /assets/* 由 server.js 白名单式下发 -->
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="icon" type="image/png" sizes="256x256" href="/assets/logo-icon.png">
+<link rel="apple-touch-icon" href="/assets/apple-touch-icon.png">
 <!-- Element UI（本地 vendor，免外网 CDN） -->
 <link rel="stylesheet" href="/vendor/element-ui/index.css">
 <style>
@@ -17,10 +21,7 @@
     padding: 24px;
   }
   .brand { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
-  .brand .logo {
-    width: 36px; height: 36px; border-radius: 9px; background: var(--primary); color: #fff;
-    display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 15px;
-  }
+  .brand .logo { width: 36px; height: 36px; display: block; object-fit: contain; flex: none; }
   .brand h1 { font-size: 17px; }
   .subtitle { color: var(--sub); font-size: 12px; margin: 8px 0 18px; line-height: 1.7; }
   .foot { margin-top: 18px; padding-top: 14px; border-top: 1px dashed var(--border); font-size: 12px; color: var(--sub); line-height: 1.8; }
@@ -35,7 +36,7 @@
 <div id="app" v-cloak>
   <el-card shadow="always" style="width:100%;max-width:400px;border-radius:14px" :body-style="{ padding: '30px 30px 24px' }">
     <div class="brand">
-      <div class="logo">票</div>
+      <img class="logo" src="/assets/logo-icon.png" alt="">
       <h1>发票催收登录</h1>
     </div>
     <div class="subtitle">登录账号就是公司全称（开票抬头），联系管理员进行创建。</div>

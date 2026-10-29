@@ -54,6 +54,7 @@ class AgentClient extends EventEmitter {
     this._batchHandler = null;
     this._helloTimer = null;
     this._qnhBusy = false;
+    this._sdcBusy = false;
   }
 
   /** 连接地址（供测试断言） */
@@ -107,7 +108,8 @@ class AgentClient extends EventEmitter {
       sending: !!this.sending,
       pdd: !!this._pddBusy,
       qnh: !!this._qnhBusy,
-      any: !!(this.sending || this._pddBusy || this._qnhBusy),
+      sdc: !!this._sdcBusy,
+      any: !!(this.sending || this._pddBusy || this._qnhBusy || this._sdcBusy),
     };
   }
 
@@ -186,6 +188,9 @@ class AgentClient extends EventEmitter {
     if (m.type === 'pdd_login') { this._runPddLogin(m).catch((e) => this.log('拼多多登录异常: ' + e.message)); return; }
     if (m.type === 'pdd_apply') { this._runPddApply(m).catch((e) => this.log('拼多多申请异常: ' + e.message)); return; }
     if (m.type === 'pdd_send') { this._runPddSend(m).catch((e) => this.log('拼多多催收异常: ' + e.message)); return; }
+    if (m.type === 'sdc_login') { this._runSdcLogin(m).catch((e) => this.log('闪电帮帮登录异常: ' + e.message)); return; }
+    if (m.type === 'sdc_fetch') { this._runSdcFetch(m).catch((e) => this.log('闪电帮帮取数异常: ' + e.message)); return; }
+    if (m.type === 'sdc_send') { this._runSdcSend(m).catch((e) => this.log('闪电帮帮催收异常: ' + e.message)); return; }
     if (m.type === 'logout') { this._runLogout(m).catch((e) => this.log('清除登录态异常: ' + e.message)); return; }
     if (m.type === 'stop') {
       this.stopFlag = true;
@@ -262,6 +267,13 @@ class AgentClient extends EventEmitter {
   /** 注册「拼多多批量催商家开票」处理器（main.js 注入 pdd-send.createSendHandler） */
   setPddSendHandler(fn) { this._pddSendHandler = fn; }
 
+  /** 注册「登录闪电帮帮」处理器（main.js 注入 sdc.createLoginHandler） */
+  setSdcLoginHandler(fn) { this._sdcLoginHandler = fn; }
+  /** 注册「拉取闪电帮帮订单」处理器（main.js 注入 sdc.createFetchHandler） */
+  setSdcFetchHandler(fn) { this._sdcFetchHandler = fn; }
+  /** 注册「闪电帮帮批量催收」处理器（main.js 注入 sdc.createSendHandler） */
+  setSdcSendHandler(fn) { this._sdcSendHandler = fn; }
+
   /**
    * 执行一次「页内签名请求」：在牵牛花页面环境里 fetch（自动带 mtgsig），结果回传服务器。
    * 只与登录互斥（共用同一个窗口）；发送催收消息期间照常执行，不影响发送节奏。
@@ -328,6 +340,127 @@ class AgentClient extends EventEmitter {
       done({ ok: false, error: String((e && e.message) || e).slice(0, 200) });
     } finally {
       this._qnhBusy = false;
+      this.stopFlag = false;
+      this.currentTaskId = null;
+      this._emitState();
+    }
+  }
+
+  /**
+   * 「拉取闪电帮帮订单」：在已登录的本机浏览器页面里翻页 fetch（签名由站点风控 SDK 自动补），
+   * 逐行回报给服务器（sdc_fetch_page），服务器边收边入库。
+   */
+  async _runSdcFetch(m) {
+    const done = (payload) => this.send(Object.assign({
+      type: 'sdc_fetch_done', taskId: m.taskId,
+    }, payload || {}));
+
+    if (this._sdcBusy) { done({ ok: false, error: '已有闪电帮帮任务在进行中' }); return; }
+    if (typeof this._sdcFetchHandler !== 'function') {
+      done({ ok: false, error: '助手版本过旧，不支持拉取闪电帮帮订单，请重新下载安装助手' });
+      return;
+    }
+    this._sdcBusy = true;
+    this.stopFlag = false;
+    this.currentTaskId = m.taskId;
+    this._emitState();
+
+    // 分批发回，避免单条 WS 消息过大；每批 40 行
+    let buf = [];
+    let uploaded = 0;
+    const flush = () => {
+      if (!buf.length) return;
+      const rows = buf;
+      buf = [];
+      uploaded += rows.length;
+      this.send({ type: 'sdc_fetch_page', taskId: m.taskId, rows });
+    };
+    const api = {
+      log: (text) => this.send({ type: 'log', text: String(text == null ? '' : text).slice(0, 200) }),
+      isStopped: () => this.stopFlag,
+      emitRow: async (row) => {
+        buf.push(row);
+        if (buf.length >= 40) flush();
+      },
+      report: (payload) => { flush(); done(Object.assign({}, payload || {}, { uploaded })); },
+    };
+    try {
+      await this._sdcFetchHandler(m, api);
+    } catch (e) {
+      done({ ok: false, error: String((e && e.message) || e).slice(0, 200) });
+    } finally {
+      this._sdcBusy = false;
+      this.stopFlag = false;
+      this.currentTaskId = null;
+      this._emitState();
+    }
+  }
+
+  /** 「登录闪电帮帮」：助手开窗口让用户扫码/短信登录，登录后回传账号标识（不回传 Cookie） */
+  async _runSdcLogin(m) {
+    const done = (payload) => this.send(Object.assign({
+      type: 'sdc_login_done', taskId: m.taskId,
+    }, payload || {}));
+
+    if (this._sdcBusy) { done({ ok: false, error: '已有闪电帮帮任务在进行中' }); return; }
+    if (typeof this._sdcLoginHandler !== 'function') {
+      done({ ok: false, error: '助手版本过旧，不支持登录闪电帮帮，请重新下载安装助手' });
+      return;
+    }
+    this._sdcBusy = true;
+    this.stopFlag = false;
+    this.currentTaskId = m.taskId;
+    this._emitState();
+    const api = {
+      log: (text) => this.send({ type: 'log', text: String(text == null ? '' : text).slice(0, 200) }),
+      isStopped: () => this.stopFlag,
+      report: done,
+    };
+    try {
+      await this._sdcLoginHandler(m, api);
+    } catch (e) {
+      done({ ok: false, error: String((e && e.message) || e).slice(0, 200) });
+    } finally {
+      this._sdcBusy = false;
+      this.stopFlag = false;
+      this.currentTaskId = null;
+      this._emitState();
+    }
+  }
+
+  /** 「闪电帮帮批量催收」：逐店打开客服会话打字发送（支持演练：只填不点发送） */
+  async _runSdcSend(m) {
+    const done = (payload) => this.send(Object.assign({
+      type: 'sdc_send_done', taskId: m.taskId,
+    }, payload || {}));
+
+    if (this._sdcBusy) { done({ ok: false, error: '已有闪电帮帮任务在进行中' }); return; }
+    if (typeof this._sdcSendHandler !== 'function') {
+      done({ ok: false, error: '助手版本过旧，不支持闪电帮帮催收，请重新下载安装助手' });
+      return;
+    }
+    this._sdcBusy = true;
+    this.stopFlag = false;
+    this.currentTaskId = m.taskId;
+    this._emitState();
+    const api = {
+      log: (text) => this.send({ type: 'log', text: String(text == null ? '' : text).slice(0, 200) }),
+      isStopped: () => this.stopFlag,
+      sleep: async (ms) => {
+        for (let waited = 0; waited < ms && !this.stopFlag; waited += 300) {
+          await new Promise((r) => setTimeout(r, Math.min(300, ms - waited)));
+        }
+      },
+      // 逐个店铺回执，服务器据此实时刷新进度面板
+      progress: (payload) => this.send(Object.assign({ type: 'sdc_send_progress', taskId: m.taskId }, payload || {})),
+      report: done,
+    };
+    try {
+      await this._sdcSendHandler(m, api);
+    } catch (e) {
+      done({ ok: false, error: String((e && e.message) || e).slice(0, 200) });
+    } finally {
+      this._sdcBusy = false;
       this.stopFlag = false;
       this.currentTaskId = null;
       this._emitState();
@@ -478,7 +611,8 @@ class AgentClient extends EventEmitter {
 
     const busy = this.busy();
     if (busy.any) {
-      const what = busy.sending ? '发送催收消息' : (busy.pdd ? '拼多多任务' : '牵牛花任务');
+      const what = busy.sending ? '发送催收消息'
+        : (busy.pdd ? '拼多多任务' : (busy.qnh ? '牵牛花任务' : '闪电帮帮任务'));
       done({ ok: false, error: `助手正在执行任务（${what}），请等任务结束后再退出账号` });
       return;
     }

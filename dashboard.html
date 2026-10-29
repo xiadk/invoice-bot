@@ -4,54 +4,140 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>发票催收</title>
-<!-- 内联 favicon：浏览器默认会请求 /favicon.ico，本项目没这个静态文件，
-     于是每次开页面控制台都留一条 404 —— 直接给个 data URI 省掉它 -->
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23ff6a00'/%3E%3Ctext x='16' y='23' font-size='19' font-family='sans-serif' font-weight='700' text-anchor='middle' fill='%23fff'%3E%C2%A5%3C/text%3E%3C/svg%3E">
+<!-- 品牌图标：/favicon.ico 与 /assets/* 由 server.js 白名单式下发 -->
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="icon" type="image/png" sizes="256x256" href="/assets/logo-icon.png">
+<link rel="apple-touch-icon" href="/assets/apple-touch-icon.png">
 <!-- Element UI 主题（本地 vendor，免外网 CDN）；须在本页自身样式之前加载，便于本页样式覆盖 -->
 <link rel="stylesheet" href="/vendor/element-ui/index.css">
 <style>
+  /* ── 设计令牌（取自设计稿 Design System 屏）─────────────────────
+     Brand #E85F00 / 激活底 #FFF3E9；文字三级 #1F2429 → #636B73 → #8A8F99；
+     卡片 #FFF + 1px #EDEDF2 + 圆角 10；输入描边 #E3E5EB + 圆角 8。 */
+  :root {
+    --brand: #e85f00; --brand-hover: #f2751a; --brand-deep: #c85000;
+    --brand-tint: #fff3e9; --brand-tint-2: #fff2e8; --brand-line: #ffb27a; --brand-disabled: #ffc9a3;
+    --text-1: #1f2429; --text-2: #636b73; --text-3: #8a8f99;
+    --bg: #f5f5f7; --surface: #fff; --surface-2: #fafafc;
+    --line: #ededf2; --line-2: #e3e5eb;
+    --warn: #e5a33d; --warn-bg: #fcf5ed;
+    --ok: #2e7d32; --ok-bg: #f0f9eb; --danger: #e53935;
+    --radius: 10px; --radius-sm: 8px; --radius-pill: 12px;
+    --space-md: 16px; --space-sm: 12px;
+    --sb-w: 232px; --topbar-h: 56px;
+  }
   /* ── 品牌色覆盖 Element 默认主题色 ───────────────────────────── */
-  .el-button--primary { background-color: #ff6a00; border-color: #ff6a00; }
-  .el-button--primary:hover, .el-button--primary:focus { background-color: #ff8533; border-color: #ff8533; }
-  .el-button--primary.is-plain { color: #ff6a00; background: #fff7f1; border-color: #ffb27a; }
-  .el-button--primary.is-plain:hover { background: #ff6a00; border-color: #ff6a00; color: #fff; }
-  .el-button--primary.is-disabled, .el-button--primary.is-disabled:hover { background-color: #ffc9a3; border-color: #ffc9a3; }
-  .el-button--text { color: #ff6a00; }
-  .el-button--text:hover { color: #ff8533; }
+  .el-button--primary { background-color: var(--brand); border-color: var(--brand); }
+  .el-button--primary:hover, .el-button--primary:focus { background-color: var(--brand-hover); border-color: var(--brand-hover); }
+  .el-button--primary.is-plain { color: var(--brand); background: var(--brand-tint); border-color: var(--brand-line); }
+  .el-button--primary.is-plain:hover { background: var(--brand); border-color: var(--brand); color: #fff; }
+  .el-button--primary.is-disabled, .el-button--primary.is-disabled:hover { background-color: var(--brand-disabled); border-color: var(--brand-disabled); }
+  .el-button--text { color: var(--brand); }
+  .el-button--text:hover { color: var(--brand-hover); }
   .el-checkbox__input.is-checked .el-checkbox__inner,
-  .el-checkbox__input.is-indeterminate .el-checkbox__inner { background-color: #ff6a00; border-color: #ff6a00; }
-  .el-checkbox__input.is-focus .el-checkbox__inner { border-color: #ff6a00; }
-  .el-checkbox__input.is-checked + .el-checkbox__label { color: #ff6a00; }
-  .el-radio__input.is-checked .el-radio__inner { background: #ff6a00; border-color: #ff6a00; }
-  .el-radio__input.is-checked + .el-radio__label { color: #ff6a00; }
-  .el-tabs__item.is-active { color: #ff6a00; }
-  .el-tabs__active-bar { background-color: #ff6a00; }
-  .el-pagination.is-background .el-pager li:not(.disabled).active { background-color: #ff6a00; }
-  .el-input__inner:focus, .el-textarea__inner:focus { border-color: #ff6a00; }
-  .el-select .el-input.is-focus .el-input__inner { border-color: #ff6a00; }
-  .el-progress-bar__inner { background-color: #ff6a00; }
-  .el-menu--horizontal > .el-menu-item.is-active { color: #ff6a00; border-bottom-color: #ff6a00; }
-  .el-menu--horizontal > .el-menu-item:hover { color: #ff6a00; }
-  .el-link.el-link--primary { color: #ff6a00; }
-  .el-loading-spinner .path { stroke: #ff6a00; }
+  .el-checkbox__input.is-indeterminate .el-checkbox__inner { background-color: var(--brand); border-color: var(--brand); }
+  .el-checkbox__input.is-focus .el-checkbox__inner { border-color: var(--brand); }
+  .el-checkbox__input.is-checked + .el-checkbox__label { color: var(--brand); }
+  .el-radio__input.is-checked .el-radio__inner { background: var(--brand); border-color: var(--brand); }
+  .el-radio__input.is-checked + .el-radio__label { color: var(--brand); }
+  /* 分段按钮（如「未核对 / 已核对」）也用品牌色，避免与其它控件蓝橙混搭 */
+  .el-radio-button__orig-radio:checked + .el-radio-button__inner {
+    background-color: var(--brand); border-color: var(--brand); color: #fff;
+    box-shadow: -1px 0 0 0 var(--brand);
+  }
+  .el-tabs__item.is-active { color: var(--brand); }
+  .el-tabs__active-bar { background-color: var(--brand); }
+  .el-pagination.is-background .el-pager li:not(.disabled).active { background-color: var(--brand); }
+  .el-input__inner:focus, .el-textarea__inner:focus { border-color: var(--brand); }
+  .el-select .el-input.is-focus .el-input__inner { border-color: var(--brand); }
+  .el-progress-bar__inner { background-color: var(--brand); }
+  .el-link.el-link--primary { color: var(--brand); }
+  .el-loading-spinner .path { stroke: var(--brand); }
 
-  :root { --primary: #ff6a00; --bg: #f5f6f8; --card: #fff; --border: #e8e9eb; --text: #26282c; --sub: #8a8f99; }
+  /* 旧变量名保留为别名：页面里还有大量内联 style 引用，改骨架时逐个替换风险太高 */
+  :root { --primary: var(--brand); --card: var(--surface); --border: var(--line); --text: var(--text-1); --sub: var(--text-3); }
   * { margin: 0; padding: 0; box-sizing: border-box; }
   [v-cloak] { display: none; }
-  body { font-family: "Microsoft YaHei", "PingFang SC", sans-serif; background: var(--bg); color: var(--text); }
+  body { font-family: "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+         background: var(--bg); color: var(--text-1); -webkit-font-smoothing: antialiased; }
   #app { min-height: 100vh; }
-  .app-header { background: #fff; border-bottom: 1px solid var(--border); padding: 0 16px; height: auto; line-height: normal; }
-  .app-header .nav-bar { display: flex; align-items: center; gap: 10px; }
-  .app-header .brand { font-size: 16px; font-weight: 700; color: var(--primary); white-space: nowrap; }
-  .app-header .nav-menu { flex: 1; border-bottom: none !important; display: flex; align-items: center; }
-  .app-header .nav-menu .el-menu-item { height: 54px; line-height: 54px; }
+
+  /* ── 骨架：上下两段（参考 1688 工作台）─────────────────────────
+     上段 = 一条通栏吸顶栏：左上角品牌 + 当前页标题 + 右侧账号/助手操作；
+     下段 = 左菜单 232px + 右内容区。菜单从顶栏下方开始，可整体收起。 */
+  .app-shell { display: flex; flex-direction: column; min-height: 100vh; }
+  .app-header { height: var(--topbar-h); flex: none; background: var(--surface);
+                border-bottom: 1px solid var(--line); padding: 0 20px;
+                display: flex; align-items: center; gap: 14px;
+                position: sticky; top: 0; z-index: 30; }
+  /* 品牌与标题之间的竖分隔线：固定落在 --sb-w 上，与下方菜单右缘（滚动条）一条线 */
+  .app-header::after { content: ''; position: absolute; left: var(--sb-w); top: 11px; bottom: 11px;
+                       width: 1px; background: var(--line); pointer-events: none;
+                       transition: opacity .18s ease; }
+  .app-header.is-collapsed::after { opacity: 0; }
+  .app-header .brand { display: flex; align-items: center; gap: 12px; height: 42px; flex: none;
+                       width: calc(var(--sb-w) - 20px); }
+  /* 菜单收起后品牌区不再撑到 232（下方已无菜单可对齐），宽度回到内容宽 */
+  .app-header.is-collapsed .brand { width: auto; }
+  .app-header .brand-logo { height: 40px; width: 40px; object-fit: contain; flex: none; }
+  .app-header .brand-name { font-size: 20px; font-weight: 700; color: var(--text-1); line-height: 1.25; white-space: nowrap; }
+  .app-header .page-ident { min-width: 0; overflow: hidden; flex: 1 1 auto; padding-left: 10px; }
+  .app-body { flex: 1 1 auto; display: flex; align-items: stretch; min-width: 0; }
+  .sidebar { width: var(--sb-w); flex: none; background: var(--surface);
+             border-right: 1px solid var(--line); padding: 12px;
+             display: flex; flex-direction: column; gap: 2px;
+             position: sticky; top: var(--topbar-h); height: calc(100vh - var(--topbar-h));
+             overflow-y: auto; overflow-x: hidden;
+             transition: width .18s ease, padding .18s ease, border-color .18s ease; }
+  /* 收起态：宽度连同内边距/描边一起归零，菜单整体滑出；左缘留一枚把手可再展开 */
+  .app-body.is-collapsed .sidebar { width: 0; padding-left: 0; padding-right: 0; border-right-color: transparent; }
+  /* 折叠把手：贴侧边栏右缘、垂直居中（截图红框位置） */
+  .sb-toggle { position: fixed; left: calc(var(--sb-w) - 11px); top: calc(50% + 28px);
+               transform: translateY(-50%); z-index: 40; width: 22px; height: 46px; padding: 0;
+               border-radius: 11px; border: 1px solid var(--line); background: var(--surface);
+               color: var(--text-3); display: flex; align-items: center; justify-content: center;
+               cursor: pointer; box-shadow: 0 2px 8px rgba(16,24,40,.10);
+               transition: left .18s ease, color .15s, border-color .15s; }
+  .sb-toggle:hover { color: var(--brand); border-color: var(--brand-line); }
+  .sb-toggle i { font-size: 12px; }
+  .app-body.is-collapsed .sb-toggle { left: 2px; background: var(--brand-tint);
+               border-color: var(--brand-line); color: var(--brand); }
+  .nav-group { font-size: 11px; color: var(--text-3); padding: 12px 16px 4px 16px;
+               letter-spacing: .2px; white-space: nowrap; }
+  .nav-item { display: flex; align-items: center; gap: 10px; padding: 10px 16px;
+              border-radius: var(--radius-sm); font-size: 14px; color: var(--text-2);
+              cursor: pointer; user-select: none; white-space: nowrap;
+              transition: background .15s, color .15s; }
+  .nav-item:hover { background: var(--surface-2); color: var(--text-1); }
+  .nav-item.is-active { background: var(--brand-tint); color: var(--brand); font-weight: 500; }
+  .nav-item i { font-size: 16px; width: 18px; text-align: center; flex: none; }
+  .main-col { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  .topbar-title { font-size: 16px; font-weight: 700; color: var(--text-1); line-height: 1.35;
+                  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .pill { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px;
+          border-radius: var(--radius-pill); font-size: 12px; font-weight: 500; white-space: nowrap; }
+  .pill-ok { background: var(--ok-bg); color: var(--ok); }
+  .pill-warn { background: var(--warn-bg); color: var(--warn); }
+  .pill-info { background: #eef2f7; color: var(--text-2); }
+
+  /* ── 组件统一（对齐设计稿 Design System 屏）───────────────────── */
+  .el-card { border: 1px solid var(--line); border-radius: var(--radius); }
+  .el-table { font-size: 12px; }
+  .el-table th.el-table__cell { background: var(--surface-2); color: var(--text-2); font-weight: 400; }
+  .el-table th.el-table__cell .cell { font-size: 12px; }
+  .el-button { border-radius: var(--radius-sm); }
+  .el-input__inner, .el-textarea__inner { border-radius: var(--radius-sm); border-color: var(--line-2); }
+  .el-select .el-input__inner { border-radius: var(--radius-sm); }
+  .el-dialog { border-radius: var(--radius); }
+  .el-tag { border-radius: var(--radius-sm); }
   /* 退单列表：已取货/送达的行加淡橙底，方便一眼扫到 */
   .el-table .row-picked td { background: #fff8ec !important; }
-  .nav-right { display: flex; align-items: center; gap: 10px; }
-  .user-chip { display: flex; align-items: center; gap: 8px; font-size: 13px; }
-  .user-chip .avatar { width: 28px; height: 28px; border-radius: 50%; background: #fff1e6; color: var(--primary); display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 12px; }
-  .user-chip .uname { font-size: 13px; color: var(--text); }
-  .user-chip .urole { font-size: 11px; color: var(--sub); }
+  .nav-right { display: flex; align-items: center; gap: 8px; flex: none; white-space: nowrap; }
+  .nav-right > * { flex: none; }
+  .user-chip { display: flex; align-items: center; gap: 8px; font-size: 13px; white-space: nowrap; }
+  .user-chip .avatar { width: 28px; height: 28px; border-radius: 50%; background: #fff1e6; color: var(--primary); display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 12px; flex: none; }
+  .user-chip .uname { font-size: 13px; color: var(--text-1); white-space: nowrap; }
+  .user-chip .urole { font-size: 11px; color: var(--text-3); white-space: nowrap; }
   /* 绑定本机助手：已连接时是「状态」不是「按钮」→ 保持绿色、hover 无反馈、光标默认 */
   .agent-bind-btn.is-bound,
   .agent-bind-btn.is-bound.is-disabled,
@@ -62,13 +148,13 @@
   /* 版本更新提示：已停用的用轻微呼吸感提示——它不能像普通弹窗那样被无视 */
   @keyframes updPulse { 0%,100% { opacity: 1; } 50% { opacity: .68; } }
   .agent-upd-btn.is-blocking { animation: updPulse 2.4s ease-in-out infinite; font-weight: 600; }
-  .el-main { padding: 18px 20px 40px; }
+  .el-main { padding: 20px 20px 40px; background: var(--bg); }
   .banner { margin: 0; padding: 10px 20px; font-size: 13px; }
   .section-card { margin-bottom: 14px; }
-  .stat-card { cursor: pointer; transition: .15s; }
-  .stat-card .num { font-size: 22px; font-weight: 700; color: var(--text); }
-  .stat-card .label { font-size: 12px; color: var(--sub); margin-top: 2px; }
-  .stat-card .sub { font-size: 11px; color: var(--sub); margin-top: 2px; }
+  .stat-card { cursor: pointer; transition: .15s; border-radius: var(--radius); }
+  .stat-card .num { font-size: 24px; font-weight: 700; color: var(--text-1); line-height: 1.4; }
+  .stat-card .label { font-size: 12px; color: var(--text-2); margin-top: 2px; }
+  .stat-card .sub { font-size: 12px; color: var(--text-3); margin-top: 2px; }
   .stat-card.s-warn .num { color: #e53935; }
   .stat-card.s-done .num { color: #2e7d32; }
   .stat-card.s-info .num { color: #1565c0; }
@@ -76,7 +162,6 @@
   .stat-card.clickable .label::after { content: ' ⤢'; font-size: 11px; color: var(--sub); }
   .trend-chart { height: 200px; width: 100%; }
   .trend-title { font-size: 13px; font-weight: 600; }
-  .trend-tip { font-size: 11px; color: var(--sub); }
   .toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
   .toolbar .spacer { flex: 1; }
   .members-box { padding: 2px 0 6px; }
@@ -147,71 +232,187 @@
     text-align: center; font-size: 12px; color: var(--sub); line-height: 1.8; letter-spacing: .3px; }
   .app-footer .sep { margin: 0 6px; color: var(--border); }
   .page-head { margin-bottom: 14px; }
-  .page-head h2 { font-size: 16px; margin-bottom: 6px; }
+  /* 页面标题移到顶栏（随菜单切换），正文里不再重复一遍 */
+  .page-head h2 { display: none; }
+  /* 窄屏：侧边栏折叠成图标条 */
+  @media (max-width: 1180px) {
+    :root { --sb-w: 64px; }
+    .sidebar { padding: 8px; }
+    .app-header { padding: 0 12px; gap: 10px; }
+    .app-header .brand { width: calc(var(--sb-w) - 12px); }
+    .app-header .brand-text, .nav-group, .nav-item span { display: none; }
+    .nav-item { justify-content: center; padding: 10px 0; }
+  }
   @media (max-width: 900px) { .el-main { padding: 12px; } }
+
+  /* ══ 第 2 批：发票组（1688发票 / 拼多多发票 / 税名核对）══════════════ */
+  /* 页内 Tab 壳：设计稿把「税名核对」并作发票屏的第二个 Tab。
+     这里只做壳，侧边栏入口照旧保留，两处互通（点 Tab = 切 page='mapping'）。 */
+  .inv-tabs { display: flex; gap: 24px; border-bottom: 1px solid var(--line); margin-bottom: 14px; }
+  .inv-tab { position: relative; padding: 10px 2px 12px; font-size: 14px; color: var(--text-2);
+             cursor: pointer; user-select: none; transition: color .15s; }
+  .inv-tab:hover { color: var(--text-1); }
+  .inv-tab.is-active { color: var(--brand); font-weight: 600; }
+  .inv-tab.is-active::after { content: ''; position: absolute; left: 0; right: 0; bottom: -1px;
+                              height: 2px; border-radius: 2px; background: var(--brand); }
+  /* 统计卡：设计稿卡型——白底 + 1px 边 + 圆角 10，数字 24/700，标签 12 次级色。
+     只有真正可点的卡（.clickable）才有手型与抬升，纯展示卡不误导。 */
+  .stat-card { background: var(--surface); cursor: default; }
+  .stat-card.clickable { cursor: pointer; }
+  .stat-card .num { letter-spacing: -.2px; }
+  .stat-row { display: flex; gap: 12px; flex-wrap: wrap; margin: 12px 0; }
+  /* 税名核对：把原来占半屏的 el-alert 收敛成一条提示，四步说明一句不漏 */
+  .map-tip { display: flex; gap: 8px; align-items: flex-start; background: var(--surface-2);
+             border: 1px solid var(--line); border-radius: var(--radius-sm);
+             padding: 10px 12px; font-size: 12px; color: var(--text-2); line-height: 1.85; margin-bottom: 14px; }
+  .map-tip > i { color: var(--brand); font-size: 14px; margin-top: 2px; flex: none; }
+  .map-tip b { color: var(--text-1); font-weight: 600; }
+  .map-tip .steps { color: var(--text-3); }
+  /* 页头操作行（设计稿 .s96）：左为口径信息，右为主操作按钮，标题已在顶栏 */
+  .page-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+  .page-bar .pb-info { font-size: 12px; color: var(--text-2); line-height: 1.7; }
+  .page-bar .pb-info b { color: var(--text-1); font-weight: 600; }
+  .page-bar .pb-actions { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+  /* 表格卡内筛选条（设计稿 .s125）：独立一行，与表头留一条分隔线 */
+  .filter-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+                padding-bottom: 12px; margin-bottom: 12px; border-bottom: 1px solid var(--line); }
+  .filter-bar .fb-label { font-size: 12px; color: var(--text-2); }
+  .filter-bar .fb-spacer { flex: 1; }
+  /* 牵牛花：趋势图 + 预警面板左右两栏（窄屏自动上下叠） */
+  .qnh-split { display: flex; gap: 14px; align-items: stretch; flex-wrap: wrap; }
+  .qnh-split .split-main { flex: 1 1 460px; min-width: 0; }
+  .qnh-split .split-side { flex: 0 0 300px; }
+  @media (max-width: 1180px) { .qnh-split .split-side { flex: 1 1 100%; } }
+  .warn-kv { display: flex; flex-direction: column; gap: 8px; }
+  .warn-row { display: flex; align-items: baseline; justify-content: space-between; gap: 10px;
+              padding-bottom: 8px; border-bottom: 1px dashed var(--line); }
+  .warn-row:last-child { border-bottom: 0; padding-bottom: 0; }
+  .warn-row .wk { font-size: 12px; color: var(--text-2); }
+  .warn-row .wv { font-size: 16px; font-weight: 700; color: var(--text-1); }
+  .warn-row .wv.s-warn { color: #e53935; }
+  .warn-row .wv.small { font-size: 12px; font-weight: 500; color: var(--text-2); }
+  /* 操作日志行展开：键值列表，长内容换行 */
+  .op-detail { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+               gap: 6px 24px; padding: 8px 16px 12px; font-size: 12px; line-height: 1.8; background: #FAFAFC; }
+  .op-detail .k { display: inline-block; width: 68px; color: var(--text-3); }
+  .op-detail .v { color: var(--text-1); word-break: break-all; }
+  /* 账单行展开：三段并排（收入 / 支出 / 净收入），窄屏自动叠放 */
+  .bill-detail { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+                 gap: 4px 28px; padding: 10px 18px 14px; background: #FAFAFC; font-size: 12px; }
+  .bill-detail .bd-title { font-weight: 600; color: var(--text-1); margin-bottom: 4px;
+                           padding-bottom: 4px; border-bottom: 1px solid var(--border); }
+  .bill-detail .bd-row { display: flex; justify-content: space-between; gap: 12px; line-height: 1.9; }
+  .bill-detail .bd-row .k { color: var(--text-2); }
+  .bill-detail .bd-row .v { color: var(--text-1); font-variant-numeric: tabular-nums; }
+  .bill-detail .bd-row.bd-sum .k, .bill-detail .bd-row.bd-sum .v { font-weight: 700; }
+  .bill-detail .bd-row.bd-tip { display: block; color: var(--text-3); line-height: 1.7; margin-top: 6px; }
+  /* 退单行展开：两列键值，地址等长文本占整行 */
+  .rf-detail { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+               gap: 2px 24px; padding: 10px 18px 14px; background: #FAFAFC; font-size: 12px; }
+  .rf-detail .rd-item { display: flex; gap: 10px; line-height: 1.9; }
+  .rf-detail .rd-item .k { flex: 0 0 72px; color: var(--text-3); }
+  .rf-detail .rd-item .v { color: var(--text-1); word-break: break-all; }
+  .rf-detail .rd-wide { grid-column: 1 / -1; }
+  .rf-detail .rd-actions { grid-column: 1 / -1; margin-top: 6px; }
+  /* 独立配置页的返回入口（面包屑式，左侧页头内） */
+  .back-link { color: var(--text-2); cursor: pointer; margin-right: 10px; transition: color .15s; }
+  .back-link:hover { color: var(--brand); }
+  /* 账单两级表头：一级分组（收入 / 支出 / 净收入）压深一档，与二级细项区分。
+     vendor/element-ui 里给表头统一加了 th.el-table__cell{background:#F5F7FA}，
+     且固定列会复制一份表头，故这里两处都写并用 !important 压过库样式。 */
+  .bill-table .el-table__header th.bill-grp,
+  .bill-table .el-table__fixed-header-wrapper th.bill-grp {
+    background-color: #EDEDF2 !important; color: var(--text-1); font-weight: 600;
+  }
+  /* 1688 发票工具栏收成一行：label 与控件间距略紧，按钮文案取短名（全称留在 title） */
+  .toolbar.toolbar-tight { gap: 8px; }
+  .toolbar.toolbar-tight .tb-label { font-size: 12px; color: var(--text-2); flex: none; }
+  /* 1688 订单同步进度条（挂在工具栏卡片内，只在同步时出现） */
+  .ali-sync-bar { display: flex; align-items: center; gap: 8px; margin-top: 10px; padding-top: 9px;
+                  border-top: 1px dashed #eceef2; font-size: 12px; color: var(--text-2); }
+  .ali-sync-dot { width: 6px; height: 6px; border-radius: 50%; background: #c8ccd4; flex: none; }
+  .ali-sync-dot.on { background: var(--primary); animation: aliPulse 1.1s ease-in-out infinite; }
+  @keyframes aliPulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50%      { opacity: .3; transform: scale(.75); }
+  }
+  .ali-sync-meta { color: var(--text-3); font-variant-numeric: tabular-nums; }
 </style>
 </head>
 <body>
 <div id="app" v-cloak>
-  <el-container>
-    <el-header class="app-header" height="auto">
-      <div class="nav-bar">
-        <div class="brand">发票催收</div>
-        <el-menu class="nav-menu" :default-active="page" mode="horizontal" @select="switchPage">
-          <el-menu-item index="board">1688发票</el-menu-item>
-          <el-menu-item index="pdd">拼多多发票</el-menu-item>
-          <el-menu-item index="mapping">税名核对</el-menu-item>
-          <el-menu-item index="product" v-if="canProduct">商品列表</el-menu-item>
-          <el-menu-item index="market" v-if="canMarket">交易市场</el-menu-item>
-          <el-menu-item index="billing" v-if="canBilling">账单</el-menu-item>
-          <el-menu-item index="refund" v-if="canRefund">退单列表</el-menu-item>
-          <el-menu-item index="profit" v-if="canProfit">实时毛利监控</el-menu-item>
-          <el-menu-item index="admin" v-if="isAdmin">系统管理</el-menu-item>
-          <el-menu-item index="audit" v-if="isAdmin">操作日志</el-menu-item>
-        </el-menu>
-        <div class="nav-right">
-          <el-button size="small" plain @click="openDownload"
-                     title="下载 Windows 版本机助手（已内置服务器地址），下载后双击运行">⬇ 下载本机助手</el-button>
-          <!-- 绑定按钮与连接状态合一：未连接可点、已连接变绿色状态且不可点 -->
-          <el-button size="small" :class="['agent-bind-btn', { 'is-bound': agent.online }]"
-                     :type="agent.online ? 'success' : 'primary'" :plain="!agent.online"
-                     :loading="guide.binding" :disabled="agent.online || guide.binding"
-                     :title="agentBindTitle" @click="bindAgent">{{ agentBindText }}</el-button>
-          <!-- 版本体检不通过才出现：宽限期内橙色提醒，已停用则红色 -->
-          <el-button v-if="agentUpdate" size="small" class="agent-upd-btn"
-                     :class="{ 'is-blocking': agentUpdate.blocking }"
-                     :type="agentUpdate.blocking ? 'danger' : 'warning'"
-                     :plain="!agentUpdate.blocking" :title="agentUpdate.title" @click="promptAgentUpdate">
-            ⬆ {{ agentUpdate.text }}
-          </el-button>
-          <div class="user-chip">
-            <div class="avatar">{{ avatarText }}</div>
-            <div>
-              <div class="uname">{{ userName }}</div>
-              <div class="urole">{{ userRoleText }}</div>
-            </div>
-            <el-button size="mini" @click="openPwdModal" title="修改当前账号密码">改密</el-button>
-            <el-button size="mini" @click="logout">退出</el-button>
-          </div>
+  <div class="app-shell">
+    <!-- ── 上段：通栏吸顶栏。左上角品牌与右侧操作同处一条，滚动时一起固定 ── -->
+    <header class="app-header" :class="{ 'is-collapsed': sidebarCollapsed }">
+      <div class="brand">
+        <img class="brand-logo" src="/assets/logo-icon.png" alt="发票催收">
+        <div class="brand-text">
+          <div class="brand-name">发票催收</div>
         </div>
       </div>
-    </el-header>
+      <div class="page-ident">
+        <div class="topbar-title">{{ pageTitle }}</div>
+      </div>
+      <div class="nav-right">
+        <el-button size="small" plain @click="openDownload"
+                   title="下载 Windows 版本机助手（已内置服务器地址），下载后双击运行">⬇ 下载本机助手</el-button>
+        <!-- 绑定按钮与连接状态合一：未连接可点、已连接变绿色状态且不可点 -->
+        <el-button size="small" :class="['agent-bind-btn', { 'is-bound': agent.online }]"
+                   :type="agent.online ? 'success' : 'primary'" :plain="!agent.online"
+                   :loading="guide.binding" :disabled="agent.online || guide.binding"
+                   :title="agentBindTitle" @click="bindAgent">{{ agentBindText }}</el-button>
+        <!-- 版本体检不通过才出现：宽限期内橙色提醒，已停用则红色 -->
+        <el-button v-if="agentUpdate" size="small" class="agent-upd-btn"
+                   :class="{ 'is-blocking': agentUpdate.blocking }"
+                   :type="agentUpdate.blocking ? 'danger' : 'warning'"
+                   :plain="!agentUpdate.blocking" :title="agentUpdate.title" @click="promptAgentUpdate">
+          ⬆ {{ agentUpdate.text }}
+        </el-button>
+        <div class="user-chip">
+          <div class="avatar">{{ avatarText }}</div>
+          <div>
+            <div class="uname">{{ userName }}</div>
+            <div class="urole">{{ userRoleText }}</div>
+          </div>
+          <el-button size="mini" @click="openPwdModal" title="修改当前账号密码">改密</el-button>
+          <el-button size="mini" @click="logout">退出</el-button>
+        </div>
+      </div>
+    </header>
 
-    <div class="banner" v-if="readonly" style="background:#e3f2fd;color:#0d47a1;border-bottom:1px solid #bbdefb">
-      👁 正在以超级管理员身份查看 <b>{{ tenantLabel }}</b> 的「1688发票」数据（<b>只读</b>，不能发送/修改）。
-      <el-button size="mini" style="margin-left:12px" @click="exitTenantView">退出查看</el-button>
-    </div>
-    <div class="banner" v-if="mustChangePassword" style="background:#fff8e1;color:#8d6e00;border-bottom:1px solid #ffe082">
-      ⚠ 检测到账号使用了初始/管理员重置的密码，建议立即修改。
-      <el-button size="mini" style="margin-left:12px" @click="openPwdModal">立即修改密码</el-button>
-    </div>
+    <!-- ── 下段：左菜单 + 右内容。菜单可点把手收起，点右侧内容或滚动也会自动收起 ── -->
+    <div class="app-body" :class="{ 'is-collapsed': sidebarCollapsed }">
+      <aside class="sidebar">
+        <template v-for="g in navGroups">
+          <div class="nav-group" :key="'g-' + g.title">{{ g.title }}</div>
+          <div class="nav-item" v-for="it in g.items" :key="it.key" :title="it.label"
+               :class="{ 'is-active': page === it.key }" @click="switchPage(it.key)">
+            <i :class="it.icon"></i><span>{{ it.label }}</span>
+          </div>
+        </template>
+      </aside>
+      <button class="sb-toggle" type="button" @click="toggleSidebar"
+              :title="sidebarCollapsed ? '展开菜单' : '收起菜单（点右侧内容或滚动页面也会自动收起）'">
+        <i :class="sidebarCollapsed ? 'el-icon-arrow-right' : 'el-icon-arrow-left'"></i>
+      </button>
 
-    <el-main>
+      <div class="main-col">
+
+      <div class="banner" v-if="readonly" style="background:#e3f2fd;color:#0d47a1;border-bottom:1px solid #bbdefb">
+        👁 正在以超级管理员身份查看 <b>{{ tenantLabel }}</b> 的「1688发票」数据（<b>只读</b>，不能发送/修改）。
+        <el-button size="mini" style="margin-left:12px" @click="exitTenantView">退出查看</el-button>
+      </div>
+      <div class="banner" v-if="mustChangePassword" style="background:#fff8e1;color:#8d6e00;border-bottom:1px solid #ffe082">
+        ⚠ 检测到账号使用了初始/管理员重置的密码，建议立即修改。
+        <el-button size="mini" style="margin-left:12px" @click="openPwdModal">立即修改密码</el-button>
+      </div>
+
+      <el-main>
       <!-- ══════════ 1688发票 ══════════ -->
       <div v-show="page === 'board'" id="page-board">
         <!-- 统计卡 -->
         <el-row :gutter="12" class="section-card">
-          <el-col :xs="12" :sm="8" :md="4" v-for="s in statCards" :key="s.key">
+          <el-col :xs="12" :sm="8" :md="8" v-for="s in statCards" :key="s.key">
             <el-card shadow="hover" :class="['stat-card', s.cls, s.click ? 'clickable' : '']" :body-style="{ padding: '12px 16px' }"
                      @click.native="s.click ? openDetail(s.click) : null" :title="s.tip">
               <div class="num">{{ s.num }}</div>
@@ -223,14 +424,10 @@
 
         <!-- 趋势图（Element UI 卡片 + ECharts；点某一天可查看当天明细） -->
         <el-row :gutter="12" class="section-card">
-          <el-col :xs="24" :sm="12" v-for="c in charts" :key="c.key">
+          <el-col :xs="24" :sm="24" v-for="c in charts" :key="c.key">
             <el-card shadow="hover" :body-style="{ padding: '8px 10px 4px' }">
               <div slot="header" style="display:flex;align-items:center;justify-content:space-between;gap:8px">
                 <span class="trend-title">{{ c.title }}</span>
-                <span>
-                  <el-tag size="mini" type="info" style="margin-right:6px">峰值 {{ c.peakText }}</el-tag>
-                  <span class="trend-tip">点柱子看当天明细</span>
-                </span>
               </div>
               <div class="trend-chart" :id="'trend-chart-' + c.key"></div>
             </el-card>
@@ -250,9 +447,9 @@
 
         <!-- 工具栏 -->
         <el-card class="section-card" shadow="never" :body-style="{ padding: '12px 14px' }">
-          <div class="toolbar">
-            <span style="font-size:12px;color:var(--sub)">催收状态</span>
-            <el-select v-model="draftCollect" size="small" style="width:170px"
+          <div class="toolbar toolbar-tight">
+            <span class="tb-label">催收</span>
+            <el-select v-model="draftCollect" size="small" style="width:140px"
                        title="已催收 = 有成功催收记录的公司；未催收 = 最近 N 天没有成功催收记录（含从未催收）">
               <el-option label="已催收" value="collected"></el-option>
               <el-option label="最近一周未催收" value="7"></el-option>
@@ -260,20 +457,32 @@
               <el-option label="最近一个月未催收" value="30"></el-option>
               <el-option label="最近三个月未催收" value="90"></el-option>
             </el-select>
-            <span style="font-size:12px;color:var(--sub)">开票状态</span>
-            <el-select v-model="draftInvoice" size="small" style="width:180px">
+            <span class="tb-label">开票</span>
+            <el-select v-model="draftInvoice" size="small" style="width:150px">
               <el-option label="全部" value=""></el-option>
               <el-option label="已开票（待开票金额=0）" value="invoiced"></el-option>
               <el-option label="未开票（待开票金额>0）" value="pending"></el-option>
             </el-select>
-            <el-input v-model="draftKeyword" size="small" style="width:230px" placeholder="搜索卖家公司名 / 登录ID"
+            <el-input v-model="draftKeyword" size="small" style="width:190px" placeholder="搜索卖家公司名 / 登录ID"
                       clearable @keyup.enter.native="applyFilters"></el-input>
-            <el-button size="small" type="primary" plain :loading="boardLoading" @click="applyFilters" title="重新请求数据并按当前条件刷新列表">查询</el-button>
-            <el-button size="small" :loading="boardLoading" @click="loadData" title="重新拉取发票数据">刷新</el-button>
+            <el-button size="small" type="primary" plain :loading="boardLoading" @click="applyFilters" title="按当前筛选条件重新请求数据">查询</el-button>
+            <el-button size="small" :loading="boardLoading || aliSync.running" @click="syncAliOrders"
+                       :title="aliSync.running ? '正在从 1688 拉取订单…' : '从 1688 拉取订单：下单时间起点 ' + (aliSync.startDateTime || '库中最近下单时间（自动回退 1 天重叠）') + '，逐页拉到没有下一页为止；拉完再按开票时间增量刷新「已开票」状态'">刷新</el-button>
             <span class="spacer"></span>
-            <el-button size="small" @click="openUpload('orders')" title="上传从 1688 导出的订单 Excel 并导入（重复订单按最新数据更新）">导入1688订单数据</el-button>
-            <el-button size="small" @click="openUpload('invoices')" title="上传从电子税务局导出的发票 Excel 并导入（重复发票按最新数据更新）">导入税务局发票数据</el-button>
-            <el-button size="small" type="primary" :disabled="readonly" @click="batchSend">发送催收消息 ({{ selectedCount }})</el-button>
+            <el-button size="small" @click="openUpload('orders')" title="导入1688订单数据：上传从 1688 导出的订单 Excel 并导入（重复订单按最新数据更新）">导入订单</el-button>
+            <el-button size="small" @click="openUpload('invoices')" title="导入税务局发票数据：上传从电子税务局导出的发票 Excel 并导入（重复发票按最新数据更新）">导入发票</el-button>
+            <el-button size="small" type="primary" :disabled="readonly" @click="batchSend"
+                       title="发送前会先弹框选一条开票抬头（话术里的抬头/税号/邮箱取自选中的那条）">发送催收消息 ({{ selectedCount }})</el-button>
+          </div>
+          <!-- 订单同步进度：只在同步中/刚结束时出现，不占用常驻版面 -->
+          <div v-if="aliSync.running || aliSync.text" class="ali-sync-bar">
+            <span class="ali-sync-dot" :class="{ on: aliSync.running }"></span>
+            <span class="ali-sync-text">{{ aliSync.text }}</span>
+            <span class="ali-sync-meta" v-if="aliSync.fetched">
+              已拉 {{ aliSync.fetched }} 单 · 入库 {{ aliSync.saved }} · 新增 {{ aliSync.newCount }}
+            </span>
+            <span class="spacer" style="flex:1"></span>
+            <el-button v-if="aliSync.running" size="mini" type="text" @click="stopAliSync">停止</el-button>
           </div>
         </el-card>
 
@@ -480,21 +689,39 @@
       <div v-if="page === 'mapping'" id="page-mapping" v-loading="map.loading">
         <div class="page-head">
           <h2>税名核对</h2>
-          <el-alert type="info" :closable="false" show-icon style="margin-top:8px"
-            title="本页面是处理税务已开票公司名称无法在 1688 商家匹配到的，需要你手动匹配，操作步骤如下">
-            <div style="font-size:12px;line-height:1.9">
-              ① 看下面「待人工比对」—— 那是系统认不出来的发票名称<br>
-              ② 在右边输入 1688 商家的名字，从下拉里选中，点「保存」<br>
-              ③ 如果这个名称确实不是 1688 上任何一家店，点「忽略」，它就不会再出现，也不会被统计进去<br>
-              配对成功的会移到下面「已维护映射」里；
+          <div class="map-tip">
+            <i class="el-icon-info"></i>
+            <div>
+              <b>把税务局已开票、但系统认不出的销方名称，手工匹配到 1688 商家。</b>
+              <span class="steps">
+                ① 默认只看「未核对」—— 那是系统认不出来的发票名称；
+                ② 右边输入 1688 商家名字，从下拉里选中，点「保存」；
+                ③ 确实不是 1688 上任何一家店就点「忽略」（不再出现、也不计入统计）。
+                核对过的会落到「已核对」；
+              </span>
             </div>
-          </el-alert>
+          </div>
         </div>
         <el-card shadow="never" class="section-card">
-          <div slot="header"><b>待人工比对</b> <span class="loginid">（{{ map.unmatched.length }} 个销方名称未匹配）</span></div>
-          <el-alert v-if="!map.unmatched.length" type="success" :closable="false" show-icon
-                    title="✓ 所有销方名称都已处理（已匹配或已忽略）"></el-alert>
-          <template v-else>
+          <div slot="header">
+            <b>税名核对表</b>
+            <span class="loginid">（未核对 {{ map.unmatched.length }} 个 · 已核对 {{ map.mappings.length }} 条）</span>
+          </div>
+          <div class="filter-bar">
+            <span class="fb-label">核对状态</span>
+            <el-radio-group v-model="mapFilter" size="small">
+              <el-radio-button label="unmatched">未核对（{{ map.unmatched.length }}）</el-radio-button>
+              <el-radio-button label="matched">已核对（{{ map.mappings.length }}）</el-radio-button>
+            </el-radio-group>
+            <span class="fb-spacer"></span>
+            <span class="loginid">默认只看未核对，核对完的会移到「已核对」</span>
+          </div>
+
+          <!-- 未核对：系统认不出来的税务局销方名称 -->
+          <template v-if="mapFilter === 'unmatched'">
+            <el-alert v-if="!map.unmatched.length" type="success" :closable="false" show-icon
+                      title="✓ 所有销方名称都已处理（已匹配或已忽略）"></el-alert>
+            <template v-else>
             <el-table :data="unmatchedPage" size="small" border style="width:100%">
               <el-table-column label="税务局销方名称" min-width="180"><template slot-scope="p"><span class="company">{{ p.row.tax_seller_name }}</span></template></el-table-column>
               <el-table-column label="销方税号" width="150"><template slot-scope="p"><span class="loginid">{{ p.row.seller_tax_no || '' }}</span></template></el-table-column>
@@ -533,14 +760,14 @@
                              :page-size="unSize" :current-page="unPage" :page-sizes="pageSizes"
                              @size-change="v => { unSize = v; unPage = 1; }" @current-change="v => unPage = v"></el-pagination>
             </div>
+            </template>
           </template>
-        </el-card>
 
-        <el-card shadow="never" class="section-card">
-          <div slot="header"><b>已维护映射</b> <span class="loginid">（{{ map.mappings.length }} 条）</span></div>
-          <el-alert v-if="!map.mappings.length" type="info" :closable="false" show-icon title="暂无已维护映射"></el-alert>
+          <!-- 已核对：原先的映射明细（同一批数据，只是换成筛选后的视图） -->
           <template v-else>
-            <el-table :data="mappingPage" size="small" border style="width:100%">
+            <el-alert v-if="!map.mappings.length" type="info" :closable="false" show-icon
+                      title="暂无已核对的销方名称"></el-alert>
+            <el-table v-else :data="mappingPage" size="small" border style="width:100%">
               <el-table-column prop="tax_seller_name" label="税务局销方名称" min-width="170"></el-table-column>
               <el-table-column label="对应的 1688 商家" min-width="170">
                 <template slot-scope="p"><span class="company" v-if="p.row.seller_company">{{ p.row.seller_company }}</span><el-tag v-else size="mini" type="danger">未映射</el-tag></template>
@@ -572,7 +799,7 @@
                 </template>
               </el-table-column>
             </el-table>
-            <div class="pager-wrap">
+            <div class="pager-wrap" v-if="map.mappings.length">
               <el-pagination background layout="sizes, prev, pager, next" :total="map.mappings.length"
                              :page-size="mapSize" :current-page="mapPage" :page-sizes="pageSizes"
                              @size-change="v => { mapSize = v; mapPage = 1; }" @current-change="v => mapPage = v"></el-pagination>
@@ -605,18 +832,28 @@
 
       <!-- ══════════ 商品列表 ══════════ -->
       <div v-show="page === 'product'" id="page-product">
-        <div class="page-head">
-          <h2>商品列表</h2>
-          <div style="display:flex;align-items:center;gap:10px;margin-top:8px;flex-wrap:wrap">
-            <el-button size="small" type="primary" plain :disabled="readonly"
+        <div class="page-bar">
+          <span class="pb-info">
+            补货参考 · 总货值口径 <b>Σ((可用库存 + 在途库存) × 采购价)</b>
+            <template v-if="product.latestBatch">
+              · 最近导入 {{ fmtMinute(product.latestBatch.imported_at) }}（{{ product.latestBatch.item_count }} 个商品 / {{ yuan(product.latestBatch.total_value) }}）
+            </template>
+          </span>
+          <span class="pb-actions">
+            <el-button size="small" type="primary" :disabled="readonly"
                        title="上传「前置仓补货参考批量导出」Excel（重复商品按本次文件内容更新）"
                        @click="openUpload('products')">导入补货参考文件</el-button>
-            <span class="loginid" v-if="product.latestBatch">
-              最近导入 {{ fmtMinute(product.latestBatch.imported_at) }} · {{ product.latestBatch.item_count }} 个商品 · 总货值 {{ yuan(product.latestBatch.total_value) }}
-            </span>
-            <span style="flex:1"></span>
-            <span class="loginid">总货值 = Σ((可用库存 + 在途库存) × 采购价)</span>
-          </div>
+          </span>
+        </div>
+
+        <!-- 统计卡（设计稿 4 卡）：全部取自现有接口字段，未新增接口 -->
+        <div class="stat-row">
+          <el-card v-for="s in productStatCards" :key="s.key" shadow="never" class="stat-card"
+                   :body-style="{ padding: '14px 16px' }" style="flex:1;min-width:150px">
+            <div class="num">{{ s.num }}</div>
+            <div class="label">{{ s.label }}</div>
+            <div class="sub">{{ s.sub }}</div>
+          </el-card>
         </div>
 
         <el-card shadow="never" class="section-card">
@@ -628,8 +865,17 @@
         </el-card>
 
         <el-card shadow="never" class="section-card">
-          <div slot="header" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <div slot="header" style="display:flex;align-items:center;gap:10px">
             <b>商品</b>
+            <span class="loginid">（勾选后可批量发布到交易市场）</span>
+            <span style="flex:1"></span>
+            <el-button size="small" type="success" :disabled="!product.selected.length || readonly"
+                       @click="openPublish(product.selected.map(r => r.sku))">
+              发布到交易市场({{ product.selected.length }})
+            </el-button>
+          </div>
+          <!-- 筛选条（设计稿 .s125）：独立一行，与表头留一条分隔线 -->
+          <div class="filter-bar">
             <el-input v-model="product.draftQ" size="small" clearable placeholder="搜商品SKU / 名称" style="width:220px"
                       @keyup.enter.native="loadProducts" @clear="loadProducts"></el-input>
             <el-select v-model="product.status" size="small" style="width:130px" @change="loadProducts">
@@ -641,12 +887,8 @@
               采购价{{ product.priceSort === 'desc' ? ' ↓' : (product.priceSort === 'asc' ? ' ↑' : '') }}
             </el-button>
             <el-button size="small" type="primary" plain :loading="product.loading" @click="loadProducts">查询</el-button>
-            <span style="flex:1"></span>
+            <span class="fb-spacer"></span>
             <span class="loginid">当前筛选总货值：{{ yuan(product.filteredValue) }}</span>
-            <el-button size="small" type="success" :disabled="!product.selected.length || readonly"
-                       @click="openPublish(product.selected.map(r => r.sku))">
-              发布到交易市场({{ product.selected.length }})
-            </el-button>
           </div>
           <el-table :data="product.rows" size="small" border style="width:100%" v-loading="product.loading"
                     empty-text="暂无商品（点「导入补货参考文件」上传 Excel）" @selection-change="v => product.selected = v">
@@ -841,19 +1083,30 @@
 
       <!-- ══════════ 交易市场 ══════════ -->
       <div v-show="page === 'market'" id="page-market">
-        <div class="page-head">
-          <h2>交易市场</h2>
-          <div style="font-size:12px;color:var(--sub);line-height:1.8;margin-top:8px">
-            所有用户在「商品列表」发布的报价在此汇集；同一 SKU 去重展示一条：数量为各用户发布数量合计，价格为当前最低报价。<br>
-            点击商品行可查看该 SKU 的全部报价（价格由低到高，同价按发布时间倒序）。
-          </div>
+        <div class="page-bar">
+          <span class="pb-info">
+            内部报价市场 · 同一 SKU 去重一条（<b>数量</b> = 各用户发布数量合计，<b>价格</b> = 当前最低报价）·
+            点商品行看该 SKU 全部报价（由低到高，同价按发布时间倒序）
+          </span>
+          <span class="pb-actions">
+            <el-button size="small" :loading="market.loading" @click="loadMarket">刷新</el-button>
+          </span>
         </div>
+
+        <!-- 统计卡（设计稿 4 卡）：在售 SKU 取列表 total，其余取接口下发的只读聚合 summary -->
+        <div class="stat-row">
+          <el-card v-for="s in marketStatCards" :key="s.key" shadow="never" class="stat-card"
+                   :body-style="{ padding: '14px 16px' }" style="flex:1;min-width:150px">
+            <div class="num">{{ s.num }}</div>
+            <div class="label">{{ s.label }}</div>
+            <div class="sub">{{ s.sub }}</div>
+          </el-card>
+        </div>
+
         <el-card shadow="never" class="section-card">
           <div slot="header" style="display:flex;align-items:center;gap:10px">
             <b>在售商品</b>
             <span class="loginid">（共 {{ market.total }} 个 SKU，同一 SKU 多人发布只显示一行）</span>
-            <span style="flex:1"></span>
-            <el-button size="small" :loading="market.loading" @click="loadMarket">刷新</el-button>
           </div>
           <el-table :data="market.rows" size="small" border style="width:100%" v-loading="market.loading"
                     empty-text="暂无商品发布（去「商品列表」把商品发布到交易市场）" highlight-current-row
@@ -892,8 +1145,15 @@
 
       <!-- ══════════ 账单（按月统计收支） ══════════ -->
       <div v-show="page === 'billing'" id="page-billing">
-        <div class="page-head">
-          <h2>账单</h2>
+        <!-- 统计卡（设计稿 4 卡）：取最近月份，全部由现有 billing 数据算出，未新增接口。
+             按用户要求，本页不再放任何说明文字（v0.2.41 已删过）。 -->
+        <div class="stat-row">
+          <el-card v-for="s in billStatCards" :key="s.key" shadow="never" class="stat-card"
+                   :body-style="{ padding: '14px 16px' }" style="flex:1;min-width:150px">
+            <div class="num">{{ s.num }}</div>
+            <div class="label">{{ s.label }}</div>
+            <div class="sub">{{ s.sub }}</div>
+          </el-card>
         </div>
 
         <el-card shadow="never" class="section-card">
@@ -906,13 +1166,47 @@
           </div>
           <el-table :data="billRowsDesc" size="small" border style="width:100%" v-loading="bill.loading"
                     class="bill-table" empty-text="正在加载账单…">
-            <!-- 一级列 1：数据日期（月份，固定在最左不随横向滚动） -->
-            <el-table-column label="数据日期" width="132" fixed>
+            <!-- 行展开：该月的收入 / 支出 / 净收入构成明细（全部来自本行已有数据，不改口径） -->
+            <el-table-column type="expand" width="40">
+              <template slot-scope="p">
+                <div class="bill-detail">
+                  <div>
+                    <div class="bd-title">收入项</div>
+                    <div class="bd-row" v-for="it in billIncomeItems" :key="it.key">
+                      <span class="k">{{ it.label }}</span>
+                      <span class="v">{{ yuan(p.row.cells[it.key]) }}</span>
+                    </div>
+                    <div class="bd-row bd-sum"><span class="k">收入合计</span><span class="v">{{ yuan(p.row.totals.income) }}</span></div>
+                  </div>
+                  <div>
+                    <div class="bd-title">支出项</div>
+                    <div class="bd-row" v-for="it in billExpenseItems" :key="it.key">
+                      <span class="k">{{ it.label }}<el-tag v-if="it.source === 'auto'" size="mini" type="info"
+                                              style="margin-left:4px">系统</el-tag></span>
+                      <span class="v">{{ yuan(it.source === 'auto' ? p.row.auto[it.key] : p.row.cells[it.key]) }}</span>
+                    </div>
+                    <div class="bd-row bd-sum"><span class="k">支出合计</span><span class="v">{{ yuan(p.row.totals.expense) }}</span></div>
+                  </div>
+                  <div>
+                    <div class="bd-title">净收入</div>
+                    <div class="bd-row"><span class="k">净利润</span><span class="v">{{ yuan(p.row.totals.net) }}</span></div>
+                    <div class="bd-row"><span class="k">净利率</span><span class="v">{{ p.row.totals.rate }}%</span></div>
+                    <div class="bd-row bd-tip">
+                      净利润 = 收入合计 − 支出合计；标「系统」的支出项按当月账单实时统计，不可手工修改。
+                    </div>
+                  </div>
+                </div>
+              </template>
+            </el-table-column>
+
+            <!-- 一级列 1：数据日期（月份）。刻意不加 fixed：Element UI 的 fixed 列会复制整个表格，
+                 导致行展开内容渲染两份并重叠；本表按月倒序、行数有限，不固定不影响使用 -->
+            <el-table-column label="数据日期" width="132">
               <template slot-scope="p"><b>{{ monthText(p.row.month) }}</b></template>
             </el-table-column>
 
             <!-- 一级列 2：收入（二级 = 各收入细项 + 收入合计） -->
-            <el-table-column label="收入">
+            <el-table-column label="收入" label-class-name="bill-grp">
               <el-table-column v-for="it in billIncomeItems" :key="it.key" :label="it.label" width="142">
                 <template slot-scope="p">
                   <el-input-number :value="p.row.cells[it.key]" :min="0" :precision="2" :controls="false"
@@ -926,7 +1220,7 @@
             </el-table-column>
 
             <!-- 一级列 3：支出（二级 = 两个系统统计项 + 11 个手工项 + 支出合计） -->
-            <el-table-column label="支出">
+            <el-table-column label="支出" label-class-name="bill-grp">
               <el-table-column v-for="it in billExpenseItems" :key="it.key" :label="it.label"
                                :width="it.source === 'auto' ? 186 : 132">
                 <template slot="header">
@@ -946,7 +1240,7 @@
             </el-table-column>
 
             <!-- 一级列 4：净收入（二级 = 净利润 / 净利率） -->
-            <el-table-column label="净收入">
+            <el-table-column label="净收入" label-class-name="bill-grp">
               <el-table-column label="净利润" width="132">
                 <template slot-scope="p">
                   <span class="amount" :class="p.row.totals.net < 0 ? '' : 'ok'">{{ yuan(p.row.totals.net) }}</span>
@@ -980,12 +1274,25 @@
 
       <!-- ══════════ 系统管理 ══════════ -->
       <div v-show="page === 'admin'" id="page-admin">
-        <div class="page-head">
-          <h2>系统管理</h2>
-          <div style="font-size:12px;color:var(--sub);line-height:1.8">
-            仅超级管理员可见。可在此维护账号（新增 / 重置密码 / 禁用 / 删除）与<b>每个账号的开票抬头</b>、查看业务账号的「1688发票」数据，以及调整全局发送参数与话术模板。<br>
-            超级管理员（<b>admin</b>）是<b>纯系统账号</b>，不承载业务数据，因此在列表中只提供「重置密码」。
-          </div>
+        <div class="page-bar">
+          <span class="pb-info">
+            平台配置 · 消息模板 · 助手版本治理（仅超级管理员可见）。
+            账号与菜单权限在<b>「用户管理」</b>页维护；这里是全局项：发送参数、助手地址与版本要求、
+            拼多多翻页上限与催收话术。
+          </span>
+          <span class="pb-actions">
+            <el-tag size="small" type="info">服务端 v{{ serverVersion || '—' }}</el-tag>
+          </span>
+        </div>
+
+        <!-- 统计卡（设计稿 4 卡）：全部取自现有状态，不新增接口 -->
+        <div class="stat-row">
+          <el-card v-for="s in adminStatCards" :key="s.key" shadow="never" class="stat-card"
+                   :body-style="{ padding: '14px 16px' }" style="flex:1;min-width:150px">
+            <div class="num">{{ s.num }}</div>
+            <div class="label">{{ s.label }}</div>
+            <div class="sub">{{ s.sub }}</div>
+          </el-card>
         </div>
 
         <el-row :gutter="14">
@@ -1016,28 +1323,19 @@
           </el-col>
           <el-col :xs="24" :md="12">
             <el-card shadow="never" class="section-card">
-              <div slot="header"><b>本机助手 · 全局服务器地址</b></div>
+              <div slot="header"><b>本机助手 · 服务器地址 · 版本治理</b></div>
               <el-form label-position="top" size="small">
                 <el-form-item label="服务器地址（所有用户共用）">
                   <el-input v-model="cfg.serverUrl" placeholder="http://你的服务器:8787 或 https://invoice.example.com"></el-input>
                   <div class="form-tip">本机助手连接系统时使用的地址。在此统一配置后，用户下载的助手里会<b>自动内置</b>该地址，无需手动填写；留空则用户需手动输入。</div>
                 </el-form-item>
               </el-form>
-              <div style="margin-top:6px">
-                <el-button type="primary" size="small" @click="openDownload">⬇ 下载本机助手（Windows）</el-button>
-                <span class="form-tip" style="display:inline;margin-left:8px">用户下载到的助手已内置全局地址；在网页登录后点右上角「绑定本机助手」即可完成绑定（设备令牌，无需填税号）。</span>
-              </div>
 
               <el-divider style="margin:14px 0 10px"></el-divider>
-              <div style="margin-bottom:6px">
-                <b>助手安装包</b>
-                <span class="loginid" style="margin-left:6px">
-                  <template v-if="build.installer">当前最新：{{ build.installer.file }}（{{ (build.installer.sizeBytes / 1048576).toFixed(1) }} MB）</template>
-                  <template v-else>dist/ 里没有可用安装包</template>
-                </span>
+              <div style="margin-bottom:8px">
+                <b>安装包上传</b>
+                <span class="loginid" style="margin-left:6px">Linux 容器里无法打包时用；上传即覆盖同名文件，版本策略随之生效</span>
               </div>
-
-              <!-- 上传：Linux 容器无法 npm run agent:dist 时的替代方案 -->
               <div style="margin-bottom:8px">
                 <label class="el-button el-button--primary el-button--small" style="position:relative;overflow:hidden;cursor:pointer">
                   <input ref="installerFile" type="file" accept=".exe" style="position:absolute;inset:0;opacity:0;cursor:pointer" @change="onInstallerFile">
@@ -1045,41 +1343,6 @@
                 </label>
                 <span v-if="uploading" style="margin-left:10px;color:#2b7de9">{{ uploadProgress }}%</span>
                 <span v-if="uploadMsg" style="margin-left:10px" :style="{ color: uploadMsg.startsWith('✓') ? '#34a853' : '#e53935' }">{{ uploadMsg }}</span>
-              </div>
-
-              <!-- 已上传清单 -->
-              <el-table v-if="build.installers && build.installers.length" :data="build.installers" size="mini" max-height="200" style="margin-top:4px">
-                <el-table-column label="文件" min-width="200">
-                  <template slot-scope="s"><span class="loginid">{{ s.row.file }}</span></template>
-                </el-table-column>
-                <el-table-column label="版本" width="90">
-                  <template slot-scope="s">v{{ s.row.version || '—' }}</template>
-                </el-table-column>
-                <el-table-column label="大小" width="100">
-                  <template slot-scope="s">{{ (s.row.size / 1048576).toFixed(1) }} MB</template>
-                </el-table-column>
-                <el-table-column label="操作" width="150">
-                  <template slot-scope="s">
-                    <el-button type="text" size="mini" @click="downloadInstaller(s.row.file)">下载</el-button>
-                    <el-button type="text" size="mini" style="color:#e53935" @click="deleteInstaller(s.row.file)">删除</el-button>
-                  </template>
-                </el-table-column>
-              </el-table>
-
-              <div style="margin-top:8px">
-                <el-button type="warning" size="small" :loading="build.running" @click="rebuildAgent">
-                  {{ build.running ? '打包中…（约 1~2 分钟）' : '🔨 重新打包最新助手' }}
-                </el-button>
-                <el-tag v-if="build.ok === true" type="success" size="small" style="margin-left:8px">✓ 打包完成</el-tag>
-                <el-tag v-else-if="build.ok === false" type="danger" size="small" style="margin-left:8px">✗ 打包失败</el-tag>
-              </div>
-              <div v-if="build.log.length" class="preview-box"
-                   style="max-height:170px;overflow:auto;font-size:11px;line-height:1.6;margin-top:8px;white-space:pre-wrap;word-break:break-all">{{ build.log.join('\n') }}</div>
-              <div class="form-tip" style="margin-top:6px">
-                <b>Windows 服务器</b>：点「重新打包」一键构建（需本机 Windows 环境）。<br>
-                <b>Linux 容器</b>：无法在本机打包，请在本机 Windows 跑 <code>npm run agent:dist</code>，
-                把生成的 <code>催收小助手-Setup-x.x.x.exe</code>（和 portable 版）上传到此。上传即覆盖同名文件，
-                版本策略随之生效；到宽限期后旧助手会被硬拦并可直接「一键更新」下载这里的最新包。
               </div>
 
               <el-divider style="margin:14px 0 10px"></el-divider>
@@ -1100,43 +1363,9 @@
                   </el-form-item></el-col>
                 </el-row>
               </el-form>
-              <div v-if="cfg.agentVerPol" class="form-tip" style="margin-top:2px">
-                服务端 v{{ cfg.agentVerPol.latest }} · 最低要求 v{{ cfg.agentVerPol.min }}
-                <template v-if="cfg.agentVerPol.packOk">
-                  · 可分发
-                  <b v-if="cfg.agentVerPol.source === 'dist'">dist 里的 v{{ cfg.agentVerPol.packVersion }}</b>
-                  <b v-else>外部直链</b>
-                  <el-tag size="mini" :type="cfg.agentVerPol.expired ? 'danger' : 'success'" style="margin-left:6px">
-                    {{ cfg.agentVerPol.expired ? '已开始拦截旧版' : '宽限中，剩 ' + verDaysLeft + ' 天' }}
-                  </el-tag>
-                </template>
-                <template v-else>
-                  <el-tag size="mini" type="warning" style="margin-left:6px">拿不到新版安装包 → 只提示、不拦截</el-tag>
-                  <div style="color:#d1580a;margin-top:4px">
-                    ⚠ 容器里 <code>dist/</code> 通常是空的（它在 .gitignore 里，<code>git pull</code> 拿不到）。
-                    要么在本处机器上重新打包，要么填一个外部直链，否则「强制更新」不会生效。
-                  </div>
-                </template>
-              </div>
-              <el-table v-if="cfg.agentVerPol && cfg.agentVerPol.devices && cfg.agentVerPol.devices.length"
-                        :data="cfg.agentVerPol.devices" size="mini" max-height="220" style="margin-top:8px">
-                <el-table-column label="设备" min-width="130">
-                  <template slot-scope="s"><span class="loginid">{{ s.row.name || '未命名' }}</span></template>
-                </el-table-column>
-                <el-table-column label="版本" width="90">
-                  <template slot-scope="s"><span :style="{ color: s.row.outdated ? '#e53935' : '', fontWeight: s.row.outdated ? '600' : '' }">v{{ s.row.agentVer || '—' }}</span></template>
-                </el-table-column>
-                <el-table-column label="状态" width="140">
-                  <template slot-scope="s">
-                    <el-tag size="mini" :type="s.row.online ? 'success' : 'info'">{{ s.row.online ? '在线' : '离线' }}</el-tag>
-                    <el-tag v-if="s.row.outdated" size="mini" type="danger" style="margin-left:4px">需更新</el-tag>
-                  </template>
-                </el-table-column>
-                <el-table-column label="最后活动" min-width="120">
-                  <template slot-scope="s"><span class="form-tip" style="display:inline">{{ s.row.lastSeenAt || '—' }}</span></template>
-                </el-table-column>
-              </el-table>
-              <div v-else-if="cfg.agentVerPol" class="form-tip" style="margin-top:6px">还没有设备绑定过本机助手。</div>
+              <el-button type="primary" size="small" @click="saveConfig">保存配置</el-button>
+              <el-button size="small" @click="loadConfigUI">放弃修改</el-button>
+              <el-tag v-if="saveOk" type="success" size="small" style="margin-left:10px">✓ 已保存</el-tag>
             </el-card>
           </el-col>
         </el-row>
@@ -1192,23 +1421,23 @@
 
         <el-card shadow="never" class="section-card">
           <div slot="header">
-            <b>拼多多订单数据 · 拉取范围</b>
-            <span class="loginid">（拼多多发票页「获取订单数据」按钮）</span>
+            <b>拼多多 · 翻页上限</b>
+            <span class="loginid">（「刷新发票状态」与「获取订单数据」共用）</span>
           </div>
           <el-form label-position="top" size="small">
             <el-row :gutter="12">
               <el-col :xs="24" :md="12">
-                <el-form-item label="首次全量只拉取最近（月）">
-                  <el-input-number v-model="cfg.pddOrderMonths" :min="1" :max="36" :step="1"
+                <el-form-item label="最多翻多少页（防死循环的安全阀）">
+                  <el-input-number v-model="cfg.pddMaxPages" :min="20" :max="2000" :step="100"
                                    controls-position="right" style="width:100%"></el-input-number>
                 </el-form-item>
               </el-col>
             </el-row>
             <div class="form-tip">
-              只影响<b>每个账号第一次</b>点「获取订单数据」时的回溯范围（默认 <b>3</b> 个月），更早的订单不拉取、也不入库；
-              拼多多发票页的列表、订单状态与实付金额也只会有这个范围内的数据。<br>
-              <b>增量拉取不受此限制</b>：某个账号首次同步过之后，再点按钮只从最新订单往前补齐新数据，翻到「整页都已入库」就停。<br>
-              保存后<b>立即生效</b>（下一次点「获取订单数据」就按新值计算），不需要重启服务。
+              默认 <b>300</b> 页。发票刷新一页 20 条（约 6000 单）、「获取订单数据」一页 50 条（约 15000 单），
+              两者都是<b>翻到空页才停</b>，这个上限只用于防止接口异常时无限翻页。<br>
+              撞到上限时页面会明确提示「已到翻页上限」，不会静默少拉；若确认还有更早的订单没拉到，把这里调大即可。<br>
+              保存后<b>立即生效</b>（下一次同步就读新值），不需要重启服务。
             </div>
           </el-form>
           <el-button type="primary" size="small" @click="saveConfig">保存配置</el-button>
@@ -1216,16 +1445,35 @@
           <el-tag v-if="saveOk" type="success" size="small" style="margin-left:10px">✓ 已保存</el-tag>
         </el-card>
 
+      </div>
+
+      <!-- ══════════ 用户管理（仅超级管理员；账号 / 抬头 / 逐项菜单权限） ══════════ -->
+      <div v-show="page === 'users'" id="page-users">
+        <div class="page-bar">
+          <span class="pb-actions">
+            <el-button size="small" type="primary" @click="openUserCreate">+ 新增用户</el-button>
+          </span>
+        </div>
+
         <el-card shadow="never" class="section-card">
           <div slot="header">
-            <b>用户管理</b> <span class="loginid">（{{ users.length }} 个账号）</span>
+            <b>用户列表</b> <span class="loginid">（{{ users.length }} 个账号）</span>
             <el-button size="mini" style="margin-left:10px" @click="loadUsers">刷新</el-button>
+          </div>
+          <!-- 搜索：公司名称 / 税号 / 账号，三者任一模糊命中即显示 -->
+          <div class="filter-bar">
+            <span class="fb-label">搜索</span>
+            <el-input v-model="userKw" size="small" style="width:300px" clearable
+                      placeholder="公司名称 / 税号 / 账号（模糊匹配）"></el-input>
+            <el-button size="small" @click="userKw = ''">重置</el-button>
+            <span class="fb-spacer"></span>
+            <span class="loginid">显示 {{ filteredUsers.length }} / {{ users.length }} 个账号</span>
           </div>
           <div class="form-tip" style="margin-bottom:10px">
             开票抬头属于<b>用户信息</b>，在这里按账号逐个维护：<b>登录账号 = 公司全称</b>，点某行的「编辑」即可改公司全称 / 纳税人识别号 / 收票邮箱。
             催收话术里的 {companyName} / {taxNo} / {email} 会按<b>该账号自己的抬头</b>取值。
           </div>
-          <el-table :data="users" size="small" border style="width:100%" empty-text="加载中...">
+          <el-table :data="filteredUsers" size="small" border style="width:100%" empty-text="加载中...">
             <el-table-column prop="id" label="ID" width="56"></el-table-column>
             <el-table-column label="账号" width="150">
               <template slot-scope="p"><b>{{ p.row.username }}</b><div v-if="p.row.mustChangePassword" class="loginid">需改密</div></template>
@@ -1269,8 +1517,8 @@
           </el-table>
         </el-card>
 
-        <el-card shadow="never" class="section-card">
-          <div slot="header"><b>新增用户</b></div>
+        <!-- 新增用户：内容收进弹框（原先是页面底部一整块常驻表单） -->
+        <el-dialog title="新增用户" :visible.sync="newUserDlg" width="640px" top="10vh" append-to-body>
           <el-form label-position="top" size="small">
             <el-row :gutter="12">
               <el-col :xs="24" :md="16"><el-form-item label="公司全称（= 登录账号）*"><el-input v-model="newUser.company" placeholder="如：中山仕赫贸易有限公司"></el-input></el-form-item></el-col>
@@ -1283,43 +1531,76 @@
               <el-col :xs="24"><el-form-item label="备注"><el-input v-model="newUser.note" placeholder="可选"></el-input></el-form-item></el-col>
             </el-row>
           </el-form>
-          <el-button type="primary" size="small" :loading="creatingUser" @click="createUser">创建用户</el-button>
-          <el-tag v-if="createOk" type="success" size="small" style="margin-left:10px">✓ 已创建</el-tag>
-          <div class="form-tip" style="margin-top:8px">账号 = 公司全称（业务账号才需要抬头）。若「角色」选<b>超级管理员</b>，只需填「公司全称」与初始密码，税号 / 邮箱会被忽略。</div>
-        </el-card>
+          <div class="form-tip">账号 = 公司全称（业务账号才需要抬头）。若「角色」选<b>超级管理员</b>，只需填「公司全称」与初始密码，税号 / 邮箱会被忽略。</div>
+          <span slot="footer">
+            <el-tag v-if="createOk" type="success" size="small" style="margin-right:10px">✓ 已创建</el-tag>
+            <el-button size="small" @click="newUserDlg = false">取消</el-button>
+            <el-button size="small" type="primary" :loading="creatingUser" @click="createUser">创建用户</el-button>
+          </span>
+        </el-dialog>
       </div>
 
       <!-- ══════════ 操作日志（仅超级管理员可见） ══════════ -->
       <div v-show="page === 'audit'" id="page-audit">
-        <div class="page-head">
-          <h2>操作日志</h2>
-          <div class="meta-line">
-            记录全体用户在页面上的操作：按钮点击、发送催收、导入税务发票 / 1688订单、条件查询、按天查看金额、下载与绑定本机助手。
-            <b>按操作时间倒序</b>排列，可用用户名筛选。
-          </div>
+        <div class="page-bar">
+          <span class="pb-info">
+            审计轨迹 · 全量留痕，<b>按操作时间倒序</b>。记录按钮点击、发送催收、导入发票 / 订单、条件查询、
+            下载与绑定本机助手等动作；点行左侧箭头看完整内容与来源 IP。
+          </span>
+          <span class="pb-actions">
+            <el-button size="small" @click="loadOpLog">刷新</el-button>
+          </span>
         </div>
 
-        <el-card class="section-card" shadow="never" :body-style="{ padding: '12px 14px' }">
-          <div class="toolbar">
-            <span style="font-size:12px;color:var(--sub)">用户名</span>
-            <el-input v-model="opLog.draftUsername" size="small" style="width:230px" placeholder="按用户名筛选（留空 = 全部）"
-                      clearable @keyup.enter.native="applyOpLogFilter"></el-input>
-            <el-button size="small" type="primary" plain @click="applyOpLogFilter">查询</el-button>
-            <el-button size="small" @click="loadOpLog">刷新</el-button>
-          </div>
-        </el-card>
+        <!-- 统计卡（设计稿 4 卡）：后端只读汇总，口径为全量日志 -->
+        <div class="stat-row">
+          <el-card v-for="s in opStatCards" :key="s.key" shadow="never" class="stat-card"
+                   :body-style="{ padding: '14px 16px' }" style="flex:1;min-width:150px">
+            <div class="num">{{ s.num }}</div>
+            <div class="label">{{ s.label }}</div>
+            <div class="sub">{{ s.sub }}</div>
+          </el-card>
+        </div>
 
         <el-card shadow="never" class="section-card">
-          <el-table :data="opLog.rows" v-loading="opLog.loading" size="small" border stripe
+          <div class="filter-bar">
+            <span class="fb-label">操作人</span>
+            <el-input v-model="opLog.draftUsername" size="small" style="width:230px" placeholder="按用户名筛选（留空 = 全部）"
+                      clearable @keyup.enter.native="applyOpLogFilter"></el-input>
+            <el-button size="small" type="primary" @click="applyOpLogFilter">查询</el-button>
+            <el-button size="small" @click="resetOpLogFilter">重置</el-button>
+            <span class="fb-spacer"></span>
+            <span class="loginid">共 {{ opLog.total }} 条 · 保留 180 天</span>
+          </div>
+
+          <el-table :data="opLog.rows" v-loading="opLog.loading" size="small" border
                     empty-text="暂无操作记录">
-            <el-table-column prop="username" label="用户名" width="190" show-overflow-tooltip>
+            <!-- 行展开明细（设计稿「明细」）：完整内容 + 操作类型 + 来源 IP -->
+            <el-table-column type="expand" width="36">
+              <template slot-scope="s">
+                <div class="op-detail">
+                  <div><span class="k">操作类型</span><span class="v">{{ s.row.action || '—' }}</span></div>
+                  <div><span class="k">完整内容</span><span class="v">{{ s.row.content || '—' }}</span></div>
+                  <div><span class="k">来源 IP</span><span class="v">{{ s.row.ip || '—' }}</span></div>
+                  <div><span class="k">记录时间</span><span class="v">{{ s.row.createdAt || '—' }}</span></div>
+                </div>
+              </template>
+            </el-table-column>
+            <el-table-column label="操作时间" width="170">
+              <template slot-scope="s"><span class="loginid">{{ s.row.createdAt }}</span></template>
+            </el-table-column>
+            <el-table-column label="模块" width="110">
+              <template slot-scope="s">
+                <el-tag size="mini" :type="opModuleType(s.row.action)">{{ opModuleText(s.row.action) }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column prop="content" label="操作内容" min-width="420" show-overflow-tooltip></el-table-column>
+            <el-table-column label="操作人" width="170">
               <template slot-scope="s">
                 <span>{{ s.row.username }}</span>
                 <el-tag v-if="!s.row.userId" size="mini" type="info" style="margin-left:6px">匿名</el-tag>
               </template>
             </el-table-column>
-            <el-table-column prop="content" label="操作内容" min-width="380" show-overflow-tooltip></el-table-column>
-            <el-table-column prop="createdAt" label="操作时间" width="180"></el-table-column>
           </el-table>
           <div class="pager-wrap">
             <el-pagination background layout="total, sizes, prev, pager, next"
@@ -1333,13 +1614,16 @@
 
       <!-- ══════════ 退单列表（牵牛花，需管理员开启权限） ══════════ -->
       <div v-show="page === 'refund'" id="page-refund">
-        <div class="page-head">
-          <h2>退单列表</h2>
-          <div class="meta-line">
-            数据来自美团牵牛花（qnh.meituan.com）的退单列表，每日自动增量同步，也可以随时点「立即刷新数据」。
-            牵牛花的登录由「催收小助手」在<b>该账号自己的电脑</b>上完成（服务器不打开浏览器），登录态存在数据库里。
-            标记为 <el-tag size="mini" type="warning">已取货/送达</el-tag> 的退单表示商品已经出库，请重点核查。
-          </div>
+        <!-- 页头操作行：口径说明在左，配置入口在右（标题已由顶栏承担） -->
+        <div class="page-bar">
+          <span class="pb-info">
+            美团牵牛花退单明细 · 每日自动增量同步，也可随时点「立即刷新数据」。
+            登录由「催收小助手」在<b>该账号自己的电脑</b>上完成（服务器不打开浏览器），登录态存数据库。
+            标记 <el-tag size="mini" type="warning">已取货/送达</el-tag> 表示商品已出库，请重点核查。
+          </span>
+          <span class="pb-actions">
+            <el-button size="small" icon="el-icon-bell" @click="switchPage('refundalert')">提醒配置</el-button>
+          </span>
         </div>
 
         <qnh-tenant-picker v-if="isAdmin" :users="qnhUsers" :value="qnhTenant"
@@ -1358,12 +1642,13 @@
                   title="请先在上方选择要以哪个账号的身份查看"
                   description="超级管理员自己没有独立的牵牛花数据；选定账号后，退单、毛利、登录与告警配置都属于该账号。"></el-alert>
 
-        <!-- 汇总 -->
-        <div style="display:flex;gap:12px;margin:12px 0;flex-wrap:wrap">
-          <el-card v-for="s in refundStats" :key="s.label" shadow="never" :body-style="{ padding: '12px 16px' }"
-                   style="flex:1;min-width:150px">
-            <div style="font-size:20px;font-weight:600;color:#26282c">{{ s.value }}</div>
-            <div class="loginid">{{ s.label }}</div>
+        <!-- 统计卡（设计稿 4 卡）：口径全部取自 /api/qnh/summary，未新增统计项 -->
+        <div class="stat-row">
+          <el-card v-for="s in refundStats" :key="s.label" shadow="never" class="stat-card"
+                   :body-style="{ padding: '14px 16px' }" style="flex:1;min-width:150px">
+            <div class="num">{{ s.value }}</div>
+            <div class="label">{{ s.label }}</div>
+            <div class="sub">{{ s.sub }}</div>
           </el-card>
         </div>
 
@@ -1382,9 +1667,9 @@
           <div id="refund-trend" style="height:200px"></div>
         </el-card>
 
-        <!-- 筛选 + 列表 -->
+        <!-- 筛选条（设计稿 .filter-bar）：独立一行，与表头留一条分隔线 -->
         <el-card class="section-card" shadow="never">
-          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px">
+          <div class="filter-bar">
             <el-date-picker v-model="rq.range" type="daterange" size="small" value-format="yyyy-MM-dd"
                             start-placeholder="申请开始" end-placeholder="申请结束"
                             style="width:250px" unlink-panels></el-date-picker>
@@ -1403,12 +1688,34 @@
             </el-select>
             <el-button size="small" type="primary" @click="applyRefundFilter">查询</el-button>
             <el-button size="small" @click="resetRefundFilter">重置</el-button>
-            <span style="flex:1"></span>
+            <span class="fb-spacer"></span>
             <span class="loginid">共 {{ rq.total }} 条</span>
           </div>
 
           <el-table :data="rq.rows" size="small" border style="width:100%" v-loading="rq.loading"
                     empty-text="暂无退单数据" :row-class-name="refundRowClass">
+            <!-- 行展开：14 列之外的完整信息（数字段全部来自接口已有字段，未新增统计） -->
+            <el-table-column type="expand" width="40">
+              <template slot-scope="p">
+                <div class="rf-detail">
+                  <div class="rd-item"><span class="k">退单号</span><span class="v">{{ p.row.refundNo || '—' }}</span></div>
+                  <div class="rd-item"><span class="k">订单号</span><span class="v">{{ p.row.orderNo || '—' }}</span></div>
+                  <div class="rd-item"><span class="k">序列号</span><span class="v">{{ p.row.serialNo || '—' }}</span></div>
+                  <div class="rd-item"><span class="k">退单数量</span><span class="v">{{ p.row.refundQty == null ? '—' : p.row.refundQty }}</span></div>
+                  <div class="rd-item"><span class="k">商品种类</span><span class="v">{{ p.row.itemKinds ? p.row.itemKinds + ' 种' : '—' }}</span></div>
+                  <div class="rd-item"><span class="k">申请来源</span><span class="v">{{ p.row.applySource || '—' }}</span></div>
+                  <div class="rd-item"><span class="k">支付时间</span><span class="v">{{ p.row.paidTime || '—' }}</span></div>
+                  <div class="rd-item"><span class="k">完成时间</span><span class="v">{{ p.row.finishTime || '—' }}</span></div>
+                  <div class="rd-item"><span class="k">日志</span>
+                    <span class="v">{{ p.row.logCount }} 条（其中配送 {{ p.row.deliveryCount }} 条）</span></div>
+                  <div class="rd-item rd-wide"><span class="k">配送地址</span><span class="v">{{ p.row.receiverAddress || '—' }}</span></div>
+                  <div class="rd-actions">
+                    <el-button size="mini" @click="openRefundLog(p.row)">查看配送日志与申诉记录</el-button>
+                  </div>
+                </div>
+              </template>
+            </el-table-column>
+
             <el-table-column label="订单号" width="180">
               <template slot-scope="p"><span class="loginid">{{ p.row.serialNo || p.row.orderNo || '—' }}</span></template>
             </el-table-column>
@@ -1472,6 +1779,164 @@
           </div>
         </el-card>
 
+        <!-- 退单提醒设置 → 独立页「退单提醒配置」（switchPage('refundalert')），字段与接口未变 -->
+        <!-- 定时同步设置 → 独立页「牵牛花配置」（switchPage('qnhcfg')），仅超级管理员可见 -->
+
+      </div>
+
+      <!-- ══════════ 实时毛利监控（按「菜单权限」开放） ══════════ -->
+      <div v-show="page === 'profit'" id="page-profit">
+        <!-- 页头操作行：口径说明在左，配置入口在右（标题已由顶栏承担） -->
+        <div class="page-bar">
+          <span class="pb-info">
+            牵牛花「订单毛利明细」· <b>订单级</b>口径，默认按线上毛利升序（亏钱/低毛利的排最前）。
+            接口需签名，由<b>本机助手</b>在该账号电脑的牵牛花页面里代拉（监控开启后每 10 分钟一次）。
+            登录方式与退单列表一致：点「登录牵牛花」，在「催收小助手」窗口里登录。
+          </span>
+          <span class="pb-actions">
+            <el-button size="small" icon="el-icon-setting" @click="switchPage('qnhcfg')">告警配置</el-button>
+          </span>
+        </div>
+
+        <qnh-tenant-picker v-if="isAdmin" :users="qnhUsers" :value="qnhTenant"
+                           :sessions="qnhSessions" :self-id="me && me.id"
+                           @change="onQnhTenantChange"></qnh-tenant-picker>
+
+        <!-- 顶部状态条：登录 / 拉取毛利 / 定时（与退单列表页共用同一组件） -->
+        <el-card class="section-card" shadow="never" :body-style="{ padding: '12px 14px' }">
+          <qnh-login-bar :cookie="rq.cookie" :last-run="rq.lastRun" :schedule="rq.config"
+                         :who-label="qnhWhoLabel" action-text="立即拉取毛利数据"
+                         :action-loading="rq.profit.loading" :can-logout="true"
+                         @login="onQnhLoginBtn" @logout="logoutQnh" @action="pullProfit"></qnh-login-bar>
+        </el-card>
+
+        <el-alert v-if="qnhNeedPick" type="warning" :closable="false" show-icon style="margin-bottom:12px"
+                  title="请先在上方选择要以哪个账号的身份查看"
+                  description="超级管理员自己没有独立的牵牛花数据；选定账号后，毛利数据、登录与告警配置都属于该账号。"></el-alert>
+
+        <!-- 统计卡（设计稿 4 卡）：订单级只读聚合，来自 /api/qnh/profit 的 summary 字段 -->
+        <div class="stat-row">
+          <el-card v-for="s in profitStatCards" :key="s.key" shadow="never" class="stat-card" :class="s.cls"
+                   :body-style="{ padding: '14px 16px' }" style="flex:1;min-width:150px">
+            <div class="num">{{ s.num }}</div>
+            <div class="label">{{ s.label }}</div>
+            <div class="sub">{{ s.sub }}</div>
+          </el-card>
+        </div>
+
+        <!-- 趋势 + 预警：设计稿左右两栏（左图右预警，窄屏自动上下叠） -->
+        <div class="qnh-split">
+          <el-card class="section-card split-main" shadow="never">
+            <div slot="header" style="display:flex;align-items:center;gap:10px">
+              <b>每天毛利总额趋势</b>
+              <el-radio-group v-model="rq.profitDays" size="mini" @change="loadProfitTrend">
+                <el-radio-button :label="7">近 7 天</el-radio-button>
+                <el-radio-button :label="30">近 30 天</el-radio-button>
+                <el-radio-button :label="90">近 90 天</el-radio-button>
+              </el-radio-group>
+              <span style="flex:1"></span>
+              <span class="loginid">柱子 = 当天入库订单的线上毛利合计（负值红色）</span>
+            </div>
+            <div id="profit-trend" style="height:220px"></div>
+          </el-card>
+
+          <el-card class="section-card split-side" shadow="never">
+            <div slot="header" style="display:flex;align-items:center;gap:8px">
+              <b>毛利预警</b>
+              <el-tag size="mini" :type="rq.config.profitEnabled ? 'success' : 'info'">
+                {{ rq.config.profitEnabled ? '监控运行中' : '监控已关闭' }}
+              </el-tag>
+            </div>
+            <div class="warn-kv">
+              <div class="warn-row"><span class="wk">负毛利订单</span><span class="wv s-warn">{{ (rq.profit.summary && rq.profit.summary.negative) || 0 }} 单</span></div>
+              <div class="warn-row"><span class="wk">已推送告警</span><span class="wv">{{ rq.profit.alerts || 0 }} 单</span></div>
+              <div class="warn-row"><span class="wk">入库订单总数</span><span class="wv">{{ rq.profit.total || 0 }} 单</span></div>
+              <div class="warn-row"><span class="wk">最近拉取</span><span class="wv small">{{ rq.config.profitLastPullAt ? (rq.config.profitLastPullAt + ' · ' + rq.config.profitLastPullCount + ' 条') : '尚未拉取' }}</span></div>
+            </div>
+            <el-alert v-if="channelIssues.length" type="warning" :closable="false" show-icon
+                      style="margin-top:10px"
+                      title="当前不会发送毛利告警"
+                      :description="channelIssues.join('；') + '。点右上「告警配置」补齐。'"></el-alert>
+            <el-alert v-else-if="!rq.config.profitEnabled" type="info" :closable="false" show-icon
+                      style="margin-top:10px"
+                      title="「监控开启」未打开：不会每 10 分钟自动拉取（手动拉取仍按阈值告警）"></el-alert>
+            <div v-else class="channel-ok" style="margin-top:10px">
+              <el-tag size="mini" type="success">告警通道已就绪</el-tag>
+              <div class="loginid" style="margin-top:6px">毛利专用群机器人 · 触发条件：{{ channelCondText }}</div>
+            </div>
+            <el-alert v-if="rq.profit.error" type="warning" :title="rq.profit.error" :closable="false" show-icon
+                      style="margin-top:10px"></el-alert>
+            <el-alert v-else-if="rq.config.profitLastError" type="error" :closable="false" show-icon
+                      style="margin-top:10px"
+                      :title="'最近一次拉取失败：' + rq.config.profitLastError"></el-alert>
+          </el-card>
+        </div>
+
+        <el-card class="section-card" shadow="never">
+          <div slot="header" style="display:flex;align-items:center;gap:10px">
+            <b>订单级毛利明细</b>
+            <span class="loginid">亏损/低毛利置顶 · 共 {{ rq.profit.total || 0 }} 单</span>
+            <span style="flex:1"></span>
+            <span class="loginid">线上毛利 = 预计收入 − 成本；告警按阈值推送，每单只推一次</span>
+          </div>
+          <el-table :data="rq.profit.rows" size="small" border max-height="440"
+                    :default-sort="{ prop: 'profit', order: 'ascending' }"
+                    empty-text="暂无毛利数据（点「立即拉取毛利数据」获取当天的订单毛利明细）">
+            <el-table-column label="订单编号" width="90" align="center" prop="orderSeq">
+              <template slot-scope="p"><span class="loginid">{{ p.row.orderSeq || '—' }}</span></template>
+            </el-table-column>
+            <el-table-column label="订单号" width="200"><template slot-scope="p"><span class="loginid">{{ p.row.orderNo }}</span></template></el-table-column>
+            <el-table-column label="渠道" width="110"><template slot-scope="p">{{ p.row.channelName || '—' }}</template></el-table-column>
+            <el-table-column label="门店" min-width="170"><template slot-scope="p">{{ p.row.storeName || '—' }}</template></el-table-column>
+            <el-table-column label="下单时间" width="160"><template slot-scope="p">{{ p.row.orderTime || '—' }}</template></el-table-column>
+            <el-table-column label="预计收入（元）" width="130" align="right">
+              <template slot-scope="p">{{ p.row.estIncome == null ? '—' : p.row.estIncome.toFixed(2) }}</template>
+            </el-table-column>
+            <el-table-column label="线上毛利（元）" width="130" align="right" prop="profit" sortable>
+              <template slot-scope="p">
+                <span :class="p.row.alerted ? 'amount' : 'amount ok'">{{ p.row.profit == null ? '—' : p.row.profit.toFixed(2) }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="线上毛利率" width="110" align="right">
+              <template slot-scope="p">{{ p.row.profitRate == null ? '—' : p.row.profitRate.toFixed(2) + '%' }}</template>
+            </el-table-column>
+            <el-table-column label="告警" width="90">
+              <template slot-scope="p">
+                <el-tag v-if="p.row.alerted" size="mini" type="danger">已告警</el-tag>
+                <el-tag v-else size="mini" type="success">正常</el-tag>
+              </template>
+            </el-table-column>
+          </el-table>
+        </el-card>
+      </div>
+
+      <!-- ══════════ 退单提醒配置（从退单列表「提醒配置」进入；侧边栏不新增项） ══════════ -->
+      <div v-show="page === 'refundalert'" id="page-refundalert">
+        <div class="page-bar">
+          <span class="pb-info">
+            <span class="back-link" @click="switchPage('refund')"><i class="el-icon-arrow-left"></i> 返回退单列表</span>
+            <b>退单提醒</b> · 企业微信推送设置（每个账号配自己的机器人与模板，互不影响）
+          </span>
+          <span class="pb-actions">
+            <el-tag size="small" type="info">当前账号：{{ qnhConfigOwner }}</el-tag>
+          </span>
+        </div>
+
+        <qnh-tenant-picker v-if="isAdmin" :users="qnhUsers" :value="qnhTenant"
+                           :sessions="qnhSessions" :self-id="me && me.id"
+                           @change="onQnhTenantChange"></qnh-tenant-picker>
+
+        <el-card class="section-card" shadow="never" :body-style="{ padding: '12px 14px' }">
+          <qnh-login-bar :cookie="rq.cookie" :last-run="rq.lastRun" :schedule="rq.config"
+                         :who-label="qnhWhoLabel" action-text="立即刷新数据"
+                         :action-loading="rq.syncing" :can-logout="true"
+                         @login="onQnhLoginBtn" @logout="logoutQnh" @action="doSync"></qnh-login-bar>
+        </el-card>
+
+        <el-alert v-if="qnhNeedPick" type="warning" :closable="false" show-icon style="margin-bottom:12px"
+                  title="请先在上方选择要以哪个账号的身份查看"
+                  description="超级管理员自己没有独立的牵牛花数据；选定账号后，提醒配置属于该账号。"></el-alert>
+
         <!-- 提醒设置（每个账号配自己的机器人与模板） -->
         <el-card class="section-card" shadow="never">
           <div slot="header"><b>退单提醒设置</b> <span class="loginid">（当前账号：{{ qnhConfigOwner }}）</span></div>
@@ -1510,6 +1975,43 @@
             提醒按退单号去重，同一笔退单只推一次；申请超 24 小时仍未处理的退单会另外推送超时提醒。
           </div>
         </el-card>
+      </div>
+
+      <!-- ══════════ 牵牛花配置（毛利告警 + 数据同步；从退单/毛利页按钮进入） ══════════ -->
+      <div v-show="page === 'qnhcfg'" id="page-qnhcfg">
+        <div class="page-bar">
+          <span class="pb-info">
+            <span class="back-link" @click="switchPage(canProfit ? 'profit' : 'refund')"><i class="el-icon-arrow-left"></i> 返回</span>
+            <b>牵牛花配置</b> · 毛利告警与数据同步设置（登录态、同步时间点与告警阈值都在这里）
+          </span>
+          <span class="pb-actions">
+            <el-tag size="small" type="info">当前账号：{{ qnhConfigOwner }}</el-tag>
+          </span>
+        </div>
+
+        <qnh-tenant-picker v-if="isAdmin" :users="qnhUsers" :value="qnhTenant"
+                           :sessions="qnhSessions" :self-id="me && me.id"
+                           @change="onQnhTenantChange"></qnh-tenant-picker>
+
+        <el-card class="section-card" shadow="never" :body-style="{ padding: '12px 14px' }">
+          <qnh-login-bar :cookie="rq.cookie" :last-run="rq.lastRun" :schedule="rq.config"
+                         :who-label="qnhWhoLabel"
+                         :action-text="canProfit ? '立即拉取毛利数据' : '立即刷新数据'"
+                         :action-loading="canProfit ? rq.profit.loading : rq.syncing" :can-logout="true"
+                         @login="onQnhLoginBtn" @logout="logoutQnh"
+                         @action="canProfit ? pullProfit : doSync">
+            <template slot="actions">
+              <el-button v-if="canProfit && canRefund" size="small" :loading="rq.syncing" @click="doSync"
+                         title="从牵牛花重新拉一轮当天退单（与退单列表页「立即刷新数据」同一个动作）">
+                立即刷新退单
+              </el-button>
+            </template>
+          </qnh-login-bar>
+        </el-card>
+
+        <el-alert v-if="qnhNeedPick" type="warning" :closable="false" show-icon style="margin-bottom:12px"
+                  title="请先在上方选择要以哪个账号的身份查看"
+                  description="超级管理员自己没有独立的牵牛花数据；选定账号后，登录、同步与告警配置都属于该账号。"></el-alert>
 
         <!-- 定时同步（全局，仅超级管理员） -->
         <el-card v-if="isAdmin" class="section-card" shadow="never">
@@ -1537,35 +2039,6 @@
             到点后由服务进程内的调度器对<b>每个已登录牵牛花的账号</b>各跑一轮当天增量同步；普通账号看不到这一块。
           </div>
         </el-card>
-
-      </div>
-
-      <!-- ══════════ 实时毛利监控（按「菜单权限」开放） ══════════ -->
-      <div v-show="page === 'profit'" id="page-profit">
-        <div class="page-head">
-          <h2>实时毛利监控</h2>
-          <div class="meta-line">
-            数据来自牵牛花「订单毛利明细」，默认按<b>线上毛利从小到大</b>排列，亏钱/低毛利的订单排在最前面。
-            接口需要签名，由<b>本机助手</b>在该账号电脑的牵牛花页面里代拉（监控开启后每 10 分钟自动拉一次）。
-            登录方式与退单列表完全一致：点「登录牵牛花」，在「催收小助手」弹出的窗口里登录。
-          </div>
-        </div>
-
-        <qnh-tenant-picker v-if="isAdmin" :users="qnhUsers" :value="qnhTenant"
-                           :sessions="qnhSessions" :self-id="me && me.id"
-                           @change="onQnhTenantChange"></qnh-tenant-picker>
-
-        <!-- 顶部状态条：登录 / 拉取毛利 / 定时（与退单列表页共用同一组件） -->
-        <el-card class="section-card" shadow="never" :body-style="{ padding: '12px 14px' }">
-          <qnh-login-bar :cookie="rq.cookie" :last-run="rq.lastRun" :schedule="rq.config"
-                         :who-label="qnhWhoLabel" action-text="立即拉取毛利数据"
-                         :action-loading="rq.profit.loading" :can-logout="true"
-                         @login="onQnhLoginBtn" @logout="logoutQnh" @action="pullProfit"></qnh-login-bar>
-        </el-card>
-
-        <el-alert v-if="qnhNeedPick" type="warning" :closable="false" show-icon style="margin-bottom:12px"
-                  title="请先在上方选择要以哪个账号的身份查看"
-                  description="超级管理员自己没有独立的牵牛花数据；选定账号后，毛利数据、登录与告警配置都属于该账号。"></el-alert>
 
         <!-- 告警配置项（每个账号配自己的机器人与阈值） -->
         <el-card class="section-card" shadow="never">
@@ -1612,80 +2085,6 @@
             低于阈值的订单会推送企业微信，每单只告警一次。<b>阈值填 0 表示不启用该条件</b>，两个都为 0 则不产生告警。
           </div>
         </el-card>
-
-        <el-card class="section-card" shadow="never">
-          <div slot="header" style="display:flex;align-items:center;gap:10px">
-            <b>实时毛利监控预警</b>
-            <el-tag size="mini" :type="rq.config.profitEnabled ? 'success' : 'info'">
-              {{ rq.config.profitEnabled ? '监控运行中' : '监控已关闭' }}
-            </el-tag>
-            <span style="flex:1"></span>
-            <span class="loginid" v-if="rq.config.profitLastPullAt">
-              最近拉取 {{ rq.config.profitLastPullAt }} · {{ rq.config.profitLastPullCount }} 条
-            </span>
-          </div>
-          <el-alert v-if="channelIssues.length" type="warning" :closable="false" show-icon
-                    style="margin-bottom:10px"
-                    title="当前不会发送毛利告警"
-                    :description="channelIssues.join('；') + '。在上方「毛利告警配置项」里补齐。'"></el-alert>
-          <el-alert v-else-if="!rq.config.profitEnabled" type="info" :closable="false" show-icon
-                    style="margin-bottom:10px"
-                    title="「监控开启」未打开：不会每 10 分钟自动拉取（手动拉取仍会按阈值告警）"></el-alert>
-          <div v-else class="channel-ok">
-            <el-tag size="mini" type="success">告警通道已就绪</el-tag>
-            <span class="loginid" style="margin-left:8px">
-              毛利专用群机器人 · 触发条件：{{ channelCondText }}
-            </span>
-          </div>
-          <el-alert v-if="rq.profit.error" type="warning" :title="rq.profit.error" :closable="false" show-icon
-                    style="margin-bottom:10px"></el-alert>
-          <el-alert v-else-if="rq.config.profitLastError" type="error" :closable="false" show-icon
-                    style="margin-bottom:10px"
-                    :title="'最近一次拉取失败：' + rq.config.profitLastError"></el-alert>
-          <el-table :data="rq.profit.rows" size="small" border max-height="440"
-                    :default-sort="{ prop: 'profit', order: 'ascending' }"
-                    empty-text="暂无毛利数据（点「立即拉取毛利数据」获取当天的订单毛利明细）">
-            <el-table-column label="订单编号" width="90" align="center" prop="orderSeq">
-              <template slot-scope="p"><span class="loginid">{{ p.row.orderSeq || '—' }}</span></template>
-            </el-table-column>
-            <el-table-column label="订单号" width="200"><template slot-scope="p"><span class="loginid">{{ p.row.orderNo }}</span></template></el-table-column>
-            <el-table-column label="渠道" width="110"><template slot-scope="p">{{ p.row.channelName || '—' }}</template></el-table-column>
-            <el-table-column label="门店" min-width="170"><template slot-scope="p">{{ p.row.storeName || '—' }}</template></el-table-column>
-            <el-table-column label="下单时间" width="160"><template slot-scope="p">{{ p.row.orderTime || '—' }}</template></el-table-column>
-            <el-table-column label="预计收入（元）" width="130" align="right">
-              <template slot-scope="p">{{ p.row.estIncome == null ? '—' : p.row.estIncome.toFixed(2) }}</template>
-            </el-table-column>
-            <el-table-column label="线上毛利（元）" width="130" align="right" prop="profit" sortable>
-              <template slot-scope="p">
-                <span :class="p.row.alerted ? 'amount' : 'amount ok'">{{ p.row.profit == null ? '—' : p.row.profit.toFixed(2) }}</span>
-              </template>
-            </el-table-column>
-            <el-table-column label="线上毛利率" width="110" align="right">
-              <template slot-scope="p">{{ p.row.profitRate == null ? '—' : p.row.profitRate.toFixed(2) + '%' }}</template>
-            </el-table-column>
-            <el-table-column label="告警" width="90">
-              <template slot-scope="p">
-                <el-tag v-if="p.row.alerted" size="mini" type="danger">已告警</el-tag>
-                <el-tag v-else size="mini" type="success">正常</el-tag>
-              </template>
-            </el-table-column>
-          </el-table>
-        </el-card>
-
-        <!-- 每天毛利总额趋势 -->
-        <el-card class="section-card" shadow="never">
-          <div slot="header" style="display:flex;align-items:center;gap:10px">
-            <b>每天毛利总额趋势</b>
-            <el-radio-group v-model="rq.profitDays" size="mini" @change="loadProfitTrend">
-              <el-radio-button :label="7">近 7 天</el-radio-button>
-              <el-radio-button :label="30">近 30 天</el-radio-button>
-              <el-radio-button :label="90">近 90 天</el-radio-button>
-            </el-radio-group>
-            <span style="flex:1"></span>
-            <span class="loginid">柱子 = 当天入库订单的线上毛利合计（负值红色），无数据的日期显示 0</span>
-          </div>
-          <div id="profit-trend" style="height:220px"></div>
-        </el-card>
       </div>
 
       <!-- ══════════ 拼多多发票（对所有用户开放） ══════════ -->
@@ -1709,15 +2108,15 @@
         <!-- 顶部状态条：登录 / 刷新（与退单列表、毛利监控共用同一组件，只换服务名） -->
         <el-card class="section-card" shadow="never" :body-style="{ padding: '12px 14px' }">
           <qnh-login-bar service="拼多多" :cookie="pd.cookie" :last-run="pd.lastRun"
-                         :who-label="qnhWhoLabel" action-text="刷新发票状态"
+                         :who-label="qnhWhoLabel" action-text="刷新发票状态" hide-meta
                          :action-loading="pd.syncing" :can-logout="true"
                          @login="onPddLoginBtn" @logout="logoutPdd" @action="doPddSync">
             <template slot="actions">
               <el-button size="small" type="success" plain :loading="pd.orderSyncing"
                          @click="syncPddOrders"
                          :title="pd.orderSync && pd.orderSync.synced
-                           ? '从最新订单往前增量拉取，追平即停（增量不受时间范围限制）'
-                           : ('首次同步：只拉取最近 ' + pd.orderMonths + ' 个月的订单（可在「系统管理」调整）')">
+                           ? '从最新订单往前增量拉取，追平即停'
+                           : '首次同步：不限时间范围，一直往前翻到空页为止'">
                 {{ pd.orderSync && pd.orderSync.synced ? '获取订单数据' : '获取订单数据（首次全量）' }}
               </el-button>
               <el-tag v-if="pd.orderSync && pd.orderSync.lastAt" size="small" type="info">
@@ -1725,32 +2124,19 @@
               </el-tag>
             </template>
           </qnh-login-bar>
-          <!-- 拉取范围说明：新手最容易误以为「点了就能看到全部历史」，这里写清楚 -->
-          <div class="form-tip" style="margin-top:8px">
-            <i class="el-icon-info"></i>
-            <template v-if="pd.orderSync && pd.orderSync.synced">
-              订单数据已同步过：点「获取订单数据」为<b>增量拉取</b>，只补新订单，<b>不受时间范围限制</b>
-              （该账号首次全量时只回溯了最近 {{ pd.orderMonths }} 个月，更早的订单不会出现在列表里）。
-            </template>
-            <template v-else>
-              首次点「获取订单数据」<b>只拉取最近 {{ pd.orderMonths }} 个月</b>的订单，更早的不拉取、也不入库；
-              之后再点按钮为<b>增量拉取</b>，不受时间范围限制。
-            </template>
-            切换账号后，每个账号各自首次全量。
-          </div>
         </el-card>
 
         <el-alert v-if="qnhNeedPick" type="warning" :closable="false" show-icon style="margin-bottom:12px"
                   title="请先在上方选择要以哪个账号的身份查看"
                   description="超级管理员自己没有独立的拼多多数据；选定账号后，订单、登录与同步都属于该账号。"></el-alert>
 
-        <!-- 汇总 -->
-        <div style="display:flex;gap:12px;margin:12px 0;flex-wrap:wrap">
-          <el-card v-for="s in pddStats" :key="s.label" shadow="never" :body-style="{ padding: '12px 16px' }"
-                   style="flex:1;min-width:150px">
-            <div style="font-size:20px;font-weight:600;color:#26282c">{{ s.value }}</div>
-            <div class="loginid">{{ s.label }}</div>
-            <div class="loginid" v-if="s.sub">{{ s.sub }}</div>
+        <!-- 汇总（卡型与 1688发票页统计卡统一：数字 24/700、标签 12 次级色） -->
+        <div class="stat-row">
+          <el-card v-for="s in pddStats" :key="s.label" shadow="never" class="stat-card"
+                   :body-style="{ padding: '14px 16px' }" style="flex:1;min-width:150px">
+            <div class="num">{{ s.value }}</div>
+            <div class="label">{{ s.label }}</div>
+            <div class="sub" v-if="s.sub">{{ s.sub }}</div>
           </el-card>
         </div>
 
@@ -1804,17 +2190,21 @@
               批量申请发票{{ applySelCount ? '（' + applySelCount + '）' : '' }}
             </el-button>
             <el-button size="small" type="warning" plain :disabled="!chatSelCount"
-                       :loading="pd.applying" @click="sendPddBatch">
+                       :loading="pd.applying" @click="sendPddBatch"
+                       title="发送前会先弹框选一条开票抬头（话术里的抬头/税号/邮箱取自选中的那条）">
               批量催商家开票{{ chatSelCount ? '（' + chatSelCount + '）' : '' }}
             </el-button>
             <span style="flex:1"></span>
             <span class="loginid">共 {{ pd.total }} 条</span>
           </div>
 
+          <!-- row-key + reserve-selection：翻页/排序后回来仍记得哪些行被勾过（跨页多选靠它恢复勾选态，
+               计数与批量操作则由 pd.picked 跨页累积维护） -->
           <el-table ref="pddTable" :data="pd.rows" size="small" border style="width:100%" v-loading="pd.loading"
+                    row-key="orderSn"
                     :default-sort="pddDefaultSort"
                     empty-text="暂无订单数据" @selection-change="onPddSelChange" @sort-change="onPddSortChange">
-            <el-table-column type="selection" width="42"
+            <el-table-column type="selection" width="42" :reserve-selection="true"
                              :selectable="(row) => !!(row.applyable || row.chatable)"></el-table-column>
             <el-table-column label="商品" min-width="260">
               <template slot-scope="p">
@@ -1896,8 +2286,16 @@
                 <el-button v-if="p.row.applyable" type="text" size="mini" :disabled="pd.applying"
                            @click="applyPddRows([p.row])">申请发票</el-button>
                 <el-button v-if="p.row.chatable" type="text" size="mini" :disabled="pd.applying"
-                           style="color:#e6a23c" @click="sendPddMsgRows([p.row])">发送催收消息</el-button>
-                <span v-if="!p.row.applyable && !p.row.chatable" class="loginid">—</span>
+                           style="color:#e6a23c" @click="sendPddMsgRows([p.row])"
+                           title="发送前会先弹框选一条开票抬头">发送催收消息</el-button>
+                <!-- 已完成 + 未同步开票：平台已关闭开票入口、且订单接口拿不到数字 mall_id（聊天页必须要它），
+                     自动催收发不出去 → 给「去平台催」，在平台订单页里点「联系商家」走线下开票 -->
+                <el-tooltip v-if="!p.row.applyable && !p.row.chatable && p.row.manualChat" placement="top"
+                            content="这单已超过平台开票期限（入口已关闭），且订单接口拿不到商家会话 ID，无法自动发送。点这里打开平台订单页，在页面里点「联系商家」催其线下开票。">
+                  <el-button type="text" size="mini" style="color:#e6a23c"
+                             @click="openPddOrder(p.row)">去平台催</el-button>
+                </el-tooltip>
+                <span v-if="!p.row.applyable && !p.row.chatable && !p.row.manualChat" class="loginid">—</span>
               </template>
             </el-table-column>
           </el-table>
@@ -1911,13 +2309,302 @@
         </el-card>
       </div>
 
+      <!-- ══════════ 闪电帮帮发票（对所有用户开放） ══════════ -->
+      <div v-show="page === 'sdc'" id="page-sdc">
+        <div class="page-head">
+          <h2>闪电帮帮发票</h2>
+          <div class="meta-line">
+            数据取自闪电帮帮「发票管理」：<b>可申请开票</b>与<b>已申请开票</b>两档。
+            该站点接口带风控签名、服务器直连会被拦截，所以拉取与催收都由<b>本机助手</b>在你自己的浏览器里完成 ——
+            先确认助手已连接，再点「登录闪电帮帮」。
+          </div>
+          <div class="pdd-warn">
+            <i class="el-icon-warning"></i>
+            <span>操作过程中请保持助手窗口不要关闭；若页面提示风控限速，隔几分钟再点刷新即可。</span>
+          </div>
+        </div>
+
+        <qnh-tenant-picker v-if="isAdmin" service="闪电帮帮" :users="sdcUsers" :value="qnhTenant"
+                           :sessions="sdcSessions" :self-id="me && me.id"
+                           @change="onQnhTenantChange"></qnh-tenant-picker>
+
+        <el-card class="section-card" shadow="never" :body-style="{ padding: '12px 14px' }">
+          <qnh-login-bar service="闪电帮帮" :cookie="sdLoginCookie" action-text="刷新订单数据" hide-meta
+                         :action-loading="sd.syncing" :can-logout="true"
+                         @login="loginSdc" @logout="logoutSdc" @action="syncSdcOrders">
+            <template slot="actions">
+              <el-tag v-if="sd.login.lastSyncAt" size="small" type="info">
+                订单同步 {{ String(sd.login.lastSyncAt).slice(0, 16) }}
+              </el-tag>
+            </template>
+          </qnh-login-bar>
+          <div v-if="sd.agent.outdated" class="form-tip" style="margin-top:6px;color:#d1580a">
+            <i class="el-icon-warning"></i>
+            这台电脑上的助手是 v{{ sd.agent.agentVer }}，不支持闪电帮帮；请下载 v{{ sd.agent.minVer }} 及以上版本。
+          </div>
+          <div v-else-if="!sd.agent.online" class="form-tip" style="margin-top:6px;color:#d1580a">
+            <i class="el-icon-warning"></i>
+            本机助手未连接：登录、拉订单、发催收都要经由本机助手完成，请先启动并绑定助手。
+          </div>
+        </el-card>
+
+        <el-alert v-if="qnhNeedPick" type="warning" :closable="false" show-icon style="margin-bottom:12px"
+                  title="请先在上方选择要以哪个账号的身份查看"
+                  description="超级管理员自己没有独立的闪电帮帮数据；选定账号后，订单、登录与催收都属于该账号。"></el-alert>
+
+        <div class="stat-row">
+          <el-card v-for="s in sdcStats" :key="s.label" shadow="never" class="stat-card"
+                   :body-style="{ padding: '14px 16px' }" style="flex:1;min-width:150px">
+            <div class="num">{{ s.value }}</div>
+            <div class="label">{{ s.label }}</div>
+            <div class="sub" v-if="s.sub">{{ s.sub }}</div>
+          </el-card>
+        </div>
+
+        <!-- 取数 / 催收任务进度（与 1688 发票页同一套：文案 + 剩余时间估算 + 完成后自动收起） -->
+        <el-card v-if="sdcTaskVisible" class="section-card" shadow="never" :body-style="{ padding: '14px 16px' }">
+          <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px">
+            <span style="font-size:13px">{{ sdcTaskText }}</span>
+            <span style="flex:1"></span>
+            <el-button v-if="sd.task.running" size="mini" type="danger" plain @click="stopSdcTask">停止</el-button>
+          </div>
+          <el-progress :percentage="sdcTaskPercent" :stroke-width="10" :show-text="false"></el-progress>
+          <div class="log-panel" v-html="sdcLogHtml"></div>
+        </el-card>
+
+        <!-- 筛选 + 店铺列表（一行 = 一家店铺；订单明细与催收记录在展开行里） -->
+        <el-card class="section-card" shadow="never">
+          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px">
+            <span class="tb-label">档位</span>
+            <el-select v-model="sd.filter.stage" size="small" style="width:150px" placeholder="全部档位">
+              <el-option label="全部档位" value=""></el-option>
+              <el-option label="可申请开票" value="1"></el-option>
+              <el-option label="已申请开票" value="2"></el-option>
+              <el-option label="不支持线上开票" value="3"></el-option>
+              <el-option label="已开票" value="4"></el-option>
+            </el-select>
+            <span class="tb-label">催收</span>
+            <el-select v-model="sd.filter.sent" size="small" style="width:160px"
+                       title="已催收 = 有成功催收记录；最近 N 天未催收 = N 天内没有成功催收记录（含从未催收）">
+              <el-option label="全部" value=""></el-option>
+              <el-option label="已催收" value="collected"></el-option>
+              <el-option label="最近一周未催收" value="7"></el-option>
+              <el-option label="最近半个月未催收" value="15"></el-option>
+              <el-option label="最近一个月未催收" value="30"></el-option>
+              <el-option label="最近三个月未催收" value="90"></el-option>
+            </el-select>
+            <span class="tb-label">开票</span>
+            <el-select v-model="sd.filter.invoice" size="small" style="width:170px"
+                       title="与 1688 发票页同一条口径：已开票 = 该店待开票金额为 0；未开票 = 待开票金额大于 0">
+              <el-option label="全部" value=""></el-option>
+              <el-option label="已开票（待开票金额=0）" value="invoiced"></el-option>
+              <el-option label="未开票（待开票金额>0）" value="pending"></el-option>
+            </el-select>
+            <el-input v-model="sd.filter.keyword" size="small" clearable style="width:230px"
+                      placeholder="店铺 / 订单号 / 门店" @keyup.enter.native="applySdcFilter"></el-input>
+            <el-button size="small" type="primary" @click="applySdcFilter">查询</el-button>
+            <el-button size="small" @click="resetSdcFilter">重置</el-button>
+            <el-button size="small" type="warning" plain :disabled="sdcSelCount === 0 && !sd.total"
+                       :loading="sd.sending" @click="openSdcSend">
+              发送催收消息{{ sdcSelCount ? '（' + sdcSelCount + ' 家）' : '（全部）' }}
+            </el-button>
+            <span style="flex:1"></span>
+            <span class="loginid">共 {{ sd.total }} 家店铺 · 待开票 {{ sdcPendingTotal }} 元</span>
+          </div>
+
+          <el-table ref="sdcTable" :data="sd.rows" size="small" border style="width:100%" v-loading="sd.loading"
+                    row-key="key" :default-sort="sdcDefaultSort" empty-text="暂无店铺数据"
+                    @sort-change="onSdcSortChange"
+                    @expand-change="onSdcExpandChange">
+            <el-table-column type="expand">
+              <template slot-scope="p">
+                <div class="members-box">
+                  <template v-if="!sdDC[p.row.key] || sdDC[p.row.key].loading">
+                    <div class="muted" style="font-size:12px">加载中...</div>
+                  </template>
+                  <template v-else-if="sdDC[p.row.key].error">
+                    <div style="color:#d32f2f;font-size:12px">加载失败：{{ sdDC[p.row.key].error }}</div>
+                  </template>
+                  <template v-else>
+                    <div class="sec">
+                      <span>订单明细（共 {{ (sdDC[p.row.key].orders || []).length }} 单）· 同一家店合并成一条消息发送</span>
+                    </div>
+                    <table class="mini-tbl">
+                      <thead><tr>
+                        <th style="width:180px">订单号</th><th style="width:110px">档位</th><th style="width:130px">支付时间</th>
+                        <th style="width:100px">可开票金额</th><th style="width:150px">闪购门店</th><th>发票抬头</th>
+                        <th style="width:80px">已催</th>
+                      </tr></thead>
+                      <tbody>
+                        <tr v-for="o in sdDC[p.row.key].orders" :key="o.order_sn">
+                          <td class="mono">{{ o.order_sn }}</td>
+                          <td><el-tag size="mini" :type="sdcStageTag(o.stage)">{{ o.stageText }}</el-tag></td>
+                          <td>{{ fmtMinute(o.pay_time) }}</td>
+                          <td class="amount">{{ yuan(o.payable_amount) }}</td>
+                          <td class="muted">{{ o.wm_poi_name || '—' }}</td>
+                          <td class="muted">{{ o.invoice_title || '—' }}</td>
+                          <td class="muted">{{ Number(o.send_count) || 0 }} 次</td>
+                        </tr>
+                        <tr v-if="!(sdDC[p.row.key].orders || []).length"><td colspan="7" class="muted">无订单</td></tr>
+                      </tbody>
+                    </table>
+                    <div class="sec">催收记录（成功 {{ sdcShopOk(p.row.key) }} 次<span v-if="sdcShopFail(p.row.key)"> · 失败 {{ sdcShopFail(p.row.key) }} 次</span>）</div>
+                    <table class="mini-tbl">
+                      <tbody>
+                        <tr v-for="(l, li) in (sdDC[p.row.key].logs || [])" :key="li">
+                          <td style="width:150px">{{ fmtMinute(l.created_at) }}</td>
+                          <td style="width:80px"><el-tag size="mini" :type="l.ok ? 'success' : 'danger'">{{ l.ok ? '成功' : '失败' }}</el-tag></td>
+                          <td style="width:80px">{{ l.order_count }} 单</td>
+                          <td style="width:100px" class="amount">{{ yuan(l.amount) }}</td>
+                          <td class="muted">{{ l.ok ? '' : (l.detail || '') }}</td>
+                        </tr>
+                        <tr v-if="!(sdDC[p.row.key].logs || []).length"><td class="muted">从未催收</td></tr>
+                      </tbody>
+                    </table>
+                  </template>
+                </div>
+              </template>
+            </el-table-column>
+            <el-table-column width="46">
+              <template slot-scope="p">
+                <el-checkbox :value="!!sd.picked[p.row.key]" :disabled="!p.row.chatable" @change="v => toggleSdcShop(p.row, v)"
+                             :title="p.row.chatable ? '勾选这家店（同一家店的订单合并成一条消息）' : '这家店的订单没有店铺 ID，换不到客服会话'"></el-checkbox>
+              </template>
+            </el-table-column>
+            <el-table-column label="店铺名称" min-width="220">
+              <template slot-scope="p">
+                <div class="company">{{ p.row.shopName }}</div>
+                <div class="loginid" v-if="p.row.shop_id">店铺 ID {{ p.row.shop_id }}<template v-if="p.row.poiCount"> · {{ p.row.poiCount }} 个门店</template></div>
+                <div class="loginid" v-else>订单里没有店铺 ID，无法发起客服会话</div>
+              </template>
+            </el-table-column>
+            <el-table-column prop="payable_amount" label="可开票金额" width="130" sortable="custom"
+                             :sort-orders="['descending', 'ascending', null]" :header-cell-style="{ cursor: 'pointer' }">
+              <template slot-scope="p">
+                <span class="amount">{{ yuan(p.row.payableAmount) }}</span>
+                <div class="loginid">{{ p.row.orderCount }} 单</div>
+              </template>
+            </el-table-column>
+            <!-- 待开票 = 订单总金额 − 已申请开票金额（已申请/已开票的算「已有着落」） -->
+            <el-table-column label="待开票" width="120">
+              <template slot-scope="p">
+                <span class="amount" :style="p.row.pendingAmount > 0 ? 'color:#d1580a' : ''">{{ yuan(p.row.pendingAmount) }}</span>
+                <div class="loginid" v-if="p.row.appliedAmount">已申请 {{ yuan(p.row.appliedAmount) }}</div>
+              </template>
+            </el-table-column>
+            <el-table-column label="订单总额" width="110">
+              <template slot-scope="p">¥{{ yuan(p.row.totalAmount) }}</template>
+            </el-table-column>
+            <el-table-column label="开票档位" width="200">
+              <template slot-scope="p">
+                <el-tag size="mini" type="warning">可申请 {{ p.row.stage1Count }}</el-tag>
+                <el-tag size="mini" type="info">已申请 {{ p.row.stage2Count }}</el-tag>
+                <el-tag v-if="p.row.stage3Count" size="mini" type="danger">不支持线上 {{ p.row.stage3Count }}</el-tag>
+                <el-tag v-if="p.row.stage4Count" size="mini" type="success">已开票 {{ p.row.stage4Count }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column prop="last_pay_time" label="最近下单" width="130" sortable="custom"
+                             :sort-orders="['descending', 'ascending', null]" :header-cell-style="{ cursor: 'pointer' }">
+              <template slot-scope="p"><span class="loginid">{{ fmtMinute(p.row.lastPayTime) }}</span></template>
+            </el-table-column>
+            <el-table-column label="最近催收" width="150">
+              <template slot-scope="p">
+                <span v-if="p.row.lastSentAt" class="loginid">{{ fmtMinute(p.row.lastSentAt) }}</span>
+                <span v-else class="loginid">—</span>
+                <el-tag v-if="p.row.failCount" size="mini" type="danger" style="margin-left:4px"
+                        :title="'最近一次尝试失败 ' + p.row.failCount + ' 次'">失败 {{ p.row.failCount }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column prop="send_count" label="催收次数" width="100" sortable="custom"
+                             :sort-orders="['descending', 'ascending', null]" :header-cell-style="{ cursor: 'pointer' }">
+              <template slot-scope="p"><span :class="p.row.sendCount ? '' : 'loginid'">{{ p.row.sendCount }}</span></template>
+            </el-table-column>
+            <el-table-column label="操作" width="150" fixed="right">
+              <template slot-scope="p">
+                <el-button size="mini" type="primary" :disabled="!p.row.chatable || !p.row.chatCount"
+                           :loading="sd.sending" :title="p.row.chatCount ? '催这家店「已申请 + 不支持线上开票」的 ' + p.row.chatCount + ' 单' : '这家店没有「已申请」或「不支持线上开票」的订单，不用催'"
+                           @click="openSdcSend([p.row])">催收消息</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+
+          <div style="margin-top:12px;display:flex;align-items:center;gap:8px">
+            <el-pagination small layout="sizes, prev, pager, next" :total="sd.total"
+                           :current-page.sync="sd.page" :page-size="sd.size" :page-sizes="pageSizes"
+                           @current-change="onSdcPage" @size-change="onSdcSize"></el-pagination>
+            <span class="total">共 {{ sd.total }} 家店铺</span>
+            <span style="flex:1"></span>
+            <span class="loginid">未勾选店铺时点「发送催收消息」= 对所有店铺的<b>已申请开票 + 不支持线上开票</b>订单批量催收</span>
+          </div>
+        </el-card>
+      </div>
+
+      <!-- ══════════ 抬头配置 ══════════ -->
+      <div v-show="page === 'invtitle'" id="page-invtitle">
+        <div class="page-head">
+          <h2>抬头配置</h2>
+          <div class="meta-line">
+            维护本账号的开票抬头（可多条）。催收消息里的 <b>公司名称 / 税号 / 邮箱</b> 取自发送时弹框里选中的那条；
+            标「默认」的那条会被自动预选。
+          </div>
+        </div>
+
+        <el-card class="section-card" shadow="never">
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+            <el-button size="small" type="primary" @click="openTitleForm()">新增抬头</el-button>
+            <span style="flex:1"></span>
+            <span class="loginid">共 {{ it.rows.length }} 条</span>
+          </div>
+          <el-table :data="it.rows" size="small" border v-loading="it.loading" empty-text="还没有抬头，点「新增抬头」加一条">
+            <el-table-column label="发票抬头" min-width="240">
+              <template slot-scope="p">
+                <span>{{ p.row.title }}</span>
+                <el-tag v-if="p.row.isDefault" size="mini" style="margin-left:6px">默认</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column prop="taxNo" label="纳税人识别号" width="230" show-overflow-tooltip></el-table-column>
+            <el-table-column prop="email" label="收票邮箱" min-width="200" show-overflow-tooltip></el-table-column>
+            <el-table-column label="操作" width="220" fixed="right">
+              <template slot-scope="p">
+                <el-button type="text" size="mini" @click="openTitleForm(p.row)">编辑</el-button>
+                <el-button type="text" size="mini" :disabled="!!p.row.isDefault" @click="setDefaultTitle(p.row)">设为默认</el-button>
+                <el-button type="text" size="mini" style="color:#e6a23c" @click="delTitle(p.row)">删除</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+        </el-card>
+
+        <el-dialog :title="it.form.id ? '编辑抬头' : '新增抬头'" :visible.sync="it.dialog" width="520px" append-to-body>
+          <el-form label-width="96px" size="small">
+            <el-form-item label="发票抬头" required>
+              <el-input v-model="it.form.title" maxlength="200" placeholder="公司名称（税局登记全称）"></el-input>
+            </el-form-item>
+            <el-form-item label="税号">
+              <el-input v-model="it.form.taxNo" maxlength="64" placeholder="纳税人识别号"></el-input>
+            </el-form-item>
+            <el-form-item label="收票邮箱">
+              <el-input v-model="it.form.email" maxlength="160" placeholder="电子发票接收邮箱"></el-input>
+            </el-form-item>
+            <el-form-item label="设为默认">
+              <el-switch v-model="it.form.isDefault"></el-switch>
+            </el-form-item>
+          </el-form>
+          <span slot="footer">
+            <el-button size="small" @click="it.dialog = false">取消</el-button>
+            <el-button size="small" type="primary" :loading="it.saving" @click="saveTitle">保存</el-button>
+          </span>
+        </el-dialog>
+      </div>
+
       <!-- 全局页脚：版权归属（主体来自 config.json 的 copyright，缺省回退系统名；年份服务端按当年生成） -->
       <div class="app-footer">
         <span v-if="copyright">{{ copyright }}</span>
         <span v-else>发票催收系统 · 保留所有权利</span>
       </div>
     </el-main>
-  </el-container>
+    </div><!-- /.main-col -->
+    </div><!-- /.app-body -->
+  </div><!-- /.app-shell -->
 
   <!-- ══════════ 退单日志（订单日志 / 配送日志） ══════════ -->
   <el-dialog :title="'订单日志 · ' + (rq.log.row.refundNo || '')" :visible.sync="rq.log.visible"
@@ -2109,6 +2796,31 @@
       <el-button type="primary" :loading="pwd.saving" @click="submitPwd">确定修改</el-button>
     </div>
   </el-dialog>
+
+  <!-- ══════════ 发送前选开票抬头（1688 / 拼多多 / 闪电帮帮共用同一个弹框） ══════════ -->
+  <el-dialog :title="tp.title" :visible.sync="tp.visible" width="560px" append-to-body
+             :close-on-click-modal="false" @closed="cancelPickTitle">
+    <div class="form-tip" style="margin-bottom:10px" v-if="tp.desc">{{ tp.desc }}</div>
+    <div v-if="tp.previewTpl" class="preview-box" style="margin-bottom:12px">{{ tpPreviewText }}</div>
+    <el-radio-group v-model="tp.titleId" style="display:block" v-loading="tp.loading">
+      <el-radio v-for="t in tp.rows" :key="t.id" :label="t.id"
+                style="display:block;margin:0 0 10px;height:auto;line-height:1.6">
+        <b>{{ t.title }}</b>
+        <span v-if="t.isDefault" class="el-tag el-tag--mini" style="margin-left:6px">默认</span>
+        <div class="loginid" style="font-size:12px;color:#888">
+          税号 {{ t.taxNo || '未填' }} · 邮箱 {{ t.email || '未填' }}
+        </div>
+      </el-radio>
+    </el-radio-group>
+    <div class="form-tip" v-if="!tp.loading && !tp.rows.length">
+      还没有开票抬头：先到左侧「抬头配置」新增一条（抬头 / 税号 / 邮箱），再回来发送。
+    </div>
+    <span slot="footer">
+      <el-button size="small" @click="cancelPickTitle">取消</el-button>
+      <el-button size="small" type="primary" :disabled="!tp.titleId" :loading="tp.sending"
+                 @click="confirmPickTitle">{{ tp.confirmText }}</el-button>
+    </span>
+  </el-dialog>
 </div>
 
 <!-- 前端本地依赖（项目自带 vendor 目录，不依赖外网 CDN） -->
@@ -2128,7 +2840,6 @@ Vue.use(ELEMENT);
 Vue.config.productionTip = false;
 
 const TREND_CHARTS = [
-  { key: 'orders', title: '最近 30 天 · 每日支付订单总金额', amtKey: 'orderAmount', cntKey: 'orderCount', unit: '单', color: '#2563eb' },
   { key: 'invoices', title: '最近 30 天 · 每日已开票金额（税务局）', amtKey: 'invoiceAmount', cntKey: 'invoiceCount', unit: '张', color: '#059669' },
 ];
 const UP_GUIDES = {
@@ -2192,6 +2903,8 @@ Vue.component('qnh-login-bar', {
     service: { type: String, default: '牵牛花' },
     // true=已登录时按钮变成「退出X账号」（点击触发 logout 事件）；false=保持原来的「已登录X」
     canLogout: { type: Boolean, default: false },
+    // true=不显示右侧「身份：xxx / 登录态失效提示」（页面上方已有身份选择器时可去重）
+    hideMeta: { type: Boolean, default: false },
   },
   computed: {
     logined() { return !!(this.cookie && this.cookie.logined); },
@@ -2253,8 +2966,10 @@ Vue.component('qnh-login-bar', {
       <i class="el-icon-user-solid" style="margin-right:3px"></i>{{ service }} {{ accountText }}
     </el-tag>
     <span style="flex:1"></span>
-    <span class="loginid" v-if="whoLabel">身份：{{ whoLabel }}</span>
-    <span class="loginid" v-if="cookie && cookie.message" style="color:#e6a23c">{{ cookie.message }}</span>
+    <template v-if="!hideMeta">
+      <span class="loginid" v-if="whoLabel">身份：{{ whoLabel }}</span>
+      <span class="loginid" v-if="cookie && cookie.message" style="color:#e6a23c">{{ cookie.message }}</span>
+    </template>
   </div>`,
 });
 
@@ -2308,6 +3023,8 @@ const vm = new Vue({
     return {
       // 账号
       me: null, page: 'board', viewTenant: null,
+      // 侧边栏折叠：点把手切换；点右侧内容区、滚动页面都会自动折叠
+      sidebarCollapsed: false,
       // 牵牛花：以哪个账号的身份查看（管理员必选；普通用户 = 自己）
       qnhTenant: null, qnhUsers: [], qnhSessions: [],
       // 拼多多发票：复用牵牛花的「查看身份」（同一个账号），但两套登录态各自独立
@@ -2322,14 +3039,46 @@ const vm = new Vue({
         summary: null, lastRun: null, syncing: false,
         cookie: { logined: false, loading: false, message: '', accountName: '', pdduid: '', writtenAt: null },
         // 「获取订单数据」（订单列表接口）：首次全量、之后增量；orderSync 来自 /api/pdd/status
-        // orderMonths = 首次全量只回溯最近几个月（系统管理可配，默认 3）
-        orderSyncing: false, orderTaskId: '', orderSync: null, orderMonths: 3,
+        // maxPages = 翻页上限（与发票刷新共用，系统管理可配，默认 300）
+        orderSyncing: false, orderTaskId: '', orderSync: null, maxPages: 300,
         // 批量申请发票
-        selected: [], applying: false, applyTaskId: '',
+        // selected = 跨页累计的已勾选行（翻页不清空）；picked 是它的 {orderSn: row} 索引，
+        // 用来在 data 整页替换（后端分页）时把「本页取消勾选」的行摘掉、其余页的保留
+        selected: [], picked: {}, applying: false, applyTaskId: '',
         applyDialog: { visible: false, running: false, kind: '', status: '', message: '', progress: null, log: [], startedAt: 0 },
       },
+      // 闪电帮帮发票：同样用 pd.picked 那套跨页多选（selected 是当前选中行数组）
+      sd: {
+        loading: false, syncing: false, sending: false,
+        rows: [], total: 0, amount: 0, page: 1, size: 20,
+        // 主表是店铺维度：sort 用 SHOP_SORTS 那套（默认按可开票金额从高到低）
+        filter: { stage: '', sent: '', invoice: '', keyword: '', sort: 'amount_desc' },
+        selected: [], picked: {},
+        login: { logined: false, accountName: '', subUserId: '', lastSyncAt: null, writtenAt: null },
+        agent: { online: false, agentVer: '', minVer: '', outdated: false },
+        users: [], sessions: [],
+        summary: null,
+        task: { visible: false, taskId: '', kind: '', status: '', running: false, message: '', progress: '', log: [], startedAt: 0, finishedAt: 0 },
+      },
+      sdcDefaultSort: { prop: 'payable_amount', order: 'descending' },
+      // 闪电帮帮展开行缓存（店铺 key → { loading, orders, logs, error }）——与 1688 的 detailCache 同构，放顶层才能正常响应
+      sdDC: {},
+      // 抬头配置页（一人多条，催收前选一条）
+      it: {
+        loading: false, saving: false, rows: [], dialog: false,
+        form: { id: 0, title: '', taxNo: '', email: '', isDefault: false },
+      },
+      // 发送前选开票抬头：1688 / 拼多多 / 闪电帮帮共用一个弹框（话术变量同源，都是 {companyName}/{taxNo}/{email}）
+      tp: {
+        visible: false, loading: false, sending: false, rows: [], titleId: 0,
+        title: '选择开票抬头', desc: '', confirmText: '按这个抬头发送',
+        previewTpl: '',   // 有模板时按选中的抬头实时渲染预览（拼多多用；1688 无预览）
+      },
       // 1688发票数据
-      companies: [], sent: {}, invSummary: null, unmatchedCnt: 0, ignoredCnt: 0, manualCnt: 0, boardLoading: false,
+      companies: [], sent: {}, invSummary: null, boardLoading: false,
+      // 1688 订单同步（刷新按钮拉 mtop 订单接口）
+      aliSync: { running: false, taskId: '', page: 0, totalPages: 0, total: 0, fetched: 0, saved: 0, newCount: 0, text: '', startDateTime: '', timer: null },
+      aliSession: null,   // /api/ali/orders-session 结果：1688 登录态 + 增量起点
       // 商品列表（前置仓补货参考）
       product: {
         loading: false, rows: [], total: 0, page: 1, size: 20,
@@ -2347,7 +3096,7 @@ const vm = new Vue({
       // 发布到交易市场（单个/批量共用弹窗）
       publish: { visible: false, title: '', discount: 100, items: [], saving: false },
       // 交易市场
-      market: { loading: false, rows: [], total: 0, page: 1, size: 20 },
+      market: { loading: false, rows: [], total: 0, page: 1, size: 20, summary: {} },
       // 账单（按月）：cols = 每个月一列 { month, hasRow, cells(手工项), auto(1688/拼多多), totals }
       bill: { loading: false, items: [], cols: [] },
       billAdd: { visible: false, month: '', copyFrom: '', saving: false },
@@ -2375,13 +3124,15 @@ const vm = new Vue({
       // 商家候选下拉：按关键词向服务端要前 50 条（不再整表下发），cache 用于「选中后取会员名」
       mapSeller: { q: '', opts: [], cache: {}, loading: false, timer: null },
       mapDraft: {}, unPage: 1, unSize: 20, mapPage: 1, mapSize: 20, igPage: 1, igSize: 20,
+      // 税名核对表默认只看「未核对」；已核对 = 原「已维护映射」那批数据
+      mapFilter: 'unmatched',
       // 系统管理
       cfg: {
         gapMin: 15, gapMax: 30, chunkMax: 450, template: '', orderItem: '', reminder: '', serverUrl: '',
         // 拼多多催收话术（与 1688 的 templates 完全分开，只有一条）
         pddChat: '', pddGapSec: 4,
-        // 「获取订单数据」首次全量只回溯最近 N 个月（默认 3）
-        pddOrderMonths: 3,
+        // 拼多多翻页上限（发票刷新与订单同步共用，默认 300 页）
+        pddMaxPages: 300,
         // 发完一家后，是否在上家的间隔等待里提前加载下一家的会话（默认开）
         prefetch: true,
         // ── 助手版本治理 ──
@@ -2395,6 +3146,8 @@ const vm = new Vue({
         + '税号：{taxNo}，邮箱：{email}，非常感谢，已经在平台申请！！！',
       previewText: '', saveOk: false,
       users: [], newUser: { company: '', password: '', role: 'user', taxNo: '', email: '', note: '' },
+      // 新增用户收进弹框 + 用户列表按 公司名/税号/账号 模糊搜索
+      newUserDlg: false, userKw: '',
       build: { running: false, ok: null, error: '', version: '', installer: null, installers: [], platform: '', log: [] },
       uploading: false, uploadProgress: 0, uploadMsg: '',
       creatingUser: false, createOk: false,
@@ -2403,7 +3156,7 @@ const vm = new Vue({
       menuPermit: { visible: false, id: null, username: '', refund: false, profit: false, product: false, market: false, billing: false, saving: false,
                     origin: { refund: false, profit: false, product: false, market: false, billing: false } },
       // 操作日志（仅超级管理员）
-      opLog: { draftUsername: '', username: '', page: 1, size: 20, total: 0, rows: [], loading: false },
+      opLog: { draftUsername: '', username: '', page: 1, size: 20, total: 0, rows: [], loading: false, summary: {} },
       // 退单列表（牵牛花）
       rq: {
         loading: false, rows: [], total: 0, page: 1, size: 20,
@@ -2421,7 +3174,7 @@ const vm = new Vue({
           profitLastPullAt: '', profitLastPullCount: 0,
         },
         savingCfg: false, savedCfg: false,
-        profit: { loading: false, rows: [], total: 0, alerts: 0, error: '' },
+        profit: { loading: false, rows: [], total: 0, alerts: 0, summary: {}, error: '' },
         profitDays: 30, profitTrend: [],
         log: { visible: false, row: {}, rows: [], tab: 'all', loading: false },
       },
@@ -2434,6 +3187,46 @@ const vm = new Vue({
   },
   computed: {
     isAdmin() { return !!(this.me && this.me.role === 'admin'); },
+    /** 服务端版本号（后端 publicUser 下发，侧边栏品牌区展示） */
+    serverVersion() { return (this.me && this.me.serverVersion) || ''; },
+    /** 侧边栏导航：设计稿 4 组，条目按账号权限过滤，与旧 el-menu 各项的 v-if 等价 */
+    navGroups() {
+      const groups = [
+        { title: '发票', items: [
+          { key: 'board', label: '1688发票', icon: 'el-icon-document' },
+          { key: 'pdd', label: '拼多多发票', icon: 'el-icon-s-order' },
+          { key: 'sdc', label: '闪电帮帮发票', icon: 'el-icon-truck' },
+          { key: 'mapping', label: '税名核对', icon: 'el-icon-edit-outline' },
+          { key: 'invtitle', label: '抬头配置', icon: 'el-icon-postcard' },
+        ] },
+        { title: '核对与商品', items: [
+          this.canProduct ? { key: 'product', label: '商品列表', icon: 'el-icon-goods' } : null,
+          this.canMarket ? { key: 'market', label: '交易市场', icon: 'el-icon-s-marketing' } : null,
+          this.canBilling ? { key: 'billing', label: '账单', icon: 'el-icon-wallet' } : null,
+        ].filter(Boolean) },
+        { title: '牵牛花监控', items: [
+          this.canRefund ? { key: 'refund', label: '退单列表', icon: 'el-icon-s-claim' } : null,
+          this.canProfit ? { key: 'profit', label: '实时毛利监控', icon: 'el-icon-s-data' } : null,
+        ].filter(Boolean) },
+        { title: '系统', items: [
+          this.isAdmin ? { key: 'admin', label: '系统管理', icon: 'el-icon-setting' } : null,
+          this.isAdmin ? { key: 'users', label: '用户管理', icon: 'el-icon-user' } : null,
+          this.isAdmin ? { key: 'audit', label: '操作日志', icon: 'el-icon-tickets' } : null,
+        ].filter(Boolean) },
+      ];
+      // 整组条目被权限过滤光时，连分组标题一起隐藏，避免只剩个孤零零的小标题
+      return groups.filter((g) => g.items.length);
+    },
+    /** 顶栏主标题：与左侧菜单同名（菜单改名时标题自动跟着变，不再另写一套文案） */
+    pageTitle() {
+      const noMenu = { mapping: '税名核对', qnhcfg: '牵牛花配置', refundalert: '退单提醒' };
+      if (noMenu[this.page]) return noMenu[this.page];
+      for (const g of this.navGroups) {
+        const hit = g.items.find((it) => it.key === this.page);
+        if (hit) return hit.label;
+      }
+      return '发票催收';
+    },
     // 顶栏「绑定本机助手」按钮：未连接=动作，已连接=状态（文案与提示都跟着切）
     agentBindText() {
       if (this.guide.binding) return '正在绑定…';
@@ -2477,15 +3270,60 @@ const vm = new Vue({
     billExpenseItems() { return (this.bill.items || []).filter((i) => i.group === 'expense'); },
     /** 表格行：按月份倒序，最近的月份排在最上面 */
     billRowsDesc() { return [...(this.bill.cols || [])].reverse(); },
+    /** 账单统计卡（设计稿 4 卡）：取最近的月份，环比用上一月净利润算；无数据时给 — */
+    billStatCards() {
+      const cols = this.bill.cols || [];
+      const cur = cols.length ? cols[cols.length - 1] : null;
+      const prev = cols.length > 1 ? cols[cols.length - 2] : null;
+      if (!cur) {
+        return [
+          { key: 'net', num: '—', label: '本月净利润', sub: '还没有账单数据' },
+          { key: 'income', num: '—', label: '本月总收入', sub: '美团 / 淘宝 / 京东' },
+          { key: 'expense', num: '—', label: '本月总支出', sub: '含平台采购' },
+          { key: 'rate', num: '—', label: '本月净利率', sub: '净利润 ÷ 总收入' },
+        ];
+      }
+      const t = cur.totals || {};
+      const prevNet = prev && prev.totals ? Number(prev.totals.net) || 0 : null;
+      let mom = '较上月 —';
+      if (prevNet) {
+        const diff = ((Number(t.net) || 0) - prevNet) / Math.abs(prevNet) * 100;
+        mom = '较上月 ' + (diff >= 0 ? '+' : '') + diff.toFixed(1) + '%';
+      }
+      const auto = cur.auto || {};
+      const plat = (Number(auto.auto_1688) || 0) + (Number(auto.auto_pdd) || 0);
+      return [
+        { key: 'net', num: this.yuan(t.net), label: '本月净利润 · ' + this.monthText(cur.month), sub: mom },
+        { key: 'income', num: this.yuan(t.income), label: '本月总收入', sub: '美团 / 淘宝 / 京东' },
+        { key: 'expense', num: this.yuan(t.expense), label: '本月总支出', sub: '含平台采购 ' + this.yuan(plat) },
+        { key: 'rate', num: (Number(t.rate) || 0) + '%', label: '本月净利率', sub: '净利润 ÷ 总收入' },
+      ];
+    },
+    /** 商品列表统计卡（设计稿 4 卡）：全部取自现有接口字段，未新增接口 */
+    productStatCards() {
+      const p = this.product;
+      const lb = p.latestBatch;
+      return [
+        { key: 'total', num: p.total, label: '商品总数', sub: '按当前筛选条件统计' },
+        { key: 'value', num: this.yuan(p.filteredValue), label: '当前筛选总货值', sub: 'Σ(可用 + 在途) × 采购价' },
+        { key: 'batch', num: lb ? lb.item_count : '—', label: '最近导入商品数', sub: lb ? this.fmtMinute(lb.imported_at) : '还没有导入记录' },
+        { key: 'bval', num: lb ? this.yuan(lb.total_value) : '—', label: '最近导入总货值', sub: '该批次导入时的货值' },
+      ];
+    },
+    /** 交易市场统计卡（设计稿 4 卡）：summary 由 /api/market 下发（一条只读聚合） */
+    marketStatCards() {
+      const s = this.market.summary || {};
+      const n = (v) => Number(v) || 0;
+      return [
+        { key: 'sku', num: n(this.market.total), label: '在售 SKU', sub: '同一 SKU 多人发布只算一条' },
+        { key: 'quotes', num: n(s.quotes), label: '报价条数', sub: '全部用户的发布记录' },
+        { key: 'sellers', num: n(s.sellers), label: '参与报价人数', sub: '去重后的发布人' },
+        { key: 'min', num: s.min_price == null ? '—' : this.yuan(s.min_price), label: '全站最低报价', sub: '折后价最低的一条' },
+      ];
+    },
     // 拼多多发票对所有用户开放，不需要单独配置菜单权限
     // 卖家发送间隔低于 15 秒时给个橙色警示：这个值直接决定会不会被平台判定为机器群发
     gapTooSmall() { return Number(this.cfg.gapMin) < 15 || Number(this.cfg.gapMax) < 15; },
-    // 助手版本宽限期还剩几天（系统管理「助手版本治理」卡片里显示）
-    verDaysLeft() {
-      const p = this.cfg && this.cfg.agentVerPol;
-      if (!p || !p.graceUntil) return 0;
-      return Math.max(0, Math.ceil((p.graceUntil - Date.now()) / 86400000));
-    },
     // 管理员必须先选定一个账号，才能看该账号的牵牛花数据
     qnhNeedPick() { return this.isAdmin && this.qnhTenant == null; },
     // 拼多多催收话术预览：用当前查看账号的抬头填充（「1688发票」页里各账号抬头不同）
@@ -2499,6 +3337,20 @@ const vm = new Vue({
         companyName: u.companyName || '（未设置公司全称）',
         taxNo: u.taxNo || '（未设置税号）',
         email: u.email || '（未设置邮箱）',
+        orderSn: '261022-076095220081773',
+        amount: '15.11',
+      };
+      return tpl.replace(/\{(companyName|taxNo|email|orderSn|amount)\}/g, (m, k) => vars[k] || '');
+    },
+    // 选抬头弹框里的实时预览：切换抬头时立刻按那条抬头重新渲染（示例订单号/金额固定）
+    tpPreviewText() {
+      const tpl = String(this.tp.previewTpl || '');
+      if (!tpl) return '';
+      const t = (this.tp.rows || []).find((r) => Number(r.id) === Number(this.tp.titleId)) || {};
+      const vars = {
+        companyName: t.title || '（未设置抬头）',
+        taxNo: t.taxNo || '（未设置税号）',
+        email: t.email || '（未设置邮箱）',
         orderSn: '261022-076095220081773',
         amount: '15.11',
       };
@@ -2535,9 +3387,9 @@ const vm = new Vue({
         s = (ad.running ? name + '：' : name + '（已结束）：')
           + '第 ' + (Number(p && p.page) || 0) + ' 页 · 已拉 ' + (Number(p && p.fetched) || 0) + ' 单'
           + ' · 入库 ' + (Number(p && p.saved) || 0) + ' 条（新增 ' + (Number(p && p.newCount) || 0) + '）';
-        // 全量有时间窗口，写在进度标题上，避免用户以为「怎么只有这些订单」
-        if (ad.full) s += ' · 仅最近 ' + (Number(ad.months) || this.pd.orderMonths) + ' 个月';
-        else if (ad.running) s += ' · 增量（不限时间范围）';
+        // 全量不再限时间：进度标题上写清翻页上限，撞上限时用户能看到原因
+        if (ad.full) s += ' · 全量（翻到空页为止，上限 ' + (this.pd.maxPages || 300) + ' 页）';
+        else if (ad.running) s += ' · 增量（追平即停）';
       } else {
         s = (ad.running ? name + '：' : name + '（已结束）：') + done + '/' + total;
         if (ad.running && p && p.current) s += ' · 当前: ' + p.current;
@@ -2609,10 +3461,59 @@ const vm = new Vue({
     refundStats() {
       const s = this.rq.summary || {};
       return [
-        { label: '退单总数', value: (s.total || 0) + ' 单' },
-        { label: '退单金额合计', value: yuan(s.amount || 0) },
-        { label: '今日新增', value: (s.today || 0) + ' 单' },
-        { label: '已取货/送达', value: (s.picked || 0) + ' 单' },
+        { label: '退单总数', value: (s.total || 0) + ' 单', sub: '其中申诉 ' + (s.appeal || 0) + ' 单' },
+        { label: '退单金额合计', value: yuan(s.amount || 0), sub: '已同步入库的全部退单' },
+        { label: '今日新增', value: (s.today || 0) + ' 单', sub: '按申请时间统计' },
+        { label: '已取货/送达', value: (s.picked || 0) + ' 单', sub: '有配送日志 ' + (s.delivered || 0) + ' 单' },
+      ];
+    },
+    /** 毛利统计卡（设计稿 4 卡）：订单级只读聚合，字段来自 /api/qnh/profit 的 summary */    profitStatCards() {
+      const s = this.rq.profit.summary || {};
+      const money = (v) => (v == null ? '—' : yuan(Number(v) || 0));
+      const today = Number(s.todayProfit) || 0;
+      return [
+        { key: 'today', label: '今日毛利', num: money(today), sub: (s.todayCount || 0) + ' 单入库',
+          cls: today < 0 ? 's-warn' : (today > 0 ? 's-done' : '') },
+        { key: 'total', label: '累计毛利', num: money(s.totalProfit), sub: '订单级合计（全部已入库）' },
+        { key: 'rate', label: '平均毛利率',
+          num: s.avgRate == null ? '—' : (Number(s.avgRate).toFixed(1) + '%'),
+          sub: '按订单取均值，非加权' },
+        { key: 'neg', label: '负毛利订单', num: (s.negative || 0) + ' 单',
+          sub: '已推送告警 ' + (this.rq.profit.alerts || 0) + ' 单',
+          cls: (s.negative || 0) > 0 ? 's-warn' : '' },
+      ];
+    },
+    /** 系统管理统计卡：助手版本 / 版本要求 / 服务端版本 / 账号数，全部取自现有状态 */
+    adminStatCards() {
+      const v = this.agentVersion || {};
+      const online = !!(this.agent && this.agent.online);
+      const min = v.min ? ('v' + v.min) : '跟随服务端';
+      return [
+        { key: 'agent', label: '本机助手', num: this.agentVer ? ('v' + this.agentVer) : '未连接',
+          sub: online ? '已连接' : '未连接或未启动', cls: online ? 's-done' : '' },
+        { key: 'min', label: '最低要求版本', num: min,
+          sub: this.agentUpdate ? ('宽限剩 ' + this.agentUpdate.daysLeft + ' 天') : '低于此版本停用' },
+        { key: 'server', label: '服务端版本', num: this.serverVersion ? ('v' + this.serverVersion) : '—', sub: '当前运行版本' },
+        { key: 'users', label: '账号总数', num: (this.users.length || 0) + ' 个',
+          sub: '启用 ' + this.users.filter((u) => u.status === 'active').length + ' 个' },
+      ];
+    },
+    /** 用户列表搜索：公司名称 / 税号 / 账号，任一模糊命中即保留（不区分大小写） */
+    filteredUsers() {
+      const kw = String(this.userKw || '').trim().toLowerCase();
+      const list = this.users || [];
+      if (!kw) return list;
+      return list.filter((u) => [u.username, u.companyName, u.taxNo]
+        .some((v) => String(v || '').toLowerCase().includes(kw)));
+    },
+    /** 操作日志统计卡：后端全量只读汇总，不随筛选变化 */
+    opStatCards() {
+      const m = this.opLog.summary || {};
+      return [
+        { key: 'today', label: '今日操作', num: (m.today || 0) + ' 次', sub: '今日 00:00 起' },
+        { key: 'users', label: '今日活跃账号', num: (m.todayUsers || 0) + ' 人', sub: '按操作人去重' },
+        { key: 'week', label: '近 7 日操作', num: (m.week || 0) + ' 次', sub: '含今日' },
+        { key: 'month', label: '本月累计', num: (m.month || 0) + ' 次', sub: '日志保留 180 天' },
       ];
     },
     refundLogRows() {
@@ -2621,21 +3522,104 @@ const vm = new Vue({
       if (t === 'order' || t === 'delivery') return rows.filter((r) => r.logType === t);
       return rows;
     },
-    /** 拼多多汇总卡：条数 + 金额（金额只在有意义时展示，避免全是 0 干扰阅读） */
+    /** 拼多多汇总卡：只留三张金额卡（总金额 / 已开票 / 未开票），数据全部来自现有 /api/pdd/summary */
     pddStats() {
       const s = this.pd.summary || {};
-      const n = (o) => ((o && o.count) || 0);
-      const a = (o) => ((o && o.amount) || 0);
+      const a = (o) => Number((o && o.amount) || 0);
+      const n = (o) => Number((o && o.count) || 0);
+      const total = Number(s.totalAmount || 0);
+      const issued = a(s.issued);
+      const unissued = Math.round((total - issued) * 100) / 100;
       return [
-        { label: '订单总数', value: (s.totalCount || 0) + ' 单',
-          sub: '金额合计 ' + yuan(s.totalAmount || 0) + (n(s.unsynced) ? '｜未同步开票 ' + n(s.unsynced) + ' 单' : '') },
-        { label: '待申请', value: n(s.pending) + ' 单', sub: '可开票 ' + yuan(a(s.pending)) },
-        { label: '已申请', value: n(s.applied) + ' 单', sub: '已提交，等商家开票' },
-        { label: '开票中', value: n(s.issuing) + ' 单', sub: yuan(a(s.issuing)) },
-        { label: '已开票', value: n(s.issued) + ' 单', sub: yuan(a(s.issued)) },
-        { label: '商家处理中', value: n(s.mallProcessing) + ' 单', sub: yuan(a(s.mallProcessing)) },
-        { label: '暂不可开票', value: n(s.unavailable) + ' 单', sub: '全额退款等' },
+        { label: '总金额', value: yuan(total), sub: (s.totalCount || 0) + ' 单（含全部开票状态）' },
+        { label: '已开票总金额', value: yuan(issued), sub: n(s.issued) + ' 单已开票' },
+        { label: '未开票总金额', value: yuan(unissued),
+          sub: '待申请 ' + n(s.pending) + ' · 开票中 ' + n(s.issuing) + ' · 商家处理 ' + n(s.mallProcessing) },
       ];
+    },
+    /** 闪电帮帮：金额三卡（可申请 / 已申请 / 合计），口径与拼多多页保持一致 */
+    sdcStats() {
+      const s = this.sd.summary || {};
+      const a = (o) => Number((o && o.amount) || 0);
+      const n = (o) => Number((o && o.count) || 0);
+      const applyable = s.applyable || { count: 0, amount: 0, shops: 0 };
+      const applied = s.applied || { count: 0, amount: 0, shops: 0 };
+      const blocked = s.blocked || { count: 0, amount: 0, shops: 0 };
+      const issued = s.issued || { count: 0, amount: 0, shops: 0 };
+      return [
+        { label: '可申请开票', value: yuan(a(applyable)), sub: `${n(applyable)} 单 / ${Number(applyable.shops) || 0} 家店铺` },
+        { label: '已申请开票', value: yuan(a(applied)), sub: `${n(applied)} 单 / ${Number(applied.shops) || 0} 家店铺` },
+        { label: '不支持线上开票', value: yuan(a(blocked)), sub: `${n(blocked)} 单 / ${Number(blocked.shops) || 0} 家店铺` },
+        { label: '已开票', value: yuan(a(issued)), sub: `${n(issued)} 单 / ${Number(issued.shops) || 0} 家店铺` },
+        {
+          label: '待开票金额',
+          value: yuan(Math.max(0, a(applyable) + a(applied) + a(blocked))),
+          sub: `可催收 ${n(applied) + n(blocked)} 单（已申请 + 不支持线上）`,
+        },
+      ];
+    },
+    sdcUsers() { return this.sd.users || []; },
+    sdcSessions() { return this.sd.sessions || []; },
+    /** 勾选/催收的最小单位是店铺（发送时同一家店合并成一条消息） */
+    sdcSelCount() { return (this.sd.selected || []).length; },
+    sdcStageAmount() { return Number(this.sd.amount || 0).toFixed(2); },
+    /** 当前页的待开票合计（订单总额 − 已申请开票金额） */
+    sdcPendingTotal() {
+      return (this.sd.rows || []).reduce((a, r) => a + (Number(r.pendingAmount) || 0), 0).toFixed(2);
+    },
+    /** 登录条要一个 cookie 形的对象（复用牵牛花那个组件） */
+    sdLoginCookie() {
+      const l = this.sd.login || {};
+      return {
+        logined: !!l.logined,
+        loading: this.sd.syncing || this.sd.sending,
+        accountName: l.accountName || '',
+        message: l.lastSyncAt ? '' : '尚未拉取过订单数据',
+        writtenAt: l.writtenAt || null,
+      };
+    },
+    /** 与 1688 看板同一套：跑着就显示，结束后再留 8 秒让人看清结果，随后自动收起 */
+    sdcTaskVisible() {
+      const t = this.sd.task;
+      if (!t || !t.visible) return false;
+      return !!t.running || !!(t.finishedAt && Date.now() - t.finishedAt < 8000);
+    },
+    sdcTaskPercent() {
+      const t = this.sd.task;
+      if (!t.visible) return 0;
+      if (!t.running) return 100;
+      if (t.kind === 'send' && t.total) return Math.min(99, Math.round((t.done / t.total) * 100));
+      return 50;
+    },
+    /** 「发送催收消息：3/12 · 当前: XX店 · 成功2 失败0 · 已用1分20秒 · 约剩4分」—— 与 1688 完全一致的口径 */
+    sdcTaskText() {
+      const t = this.sd.task;
+      if (!t) return '';
+      let time = '';
+      if (t.startedAt) {
+        const elapsed = Date.now() - t.startedAt;
+        time = ` · 已用${fmtDur(elapsed)}`;
+        const done = t.kind === 'send' ? (t.done || 0) : 0;
+        if (t.running && done > 0 && t.total > done) time += ` · 约剩${fmtDur((t.total - done) * (elapsed / done))}`;
+      }
+      const head = t.kind === 'send' ? '发送催收消息' : (t.kind === 'sync' ? '拉取订单数据' : '任务');
+      const tally = t.kind === 'send' ? ` · 成功${t.okCount || 0} 失败${t.failCount || 0}` : '';
+      const cur = t.kind === 'send' ? (t.current ? ` · 当前: ${t.current}` : '') : (t.progress ? ` · ${t.progress}` : '');
+      const cnt = t.kind === 'send' ? `${t.done || 0}/${t.total || 0}` : '';
+      const tail = t.running ? '' : (t.message ? ` · ${t.message}` : '');
+      return `${head}${cnt ? '：' + cnt : ''}${cur}${tally}${time}${tail}`;
+    },
+    sdcLogHtml() {
+      const t = this.sd.task || {};
+      const logs = t.log || [];
+      const waiting = t.kind === 'send' ? '等待本机助手打开客服会话…' : '等待本机助手开始拉取…';
+      if (!logs.length) return '<div style="color:#8a8f98">' + waiting + '</div>';
+      return logs.map((l) => {
+        const bad = l.text.indexOf('✗') > -1 || l.text.indexOf('失败') > -1;
+        const good = l.text.indexOf('✓') > -1;
+        const color = bad ? '#ff8a80' : (good ? '#69f0ae' : '#b9f6ca');
+        return '<div style="color:' + color + '">' + this.esc(l.t) + ' ' + this.esc(l.text) + '</div>';
+      }).join('');
     },
     readonly() {
       if (this.viewTenant == null || !this.me) return false;
@@ -2656,23 +3640,15 @@ const vm = new Vue({
       const invAmt = this.invSummary ? Number(this.invSummary.amount) : 0;
       const pendingAmt = this.companies.reduce((a, c) => a + Number(c.pendingAmount), 0);
       const hasPending = this.companies.filter(c => Number(c.pendingAmount) > 0).length;
-      const members = this.companies.flatMap(c => c.members);
-      const sentCnt = members.filter(m => m.sendCount > 0).length;
       return [
         { key: 'o', cls: '', num: yuan(orderAmt), label: '订单总金额', sub: `共 ${orderCnt} 单 / ${this.companies.length} 家公司`, click: 'orders', tip: '点击查看订单明细' },
         { key: 'i', cls: 's-info', num: yuan(invAmt), label: '已开票金额（税务局）', sub: `共 ${this.invSummary ? this.invSummary.invoice_count : 0} 张发票 / ${this.invSummary ? this.invSummary.rows_count : 0} 行明细`, click: 'invoices', tip: '点击查看发票明细' },
         { key: 'p', cls: 's-warn', num: yuan(pendingAmt), label: '待开票金额', sub: `${hasPending} 家公司有待开票` },
-        { key: 'm', cls: 's-done', num: this.manualCnt, label: '人工确认已开票', sub: '订单数（商家线下开票）' },
-        { key: 's', cls: '', num: sentCnt, label: '已催收会员名', sub: `累计成功 ${members.reduce((a, m) => a + (m.sendCount || 0), 0)} 次（失败不计）` },
-        { key: 'u', cls: this.unmatchedCnt > 0 ? 's-warn' : 's-done', num: this.unmatchedCnt, label: '未匹配销方名称', sub: this.unmatchedCnt > 0 ? '需人工比对' : (this.ignoredCnt > 0 ? `已匹配或已忽略（忽略 ${this.ignoredCnt} 个）` : '全部已匹配') },
       ];
     },
     charts() {
-      return TREND_CHARTS.map((c) => {
-        let peak = 0, peakDate = '—';
-        for (const d of this.trendDays) { const v = Number(d[c.amtKey]) || 0; if (v > peak) { peak = v; peakDate = d.date; } }
-        return Object.assign({}, c, { peakText: yuan(peak), peakDate });
-      });
+      // 图表配置是常量（数据在 trendDays 里），不再派生「峰值」文案 —— 卡片右上那两个小标签已删除
+      return TREND_CHARTS;
     },
     visibleCompanies() {
       const now = Date.now();
@@ -2762,12 +3738,20 @@ const vm = new Vue({
   watch: {
     trendDays() { this.$nextTick(() => this.renderTrend()); },
     page(p) {
-      if (p === 'board') this.$nextTick(() => this.renderTrend());
+      // v-show 切页：隐藏期间容器宽高为 0，切回来后 ECharts 还按旧宽度画 → 图表被压成一条。
+      // 等一帧（display 生效、动画起步）再统一 resize 所有图表实例；
+      if (p === 'board') {
+        this._trendRetry = {};
+        this.$nextTick(() => setTimeout(() => { if (this.page === 'board') this.renderTrend(); }, 60));
+      }
+      this.$nextTick(() => setTimeout(() => { if (this.page === p) this.onResize(); }, 60));
       if (p === 'refund') this.$nextTick(() => this.renderRefundTrend());
       if (p === 'profit') this.$nextTick(() => this.renderProfitTrend());
       if (p === 'product') { this.loadProducts(); this.loadProductTrend(); }
       if (p === 'market') this.loadMarket();
       if (p === 'billing') this.loadBilling();
+      if (p === 'sdc') { this.clearSdcPicked(); this.loadSdcStatus(); this.loadSdcOrders(); }
+      if (p === 'invtitle') this.loadTitles();
     },
     'detail.visible'(v) { if (!v) this.detail.q = ''; },
   },
@@ -2775,13 +3759,20 @@ const vm = new Vue({
     this.calcTblH();
     window.addEventListener('resize', this.onResize);
     document.addEventListener('click', this.onDocClick);   // 全局按钮点击埋点（操作日志）
+    // 侧边栏自动收起：点右侧内容区、滚动页面各挂一个监听
+    // 点击用捕获阶段——Element UI 的排序箭头/下拉等会 @click.stop，冒泡监听会漏掉这些位置
+    document.addEventListener('click', this.onLayoutClick, true);
+    window.addEventListener('scroll', this.onAnyScroll, { passive: true });
     // 助手连接状态：导航栏常驻展示，每 10 秒轻量刷新一次
     this.agentTimer = setInterval(() => { this.refreshAgent(); }, 10000);
+    this.loadAliSession();
     this.boot();
   },
   beforeDestroy() {
     window.removeEventListener('resize', this.onResize);
     document.removeEventListener('click', this.onDocClick);
+    document.removeEventListener('click', this.onLayoutClick, true);
+    window.removeEventListener('scroll', this.onAnyScroll);
     if (this.agentTimer) { clearInterval(this.agentTimer); this.agentTimer = null; }
   },
   methods: {
@@ -2838,25 +3829,54 @@ const vm = new Vue({
       this._agentTimer = setInterval(this.refreshAgent, 5000);
       if (this.isAdmin) { this.loadUsers(); }
     },
+    // ── 侧边栏折叠 ──
+    /** 统一的展开/收起入口：改完状态后等宽度动画结束，再让图表和表格按新宽度重排 */
+    setSidebar(v) {
+      const next = !!v;
+      if (this.sidebarCollapsed === next) return;
+      this.sidebarCollapsed = next;
+      // 收起/展开会引起布局重排，页面高度随之变化，浏览器会修正 scrollTop 并触发一次
+      // scroll 事件——若不设防，滚到页中时点「展开」会被这次事件立刻收回去。
+      this._sbGuardUntil = Date.now() + 450;
+      setTimeout(() => this.onResize(), 220);
+    },
+    toggleSidebar() { this.setSidebar(!this.sidebarCollapsed); },
+    /** 点右侧内容区（.main-col 内任意位置）自动收起；点左侧菜单、顶栏、弹窗都不触发 */
+    onLayoutClick(e) {
+      if (this.sidebarCollapsed) return;
+      const main = this.$el && this.$el.querySelector('.main-col');
+      if (!main || !e.target || !main.contains(e.target)) return;
+      this.setSidebar(true);
+    },
+    /** 滚动页面自动收起（侧边栏自身的内部滚动不冒泡到这里，不会误触发）；
+     *  收起/展开后 450ms 内的 scroll 是布局重排的连带修正，不是用户行为，忽略 */
+    onAnyScroll() {
+      if (this._sbGuardUntil && Date.now() < this._sbGuardUntil) return;
+      if (!this.sidebarCollapsed) this.setSidebar(true);
+    },
     // ── 页面切换 ──
     switchPage(p) {
       if (p === 'admin' && !this.isAdmin) p = 'board';
+      if (p === 'users' && !this.isAdmin) p = 'board';
       if (p === 'audit' && !this.isAdmin) p = 'board';
       if (p === 'refund' && !this.canRefund) p = 'board';
+      if (p === 'refundalert' && !this.canRefund) p = 'board';
+      if (p === 'qnhcfg' && !(this.canProfit || this.canRefund)) p = 'board';
       if (p === 'profit' && !this.canProfit) p = 'board';
       if (p === 'product' && !this.canProduct) p = 'board';
       if (p === 'market' && !this.canMarket) p = 'board';
       if (p === 'billing' && !this.canBilling) p = 'board';
       this.page = p;
       if (p === 'admin') { this.loadConfigUI(); this.loadUsers(); this.loadBuildStatus(); this.loadAgentVersions(); }
+      if (p === 'users') { this.loadUsers(); }
       if (p === 'mapping') this.loadMapping();
       if (p === 'audit') this.loadOpLog();
-      if (p === 'profit' || p === 'refund' || p === 'pdd') {
+      if (p === 'profit' || p === 'refund' || p === 'pdd' || p === 'qnhcfg' || p === 'refundalert') {
         if (p === 'refund') this.reportOp('qnh.view');
         this.enterQnhPage(p);
       }
     },
-    /** 进入退单列表 / 实时毛利监控 / 拼多多发票：先确定「以哪个账号的身份」，再拉该账号的数据 */
+    /** 进入退单列表 / 实时毛利监控 / 牵牛花配置 / 退单提醒配置 / 拼多多发票：先确定「以哪个账号的身份」，再拉该账号的数据 */
     async enterQnhPage(p) {
       await this.ensureQnhTenant();
       this.qnhReload();
@@ -2876,9 +3896,6 @@ const vm = new Vue({
         this.sent = {};
         for (const k of (d.sentList || [])) this.$set(this.sent, k, true);
         this.invSummary = d.invoiceSummary || null;
-        this.unmatchedCnt = d.unmatchedNameCount || 0;
-        this.ignoredCnt = d.ignoredNameCount || 0;
-        this.manualCnt = d.manualIssuedCount || 0;
         const memberCnt = this.companies.reduce((a, c) => a + c.memberCount, 0);
         this.meta = '数据: ' + d.generatedAt + ' · ' + this.companies.length + ' 家公司 / ' + memberCnt + ' 个会员名'
           + (d.tenant ? ' · 租户: ' + d.tenant.username : '');
@@ -2891,6 +3908,125 @@ const vm = new Vue({
         this.refreshOpenPanels();
       } catch (e) { this.$message.error('加载数据失败: ' + e.message); }
       finally { this.boardLoading = false; }
+    },
+    // ── 1688 订单同步：刷新按钮 ──
+    // 流程：POST 起任务 → 每 1.2s 轮询进度 → 结束后自动重读看板数据。
+    // 起点由服务端取「库中最近订单时间」，同一次同步里固定不变，避免边拉边改窗口。
+
+    // 读一次登录态与增量起点，单纯为了把「刷新」按钮的 title 说准（显示真实起点而不是"自动"）
+    async loadAliSession() {
+      try {
+        const d = await this.api('/api/ali/orders-session');
+        if (d && d.latestOrderTime) this.aliSync.startDateTime = d.latestOrderTime;
+        this.aliSession = d || null;
+      } catch (e) { /* 读不到就保持"自动"，不影响同步 */ }
+    },
+    async syncAliOrders() {
+      if (this.aliSync.running) return;
+      Object.assign(this.aliSync, {
+        running: true, taskId: '', page: 0, fetched: 0, saved: 0, newCount: 0,
+        text: '正在请求 1688 订单接口…',
+      });
+      try {
+        const d = await this.api('/api/ali/orders-sync', {
+          method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+        });
+        if (!d.ok) {
+          this.aliSync.running = false;
+          this.aliSync.text = d.message || d.error || '同步未开始';
+          // 登录态问题单独提示，避免用户以为功能坏了
+          if (d.needLogin) {
+            this.$message.warning(d.message || '需要先登录 1688');
+          } else {
+            this.$message.error(d.message || d.error || '同步未开始');
+          }
+          return;
+        }
+        this.aliSync.taskId = d.taskId || '';
+        if (d.already) this.aliSync.text = '同步任务已在运行，继续展示进度…';
+        this.pollAliSync();
+      } catch (e) {
+        this.aliSync.running = false;
+        this.aliSync.text = '';
+        this.$message.error('同步失败：' + e.message);
+      }
+    },
+    pollAliSync() {
+      if (!this.aliSync.taskId) return;
+      clearTimeout(this.aliSync.timer);
+      this.aliSync.timer = setTimeout(async () => {
+        let d;
+        try {
+          d = await this.api('/api/ali/orders-sync?id=' + encodeURIComponent(this.aliSync.taskId));
+        } catch (e) {
+          this.aliSync.running = false;
+          this.aliSync.text = '进度查询失败：' + e.message;
+          return;
+        }
+        if (!d || !d.ok) {
+          this.aliSync.running = false;
+          this.aliSync.text = (d && d.error) || '任务已过期';
+          return;
+        }
+        const p = d.progress || {};
+        this.aliSync.page = p.page || 0;
+        this.aliSync.totalPages = p.totalPages || 0;
+        this.aliSync.total = p.total || 0;
+        this.aliSync.fetched = p.fetched || 0;
+        this.aliSync.saved = p.saved || 0;
+        this.aliSync.newCount = p.newCount || 0;
+        if (d.startDateTime) this.aliSync.startDateTime = d.startDateTime;
+
+        // 同一任务分两段跑：先订单（按下单时间增量），再已开票状态（按开票时间增量）
+        const invPhase = d.phase === 'invoices';
+        if (d.status === 'pending') {
+          if (invPhase) {
+            this.aliSync.text = '正在同步开票状态 · 第 ' + (p.invPage || 0) + (p.invPages ? '/' + p.invPages : '') + ' 页'
+              + (p.invFetched ? ' · 接口 ' + p.invFetched + ' 条' : '');
+          } else {
+            this.aliSync.text = p.page
+              ? '同步中 · 第 ' + p.page + (p.totalPages ? '/' + p.totalPages : '') + ' 页'
+                + (p.current ? ' · ' + p.current : '')
+              : '同步中…';
+          }
+          this.pollAliSync();
+          return;
+        }
+
+        // 结束
+        this.aliSync.running = false;
+        const invNote = (d.invoice && (d.invoice.matched || d.invoice.fetched))
+          ? ' · 开票状态：接口 ' + (d.invoice.fetched || 0) + ' 条，命中 ' + (d.invoice.matched || 0) + ' 单'
+          : '';
+        this.aliSync.text = (d.message || (d.status === 'done' ? '同步完成' : '同步失败')) + invNote;
+        if (d.status === 'done') {
+          this.$message.success((d.message || '订单同步完成') + invNote);
+          this.loadData();                     // 拉完立刻重读看板
+          this.loadAliSession();               // 起点已推进，按钮提示跟着更新
+          setTimeout(() => { this.aliSync.text = ''; }, 8000);
+        } else if (d.needImport) {
+          // 首次使用：库里还没有任何订单，增量起点无从谈起 → 明确引导去用「导入订单」
+          this.$message({
+            message: d.message || '首次使用需要先点「导入订单」导入一次历史订单，之后「刷新」才会增量拉取',
+            type: 'warning', duration: 10000, showClose: true,
+          });
+          setTimeout(() => { this.aliSync.text = ''; }, 15000);
+        } else {
+          if (d.needLogin) this.$message.warning(d.message || '需要先登录 1688');
+          else this.$message.error(d.message || '订单同步失败');
+          setTimeout(() => { this.aliSync.text = ''; }, 12000);
+        }
+      }, 1200);
+    },
+    async stopAliSync() {
+      if (!this.aliSync.taskId) return;
+      try {
+        await this.api('/api/ali/orders-sync-stop', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ taskId: this.aliSync.taskId }),
+        });
+        this.aliSync.text = '正在停止…';
+      } catch (e) { this.$message.error('停止失败：' + e.message); }
     },
     applyFilters() {
       this.keyword = this.draftKeyword.trim();
@@ -3080,15 +4216,31 @@ const vm = new Vue({
       } catch (e) { this.$message.error('停止失败：' + e.message); }
     },
     // ── 发送 ──
-    async sendOne(loginId) { if (this.readonly) return; await this.doSend([loginId]); },
+    async sendOne(loginId) {
+      if (this.readonly) return;
+      // 把会员名（= 1688 店铺）显示在弹框里，避免「点了哪家」记不清
+      const owner = (this.companies || []).find((c) => (c.members || []).some((x) => x.loginId === loginId));
+      const m = owner ? (owner.members || []).find((x) => x.loginId === loginId) : null;
+      const label = (m && (m.sellerLogin || m.loginId)) || loginId;
+      const titleId = await this.pickTitle({
+        desc: '给「' + label + '」发送催收消息前，先选一条发票抬头'
+          + '（话术里的 {companyName}/{taxNo}/{email} 取自这里）',
+        confirmText: '按这个抬头发送',
+      });
+      if (!titleId) return;
+      await this.doSend([loginId], titleId);
+    },
     async batchSend() {
       if (this.readonly) { this.$message.warning('只读模式下不能发送催收消息'); return; }
       if (this.selectedCount === 0) { this.$message.warning('请先勾选会员名（展开公司后可用公司/会员名复选框勾选）'); return; }
       const gap = await this.getGapHint();
-      try {
-        await this.$confirm(`确认给 ${this.selectedCount} 个会员名发送催收消息？\n每个会员名 3 条消息（模板+订单清单+提醒），金额与订单号按该会员名统计；间隔${gap}`, '确认发送', { type: 'warning' });
-      } catch (e) { return; }
-      await this.doSend(Object.keys(this.selected));
+      const titleId = await this.pickTitle({
+        desc: `将给 ${this.selectedCount} 个会员名发送催收消息：每个会员名 3 条消息（模板 + 订单清单 + 提醒），`
+          + `金额与订单号按该会员名统计；间隔 ${gap}。话术里的 {companyName}/{taxNo}/{email} 取自下面选中的抬头。`,
+        confirmText: `发送给 ${this.selectedCount} 个会员名`,
+      });
+      if (!titleId) return;
+      await this.doSend(Object.keys(this.selected), titleId);
     },
     async getGapHint() {
       try {
@@ -3103,7 +4255,7 @@ const vm = new Vue({
         return `${lo}~${hi}秒（已提前加载下一家，通常不再额外等待），预计总时长约${Math.round(this.selectedCount * perSeller / 60)}分钟`;
       } catch (e) { return '15~30秒'; }
     },
-    async doSend(ids) {
+    async doSend(ids, titleId) {
       if (!this.agent.online) {
         this.$message.info('正在启动本机助手…');
         const ok = await this.ensureAgentOnline();
@@ -3113,7 +4265,10 @@ const vm = new Vue({
         }
       }
       try {
-        const d = await this.api('/api/send', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ loginIds: ids }) });
+        const d = await this.api('/api/send', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ loginIds: ids, titleId: titleId || 0 }),
+        });
         if (d.error) { this.$message.error('启动失败: ' + d.error); return; }
         // 任务已交给本机助手去跑，勾选项的使命到此为止 → 立刻清空。
         // 原来发送完列表刷新了、顶部计数却还挂着旧数字，只有按 F5 刷新页面才归零。
@@ -3195,7 +4350,29 @@ const vm = new Vue({
       this.charts.forEach((c, i) => {
         const dom = document.getElementById('trend-chart-' + c.key);
         if (!dom) return;
+        // 容器还没撑开（切页瞬间仍是 display:none → clientWidth 0）时绝不能 init，否则 ECharts 会把
+        // 画布尺寸锁死成 0/极窄，之后只能靠 resize 救回来。用 rAF 等它宽起来（隐藏页 rAF 自动暂停，
+        // 不会空转），最多等约 5 秒；同一容器只排一个等待，避免重复排队。
+        if (dom.clientWidth < 40) {
+          this._trendRetry = this._trendRetry || {};
+          if (this._trendRetry[c.key]) return;
+          this._trendRetry[c.key] = 1;
+          let frames = 0;
+          const waitWide = () => {
+            frames++;
+            if (this.page !== 'board' || frames > 300) { delete this._trendRetry[c.key]; return; }
+            const d2 = document.getElementById('trend-chart-' + c.key);
+            if (!d2) { delete this._trendRetry[c.key]; return; }
+            if (d2.clientWidth < 40) { requestAnimationFrame(waitWide); return; }
+            delete this._trendRetry[c.key];
+            this.renderTrend();
+          };
+          requestAnimationFrame(waitWide);
+          return;
+        }
         const ch = this._charts[i] || (this._charts[i] = EC.init(dom));
+        try { ch.resize(); } catch (e) {}   // 容器宽度变了（切页 / 折叠菜单 / 窗口缩放）先让实例跟上
+        this.watchTrendBox(dom);            // 之后容器再变形（菜单收起动画、窗口缩放）由 ResizeObserver 兜住
         const days = this.trendDays;
         ch.off('click');
         ch.on('click', (p) => {
@@ -3231,6 +4408,24 @@ const vm = new Vue({
         }, true);
       });
     },
+    /**
+     * 给趋势图容器挂 ResizeObserver：容器尺寸一变就同步 resize 实例。
+     * 覆盖「切页 / 收起菜单（180ms 过渡）/ 窗口缩放 / 表格挤动」等所有情况，
+     * 否则过渡结束后画布还停在中间宽度，柱子会挤在左边、日期标签叠成一团。
+     */
+    watchTrendBox(dom) {
+      if (dom.__tRo || typeof ResizeObserver === 'undefined') return;
+      let raf = 0;
+      dom.__tRo = new ResizeObserver(() => {
+        if (raf) return;
+        raf = requestAnimationFrame(() => {
+          raf = 0;
+          const inst = (this._charts || []).find((c) => c && typeof c.getDom === 'function' && c.getDom() === dom);
+          if (inst) { try { inst.resize(); } catch (e) {} }
+        });
+      });
+      dom.__tRo.observe(dom);
+    },
 
     // ══════ 牵牛花：两个页面共用（登录 / 状态 / 配置） ══════
     /**
@@ -3256,16 +4451,20 @@ const vm = new Vue({
       this.rq.profit = { loading: false, rows: [], total: 0, alerts: 0, error: '' };
       this.rq.profitTrend = [];
       this.pd.rows = []; this.pd.total = 0; this.pd.page = 1;
-      this.pd.summary = null; this.pd.lastRun = null; this.pd.selected = [];
+      this.pd.summary = null; this.pd.lastRun = null; this.clearPddPicked();
       this.pd.cookie = { logined: false, loading: false, message: '' };
       // 切换账号：上一个账号的申请结果不再适用（任务仍在跑的话保留卡片，避免误以为任务被停）
       if (!this.pd.applyDialog.running) this.pd.applyDialog.visible = false;
+      this.sd.rows = []; this.sd.total = 0; this.sd.page = 1; this.sd.summary = null;
+      this.sdDC = {};
+      this.clearSdcPicked();
       this.qnhReload();
     },
-    /** 按当前页面重载（退单 / 毛利 / 拼多多 三个页面共用同一套「身份 → 数据」流程） */
+    /** 按当前页面重载（退单 / 毛利 / 拼多多 / 闪电帮帮 四个页面共用同一套「身份 → 数据」流程） */
     qnhReload() {
       // 拼多多与牵牛花是两套独立登录态，进拼多多页不该去请求牵牛花状态
       if (this.page === 'pdd') { this.loadPddStatus(); this.loadPddOrders(); return; }
+      if (this.page === 'sdc') { this.loadSdcStatus(); this.loadSdcOrders(); return; }
       this.loadRefundStatus();
       if (this.page === 'refund') { this.loadRefunds(); this.loadRefundTrend(); }
       if (this.page === 'profit') { this.loadProfit(); }
@@ -3632,7 +4831,7 @@ const vm = new Vue({
         };
         this.pd.summary = d.summary || null;
         this.pd.orderSync = d.orderSync || null;
-        this.pd.orderMonths = Number(d.orderMonths) > 0 ? Number(d.orderMonths) : 3;
+        this.pd.maxPages = Number(d.maxPages) > 0 ? Number(d.maxPages) : 300;
         if (Array.isArray(d.sessions)) this.pddSessions = d.sessions.map(Number);
         if (Array.isArray(d.users)) {
           this.pddUsers = d.users;
@@ -3663,7 +4862,7 @@ const vm = new Vue({
         this.pd.loading = false;
       }
     },
-    applyPddFilter() { this.pd.page = 1; this.loadPddOrders(); },
+    applyPddFilter() { this.pd.page = 1; this.clearPddPicked(); this.loadPddOrders(); },
     // 表头排序（下单时间 / 开票金额）：点一次降序、再点升序、第三次取消 → 回落到默认（时间倒序）
     onPddSortChange({ prop, order }) {
       const key = prop === 'invoiceAmount' ? 'amount' : 'time';
@@ -3686,6 +4885,7 @@ const vm = new Vue({
     resetPddFilter() {
       this.pd.filter = { status: '', keyword: '', sort: 'time_desc' };
       this.pd.page = 1;
+      this.clearPddPicked();
       // 排序箭头一起复位；el-table.sort() 会触发 sort-change，用标记跳过它自带的那次加载
       const t = this.$refs.pddTable;
       if (t && typeof t.sort === 'function') {
@@ -3729,15 +4929,15 @@ const vm = new Vue({
     async syncPddOrders() {
       if (this.pd.orderSyncing) { this.$message.info('正在同步中，请看下方进度'); return; }
       if (this.qnhNeedPick) { this.$message.warning('请先选择要以哪个账号的身份同步'); return; }
-      // 首次全量有时间窗口，先讲清楚范围再动手（增量不限范围，不用打扰）
+      // 首次全量不再限时间，但要讲清「会翻很久」，让用户有预期
       const first = !(this.pd.orderSync && this.pd.orderSync.synced);
       if (first) {
         try {
           await this.$confirm(
-            `首次同步只拉取最近 ${this.pd.orderMonths} 个月的订单，更早的订单不会拉取、也不会出现在列表里。`
-            + `\n\n之后再点「获取订单数据」为增量拉取（只补新订单，不受时间范围限制）。`
-            + `\n\n范围可在「系统管理 → 拼多多订单数据 · 拉取范围」调整。`,
-            '首次同步 · 拉取范围',
+            `首次同步为全量拉取：不限时间范围，会一直往前翻到空页为止，账号历史订单越多耗时越长。`
+            + `\n\n翻页上限 ${this.pd.maxPages} 页（发票一页 20 条 / 订单一页 50 条），撞上限时会明确提示。`
+            + `\n\n之后再点「获取订单数据」为增量拉取（只补新订单，追平即停）。`,
+            '首次同步 · 全量拉取',
             { confirmButtonText: '开始拉取', cancelButtonText: '取消', type: 'info' }
           );
         } catch (e) { return; }
@@ -3755,7 +4955,7 @@ const vm = new Vue({
         this.pd.orderTaskId = d.taskId || '';
         this.pd.applyDialog = {
           visible: true, running: true, kind: 'orders', status: '', message: '',
-          full: !!d.full, months: Number(d.months) || this.pd.orderMonths,
+          full: !!d.full,
           progress: { page: 0, fetched: 0, rows: 0, saved: 0, newCount: 0 }, log: [],
           startedAt: Date.now(),
         };
@@ -3789,7 +4989,6 @@ const vm = new Vue({
           d = null;
         }
         if (d && !d.error) {
-          if (d.months) this.pd.applyDialog.months = d.months;
           if (d.full !== undefined) this.pd.applyDialog.full = !!d.full;
           if (d.progress) this.pd.applyDialog.progress = d.progress;
           if (Array.isArray(d.progressLog)) this.pd.applyDialog.log = d.progressLog;
@@ -3827,7 +5026,26 @@ const vm = new Vue({
     },
 
     // ── 拼多多「申请发票」（勾选批量 / 行内单个，同一入口） ──
-    onPddSelChange(rows) { this.pd.selected = rows || []; },
+    /**
+     * 拼多多列表多选：跨页累计，翻页/排序不清空（用户要求「第一页全选 → 翻第二页接着选 → 一起批量操作」）。
+     * Element 的 selection-change 只给「当前页选中的行」，所以这里做增量合并：
+     *   当前页里没被选中的 → 从 picked 摘掉；当前页选中的 → 写入 picked；其余页的一律保留。
+     */
+    onPddSelChange(rows) {
+      const picked = this.pd.picked || (this.pd.picked = {});
+      const pageRows = this.pd.rows || [];
+      const selSns = new Set((rows || []).map((r) => r && r.orderSn).filter(Boolean));
+      pageRows.forEach((r) => { if (r && r.orderSn && !selSns.has(r.orderSn)) delete picked[r.orderSn]; });
+      (rows || []).forEach((r) => { if (r && r.orderSn) picked[r.orderSn] = r; });
+      this.pd.selected = Object.keys(picked).map((k) => picked[k]);
+    },
+    /** 清空拼多多跨页选中（换筛选条件/换账号/批量任务跑完后调用，避免「看不见的行还选着」） */
+    clearPddPicked() {
+      this.pd.picked = {};
+      this.pd.selected = [];
+      const t = this.$refs.pddTable;
+      if (t && typeof t.clearSelection === 'function') t.clearSelection();
+    },
     applyPddBatch() { this.applyPddRows(this.pd.selected); },
     async applyPddRows(rows) {
       const list = (rows || []).filter((r) => r && r.applyable);
@@ -3872,6 +5090,7 @@ const vm = new Vue({
           this.$message.warning('有 ' + d.skipped.length + ' 笔订单不可申请（非该账号或非待申请状态），已跳过');
         }
         this.$message.info(d.message || '已下发申请任务');
+        this.clearPddPicked();   // 已提交的单不必再勾着（避免重复提交同一批）
         await this.openPddTaskCard('apply', d.taskId, d.total || list.length);
       } catch (e) {
         this.$message.error('申请失败：' + e.message);
@@ -3883,28 +5102,33 @@ const vm = new Vue({
 
     // ── 拼多多「催商家开票」（商家处理中订单；行内单个 / 勾选批量，同一入口） ──
     sendPddBatch() { this.sendPddMsgRows(this.pd.selected); },
+    /** 打开拼多多订单页：已完成但「未同步开票」的单，平台已关开票入口、又没有商家会话 ID，
+     *  只能在平台页面里点「联系商家」走线下开票（不伪造状态、不发注定失败的消息） */
+    openPddOrder(row) {
+      const sn = row && row.orderSn;
+      if (!sn) { this.$message.warning('缺少订单号'); return; }
+      window.open('https://mobile.yangkeduo.com/order.html?order_sn=' + encodeURIComponent(sn),
+        '_blank', 'noopener');
+    },
     async sendPddMsgRows(rows) {
       const list = (rows || []).filter((r) => r && r.chatable);
       if (!list.length) { this.$message.warning('请先勾选「商家处理中」的订单'); return; }
       if (this.pd.applying) return;
       if (this.qnhNeedPick) { this.$message.warning('请先选择要以哪个账号的身份操作'); return; }
-      const preview = this.esc(this.pddMsgPreview);
-      try {
-        await this.$confirm(
-          '将给 <b>' + list.length + '</b> 个商家发送催收消息'
-          + '（同一商家的多笔订单会自动合并成一条，避免重复打扰）。实际发送内容：'
-          + '<div style="margin-top:8px;padding:8px 10px;background:#f6f7f9;border-radius:6px;'
-          + 'white-space:pre-wrap;word-break:break-all;font-size:12px;line-height:1.7">' + preview + '</div>',
-          '发送催收消息确认',
-          { dangerouslyUseHTMLString: true, confirmButtonText: '发送', cancelButtonText: '再想想', type: 'warning' }
-        );
-      } catch (e) { return; }
+      // 先选抬头：话术里的 {companyName}/{taxNo}/{email} 由选中的那条渲染，预览实时跟着变
+      const titleId = await this.pickTitle({
+        desc: '将给 ' + list.length + ' 个商家发送催收消息'
+          + '（同一商家的多笔订单会自动合并成一条，避免重复打扰）。下面话术按选中的抬头实时渲染：',
+        previewTpl: String(this.cfg.pddChat || ''),
+        confirmText: '发送给 ' + list.length + ' 个商家',
+      });
+      if (!titleId) return;
 
       this.pd.applying = true;
       try {
         let d = await this.pddApi('/api/pdd/send', {
           method: 'POST', headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ orderSns: list.map((r) => r.orderSn) }),
+          body: JSON.stringify({ orderSns: list.map((r) => r.orderSn), titleId }),
         });
         // 助手未连接 → 自动唤起（xsh://run 深链 + 等待重连），成功后重试一次
         if (d.needAgent) {
@@ -3917,7 +5141,7 @@ const vm = new Vue({
           this.$message.success('助手已连接，继续发送');
           d = await this.pddApi('/api/pdd/send', {
             method: 'POST', headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ orderSns: list.map((r) => r.orderSn) }),
+            body: JSON.stringify({ orderSns: list.map((r) => r.orderSn), titleId }),
           });
         }
         if (d.error || !d.ok) {
@@ -3932,6 +5156,7 @@ const vm = new Vue({
           this.$message.warning('有 ' + d.skipped.length + ' 笔订单不可催收（非该账号或非商家处理中），已跳过');
         }
         this.$message.info(d.message || '已下发催收任务');
+        this.clearPddPicked();   // 已提交的单不必再勾着（避免重复发送同一批）
         await this.openPddTaskCard('send', d.taskId, d.total || list.length);
       } catch (e) {
         this.$message.error('发送失败：' + e.message);
@@ -4122,6 +5347,7 @@ const vm = new Vue({
         this.rq.profit.rows = d.rows || [];
         this.rq.profit.total = d.total || 0;
         this.rq.profit.alerts = d.alerts || 0;
+        this.rq.profit.summary = d.summary || {};
         this.rq.profit.error = '';
       } catch (e) {
         this.rq.profit.error = '毛利数据加载失败：' + e.message;
@@ -4248,6 +5474,423 @@ const vm = new Vue({
     },
     refundLogCount(type) {
       return (this.rq.log.rows || []).filter((r) => r.logType === type).length;
+    },
+
+    // ══════ 闪电帮帮发票（登录 / 拉订单 / 按店铺批量催收；全部经本机助手） ══════
+    sdcApi(path, opts) { return this.qnhApi(path, opts); },
+
+    async loadSdcStatus() {
+      if (this.qnhNeedPick) return;
+      try {
+        const d = await this.sdcApi('/api/sdc/status');
+        if (d.error) { this.$message.error(d.error); return; }
+        const l = d.login || {};
+        this.sd.login = {
+          logined: !!l.logined,
+          accountName: l.accountName || (l.subUserId ? ('闪电帮帮用户 ' + l.subUserId) : ''),
+          subUserId: l.subUserId || '',
+          lastSyncAt: l.lastSyncAt || null,
+          writtenAt: l.writtenAt || null,
+        };
+        this.sd.summary = d.summary || null;
+        this.sd.agent = d.agent || this.sd.agent;
+        if (Array.isArray(d.sessions)) this.sd.sessions = d.sessions.map(Number);
+        if (Array.isArray(d.users)) {
+          this.sd.users = d.users;
+          if (!this.qnhUsers.length) this.qnhUsers = d.users;
+        }
+      } catch (e) {
+        this.$message.error('获取闪电帮帮状态失败：' + e.message);
+      }
+    },
+
+    /** 店铺维度主表（一行 = 一家店铺） */
+    async loadSdcOrders() {
+      if (this.qnhNeedPick) return;
+      this.sd.loading = true;
+      try {
+        const q = new URLSearchParams();
+        const f = this.sd.filter || {};
+        if (f.stage !== '') q.set('stage', f.stage);
+        if (f.sent) q.set('sent', f.sent);
+        if (f.invoice) q.set('invoice', f.invoice);
+        if (f.keyword) q.set('keyword', f.keyword);
+        if (f.sort) q.set('sort', f.sort);
+        q.set('page', this.sd.page);
+        q.set('size', this.sd.size);
+        const d = await this.sdcApi('/api/sdc/shops?' + q.toString());
+        if (d.error) { this.$message.error(d.error); return; }
+        this.sd.rows = d.rows || [];
+        this.sd.total = d.total || 0;
+        this.sd.amount = d.amount || 0;
+      } catch (e) {
+        this.$message.error('加载闪电帮帮店铺失败：' + e.message);
+      } finally {
+        this.sd.loading = false;
+      }
+    },
+
+    /** 展开某家店：拉它的订单明细 + 历史催收记录（只拉一次，之后走缓存） */
+    async onSdcExpandChange(row, expanded) {
+      if (!row || !expanded) return;
+      const k = row.key;
+      if (this.sdDC[k]) return;
+      this.$set(this.sdDC, k, { loading: true, orders: [], logs: [], error: '' });
+      try {
+        const q = new URLSearchParams();
+        const f = this.sd.filter || {};
+        if (f.stage !== '') q.set('stage', f.stage);
+        if (f.keyword) q.set('keyword', f.keyword);
+        q.set('shopId', row.shop_id || '__none__');   // 空串那组也要能展开看订单
+        q.set('size', '200');
+        const d = await this.sdcApi('/api/sdc/orders?' + q.toString());
+        if (d.error) throw new Error(d.error);
+        const hq = new URLSearchParams({ limit: '20' });
+        if (row.shop_id) hq.set('shopId', row.shop_id);
+        const h = row.shop_id ? await this.sdcApi('/api/sdc/msg-history?' + hq.toString()) : { rows: [] };
+        this.$set(this.sdDC, k, {
+          loading: false, orders: d.rows || [], logs: (h && h.rows) || [], error: '',
+        });
+      } catch (e) {
+        this.$set(this.sdDC, k, { loading: false, orders: [], logs: [], error: e.message || '加载失败' });
+      }
+    },
+
+    /** 登录：把任务下发给本机助手，弹登录窗口给用户扫码/短信验证（与拼多多同一套路） */
+    async loginSdc() {
+      try {
+        const d = await this.sdcApi('/api/sdc/login', {
+          method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+        });
+        if (d.error) { this.$message.error(d.error); return; }
+        if (d.ok === false) { this.$message({ message: d.message || '登录失败', type: 'warning', duration: 6000 }); return; }
+        this.$message.info(d.message || '已在本机助手里打开登录窗口');
+        this.pollSdcLogin(d.taskId);
+      } catch (e) {
+        this.$message.error('下发登录任务失败：' + e.message);
+      }
+    },
+
+    pollSdcLogin(taskId) {
+      const timer = setInterval(async () => {
+        try {
+          const d = await this.sdcApi('/api/sdc/login-status?taskId=' + encodeURIComponent(taskId));
+          if (d.error) { clearInterval(timer); return; }
+          if (d.status === 'pending') return;
+          clearInterval(timer);
+          if (d.ok) {
+            this.$message.success('闪电帮帮登录成功：' + (d.accountName || ''));
+            await this.loadSdcStatus();
+          } else {
+            this.$message({ message: '登录未完成：' + (d.message || '未知原因'), type: 'warning', duration: 6000 });
+          }
+        } catch (e) { clearInterval(timer); }
+      }, 2000);
+    },
+
+    async logoutSdc() {
+      try {
+        const d = await this.sdcApi('/api/sdc/logout', {
+          method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+        });
+        this.$message({ message: d.message || '已退出', duration: 6000 });
+        this.clearSdcPicked();
+        await this.loadSdcStatus();
+        await this.loadSdcOrders();
+      } catch (e) {
+        this.$message.error('退出闪电帮帮失败：' + e.message);
+      }
+    },
+
+    /** 刷新订单数据：助手在真实页面里翻页拉取，这里只负责开卡片并轮询 */
+    async syncSdcOrders() {
+      this.sd.syncing = true;
+      try {
+        const d = await this.sdcApi('/api/sdc/sync', {
+          method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+        });
+        if (d.error) { this.$message.error(d.error); return; }
+        if (d.ok === false) {
+          this.$message({ message: d.message || '下单取数失败', type: 'warning', duration: 6000 });
+          return;
+        }
+        this.sd.task = {
+          visible: true, taskId: d.taskId, kind: 'sync', status: 'pending', running: true,
+          message: d.message || '', progress: '', log: [], startedAt: Date.now(), finishedAt: 0,
+          total: 0, results: [], done: 0, current: '', okCount: 0, failCount: 0,
+        };
+        this.pollSdcTask(d.taskId, 'sync');
+      } catch (e) {
+        this.$message.error('下发取数任务失败：' + e.message);
+      } finally {
+        this.sd.syncing = false;
+      }
+    },
+
+    pollSdcTask(taskId, kind) {
+      const timer = setInterval(async () => {
+        try {
+          const d = await this.sdcApi('/api/sdc/task-status?taskId=' + encodeURIComponent(taskId));
+          if (d.error) { clearInterval(timer); return; }
+          const t = this.sd.task;
+          if (!t.visible || t.taskId !== taskId) { clearInterval(timer); return; }
+          t.kind = d.kind || kind;
+          t.status = d.status;
+          t.message = d.message || t.message;
+          t.progress = d.progress || '';
+          t.total = d.total || 0;
+          t.results = d.results || [];
+          t.done = d.done || (d.results || []).length;      // 已处理家数（助手逐店回执）
+          t.current = d.current || '';                      // 当前在处理的那家店
+          t.okCount = d.okCount || 0;
+          t.failCount = d.failCount || 0;
+          t.running = d.status === 'pending';
+          // 助手侧的日志（打开了哪个会话、点的按钮还是回车、有没有报错）由服务端回传，
+          // 以前这里没有接，页面上只剩「已处理 x/y 家」，排查全靠猜。
+          const remote = Array.isArray(d.log) ? d.log : [];
+          if (remote.length) {
+            const seen = t.log.length ? t.log[t.log.length - 1].text : '';
+            let started = false;
+            for (const l of remote) {
+              if (!started) { if (l.text === seen) started = true; continue; }
+              t.log.push({ t: l.t || stamp, text: l.text });
+            }
+          }
+          const stamp = new Date().toISOString().slice(11, 19);
+          // 「已处理 x/y 家」这类本地拼的进度行不再需要：上面的任务文案已经带 N/M 家 + 当前店名，
+          // 重复显示只会让日志区和进度条互相打架。
+          if (d.kind !== 'send' && d.progress) {
+            const last = t.log[t.log.length - 1];
+            if (!last || last.text !== d.progress) t.log.push({ t: stamp, text: d.progress });
+          }
+          if (d.status !== 'pending') {
+            clearInterval(timer);
+            t.running = false;
+            t.finishedAt = Date.now();        // taskVisible 据此再留 8 秒后自动收起（1688 同款行为）
+            t.done = (d.results || []).length;
+            t.log.push({ t: stamp, text: (d.ok ? '✓ ' : '✗ ') + (d.message || (d.ok ? '任务完成' : '任务失败')) });
+            this.sdDC = {};   // 店铺行里的订单/催收记录可能已变，展开时重新拉
+            this.clearSdcPicked();
+            await this.loadSdcStatus();
+            await this.loadSdcOrders();
+            if (d.loginish) this.$message({ message: '闪电帮帮登录态已失效，请重新登录', type: 'warning', duration: 6000 });
+          }
+        } catch (e) { clearInterval(timer); }
+      }, 2500);
+    },
+
+    async stopSdcTask() {
+      try {
+        await this.sdcApi('/api/sdc/task-stop', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ taskId: this.sd.task.taskId }),
+        });
+        this.$message.info('已请求停止：当前这一步处理完就停');
+      } catch (e) { /* 忽略 */ }
+    },
+
+    applySdcFilter() { this.sd.page = 1; this.clearSdcPicked(); this.loadSdcOrders(); },
+    resetSdcFilter() {
+      this.sd.filter = { stage: '', sent: '', invoice: '', keyword: '', sort: 'amount_desc' };
+      this.sd.page = 1;
+      this.clearSdcPicked();
+      this.loadSdcOrders();
+    },
+    onSdcPage(p) { this.sd.page = p; this.loadSdcOrders(); },
+    onSdcSize(s) { this.sd.size = s; this.sd.page = 1; this.loadSdcOrders(); },
+    onSdcSortChange({ prop, order }) {
+      // 店铺树的可排序列 → SHOP_SORTS 的 key（不认识的列回到默认：按可开票金额倒序）
+      const map = {
+        payable_amount: order === 'ascending' ? 'amount_asc' : 'amount_desc',
+        send_count: order === 'ascending' ? 'sent_asc' : 'sent_desc',
+        last_pay_time: order === 'ascending' ? 'time_asc' : 'time_desc',
+      };
+      this.sd.filter.sort = (order && map[prop]) || 'amount_desc';
+      this.sd.page = 1;
+      this.loadSdcOrders();
+    },
+    /** 清空已勾选的店铺（换筛选 / 翻页重置 / 任务结束时用） */
+    clearSdcPicked() {
+      this.sd.picked = {};
+      this.sd.selected = [];
+    },
+    /** 展开行里「这家店催收成功/失败次数」（必须放 methods：带参数调用，computed 会取成值） */
+    sdcShopOk(k) { return ((this.sdDC[k] || {}).logs || []).filter((l) => l.ok).length; },
+    sdcShopFail(k) { return ((this.sdDC[k] || {}).logs || []).filter((l) => !l.ok).length; },
+    /** 档位标签配色：可申请=警告色、已申请=灰、不支持线上=红、已开票=绿 */
+    sdcStageTag(stage) {
+      const s = Number(stage);
+      if (s === 1) return 'warning';
+      if (s === 3) return 'danger';
+      if (s === 4) return 'success';
+      return 'info';
+    },
+    toggleSdcShop(row, v) {
+      // 没有店铺 ID 的「无店铺组」换不到客服会话，勾了也不能算（UI 上是禁用态，这里再兜一层）
+      if (!row || !row.chatable) return;
+      const picked = Object.assign({}, this.sd.picked);
+      if (v) picked[row.key] = row; else delete picked[row.key];
+      this.sd.picked = picked;
+      this.sd.selected = Object.values(picked);
+    },
+
+    /**
+     * 点「发送催收消息」：先弹框选抬头（一人可配多个抬头），确认后再下发。
+     * 没勾店铺 = 对库里所有店铺的「已申请 + 不支持线上开票」订单批量催。
+     */
+    async openSdcSend(rows) {
+      const picked = Array.isArray(rows) ? rows : (this.sd.selected || []);
+      const ids = picked.map((r) => r.shop_id).filter(Boolean);
+      const titleId = await this.pickTitle({
+        desc: ids.length
+          ? `将向勾选的 ${ids.length} 家店铺发送催收消息（同一家店合并成一条）。`
+            + '话术里的 {companyName}/{taxNo}/{email} 取自下面选中的抬头：'
+          : '没有勾选店铺：将对库里所有店铺的「已申请开票 + 不支持线上开票」订单批量催收。'
+            + '话术里的 {companyName}/{taxNo}/{email} 取自下面选中的抬头：',
+      });
+      if (!titleId) return;
+      await this.doSendSdc(ids, titleId);
+    },
+
+    async doSendSdc(shopIds, titleId) {
+      this.sd.sending = true;
+      try {
+        const d = await this.sdcApi('/api/sdc/send', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ shopIds, titleId: titleId || 0 }),
+        });
+        if (d.error) { this.$message.error(d.error); return; }
+        if (d.ok === false) { this.$message({ message: d.message || '下发催收任务失败', type: 'warning', duration: 6000 }); return; }
+        this.sd.task = {
+          visible: true, taskId: d.taskId, kind: 'send', status: 'pending', running: true,
+          message: d.message || '', progress: '', log: [], startedAt: Date.now(), finishedAt: 0,
+          total: d.total || 0, results: [], done: 0, current: '', okCount: 0, failCount: 0,
+        };
+        this.pollSdcTask(d.taskId, 'send');
+      } catch (e) {
+        this.$message.error('下发催收任务失败：' + e.message);
+      } finally {
+        this.sd.sending = false;
+      }
+    },
+
+    // ══════ 发送前选开票抬头（1688 / 拼多多 / 闪电帮帮 三处共用同一个弹框） ══════
+    /**
+     * 弹框选一条抬头：resolve 出抬头 id；用户取消 → resolve(0)，调用方据此 return。
+     * @param {{desc?:string, previewTpl?:string, confirmText?:string, title?:string}} opts
+     * @returns {Promise<number>}
+     */
+    pickTitle(opts) {
+      const o = opts || {};
+      return new Promise((resolve) => {
+        this._tpResolve = resolve;
+        this.tp.title = o.title || '选择开票抬头';
+        this.tp.desc = o.desc || '';
+        this.tp.previewTpl = o.previewTpl || '';
+        this.tp.confirmText = o.confirmText || '按这个抬头发送';
+        this.tp.rows = [];
+        this.tp.titleId = 0;
+        this.tp.sending = false;
+        this.tp.visible = true;
+        this.loadPickTitles();
+      });
+    },
+    async loadPickTitles() {
+      this.tp.loading = true;
+      try {
+        const d = await this.sdcApi('/api/sdc/titles');
+        if (d && d.error) { this.$message.error(d.error); this.tp.rows = []; return; }
+        this.tp.rows = (d && d.rows) || [];
+        // 默认选中「默认抬头」，没有默认就选第一条：避免用户以为已选中、点确认才发现没选
+        const def = this.tp.rows.find((t) => t.isDefault) || this.tp.rows[0];
+        this.tp.titleId = def ? def.id : 0;
+      } catch (e) {
+        this.tp.rows = [];
+        this.$message.error('加载抬头失败：' + e.message);
+      } finally { this.tp.loading = false; }
+    },
+    confirmPickTitle() {
+      const id = Number(this.tp.titleId) || 0;
+      this._tpResolveDone(id);
+      this.tp.visible = false;
+    },
+    /** 取消 / 右上角关闭：一律按「放弃发送」处理（resolve 0） */
+    cancelPickTitle() {
+      this._tpResolveDone(0);
+      if (this.tp.visible) this.tp.visible = false;
+    },
+    /** 只 resolve 一次：确认后再触发 @closed 不会把结果改写回 0 */
+    _tpResolveDone(id) {
+      const fn = this._tpResolve;
+      this._tpResolve = null;
+      if (fn) fn(id);
+    },
+
+    // ══════ 抬头配置（本账号可维护多条：抬头 / 税号 / 收票邮箱；催收时弹框选一条） ══════
+    async loadTitles() {
+      this.it.loading = true;
+      try {
+        const d = await this.sdcApi('/api/sdc/titles');
+        if (d && d.error) { this.$message.error(d.error); return; }
+        this.it.rows = (d && d.rows) || [];
+      } catch (e) {
+        this.$message.error('加载抬头失败：' + e.message);
+      } finally { this.it.loading = false; }
+    },
+    /** 传 row = 编辑；不传 = 新增（首条自动勾成默认，省得用户忘记设） */
+    openTitleForm(row) {
+      this.it.form = row
+        ? { id: row.id, title: row.title || '', taxNo: row.taxNo || '', email: row.email || '', isDefault: !!row.isDefault }
+        : { id: 0, title: '', taxNo: '', email: '', isDefault: this.it.rows.length === 0 };
+      this.it.dialog = true;
+    },
+    async saveTitle() {
+      const f = this.it.form;
+      if (!String(f.title || '').trim()) { this.$message.warning('请先填写发票抬头（公司全称）'); return; }
+      this.it.saving = true;
+      try {
+        const d = await this.sdcApi('/api/sdc/titles', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            id: Number(f.id) || 0,
+            title: f.title, taxNo: f.taxNo, email: f.email, isDefault: !!f.isDefault,
+          }),
+        });
+        if (d && d.error) { this.$message.error(d.error); return; }
+        if (d && d.ok === false) { this.$message({ message: d.message || '保存失败', type: 'warning', duration: 5000 }); return; }
+        this.it.rows = (d && d.rows) || [];
+        this.it.dialog = false;
+        this.$message.success(f.id ? '抬头已更新' : '抬头已新增');
+      } catch (e) {
+        this.$message.error('保存失败：' + e.message);
+      } finally { this.it.saving = false; }
+    },
+    async setDefaultTitle(row) {
+      if (!row || !row.id) return;
+      try {
+        const d = await this.sdcApi('/api/sdc/titles/default', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ id: row.id }),
+        });
+        if (d && d.error) { this.$message.error(d.error); return; }
+        if (d && d.ok === false) { this.$message({ message: d.message || '设置失败', type: 'warning', duration: 5000 }); return; }
+        this.it.rows = (d && d.rows) || [];
+        this.$message.success('已设为默认抬头');
+      } catch (e) { this.$message.error('设置失败：' + e.message); }
+    },
+    async delTitle(row) {
+      if (!row || !row.id) return;
+      try { await this.$confirm(`确定删除抬头「${row.title}」？`, '删除确认', { type: 'warning' }); } catch (e) { return; }
+      try {
+        const d = await this.sdcApi('/api/sdc/titles/delete', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ id: row.id }),
+        });
+        if (d && d.error) { this.$message.error(d.error); return; }
+        if (d && d.ok === false) { this.$message({ message: d.message || '删除失败', type: 'warning', duration: 5000 }); return; }
+        this.it.rows = (d && d.rows) || [];
+        this.$message.success('已删除');
+      } catch (e) { this.$message.error('删除失败：' + e.message); }
     },
 
     // ══════ 税名核对（所有人可用；普通用户只见自己发票里的销方，映射全平台共享） ══════
@@ -4463,8 +6106,8 @@ const vm = new Vue({
           // 拼多多话术：同样做字段级回退，避免把空值存回去
           pddChat: (typeof pm.chat === 'string' && pm.chat.trim()) ? pm.chat : (dpm.chat || this.defaultPddChat),
           pddGapSec: Math.max(2, Math.round((Number(pm.gapMs) || Number(dpm.gapMs) || 4000) / 1000)),
-          // 订单同步：首次全量回溯月数（空/非法 → 回退 3）
-          pddOrderMonths: Math.min(36, Math.max(1, Number(rt.pddOrdersFullMonths) || 3)),
+          // 拼多多翻页上限（发票刷新与订单同步共用；空/非法 → 回退 300）
+          pddMaxPages: Math.min(2000, Math.max(20, Number(rt.pddMaxPages) || 300)),
           // 「提前加载下一家会话」：缺省 true（没配过就是开）
           prefetch: String(rt.prefetchNextSeller) !== 'false',
           // 助手版本治理：最低要求留空=跟随服务端；宽限天数默认 3 天
@@ -4495,8 +6138,8 @@ const vm = new Vue({
           runtime: {
             sendGapMinSec: Number(this.cfg.gapMin) || 15,
             sendGapMaxSec: Number(this.cfg.gapMax) || 30,
-            // 拼多多「获取订单数据」首次全量的回溯月数（保存后下次同步即生效，无需重启）
-            pddOrdersFullMonths: Math.min(36, Math.max(1, Number(this.cfg.pddOrderMonths) || 3)),
+            // 拼多多翻页上限（发票刷新与订单同步共用，保存后下次同步即生效，无需重启）
+            pddMaxPages: Math.min(2000, Math.max(20, Number(this.cfg.pddMaxPages) || 300)),
             // 「提前加载下一家会话」开关（下次发送任务生效，无需重启）
             prefetchNextSeller: this.cfg.prefetch !== false,
             // 助手版本治理：最低要求留空=跟随服务端版本；宽限天数 0~30；外部直链兜底
@@ -4583,9 +6226,16 @@ const vm = new Vue({
         if (d.error) { this.$message.error('创建失败: ' + d.error); this.creatingUser = false; return; }
         this.newUser = { company: '', password: '', role: 'user', taxNo: '', email: '', note: '' };
         this.createOk = true; setTimeout(() => { this.createOk = false; }, 2500);
+        this.newUserDlg = false;       // 创建成功即关弹框，列表在下方已刷新
         await this.loadUsers();
       } catch (e) { this.$message.error('创建失败: ' + e.message); }
       this.creatingUser = false;
+    },
+    /** 打开「新增用户」弹框：每次都是干净的空表单 */
+    openUserCreate() {
+      this.newUser = { company: '', password: '', role: 'user', taxNo: '', email: '', note: '' };
+      this.createOk = false;
+      this.newUserDlg = true;
     },
     viewUserData(u) { this.setTenantView(u.id, u.companyName || u.username); },
     openUserEdit(u) {
@@ -4678,7 +6328,7 @@ const vm = new Vue({
       const skip = this._opSkip;
       this._opSkip = false;              // 无论后面走哪条分支都要消费掉，避免污染下一次点击
       if (skip) return;
-      const el = e.target && e.target.closest ? e.target.closest('.el-button, button, .el-menu-item') : null;
+      const el = e.target && e.target.closest ? e.target.closest('.el-button, button, .el-menu-item, .nav-item') : null;
       if (!el) return;
       const text = String(el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 40);
       if (!text || OP_SKIP_BTN.includes(text)) return;      // 弹框的「确定/取消」这类无信息量按钮不记
@@ -4695,8 +6345,8 @@ const vm = new Vue({
         const p = new URLSearchParams({ page: this.opLog.page, size: this.opLog.size });
         if (this.opLog.username) p.set('username', this.opLog.username);
         const d = await this.api('/api/admin/op-log?' + p.toString());
-        if (d.error) { this.$message.error(d.error); this.opLog.rows = []; this.opLog.total = 0; }
-        else { this.opLog.rows = d.logs || []; this.opLog.total = d.total || 0; }
+        if (d.error) { this.$message.error(d.error); this.opLog.rows = []; this.opLog.total = 0; this.opLog.summary = {}; }
+        else { this.opLog.rows = d.logs || []; this.opLog.total = d.total || 0; this.opLog.summary = d.summary || {}; }
       } catch (e) { this.$message.error('加载操作日志失败: ' + e.message); }
       this.opLog.loading = false;
     },
@@ -4704,6 +6354,31 @@ const vm = new Vue({
       this.opLog.username = (this.opLog.draftUsername || '').trim();
       this.opLog.page = 1;
       this.loadOpLog();
+    },
+    resetOpLogFilter() {
+      this.opLog.draftUsername = '';
+      this.opLog.username = '';
+      this.opLog.page = 1;
+      this.loadOpLog();
+    },
+    /** 操作日志「模块」列：按 action 前缀归类，未知的归「其他」 */
+    opModuleText(action) {
+      const a = String(action || '');
+      if (a.startsWith('qnh.')) return '牵牛花';
+      if (a.startsWith('pdd.')) return '拼多多';
+      if (a.startsWith('agent.')) return '本机助手';
+      if (a.startsWith('import.')) return '数据导入';
+      if (a.startsWith('query.')) return '条件查询';
+      if (a.startsWith('btn.')) return '按钮点击';
+      if (a.startsWith('view.')) return '查看明细';
+      return a ? '其他' : '—';
+    },
+    opModuleType(action) {
+      const a = String(action || '');
+      if (a.startsWith('qnh.')) return 'success';
+      if (a.startsWith('pdd.')) return 'warning';
+      if (a.startsWith('agent.')) return '';
+      return 'info';
     },
     onOpLogPage(p) { this.opLog.page = p; this.loadOpLog(); },
     onOpLogSize(s) { this.opLog.size = s; this.opLog.page = 1; this.loadOpLog(); },
@@ -5025,6 +6700,7 @@ const vm = new Vue({
         const d = await this.api('/api/market?page=' + this.market.page + '&size=' + this.market.size);
         this.market.rows = d.rows || [];
         this.market.total = Number(d.total) || 0;
+        this.market.summary = d.summary || {};
         // 越界回正（例如别人撤掉发布后当前页变空）
         const pages = Math.max(1, Math.ceil(this.market.total / this.market.size));
         if (this.market.page > pages) { this.market.page = pages; return this.loadMarket(); }

@@ -69,6 +69,10 @@ const qnh = require('./lib/qnh');
 const qagent = require('./lib/qnh-agent');
 const pdd = require('./lib/pdd');
 const pddOrders = require('./lib/pdd-orders');
+const aliOrders = require('./lib/ali-orders');
+const psync = require('./lib/pdd-sync');
+const sdc = require('./lib/sdc');
+const invoiceTitles = require('./lib/invoice-titles');
 
 const PORT = Number(process.env.PORT) || 8787;
 const ROOT = __dirname;
@@ -120,6 +124,23 @@ function sendVendor(res, rel) {
   let buf;
   try { buf = fs.readFileSync(target); } catch (e) { res.writeHead(404); return res.end('not found'); }
   res.writeHead(200, { 'content-type': VENDOR_MIME[ext], 'cache-control': 'public, max-age=86400' });
+  res.end(buf);
+}
+// 品牌静态资源（logo / favicon）—— 与 vendor 一样白名单式下发，杜绝路径穿越
+const ASSETS_DIR = path.join(ROOT, 'assets');
+const ASSETS_MIME = { '.png': 'image/png', '.ico': 'image/x-icon', '.svg': 'image/svg+xml' };
+function sendAsset(req, res, rel) {
+  const target = path.normalize(path.join(ASSETS_DIR, rel));
+  if (!target.startsWith(ASSETS_DIR + path.sep)) { res.writeHead(403); return res.end('forbidden'); }
+  const ext = path.extname(target).toLowerCase();
+  if (!ASSETS_MIME[ext]) { res.writeHead(403); return res.end('forbidden'); }
+  let buf;
+  try { buf = fs.readFileSync(target); } catch (e) { res.writeHead(404); return res.end('not found'); }
+  // 协商缓存：内容变则 URL 立即生效（否则浏览器会按 max-age 把旧图标赖一周），
+  // 内容没变则回 304，不重传。品牌资源必须走这条路而不是长 max-age。
+  const etag = '"' + crypto.createHash('md5').update(buf).digest('hex') + '"';
+  if (req.headers['if-none-match'] === etag) { res.writeHead(304, { etag }); return res.end(); }
+  res.writeHead(200, { 'content-type': ASSETS_MIME[ext], 'cache-control': 'no-cache', etag });
   res.end(buf);
 }
 function redirect(res, to) {
@@ -299,6 +320,8 @@ function publicUser(u) {
     email: u.email || '',
     displayName: u.display_name || '',
     mustChangePassword: !!u.must_change_password,
+    // 服务端版本号：侧边栏品牌区展示，前端不必再为此单独请求 admin 接口
+    serverVersion: SERVER_VERSION,
     // 退单列表页权限（超级管理员始终可见，普通用户由管理员逐个开启）
     qnhRefundEnabled: u.role === 'admin' ? true : !!Number(u.qnh_refund_enabled),
     // 实时毛利监控权限（同上，独立开关）
@@ -724,6 +747,29 @@ async function buyerInfoOf(userId) {
   return { companyName: u.company_name || '', taxNo: u.tax_no || '', email: u.email || '' };
 }
 
+/**
+ * 发送时用哪条抬头：优先用户在下拉里选的那条（app_invoice_title），
+ * 没选就用默认抬头；一条都没有才回落到账号上的老字段（兼容升级前只配过一份抬头的账号）。
+ * 三个渠道（1688 / 拼多多 / 闪电帮帮）共用同一个口径，保证话术变量来源一致。
+ * @param {number} userId
+ * @param {number} [titleId] 0/缺省 = 默认抬头
+ * @returns {Promise<{companyName:string, taxNo:string, email:string, titleId:number}>}
+ */
+async function buyerOfSend(userId, titleId) {
+  // get() 传 0 时返回默认抬头（并按需从 app_user 播种），取不到才走老字段
+  const t = await invoiceTitles.get(Number(userId) || 0, Number(titleId) || 0).catch(() => null);
+  if (t) {
+    return { companyName: t.title || '', taxNo: t.taxNo || '', email: t.email || '', titleId: Number(t.id) || 0 };
+  }
+  const old = await buyerInfoOf(userId).catch(() => null);
+  return {
+    companyName: (old && old.companyName) || '',
+    taxNo: (old && old.taxNo) || '',
+    email: (old && old.email) || '',
+    titleId: 0,
+  };
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // 本机通道：连接中枢 + 设备令牌（2026-10-14 起替代「税号当配对码」）
 //   发送动作在用户本机（桌面助手/浏览器）完成；服务器只负责下发任务、记录结果、展示进度。
@@ -787,13 +833,29 @@ const OP_ACTIONS = {
     ? `拼多多批量催收失败${d.reason ? '：' + d.reason : ''}`
     : `拼多多批量催收完成（成功 ${d.okCount || 0} 个商家、失败 ${d.failCount || 0} 个）`,
   'pdd.sync': (d) => `刷新了拼多多发票状态${d.ok ? '（' + (d.total || 0) + ' 条）' : '（失败）'}`,
-  'pdd.orders.sync': (d) => `拉取了拼多多全部订单${d.full ? `（全量·最近 ${d.months || 3} 个月）` : '（增量）'}`,
+  'pdd.orders.sync': (d) => `拉取了拼多多全部订单${d.full ? '（全量）' : '（增量）'}`, 
+  'ali.orders.sync': (d) => `同步了 1688 订单${d.startDateTime ? '（起 ' + d.startDateTime + '）' : ''}`,
   'pdd.login.start': (d) => `发起了「登录拼多多」（${d.tenantId ? '用户 ' + d.tenantId : '本人'}）`,
   'pdd.login': (d) => `登录拼多多${d.ok ? '（成功）' : '（失败）'}`,
   'pdd.logout': (d) => `退出了拼多多账号`
     + (d.accountName ? `「${d.accountName}」` : '')
     + (d.pdduid ? `（ID ${d.pdduid}）` : '')
     + (d.agentCleared ? '（含本机登录态）' : '（本机助手未同步清除）'),
+  'sdc.view': () => '打开了闪电帮帮发票页',
+  'sdc.login.start': (d) => `发起了「登录闪电帮帮」（${d.tenantId ? '用户 ' + d.tenantId : '本人'}）`,
+  'sdc.login': (d) => `登录闪电帮帮${d.ok ? '（成功）' : '（失败）'}`,
+  'sdc.logout': (d) => `退出了闪电帮帮账号`
+    + (d.accountName ? `「${d.accountName}」` : '')
+    + (d.agentCleared ? '（含本机登录态）' : '（本机助手未同步清除）'),
+  'sdc.sync': (d) => d.ok === false
+    ? `拉取闪电帮帮订单失败${d.reason ? '：' + d.reason : ''}`
+    : `拉取了闪电帮帮订单（可申请 ${d.applyable || 0} 单、已申请 ${d.applied || 0} 单）`,
+  'sdc.title.save': (d) => `保存了开票抬头${d.title ? '「' + d.title + '」' : ''}`,
+  'sdc.title.delete': () => '删除了一条开票抬头',
+  'sdc.send.start': (d) => `发起了闪电帮帮批量催收（${d.total || 0} 家店铺${d.title ? '，抬头 ' + d.title : ''}）`,
+  'sdc.send': (d) => d.ok === false
+    ? `闪电帮帮批量催收失败${d.reason ? '：' + d.reason : ''}`
+    : `闪电帮帮批量催收完成（成功 ${d.okCount || 0} 家、失败 ${d.failCount || 0} 家）`,
 };
 
 // 前端下拉是「值」，日志里要显示人能看懂的「文案」，在服务端做映射，避免客户端乱传
@@ -1060,12 +1122,27 @@ const PDD_LOGIN_MIN_AGENT = '0.2.18';
 // ── 拼多多「页内操作」任务：助手加载真实页面执行（anti-content 由页面风控 SDK 生成）──
 //    kind='apply' 申请发票（开票页点提交） / kind='send' 催商家开票（聊天页发消息）
 const PDD_TASKS = new Map();                   // taskId -> ctx
+// ── 1688 订单同步任务：从「库里最近订单时间」往后翻页拉全部订单 ──
+//    与 PDD_TASKS 同构，前端轮询进度即可；不落库，进程重启后作废（订单本身已入库）
+const ALI_TASKS = new Map();                   // taskId -> ctx
+const ALI_TASK_TTL_MS = 60 * 60 * 1000;        // 完成后保留 1 小时供前端读最终状态
 const PDD_APPLY_TIMEOUT_MS = Number(process.env.PDD_APPLY_TIMEOUT_MS) || 10 * 60 * 1000;
 const PDD_APPLY_TTL_MS = PDD_APPLY_TIMEOUT_MS + 5 * 60 * 1000;
 // 支持「申请发票」的最低助手版本
 const PDD_APPLY_MIN_AGENT = '0.2.21';   // 0.2.21 起：CDP 抓包判成败 + 页面就绪再点（修「等待结果超时」）
 // 支持「催商家开票」的最低助手版本（0.2.23 起才有 pdd_send 内核）
 const PDD_SEND_MIN_AGENT = '0.2.23';
+
+// ── 闪电帮帮任务：登录 / 拉订单 / 批量催收（三项都必须在本机助手的浏览器里跑）──
+//    原因：该站点网关要 mtgsig 签名，服务器直连 403；只有页面上下文的 fetch 会自动被签名。
+const SDC_LOGINS = new Map();                  // taskId -> ctx（登录）
+const SDC_TASKS = new Map();                   // taskId -> ctx（sync 取数 / send 催收）
+const SDC_LOGIN_TIMEOUT_MS = Number(process.env.SDC_LOGIN_TIMEOUT_MS) || 5 * 60 * 1000;
+const SDC_LOGIN_TTL_MS = SDC_LOGIN_TIMEOUT_MS + 60 * 1000;
+const SDC_TASK_TIMEOUT_MS = Number(process.env.SDC_TASK_TIMEOUT_MS) || 15 * 60 * 1000;
+const SDC_TASK_TTL_MS = SDC_TASK_TIMEOUT_MS + 5 * 60 * 1000;
+// 支持闪电帮帮三项能力的最低助手版本（0.2.55 起才有 sdc_login / sdc_fetch / sdc_send 内核）
+const SDC_MIN_AGENT = '0.2.67';
 
 // ── 「清除本机登录态」──────────────────────────────────────────────
 // 看板点「退出 XX 账号」时，光删数据库里的 Cookie 不够：助手那边的登录窗口用的是
@@ -1181,6 +1258,8 @@ const qnhLoginSweeper = setInterval(() => {
   for (const [id, c] of QNH_LOGINS) if (now > c.expiresAt) QNH_LOGINS.delete(id);
   for (const [id, c] of PDD_LOGINS) if (now > c.expiresAt) PDD_LOGINS.delete(id);
   for (const [id, c] of PDD_TASKS) if (now > c.expiresAt && c.status !== 'pending') PDD_TASKS.delete(id);
+  for (const [id, c] of SDC_LOGINS) if (now > c.expiresAt) SDC_LOGINS.delete(id);
+  for (const [id, c] of SDC_TASKS) if (now > c.expiresAt && c.status !== 'pending') SDC_TASKS.delete(id);
 }, 60000);
 if (qnhLoginSweeper.unref) qnhLoginSweeper.unref();
 
@@ -1389,6 +1468,136 @@ function onPddSendDone(uid, msg) {
 }
 
 /**
+ * 助手回报「登录闪电帮帮」结果：写台账（不写 Cookie，登录态始终留在本机浏览器分区里）。
+ */
+function onSdcLoginDone(uid, msg) {
+  const ctx = SDC_LOGINS.get(String((msg && msg.taskId) || ''));
+  if (!ctx || ctx.userId !== Number(uid) || ctx.status !== 'pending') return;
+  if (!msg.ok) {
+    ctx.status = 'failed';
+    ctx.message = String(msg.error || '助手执行登录失败').slice(0, 300);
+    ctx.finishedAt = new Date();
+    logOp(Number(uid), 'sdc.login', { ok: false, tenantId: ctx.userId, reason: ctx.message });
+    return;
+  }
+  ctx.status = 'done';
+  ctx.subUserId = String(msg.subUserId || '');
+  ctx.accountName = String(msg.accountName || '');
+  ctx.finishedAt = new Date();
+  ctx.message = `登录成功${ctx.accountName ? '：' + ctx.accountName : ''}`;
+  sdc.upsertSession(ctx.userId, { subUserId: ctx.subUserId, accountName: ctx.accountName, agentVer: msg.agentVer || '', source: '本机助手' })
+    .catch((e) => console.warn(`[sdc] 登录台账写入失败：${(e && e.message) || e}`));
+  logOp(Number(uid), 'sdc.login', { ok: true, tenantId: ctx.userId, accountName: ctx.accountName });
+}
+
+/**
+ * 助手分批回传订单行：边收边入库（避免等全部拉完才写，中途失败也留住已拿到的部分）。
+ */
+function onSdcFetchPage(uid, msg) {
+  const ctx = SDC_TASKS.get(String((msg && msg.taskId) || ''));
+  if (!ctx || ctx.kind !== 'sync' || ctx.userId !== Number(uid) || ctx.status !== 'pending') return;
+  const rows = Array.isArray(msg.rows) ? msg.rows : [];
+  if (!rows.length) return;
+  ctx.received += rows.length;
+  sdc.saveOrders(ctx.userId, rows)
+    .then((r) => {
+      ctx.inserted += r.inserted; ctx.updated += r.updated; ctx.skipped += r.skipped;
+      ctx.progress = `已回传 ${ctx.received} 单（新增 ${ctx.inserted} / 更新 ${ctx.updated} / 无变化 ${ctx.skipped}）`;
+    })
+    .catch((e) => { ctx.lastError = String((e && e.message) || e).slice(0, 200); });
+}
+
+/** 助手跑完取数：收尾 + 写同步时间 + 留痕 */
+function onSdcFetchDone(uid, msg) {
+  const ctx = SDC_TASKS.get(String((msg && msg.taskId) || ''));
+  if (!ctx || ctx.kind !== 'sync' || ctx.userId !== Number(uid) || ctx.status !== 'pending') return;
+  const tally = msg.tally || {};
+  const gotAny = Object.values(tally).some((t) => t && Number(t.rows) > 0);
+  sdc.touchSync(ctx.userId).catch(() => null);
+  if (!msg.ok && !gotAny) {
+    ctx.status = 'failed';
+    ctx.message = String(msg.error || '助手拉取订单失败').slice(0, 300);
+    ctx.finishedAt = new Date();
+    logOp(Number(uid), 'sdc.sync', { ok: false, tenantId: ctx.userId, reason: ctx.message });
+    return;
+  }
+  ctx.status = 'done';
+  ctx.finishedAt = new Date();
+  ctx.tally = tally;
+  ctx.loginish = !!msg.loginish;
+  ctx.message = String(msg.error || '')
+    ? `拉取完成（部分档位失败：${String(msg.error).slice(0, 120)}）`
+    : `拉取完成：新增 ${ctx.inserted} 单、更新 ${ctx.updated} 单`;
+  logOp(Number(uid), 'sdc.sync', {
+    ok: true, tenantId: ctx.userId,
+    applyable: (tally['1'] && tally['1'].rows) || 0,
+    applied: (tally['2'] && tally['2'].rows) || 0,
+  });
+}
+
+/** 助手每处理完一家店回执一次（sdc_send_progress）：实时刷新「第 N/M 家 · 当前店名 · 成功/失败」 */
+function onSdcSendProgress(uid, msg) {
+  const ctx = SDC_TASKS.get(String((msg && msg.taskId) || ''));
+  if (!ctx || ctx.kind !== 'send' || ctx.userId !== Number(uid) || ctx.status !== 'pending') return;
+  if (Array.isArray(msg.results)) ctx.results = msg.results;
+  ctx.doneIdx = Number(msg.done) || (ctx.results || []).length;
+  ctx.current = String(msg.current || '').slice(0, 128);
+  ctx.okCount = Number(msg.okCount) || (ctx.results || []).filter((r) => r && r.ok).length;
+  ctx.failCount = Number(msg.failCount) || Math.max(0, (ctx.results || []).length - ctx.okCount);
+  ctx.progressGauged = true;   // 有了精确回执就不再从日志里猜
+}
+
+/**
+ * 兜底：从助手日志行里认「▶ 第 1/5 家：XX店（会话 xxx）」与「✓/✗ 店名：…」，
+ * 给还没升级到会报 sdc_send_progress 的助手也凑出可用的进度数字。
+ * 认不出来就什么都不做（保持上一次的值），绝不让进度倒退。
+ */
+function guessSdcProgress(ctx, text) {
+  if (ctx.progressGauged) return;
+  const head = /第\s*(\d+)\s*\/\s*(\d+)\s*家[：:]\s*([^（(]+)/.exec(text);
+  if (head) {
+    const n = Number(head[1]);
+    if (Number.isFinite(n) && n > 0) {
+      ctx.doneIdx = n;
+      ctx.current = String(head[3] || '').trim().slice(0, 128);
+    }
+    return;
+  }
+  if (/^\s*✓/.test(text)) {
+    ctx.okCount = Number(ctx.okCount || 0) + 1;
+    ctx.doneIdx = Math.min(Number(ctx.total) || 0, Number(ctx.doneIdx || 0) + 1);
+  } else if (/^\s*✗/.test(text)) {
+    ctx.failCount = Number(ctx.failCount || 0) + 1;
+    ctx.doneIdx = Math.min(Number(ctx.total) || 0, Number(ctx.doneIdx || 0) + 1);
+  }
+}
+
+/** 助手回报「闪电帮帮批量催收」结果：逐店铺落 sdc_msg_log，并按店铺回写订单的催收次数 */
+function onSdcSendDone(uid, msg) {
+  const ctx = SDC_TASKS.get(String((msg && msg.taskId) || ''));
+  if (!ctx || ctx.kind !== 'send' || ctx.userId !== Number(uid) || ctx.status !== 'pending') return;
+  const results = Array.isArray(msg.results) ? msg.results : [];
+  ctx.results = results;
+  ctx.okCount = Number(msg.okCount) || results.filter((r) => r.ok).length;
+  ctx.failCount = Number(msg.failCount) || (results.length - ctx.okCount);
+  sdc.logMsg(ctx.userId, results).catch((e) => console.warn(`[sdc] 催收日志写入失败：${(e && e.message) || e}`));
+  if (!msg.ok && !results.length) {
+    ctx.status = 'failed';
+    ctx.message = String(msg.error || '助手执行催收失败').slice(0, 300);
+    ctx.finishedAt = new Date();
+    logOp(Number(uid), 'sdc.send', { ok: false, tenantId: ctx.userId, reason: ctx.message });
+    return;
+  }
+  ctx.status = 'done';
+  ctx.finishedAt = new Date();
+  ctx.message = '催收消息发送完成：'
+    + `成功 ${ctx.okCount} 家店铺、失败 ${ctx.failCount} 家` + (msg.stopped ? '（中途停止）' : '');
+  logOp(Number(uid), 'sdc.send', {
+    ok: ctx.okCount > 0, okCount: ctx.okCount, failCount: ctx.failCount, tenantId: ctx.userId,
+  });
+}
+
+/**
  * 把任务进度推送给本机助手（供助手状态面板的实时发送面板渲染）
  * 推送失败（通道已断）无所谓：助手面板只是旁观，断线时看板仍能看到状态。
  */
@@ -1417,6 +1626,13 @@ function handleAgentMessage(uid, msg) {
   if (msg.type === 'pdd_apply_progress') { onPddApplyProgress(uid, msg); return; }
   if (msg.type === 'pdd_send_done') { onPddSendDone(uid, msg); return; }
   if (msg.type === 'pdd_send_progress') { onPddApplyProgress(uid, msg); return; }
+  // ── 闪电帮帮：登录 / 取数（分批回传）/ 批量催收 ──
+  if (msg.type === 'sdc_login_done') { onSdcLoginDone(uid, msg); return; }
+  if (msg.type === 'sdc_fetch_page') { onSdcFetchPage(uid, msg); return; }
+  if (msg.type === 'sdc_fetch_done') { onSdcFetchDone(uid, msg); return; }
+  if (msg.type === 'sdc_send_done') { onSdcSendDone(uid, msg); return; }
+  // 助手每处理完一家店回执一次：进度面板就能像 1688 那样显示「第 N/M 家 · 当前 XX店 · 成功x 失败y」
+  if (msg.type === 'sdc_send_progress') { onSdcSendProgress(uid, msg); return; }
   // 「牵牛花页内签名请求」：助手回传配送日志 / 毛利明细等接口结果
   if (msg.type === 'qnh_fetch_done') { qagent.onDone(uid, msg); return; }
   // 「清除本机登录态」：助手清掉本机浏览器分区后回执
@@ -1440,6 +1656,20 @@ function handleAgentMessage(uid, msg) {
         pctx.progressLog = pctx.progressLog || [];
         pctx.progressLog.push({ t: new Date().toISOString().slice(11, 19), text: String(msg.text || '').slice(0, 200) });
         if (pctx.progressLog.length > 300) pctx.progressLog.splice(0, pctx.progressLog.length - 300);
+      }
+      // 闪电帮帮（取数 / 催收）：助手日志必须进这里，否则页面上只看得到「已处理 x/y 家」，
+      // 助手到底有没有打开会话、点是按钮还是回车，全变成黑盒，线上无法排查。
+      const sctx = [...SDC_TASKS.values()]
+        .filter((c) => c.userId === Number(uid) && c.status === 'pending')
+        .sort((a, b) => b.createdAt - a.createdAt)[0];
+      if (sctx) {
+        const text = String(msg.text || '').slice(0, 200);
+        sctx.progressLog = sctx.progressLog || [];
+        sctx.progressLog.push({ t: new Date().toISOString().slice(11, 19), text });
+        if (sctx.progressLog.length > 300) sctx.progressLog.splice(0, sctx.progressLog.length - 300);
+        // 兜底：老版本助手不会主动报 sdc_send_progress，就从日志行里认「第 N/M 家：店名」，
+        // 否则进度数字会一直停在 0，直到最后一次回执才跳到 100%（等于没有进度）。
+        if (sctx.kind === 'send') guessSdcProgress(sctx, text);
       }
       console.log(`[agent] uid=${uid} · ${String(msg.text || '').slice(0, 200)}`);
     }
@@ -1685,7 +1915,7 @@ async function resumableTask(userId) {
  * @param {'pending'|'failed'|'both'} scope
  */
 async function resumeLoginIds(userId, taskId, scope) {
-  const rows = await db.query('SELECT id, items FROM agent_task WHERE id = ? AND user_id = ?', [taskId, userId]);
+  const rows = await db.query('SELECT id, items, title_id FROM agent_task WHERE id = ? AND user_id = ?', [taskId, userId]);
   const r = rows[0];
   if (!r) throw new Error('找不到该任务（可能不属于当前账号）');
   const sum = summarizeItems(r.items);
@@ -1699,14 +1929,19 @@ async function resumeLoginIds(userId, taskId, scope) {
     seen.add(it.loginId);
     loginIds.push(it.loginId);
   }
-  return { taskId: Number(r.id), loginIds, pending: sum.pending.length, failed: sum.failed.length };
+  return {
+    taskId: Number(r.id), loginIds, pending: sum.pending.length, failed: sum.failed.length,
+    titleId: Number(r.title_id) || 0,   // 续跑沿用原任务选的那条抬头
+  };
 }
 
 /**
  * 组装并下发一次「本机助手」发送任务
  * @param {number} userId
  * @param {string[]} loginIds 要发送的卖家内部 loginId
- * @param {{resumeOf?:number}} [opts] resumeOf=断线续跑时被接续的任务 id（仅用于审计与日志）
+ * @param {{resumeOf?:number, titleId?:number}} [opts]
+ *   resumeOf=断线续跑时被接续的任务 id（仅用于审计与日志）
+ *   titleId = 发送时选用的发票抬头（app_invoice_title.id），0/缺省=回落账号老字段
  */
 async function doClientSend(userId, loginIds, opts = {}) {
   const resumeOf = Number(opts.resumeOf) || null;
@@ -1721,7 +1956,8 @@ async function doClientSend(userId, loginIds, opts = {}) {
   // 「提前加载下一家会话」：把下一家的页面加载塞进两家之间的等待里，总时长下降但
   // 两家真实发送动作的间隔不会小于 gap。关掉则退回「先等够 gap 再加载下一家」的旧节拍。
   const prefetch = rt.prefetchNextSeller !== false;
-  const buyer = await buyerInfoOf(userId);
+  // 抬头：用户在下拉里选的那条（断线续跑沿用原任务的选择，不会中途换成默认抬头）
+  const buyer = await buyerOfSend(userId, opts.titleId);
   const runConfig = { ...config, buyerInfo: buyer };
   const data = await loadSellers(userId);
 
@@ -1760,10 +1996,11 @@ async function doClientSend(userId, loginIds, opts = {}) {
   }
 
   const created = await db.exec(
-    "INSERT INTO agent_task (user_id, status, total, items, resume_of, started_at) VALUES (?, 'running', ?, ?, ?, NOW())",
+    "INSERT INTO agent_task (user_id, status, total, items, resume_of, title_id, started_at)"
+      + " VALUES (?, 'running', ?, ?, ?, ?, NOW())",
     [userId, sellers.length, JSON.stringify(sellers.map((s) => ({
       loginId: s.loginId, company: s.company, amount: s.amount, orderNos: s.orderNos, status: 'pending',
-    }))), resumeOf]
+    }))), resumeOf, buyer.titleId || null]
   );
   const taskId = created.insertId;
 
@@ -2282,6 +2519,10 @@ const server = http.createServer(async (req, res) => {
       return sendHtml(res, 'bookmarklet.html');
     }
     if (method === 'GET' && p === '/healthz') return sendJson(res, 200, { ok: true, ts: new Date().toISOString() });
+    // 品牌图标：浏览器默认会请求 /favicon.ico，这里给真实图标而不是一条 404
+    // 直接复用桌面端那套 ICO（内含 16/20/24 的简化帧，小尺寸不糊）
+    if (method === 'GET' && p === '/favicon.ico') return sendAsset(req, res, 'app-icon-mascot.ico');
+    if (method === 'GET' && p.startsWith('/assets/')) return sendAsset(req, res, decodeURIComponent(p.slice('/assets/'.length)));
     // 前端本地依赖（免外网 CDN）：/vendor/vue.min.js、/vendor/echarts.min.js、/vendor/element-ui/*
     if (method === 'GET' && p.startsWith('/vendor/')) return sendVendor(res, decodeURIComponent(p.slice('/vendor/'.length)));
     if (method === 'GET' && (p === '/' || p === '/index.html')) {
@@ -2609,6 +2850,157 @@ const server = http.createServer(async (req, res) => {
       });
     }
 
+    // ── 1688 订单同步（mtop: OrderListDataLineService.buyerOrderList）──
+    // 「1688发票」页的刷新按钮打这里：从库里最近的订单时间起，往后翻页拉全部订单。
+    // 登录态不进数据库，只读 data/ali-cookie.txt（或环境变量 ALI_COOKIE）。
+    if (method === 'GET' && p === '/api/ali/orders-session') {
+      const st = aliOrders.sessionStatus();
+      return sendJson(res, 200, Object.assign(st, {
+        latestOrderTime: await aliOrders.latestOrderTime(tenantId).catch(() => null),
+        pageSize: aliOrders.PAGE_SIZE,
+        cookieFileHint: 'data/ali-cookie.txt',
+      }));
+    }
+    if (method === 'POST' && p === '/api/ali/orders-sync') {
+      writeGuard();
+      const b = await readBody(req).catch(() => ({}));
+      // 同一租户只允许一个同步任务在跑，避免重复翻页把接口打限流
+      const running = [...ALI_TASKS.values()].find((c) => c.userId === Number(tenantId) && c.status === 'pending');
+      if (running) {
+        return sendJson(res, 200, {
+          ok: true, pending: true, taskId: running.taskId, already: true,
+          message: '订单同步正在运行中，继续展示进度…',
+        });
+      }
+      // 允许指定起始时间；不传则由服务端取「库里最近的订单时间」
+      const forcedStart = b.startDateTime && /^\d{4}-\d{2}-\d{2}/.test(String(b.startDateTime))
+        ? String(b.startDateTime) : null;
+
+      const taskId = 'aliord-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+      const ctx = {
+        taskId, kind: 'ali-orders', userId: Number(tenantId), status: 'pending',
+        message: '', startDateTime: forcedStart, createdAt: Date.now(),
+        // withInvoices：订单拉完顺带刷「已开票」状态（默认开；传 false 可只拉订单）
+        withInvoices: b.withInvoices !== false,
+        progress: { page: 0, totalPages: 0, total: 0, fetched: 0, rows: 0, saved: 0, newCount: 0, current: '' },
+        progressLog: [], expiresAt: Date.now() + ALI_TASK_TTL_MS,
+      };
+      const pushLog = (text) => {
+        const t = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+        ctx.progressLog.push({ t, text });
+        if (ctx.progressLog.length > 300) ctx.progressLog.shift();
+      };
+      ALI_TASKS.set(taskId, ctx);
+      pushLog('开始同步 1688 订单…');
+
+      aliOrders.syncOrders({
+        userId: Number(tenantId),
+        startDateTime: forcedStart,
+        onProgress: (pr) => {
+          if (!ctx.startDateTime && pr.__start) ctx.startDateTime = pr.__start;
+          ctx.progress = Object.assign({}, ctx.progress, {
+            page: pr.page, fetched: pr.fetched, rows: pr.rows,
+            saved: pr.saved, newCount: pr.newCount, current: pr.current || '',
+            totalPages: pr.totalPages || ctx.progress.totalPages || 0,
+            total: pr.total || ctx.progress.total || 0,
+          });
+          pushLog(`第 ${pr.page}${pr.totalPages ? '/' + pr.totalPages : ''} 页：本页 ${pr.rows} 单，累计 ${pr.fetched} 单，入库 ${pr.saved}（新增 ${pr.newCount}）`);
+          if (pr.page === 1 && Array.isArray(pr.firstKeys) && pr.firstKeys.length) {
+            pushLog('首单字段：' + pr.firstKeys.slice(0, 12).join(', ') + ' …');
+          }
+        },
+        shouldStop: () => !!ctx.stopping,
+      }).then(async (out) => {
+        ctx.status = out.ok ? 'done' : 'failed';
+        ctx.message = out.message || '';
+        ctx.needLogin = !!out.needLogin;
+        ctx.needImport = !!out.needImport;
+        ctx.rawSample = out.rawSample || null;
+        if (out.startDateTime) ctx.startDateTime = out.startDateTime;
+        ctx.progress = Object.assign({}, ctx.progress, {
+          page: out.pages || 0, fetched: out.fetched || 0,
+          saved: out.saved || 0, newCount: out.newCount || 0, percent: 100,
+          total: out.total || ctx.progress.total || 0,
+        });
+        ctx.finishedAt = Date.now();
+        ctx.expiresAt = Date.now() + ALI_TASK_TTL_MS;
+        if (out.truncated) pushLog(`已到翻页上限（${out.maxPages} 页），更早的订单未拉取`);
+        pushLog((out.ok ? '✓ ' : '✗ ') + (out.message || ''));
+
+        // 订单拉完接着刷「已开票」状态（第 9 条）：共用同一条进度条，前端不用串两个任务
+        if (out.ok && ctx.withInvoices && !ctx.stopping) {
+          ctx.status = 'pending';
+          ctx.phase = 'invoices';
+          pushLog('开始同步 1688 已开票状态（按开票时间增量）…');
+          try {
+            const inv = await aliOrders.syncInvoices({
+              userId: Number(tenantId),
+              onProgress: (p) => {
+                ctx.progress.invPage = p.page;
+                ctx.progress.invPages = p.totalPages || 0;
+                ctx.progress.invFetched = p.fetched;
+                pushLog(`发票同步第 ${p.page}${p.totalPages ? '/' + p.totalPages : ''} 页：接口 ${p.fetched} 条，命中 ${p.picked} 条`);
+              },
+              shouldStop: () => !!ctx.stopping,
+            });
+            ctx.invoice = {
+              fetched: inv.fetched || 0, matched: inv.matched || 0,
+              missing: inv.missing || 0, since: inv.since || null,
+            };
+            pushLog((inv.ok ? '✓ ' : '✗ ') + (inv.message || ''));
+            if (!inv.ok) {
+              ctx.status = 'failed';
+              ctx.message = [ctx.message, inv.message].filter(Boolean).join('；');
+              ctx.needLogin = ctx.needLogin || !!inv.needLogin;
+            } else {
+              ctx.status = 'done';
+            }
+          } catch (e) {
+            pushLog('✗ 发票同步异常：' + ((e && e.message) || e));
+          }
+          ctx.finishedAt = Date.now();
+          ctx.expiresAt = Date.now() + ALI_TASK_TTL_MS;
+        }
+      }).catch((e) => {
+        ctx.status = 'failed';
+        ctx.message = (e && e.message) || String(e);
+        ctx.finishedAt = Date.now();
+        pushLog('✗ 同步异常：' + ctx.message);
+      });
+
+      const st = aliOrders.sessionStatus();
+      if (!st.configured) {
+        return sendJson(res, 200, {
+          ok: false, pending: false, needLogin: true,
+          message: '未配置 1688 登录态：接口需要真实买家登录 Cookie，请把浏览器登录 1688 后的 Cookie 保存到 data/ali-cookie.txt 再试',
+        });
+      }
+      await logOp(user, 'ali.orders.sync', { tenantId, startDateTime: forcedStart });
+      return sendJson(res, 200, {
+        ok: true, pending: true, taskId,
+        message: '已开始同步 1688 订单，进度见下方…',
+      });
+    }
+    if (method === 'GET' && p === '/api/ali/orders-sync') {
+      const id = url.searchParams.get('id');
+      const ctx = ALI_TASKS.get(String(id || ''));
+      if (!ctx) return sendJson(res, 404, { ok: false, error: '任务不存在或已过期' });
+      return sendJson(res, 200, {
+        ok: true, status: ctx.status, message: ctx.message,
+        needLogin: !!ctx.needLogin, rawSample: ctx.rawSample || null,
+        needImport: !!ctx.needImport,
+        startDateTime: ctx.startDateTime || null,
+        phase: ctx.phase || 'orders', invoice: ctx.invoice || null,
+        progress: ctx.progress, progressLog: ctx.progressLog,
+      });
+    }
+    if (method === 'POST' && p === '/api/ali/orders-sync-stop') {
+      const b = await readBody(req).catch(() => ({}));
+      const ctx = ALI_TASKS.get(String(b.taskId || ''));
+      if (ctx) { ctx.stopping = true; return sendJson(res, 200, { ok: true }); }
+      return sendJson(res, 200, { ok: false, error: '任务不存在' });
+    }
+
     // 看板数据
     if (method === 'GET' && p === '/api/data') {
       const companies = await loadCompanies(tenantId);
@@ -2787,12 +3179,12 @@ const server = http.createServer(async (req, res) => {
       const old = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
       const merged = { ...old };
       merged.runtime = { ...(old.runtime || {}), ...(config.runtime || {}) };
-      // 拼多多「首次全量」回溯月数：夹在 1~36，非法值回默认 3（改完下次同步即生效，无需重启）
-      if (config.runtime && config.runtime.pddOrdersFullMonths !== undefined) {
-        const n = Number(config.runtime.pddOrdersFullMonths);
-        merged.runtime.pddOrdersFullMonths = Number.isFinite(n) && n > 0
-          ? Math.min(pddOrders.MAX_FULL_MONTHS, Math.max(pddOrders.MIN_FULL_MONTHS, Math.round(n)))
-          : pddOrders.DEFAULT_FULL_MONTHS;
+      // 拼多多翻页上限（发票刷新与订单同步共用）：夹在 20~2000，非法值回默认 300（改完下次同步即生效）
+      if (config.runtime && config.runtime.pddMaxPages !== undefined) {
+        const n = Number(config.runtime.pddMaxPages);
+        merged.runtime.pddMaxPages = Number.isFinite(n) && n > 0
+          ? Math.min(psync.MAX_MAX_PAGES, Math.max(psync.MIN_MAX_PAGES, Math.round(n)))
+          : psync.DEFAULT_MAX_PAGES;
       }
       merged.messages = { ...(old.messages || {}), ...(config.messages || {}) };
       // 「提前加载下一家会话」开关：布尔，缺省 true（下次发送任务生效，无需重启）
@@ -3268,7 +3660,7 @@ const server = http.createServer(async (req, res) => {
       if (!agentHub.isOnline(user.id)) {
         throw new Error('本机助手未连接：请先在本机启动「催收小助手」桌面程序，再点「续跑」');
       }
-      doClientSend(tenantId, picked.loginIds, { resumeOf: picked.taskId }).catch((e) => {
+      doClientSend(tenantId, picked.loginIds, { resumeOf: picked.taskId, titleId: picked.titleId }).catch((e) => {
         const ts = taskFor(tenantId);
         ts.running = false;
         taskLog(ts, '✗ 续跑异常: ' + e.message);
@@ -3284,6 +3676,7 @@ const server = http.createServer(async (req, res) => {
       writeGuard();
       const body = await readBody(req);
       const { loginIds } = body || {};
+      const titleId = Number((body || {}).titleId) || 0;
       if (!Array.isArray(loginIds) || loginIds.length === 0) throw new Error('缺少 loginIds');
       const t = taskFor(tenantId);
       if (t.running) throw new Error('已有任务在运行中');
@@ -3296,7 +3689,7 @@ const server = http.createServer(async (req, res) => {
         throw new Error(`这台电脑上的催收小助手是 v${vchk.current}，版本过旧：发送催收消息需要 v${vchk.min} 及以上。`
           + '请先点页面右上角「下载本机助手」安装新版，新版的停止响应更快、发送也更快。');
       }
-      doClientSend(tenantId, loginIds).catch((e) => {
+      doClientSend(tenantId, loginIds, { titleId }).catch((e) => {
         const ts = taskFor(tenantId);
         ts.running = false;
         taskLog(ts, '✗ 任务异常: ' + e.message);
@@ -3611,8 +4004,8 @@ const server = http.createServer(async (req, res) => {
           cookie,
           summary: sum,
           orderSync,
-          // 「获取订单数据」首次全量的时间窗口（月），页面上的说明文案用它，改配置后刷新即变
-          orderMonths: pddOrders.getFullMonths(),
+          // 「获取订单数据」首次全量不再限时间，一直翻到空页；这里给页面用的翻页上限（系统管理可改）
+          maxPages: psync.getMaxPages(),
           statusText: pdd.STATUS_TEXT,
           isAdmin,
           tenantId: pddUid,
@@ -3672,13 +4065,10 @@ const server = http.createServer(async (req, res) => {
         // 首次（库里还没有订单列表同步过的数据）自动全量；之后默认增量
         let full = b.full === true || b.full === 'true';
         if (!(await pddOrders.hasOrderData(pddUid))) full = true;
-        // 全量只回溯最近 N 个月（系统管理可配，默认 3）；增量不受限制
-        const months = pddOrders.getFullMonths();
-        const cutoff = full ? pddOrders.cutoffOf(months).slice(0, 10) : null;
 
         const taskId = 'pddord-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
         const ctx = {
-          taskId, kind: 'orders', full, months, cutoff, userId: Number(pddUid), status: 'pending', message: '',
+          taskId, kind: 'orders', full, userId: Number(pddUid), status: 'pending', message: '',
           total: 0, results: [], okCount: 0, failCount: 0,
           progress: { page: 0, fetched: 0, rows: 0, saved: 0, newCount: 0, current: '' },
           progressLog: [], createdAt: Date.now(), expiresAt: Date.now() + 30 * 60 * 1000,
@@ -3691,13 +4081,12 @@ const server = http.createServer(async (req, res) => {
         };
         PDD_TASKS.set(taskId, ctx);
         pushLog(full
-          ? `开始全量拉取订单（只回溯最近 ${months} 个月：${cutoff} 起，更早的不拉取、不入库）…`
-          : '开始增量拉取订单（从最新往前翻，追平即停；不受时间范围限制）…');
+          ? '开始全量拉取订单（不限时间范围，一直往前翻到空页为止）…'
+          : '开始增量拉取订单（从最新往前翻，追平即停）…');
 
         pddOrders.syncOrders({
           userId: pddUid,
           full,
-          months,
           onProgress: (pr) => {
             ctx.progress = Object.assign({}, ctx.progress, pr);
             ctx.total = pr.fetched || 0;
@@ -3707,7 +4096,8 @@ const server = http.createServer(async (req, res) => {
         }).then((out) => {
           ctx.status = out.ok ? 'done' : 'failed';
           ctx.message = out.message || '';
-          ctx.reachedCutoff = !!out.reachedCutoff;
+          ctx.truncated = !!out.truncated;
+          ctx.maxPages = out.maxPages || null;
           ctx.progress = Object.assign({}, ctx.progress, {
             page: out.pages || ctx.progress.page,
             fetched: out.fetched || 0, rows: out.rows || 0,
@@ -3716,7 +4106,7 @@ const server = http.createServer(async (req, res) => {
           ctx.total = out.fetched || ctx.total;
           ctx.finishedAt = Date.now();
           ctx.expiresAt = Date.now() + PDD_APPLY_TTL_MS;
-          if (ctx.reachedCutoff) pushLog(`已到时间窗口下限（${cutoff} 之前的不再拉取）`);
+          if (ctx.truncated) pushLog(`已到翻页上限（${out.maxPages} 页），更早的订单未拉取，可在系统管理调大上限`);
           pushLog((out.ok ? '✓ ' : '✗ ') + (out.message || ''));
         }).catch((e) => {
           ctx.status = 'failed';
@@ -3725,12 +4115,12 @@ const server = http.createServer(async (req, res) => {
           pushLog('✗ 同步异常：' + ctx.message);
         });
 
-        await logOp(user, 'pdd.orders.sync', { tenantId: pddUid, full, months });
+        await logOp(user, 'pdd.orders.sync', { tenantId: pddUid, full });
         return sendJson(res, 200, {
-          ok: true, pending: true, taskId, full, months, cutoff,
+          ok: true, pending: true, taskId, full,
           message: full
-            ? `已开始全量拉取订单（只回溯最近 ${months} 个月：${cutoff} 起），进度见下方…`
-            : '已开始增量拉取订单（不受时间范围限制），进度见下方…',
+            ? '已开始全量拉取订单（不限时间范围），进度见下方…'
+            : '已开始增量拉取订单（追平即停），进度见下方…',
         });
       }
 
@@ -3892,6 +4282,7 @@ const server = http.createServer(async (req, res) => {
       if (method === 'POST' && p === '/api/pdd/send') {
         const b = await readBody(req);
         const sns = Array.isArray(b.orderSns) ? b.orderSns : [];
+        const pddTitleId = Number(b.titleId) || 0;
         if (!sns.length) return sendJson(res, 200, { ok: false, message: '请先勾选要催收的订单' });
 
         if (!(await pdd.cookieStatus(pddUid).catch(() => null) || {}).logined) {
@@ -3926,7 +4317,7 @@ const server = http.createServer(async (req, res) => {
         // 但如果模板里用了 {orderSn}，说明用户想逐单说明，就按订单逐条发。
         const cfg = loadConfig();
         const msgCfg = pdd.getPddMessageConfig(cfg);
-        const buyer = await buyerInfoOf(Number(pddUid));
+        const buyer = await buyerOfSend(Number(pddUid), pddTitleId);
         const perOrder = /\{orderSn\}/.test(msgCfg.chat);
         const items = [];
         const seenMall = new Set();
@@ -3960,12 +4351,17 @@ const server = http.createServer(async (req, res) => {
           return sendJson(res, 200, { ok: false, needAgent: true, message: '下发催收任务失败：本机助手连接已断开。' });
         }
         PDD_TASKS.set(taskId, ctx);
-        await logOp(user, 'pdd.send.start', { tenantId: pddUid, total: items.length, invalid: invalid.length });
+        await logOp(user, 'pdd.send.start', {
+          tenantId: pddUid, total: items.length, invalid: invalid.length,
+          titleId: buyer.titleId || 0, title: buyer.companyName || '',
+        });
         return sendJson(res, 200, {
           ok: true, pending: true, taskId,
           total: items.length,
           merged: orders.length - items.length,   // 同商家合并掉的单数
           skipped: invalid,
+          title: buyer.companyName || '',
+          titleId: buyer.titleId || 0,
           preview: items[0] ? items[0].content : '',
           message: `已下发催收任务（${items.length} 个商家${orders.length > items.length ? `，${orders.length - items.length} 单同商家已合并` : ''}），正在本机助手里逐条发送…`,
         });
@@ -4001,9 +4397,8 @@ const server = http.createServer(async (req, res) => {
           ok: ctx.status === 'done',
           message: ctx.message || '',
           full: !!ctx.full,
-          months: ctx.months || null,
-          cutoff: ctx.cutoff || null,
-          reachedCutoff: !!ctx.reachedCutoff,
+          maxPages: ctx.maxPages || null,
+          truncated: !!ctx.truncated,
           total: ctx.total,
           results: ctx.results,
           okCount: ctx.okCount,
@@ -4014,6 +4409,399 @@ const server = http.createServer(async (req, res) => {
       }
 
       return sendJson(res, 404, { error: '未知拼多多接口' });
+    }
+
+    // ── 闪电帮帮发票（/api/sdc/*）────────────────────────────────────
+    // ⚠ 与拼多多不同：该站点网关要 mtgsig 签名，服务器直连 403。
+    //   所以「登录 / 拉订单 / 发催收」三个动作都是：服务器下发任务 → 本机助手在真实页面里执行
+    //   → 结果回传服务器入库。服务器从不用自己的网络去碰这个站点。
+    if (p.startsWith('/api/sdc/')) {
+      const sdcUid = tenantId;   // 本块所有读写的「数据归属用户」
+
+      // 概况：登录台账 + 汇总 + 助手状态；管理员额外拿账号列表以便「代入」
+      if (method === 'GET' && p === '/api/sdc/status') {
+        const [sess, sum] = await Promise.all([
+          sdc.sessionInfo(sdcUid).catch(() => ({ logined: false })),
+          sdc.summary(sdcUid).catch(() => null),
+        ]);
+        const aUid = agentUidFor(user, sdcUid);
+        const out = {
+          logged: !!sess.logined,
+          login: sess,
+          summary: sum,
+          stageText: sdc.STAGE_TEXT,
+          agent: {
+            online: !!(aUid && agentHub.isOnline(aUid)),
+            agentVer: aUid ? (agentHub.status(aUid).agentVer || '') : '',
+            minVer: SDC_MIN_AGENT,
+            outdated: !!(aUid && agentHub.isOnline(aUid) && agentHub.status(aUid).agentVer
+              && !verGte(agentHub.status(aUid).agentVer || '', SDC_MIN_AGENT)),
+          },
+          isAdmin,
+          tenantId: sdcUid,
+        };
+        if (isAdmin) {
+          try {
+            out.sessions = await sdc.usersWithSession();
+            out.users = (await listUsers()).map((u) => ({
+              id: u.id, username: u.username, companyName: u.companyName, role: u.role,
+            }));
+          } catch (e) { /* 列表拿不到不影响主流程 */ }
+        }
+        return sendJson(res, 200, out);
+      }
+
+      if (method === 'GET' && p === '/api/sdc/orders') {
+        const q = url.searchParams;
+        const base = {
+          userId: sdcUid,
+          stage: q.get('stage') || '',
+          keyword: q.get('keyword') || '',
+          shopId: q.get('shopId') || '',
+          sent: q.get('sent') || '',
+          sort: q.get('sort') || 'time_desc',
+          page: q.get('page'),
+          size: q.get('size'),
+        };
+        const [rows, cnt] = await Promise.all([
+          sdc.list(base),
+          sdc.count(base),
+        ]);
+        return sendJson(res, 200, { rows, total: cnt.count, amount: cnt.amount, stageText: sdc.STAGE_TEXT });
+      }
+
+      // 店铺维度主表（一行 = 一家店铺）；展开行的订单明细走上面的 /api/sdc/orders?shopId=
+      if (method === 'GET' && p === '/api/sdc/shops') {
+        const q = url.searchParams;
+        const base = {
+          userId: sdcUid,
+          stage: q.get('stage') || '',
+          keyword: q.get('keyword') || '',
+          sent: q.get('sent') || '',
+          invoice: q.get('invoice') || '',
+          sort: q.get('sort') || 'amount_desc',
+          page: q.get('page'),
+          size: q.get('size'),
+        };
+        const [rows, cnt] = await Promise.all([
+          sdc.shops(base),
+          sdc.countShops(base),
+        ]);
+        return sendJson(res, 200, { rows, total: cnt.count, amount: cnt.amount });
+      }
+
+      if (method === 'GET' && p === '/api/sdc/summary') {
+        return sendJson(res, 200, await sdc.summary(sdcUid));
+      }
+
+      // ── 开票抬头（一人多条，催收前选一条）──
+      // 归属跟随当前身份：普通用户是自己的 id；超级管理员切了身份就是被切换那个账号的
+      if (method === 'GET' && p === '/api/sdc/titles') {
+        return sendJson(res, 200, { rows: await invoiceTitles.list(Number(sdcUid)) });
+      }
+      if (method === 'POST' && p === '/api/sdc/titles') {
+        writeGuard();
+        const b = await readBody(req).catch(() => ({}));
+        try {
+          const out = await invoiceTitles.save(Number(sdcUid), b);
+          await logOp(user, 'sdc.title.save', { tenantId: sdcUid, id: out.id, title: String(b.title || '').slice(0, 60) });
+          return sendJson(res, 200, { ok: true, id: out.id, rows: await invoiceTitles.list(Number(sdcUid)) });
+        } catch (e) {
+          return sendJson(res, 200, { ok: false, message: (e && e.message) || '保存失败' });
+        }
+      }
+      if (method === 'POST' && p === '/api/sdc/titles/default') {
+        writeGuard();
+        const b = await readBody(req).catch(() => ({}));
+        try {
+          await invoiceTitles.setDefault(Number(sdcUid), b.id);
+          return sendJson(res, 200, { ok: true, rows: await invoiceTitles.list(Number(sdcUid)) });
+        } catch (e) {
+          return sendJson(res, 200, { ok: false, message: (e && e.message) || '设置失败' });
+        }
+      }
+      if (method === 'POST' && p === '/api/sdc/titles/delete') {
+        writeGuard();
+        const b = await readBody(req).catch(() => ({}));
+        try {
+          await invoiceTitles.remove(Number(sdcUid), b.id);
+          await logOp(user, 'sdc.title.delete', { tenantId: sdcUid, id: Number(b.id) || 0 });
+          return sendJson(res, 200, { ok: true, rows: await invoiceTitles.list(Number(sdcUid)) });
+        } catch (e) {
+          return sendJson(res, 200, { ok: false, message: (e && e.message) || '删除失败' });
+        }
+      }
+
+      if (method === 'GET' && p === '/api/sdc/msg-history') {
+        const shopId = url.searchParams.get('shopId');
+        const rows = await sdc.msgHistory(sdcUid, Number(url.searchParams.get('limit')) || 20, shopId);
+        return sendJson(res, 200, { rows });
+      }
+
+      // 「登录闪电帮帮」：下发任务给本机助手 → 助手开窗口让用户登录 → 回传账号标识
+      if (method === 'POST' && p === '/api/sdc/login') {
+        const aUid = agentUidFor(user, sdcUid);
+        const onMyPc = aUid && Number(aUid) !== Number(sdcUid);
+        if (!aUid) {
+          return sendJson(res, 200, {
+            ok: false, needAgent: true,
+            message: '本机助手未连接：请先在电脑上启动「催收小助手」并点页面右上角「绑定本机助手」完成绑定。'
+              + '闪电帮帮登录只在本机完成，服务器不会代你登录。',
+          });
+        }
+        if (!agentVersionGate(res, aUid, '登录闪电帮帮')) return;
+        const agentVer = agentHub.status(aUid).agentVer || '';
+        if (agentVer && !verGte(agentVer, SDC_MIN_AGENT)) {
+          return sendJson(res, 200, {
+            ok: false, needAgent: true, agentOutdated: true,
+            message: `这台电脑上的催收小助手是 v${agentVer}，还不支持闪电帮帮。请下载安装 v${SDC_MIN_AGENT} 及以上版本。`,
+          });
+        }
+        const taskId = 'sdc-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+        const ctx = {
+          taskId, userId: Number(sdcUid), status: 'pending', message: '',
+          accountName: '', subUserId: '', createdAt: Date.now(),
+          expiresAt: Date.now() + SDC_LOGIN_TTL_MS,
+        };
+        const sent = agentHub.send(aUid, {
+          type: 'sdc_login',
+          taskId,
+          timeoutMs: SDC_LOGIN_TIMEOUT_MS,
+        });
+        if (!sent) {
+          return sendJson(res, 200, {
+            ok: false, needAgent: true,
+            message: '下发登录任务失败：本机助手连接已断开，请确认助手正在运行。',
+          });
+        }
+        SDC_LOGINS.set(taskId, ctx);
+        await logOp(user, 'sdc.login.start', { tenantId: sdcUid, agentUid: aUid });
+        return sendJson(res, 200, {
+          ok: true, pending: true, taskId,
+          message: (onMyPc ? '已在你本机的助手窗口里打开闪电帮帮登录（登录态记在「' + ((await tenantLabelOf(sdcUid)) || '该账号') + '」名下），'
+            : '已在该用户电脑上打开闪电帮帮登录窗口，')
+            + '请在弹出的助手窗口里完成登录（支持扫码/短信验证）。',
+        });
+      }
+
+      if (method === 'GET' && p === '/api/sdc/login-status') {
+        const ctx = SDC_LOGINS.get(String(url.searchParams.get('taskId') || ''));
+        const mine = ctx && (ctx.userId === Number(user.id) || (isAdmin && ctx.userId === Number(sdcUid)));
+        if (!mine) return sendJson(res, 404, { error: '登录任务不存在或已结束' });
+        return sendJson(res, 200, {
+          status: ctx.status,
+          ok: ctx.status === 'done',
+          message: ctx.message || '',
+          accountName: ctx.accountName || '',
+          subUserId: ctx.subUserId || '',
+        });
+      }
+
+      // 退出登录：删台账 + 让助手把本机浏览器分区一起清掉（否则下次登录会免登进旧账号）
+      if (method === 'POST' && p === '/api/sdc/logout') {
+        const info = await sdc.sessionInfo(sdcUid).catch(() => null);
+        await sdc.clearSession(sdcUid);
+        const agent = await agentLogout(agentUidFor(user, sdcUid) || sdcUid, 'sdc');
+        await logOp(user, 'sdc.logout', {
+          tenantId: sdcUid, accountName: (info && info.accountName) || '', agentCleared: !!agent.ok,
+        });
+        return sendJson(res, 200, {
+          ok: true,
+          accountName: (info && info.accountName) || '',
+          agentCleared: !!agent.ok,
+          agentOffline: !!agent.offline,
+          message: '已退出闪电帮帮账号'
+            + (info && info.accountName ? `「${info.accountName}」` : '')
+            + '。' + logoutAgentNote(agent, '闪电帮帮'),
+        });
+      }
+
+      // 「刷新订单数据」：下发任务给助手 → 助手在真实页面里翻页 fetch → 分批回传入库
+      if (method === 'POST' && p === '/api/sdc/sync') {
+        const running = [...SDC_TASKS.values()].find(
+          (c) => c.kind === 'sync' && c.userId === Number(sdcUid) && c.status === 'pending'
+        );
+        if (running) {
+          return sendJson(res, 200, {
+            ok: true, pending: true, taskId: running.taskId, already: true,
+            message: '正在拉取订单数据，继续展示进度…',
+          });
+        }
+        const sess = await sdc.sessionInfo(sdcUid).catch(() => null);
+        if (!sess || !sess.logined) {
+          return sendJson(res, 200, { ok: false, loginish: true, message: '尚未登录闪电帮帮，请先登录' });
+        }
+        const aUid = agentUidFor(user, sdcUid);
+        if (!aUid) {
+          return sendJson(res, 200, {
+            ok: false, needAgent: true,
+            message: '本机助手未连接：闪电帮帮的订单接口带风控签名，只能由助手在真实页面里拉取。',
+          });
+        }
+        if (!agentVersionGate(res, aUid, '拉取闪电帮帮订单')) return;
+        const taskId = 'sdcs-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+        const win = await sdc.syncWindow(sdcUid).catch(() => null);
+        const ctx = {
+          taskId, kind: 'sync', userId: Number(sdcUid), status: 'pending', message: '',
+          received: 0, inserted: 0, updated: 0, skipped: 0, tally: {}, progress: '', progressLog: [],
+          startMs: win ? win.startMs : 0, invoiceSinceMs: win ? win.invoiceSinceMs : 0,
+          createdAt: Date.now(), expiresAt: Date.now() + SDC_TASK_TTL_MS,
+        };
+        if (win && win.first) {
+          ctx.progressLog.push({ t: new Date().toISOString().slice(11, 19), text: '库里还没有闪电帮帮订单：首次同步拉取近一年的订单' });
+        }
+        if (win && win.invoiceFull) {
+          ctx.progressLog.push({
+            t: new Date().toISOString().slice(11, 19),
+            text: '库里还没有任何「已开票」订单：这次把开票记录全量扫一遍'
+              + '（历史单的开票时间早于增量锚点，只靠增量补不回来）',
+          });
+        }
+        const sent = agentHub.send(aUid, {
+          type: 'sdc_fetch', taskId, pageSize: 50,
+          startMs: ctx.startMs, endMs: win ? win.endMs : Date.now(), invoiceSinceMs: ctx.invoiceSinceMs,
+        });
+        if (!sent) {
+          return sendJson(res, 200, { ok: false, needAgent: true, message: '下发取数任务失败：本机助手连接已断开。' });
+        }
+        SDC_TASKS.set(taskId, ctx);
+        return sendJson(res, 200, { ok: true, pending: true, taskId, message: '已下发取数任务，正在本机助手里拉取…' });
+      }
+
+      // 「批量催收」：按店铺合并成一条消息交给助手逐店发送
+      // 口径（2026-10-29）：催的是「卡住的」两档 —— 已申请开票(2) + 不支持线上开票(3)；
+      // 标题/税号/邮箱取用户选中的抬头（不传就用默认抬头）。
+      if (method === 'POST' && p === '/api/sdc/send') {
+        const b = await readBody(req).catch(() => ({}));
+        const sns = Array.isArray(b.orderSns) ? b.orderSns.map(String).filter(Boolean) : [];
+        // 页面主表是店铺维度，勾选的单位就是店铺（旧的「勾选订单」仍然支持）
+        const shopIds = Array.isArray(b.shopIds) ? b.shopIds.map(String).filter(Boolean) : [];
+        const titleId = Number(b.titleId) || 0;
+        const sess = await sdc.sessionInfo(sdcUid).catch(() => null);
+        if (!sess || !sess.logined) {
+          return sendJson(res, 200, { ok: false, loginish: true, message: '尚未登录闪电帮帮，请先登录' });
+        }
+        const sendUid = agentUidFor(user, sdcUid);
+        if (!sendUid) {
+          return sendJson(res, 200, {
+            ok: false, needAgent: true,
+            message: '本机助手未连接：发催收消息要在本机助手里打开真实客服会话（消息签名由页面生成），请先启动并绑定助手。',
+          });
+        }
+        if (!agentVersionGate(res, sendUid, '发送催收消息')) return;
+        const agentVer = agentHub.status(sendUid).agentVer || '';
+        if (agentVer && !verGte(agentVer, SDC_MIN_AGENT)) {
+          return sendJson(res, 200, {
+            ok: false, needAgent: true, agentOutdated: true,
+            message: `这台电脑上的催收小助手是 v${agentVer}，还不支持闪电帮帮催收。请升级到 v${SDC_MIN_AGENT} 及以上。`,
+          });
+        }
+
+        const shops = await sdc.shopsToChat(sdcUid, sns, { shopIds, stages: sdc.STAGES_TO_CHAT });
+        if (!shops.length) {
+          return sendJson(res, 200, {
+            ok: false,
+            message: '没有可催收的订单：催收只针对「已申请开票」与「不支持线上开票」两档'
+              + (shopIds.length ? '（勾选的店铺在这两档下没有订单）' : '（库里暂无这两档订单，先点刷新拉取）'),
+          });
+        }
+        // 消息内容与 1688 完全同源（config.messages 那套模板：抬头/税号/邮箱/金额 + 订单清单），
+        // 只是把「1688 卖家」换成「闪电帮帮店铺」，话术不用另配一套。
+        // 抬头由用户在弹框里选（titleId），没选就用默认抬头，再没有才回落到 app_user 上的老字段。
+        const cfg = loadConfig();
+        // 抬头由用户在弹框里选（titleId），没选就用账号上的老字段——与 1688 / 拼多多同一口径
+        const buyer = await buyerOfSend(Number(sdcUid), titleId);
+        const runConfig = Object.assign({}, cfg, { buyerInfo: buyer });
+        const items = [];
+        for (const s of shops) {
+          const contents = buildMessages(
+            { loginId: s.shopId, amount: s.amount, orders: s.orders.map((o) => ({ orderId: o.orderId, amount: Number(o.amount).toFixed(2) })) },
+            runConfig
+          );
+          if (!contents.length) continue;   // 模板为空绝不发空消息
+          items.push({
+            shopId: s.shopId, shopName: s.shopName, amount: s.amount,
+            orderSns: s.orders.map((o) => o.orderId), contents,
+          });
+        }
+        if (!items.length) {
+          return sendJson(res, 200, {
+            ok: false,
+            message: '催收消息内容为空：请到「系统管理 → 消息模板」里配置模板文案（抬头/税号/邮箱/订单清单）',
+          });
+        }
+
+        const taskId = 'sdcm-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+        const ctx = {
+          taskId, kind: 'send', userId: Number(sdcUid), status: 'pending', message: '',
+          total: items.length, results: [], okCount: 0, failCount: 0,
+          doneIdx: 0, current: '',          // 当前在处理第几家 / 哪家店（进度面板要显示，像 1688 那样）
+          orderCount: items.reduce((a, it) => a + it.orderSns.length, 0),
+          title: buyer.companyName || '', taxNo: buyer.taxNo || '',
+          createdAt: Date.now(), expiresAt: Date.now() + SDC_TASK_TTL_MS,
+        };
+        const sent = agentHub.send(sendUid, {
+          type: 'sdc_send', taskId, items,
+          gapMs: 6000,   // 店铺之间的间隔，别把风控惹急
+        });
+        if (!sent) {
+          return sendJson(res, 200, { ok: false, needAgent: true, message: '下发催收任务失败：本机助手连接已断开。' });
+        }
+        SDC_TASKS.set(taskId, ctx);
+        await logOp(user, 'sdc.send.start', { tenantId: sdcUid, total: items.length, title: ctx.title });
+        return sendJson(res, 200, {
+          ok: true, pending: true, taskId,
+          total: items.length,
+          orderCount: ctx.orderCount,
+          title: ctx.title,
+          preview: items[0] ? items[0].contents[0] : '',
+          message: `已下发催收任务（${items.length} 家店铺 / 共 ${ctx.orderCount} 单，抬头：${ctx.title || '未配置'}），正在本机助手里逐条发送…`,
+        });
+      }
+
+      // 停止「取数 / 催收」任务
+      if (method === 'POST' && p === '/api/sdc/task-stop') {
+        const b = await readBody(req).catch(() => ({}));
+        const ctx = SDC_TASKS.get(String(b.taskId || ''));
+        const mine = ctx && (ctx.userId === Number(user.id) || (isAdmin && ctx.userId === Number(sdcUid)));
+        if (!mine) return sendJson(res, 404, { error: '任务不存在或已结束' });
+        if (ctx.status !== 'pending') return sendJson(res, 200, { ok: false, message: '任务已结束，无需停止' });
+        ctx.stopping = true;
+        const sent = agentHub.send(ctx.userId, { type: 'stop' });
+        return sendJson(res, 200, {
+          ok: true,
+          message: sent ? '已发送停止指令：当前这一家/这一页处理完就停' : '助手连接已断开，任务会随连接中断结束',
+        });
+      }
+
+      // 轮询「取数 / 催收」进度
+      if (method === 'GET' && p === '/api/sdc/task-status') {
+        const ctx = SDC_TASKS.get(String(url.searchParams.get('taskId') || ''));
+        const mine = ctx && (ctx.userId === Number(user.id) || (isAdmin && ctx.userId === Number(sdcUid)));
+        if (!mine) return sendJson(res, 404, { error: '任务不存在或已结束' });
+        return sendJson(res, 200, {
+          kind: ctx.kind,
+          status: ctx.status,
+          ok: ctx.status === 'done',
+          message: ctx.message || '',
+          received: ctx.received || 0,
+          inserted: ctx.inserted || 0,
+          updated: ctx.updated || 0,
+          skipped: ctx.skipped || 0,
+          tally: ctx.tally || {},
+          progress: ctx.progress || '',
+          total: ctx.total || 0,
+          results: ctx.results || [],
+          done: ctx.doneIdx || (ctx.results || []).length,
+          current: ctx.current || '',
+          okCount: ctx.okCount || 0,
+          failCount: ctx.failCount || 0,
+          loginish: !!ctx.loginish,
+          log: ctx.progressLog || [],
+        });
+      }
+
+      return sendJson(res, 404, { error: '未知闪电帮帮接口' });
     }
 
     // ── 系统管理（仅超级管理员） ──
@@ -4090,6 +4878,15 @@ const server = http.createServer(async (req, res) => {
         if (kw) { where.push('username LIKE ?'); args.push(`%${kw}%`); }
         const wsql = where.length ? ' WHERE ' + where.join(' AND ') : '';
         const total = (await db.query(`SELECT COUNT(*) AS n FROM operation_log${wsql}`, args))[0].n;
+        // 只读汇总（操作日志页 4 张统计卡）：今日操作 / 今日活跃账号 / 近 7 日 / 本月
+        // 口径固定为全量日志，不随用户名筛选变化（统计卡讲的是整体审计轨迹）
+        const agg = (await db.query(
+          `SELECT SUM(DATE(created_at) = CURDATE()) AS today,
+                  COUNT(DISTINCT CASE WHEN DATE(created_at) = CURDATE() THEN username END) AS today_users,
+                  SUM(created_at >= DATE_SUB(CURDATE(), INTERVAL 6 DAY)) AS week,
+                  SUM(DATE_FORMAT(created_at, '%Y-%m') = DATE_FORMAT(NOW(), '%Y-%m')) AS month
+             FROM operation_log`
+        ))[0] || {};
         const rows = await db.query(
           `SELECT id, user_id, username, action, content, ip, created_at FROM operation_log${wsql}
            ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`,
@@ -4097,6 +4894,12 @@ const server = http.createServer(async (req, res) => {
         );
         return sendJson(res, 200, {
           total, page, size,
+          summary: {
+            today: Number(agg.today) || 0,
+            todayUsers: Number(agg.today_users) || 0,
+            week: Number(agg.week) || 0,
+            month: Number(agg.month) || 0,
+          },
           logs: rows.map((r) => ({
             id: r.id, userId: r.user_id, username: r.username || '—',
             action: r.action, content: r.content, ip: r.ip || '',
