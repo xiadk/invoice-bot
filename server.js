@@ -72,7 +72,6 @@ const pddOrders = require('./lib/pdd-orders');
 const aliOrders = require('./lib/ali-orders');
 const psync = require('./lib/pdd-sync');
 const sdc = require('./lib/sdc');
-const invoiceTitles = require('./lib/invoice-titles');
 
 const PORT = Number(process.env.PORT) || 8787;
 const ROOT = __dirname;
@@ -748,20 +747,16 @@ async function buyerInfoOf(userId) {
 }
 
 /**
- * 发送时用哪条抬头：优先用户在下拉里选的那条（app_invoice_title），
- * 没选就用默认抬头；一条都没有才回落到账号上的老字段（兼容升级前只配过一份抬头的账号）。
- * 三个渠道（1688 / 拼多多 / 闪电帮帮）共用同一个口径，保证话术变量来源一致。
+ * 发送话术用的开票抬头：一律用本账号默认抬头（app_user.company_name / tax_no / email，
+ * 在「系统管理 → 用户管理 → 编辑」里由超级管理员维护）。
+ * 2026-10-30 起取消「发送前选抬头」的步骤（相关菜单与 app_invoice_title 多抬头功能一并下线），
+ * 三个渠道（1688 / 拼多多 / 闪电帮帮）共用同一口径，保证话术变量来源一致。
  * @param {number} userId
- * @param {number} [titleId] 0/缺省 = 默认抬头
+ * @param {number} [titleId] 忽略，保留参数仅为兼容旧调用签名
  * @returns {Promise<{companyName:string, taxNo:string, email:string, titleId:number}>}
  */
 async function buyerOfSend(userId, titleId) {
-  // get() 传 0 时返回默认抬头（并按需从 app_user 播种），取不到才走老字段
-  const t = await invoiceTitles.get(Number(userId) || 0, Number(titleId) || 0).catch(() => null);
-  if (t) {
-    return { companyName: t.title || '', taxNo: t.taxNo || '', email: t.email || '', titleId: Number(t.id) || 0 };
-  }
-  const old = await buyerInfoOf(userId).catch(() => null);
+  const old = await buyerInfoOf(Number(userId) || 0).catch(() => null);
   return {
     companyName: (old && old.companyName) || '',
     taxNo: (old && old.taxNo) || '',
@@ -850,8 +845,6 @@ const OP_ACTIONS = {
   'sdc.sync': (d) => d.ok === false
     ? `拉取闪电帮帮订单失败${d.reason ? '：' + d.reason : ''}`
     : `拉取了闪电帮帮订单（可申请 ${d.applyable || 0} 单、已申请 ${d.applied || 0} 单）`,
-  'sdc.title.save': (d) => `保存了开票抬头${d.title ? '「' + d.title + '」' : ''}`,
-  'sdc.title.delete': () => '删除了一条开票抬头',
   'sdc.send.start': (d) => `发起了闪电帮帮批量催收（${d.total || 0} 家店铺${d.title ? '，抬头 ' + d.title : ''}）`,
   'sdc.send': (d) => d.ok === false
     ? `闪电帮帮批量催收失败${d.reason ? '：' + d.reason : ''}`
@@ -1119,6 +1112,13 @@ const PDD_LOGIN_TTL_MS = PDD_LOGIN_TIMEOUT_MS + 60 * 1000;
 // 支持「登录拼多多」的最低助手版本
 const PDD_LOGIN_MIN_AGENT = '0.2.18';
 
+// ── 「登录1688」任务：与拼多多同一套路（本机助手弹窗登录 → Cookie 回传写 ali-cookie.txt）──
+const ALI_LOGINS = new Map();                  // taskId -> ctx
+const ALI_LOGIN_TIMEOUT_MS = Number(process.env.ALI_LOGIN_TIMEOUT_MS) || 5 * 60 * 1000;
+const ALI_LOGIN_TTL_MS = ALI_LOGIN_TIMEOUT_MS + 60 * 1000;
+// 支持「登录1688」的最低助手版本（0.2.72 起助手才有 ali_login 内核）
+const ALI_LOGIN_MIN_AGENT = '0.2.72';
+
 // ── 拼多多「页内操作」任务：助手加载真实页面执行（anti-content 由页面风控 SDK 生成）──
 //    kind='apply' 申请发票（开票页点提交） / kind='send' 催商家开票（聊天页发消息）
 const PDD_TASKS = new Map();                   // taskId -> ctx
@@ -1366,6 +1366,40 @@ function onPddLoginDone(uid, msg) {
     ctx.message = '保存登录态失败：' + String((e && e.message) || e).slice(0, 200);
     logOp(Number(uid), 'pdd.login', { ok: false });
   });
+}
+
+/**
+ * 助手回报「登录1688」结果：把 Cookie 串写进 data/ali-cookie.txt（mtop 直连取数用的就是它）。
+ * 与拼多多不同：1688 的服务器侧登录态是文件不是数据库 —— saveCookie / clearCookie 都在 lib/ali-orders.js。
+ */
+function onAliLoginDone(uid, msg) {
+  const ctx = ALI_LOGINS.get(String((msg && msg.taskId) || ''));
+  if (!ctx || ctx.userId !== Number(uid) || ctx.status !== 'pending') return;
+  if (!msg.ok) {
+    ctx.status = 'failed';
+    ctx.message = String(msg.error || '助手未采集到登录态').slice(0, 300);
+    logOp(Number(uid), 'ali.login', { ok: false });
+    return;
+  }
+  const cookie = String(msg.cookie || '').trim();
+  if (!cookie) {
+    ctx.status = 'failed';
+    ctx.message = '助手回传的登录态为空，请重新登录';
+    logOp(Number(uid), 'ali.login', { ok: false });
+    return;
+  }
+  try {
+    const r = aliOrders.saveCookie(cookie);
+    ctx.status = 'done';
+    ctx.cookieCount = cookie.split(';').filter((s) => s.trim()).length;
+    ctx.writtenAt = new Date();
+    ctx.message = `登录态已更新（${ctx.cookieCount} 个 Cookie${r && r.envOverridden ? '，注意环境变量 ALI_COOKIE 仍在生效' : ''}）`;
+    logOp(Number(uid), 'ali.login', { ok: true });
+  } catch (e) {
+    ctx.status = 'failed';
+    ctx.message = '保存登录态失败：' + String((e && e.message) || e).slice(0, 200);
+    logOp(Number(uid), 'ali.login', { ok: false });
+  }
 }
 
 /**
@@ -1622,6 +1656,7 @@ function handleAgentMessage(uid, msg) {
   // 「登录牵牛花」：助手在本机开窗口让用户登录，完成后把 Cookie 回传
   if (msg.type === 'qnh_login_done') { onQnhLoginDone(uid, msg); return; }
   if (msg.type === 'pdd_login_done') { onPddLoginDone(uid, msg); return; }
+  if (msg.type === 'ali_login_done') { onAliLoginDone(uid, msg); return; }
   if (msg.type === 'pdd_apply_done') { onPddApplyDone(uid, msg); return; }
   if (msg.type === 'pdd_apply_progress') { onPddApplyProgress(uid, msg); return; }
   if (msg.type === 'pdd_send_done') { onPddSendDone(uid, msg); return; }
@@ -1941,7 +1976,7 @@ async function resumeLoginIds(userId, taskId, scope) {
  * @param {string[]} loginIds 要发送的卖家内部 loginId
  * @param {{resumeOf?:number, titleId?:number}} [opts]
  *   resumeOf=断线续跑时被接续的任务 id（仅用于审计与日志）
- *   titleId = 发送时选用的发票抬头（app_invoice_title.id），0/缺省=回落账号老字段
+ *   titleId = 保留参数（2026-10-30 起已无选抬头，恒为账号默认抬头）；agent_task.title_id 留作审计
  */
 async function doClientSend(userId, loginIds, opts = {}) {
   const resumeOf = Number(opts.resumeOf) || null;
@@ -2512,6 +2547,8 @@ const server = http.createServer(async (req, res) => {
     if (method === 'GET' && (p === '/login' || p === '/login.html')) return sendHtml(res, 'login.html');
     // 公开下载落地页（无需登录，供用户获取本机发送扩展）
     if (method === 'GET' && (p === '/download' || p === '/download.html')) return sendHtml(res, 'download.html');
+    // 公开营销首页（无需登录，访客落地页；已登录用户走下方 / 的 dashboard 分支）
+    if (method === 'GET' && (p === '/home' || p === '/home.html')) return sendHtml(res, 'home.html');
     // 书签工具落地页（登录可用，零安装方案；未登录跳转登录页）
     if (method === 'GET' && (p === '/bookmarklet' || p === '/bookmarklet.html')) {
       const bu = await currentUser(req);
@@ -2527,7 +2564,7 @@ const server = http.createServer(async (req, res) => {
     if (method === 'GET' && p.startsWith('/vendor/')) return sendVendor(res, decodeURIComponent(p.slice('/vendor/'.length)));
     if (method === 'GET' && (p === '/' || p === '/index.html')) {
       const u = await currentUser(req);
-      if (!u) return redirect(res, '/login');
+      if (!u) return sendHtml(res, 'home.html');   // 未登录 → 公开营销首页（访客落地页）
       return sendHtml(res, 'dashboard.html');
     }
 
@@ -2861,6 +2898,101 @@ const server = http.createServer(async (req, res) => {
         cookieFileHint: 'data/ali-cookie.txt',
       }));
     }
+    // ── 「登录1688」：本机助手弹桌面窗口（persist:1688 分区）→ 用户登录 → Cookie 串回传 →
+    // 写进 data/ali-cookie.txt。从此不用再手工粘贴 Cookie。
+    if (method === 'POST' && p === '/api/ali/login') {
+      // 管理员代入他人时，登录窗口开在「有在线助手的那台电脑」上，登录态仍写到该租户共用的文件
+      const aUid = agentUidFor(user, tenantId);
+      const onMyPc = aUid && Number(aUid) !== Number(tenantId);
+      if (!aUid) {
+        return sendJson(res, 200, {
+          ok: false,
+          needAgent: true,
+          message: '本机助手未连接：请先在电脑上启动「催收小助手」并绑定。1688 登录只在本机完成，服务器不会代你登录。',
+        });
+      }
+      if (!agentVersionGate(res, aUid, '登录1688')) return;
+      const agentVer = agentHub.status(aUid).agentVer || '';
+      if (agentVer && !verGte(agentVer, ALI_LOGIN_MIN_AGENT)) {
+        return sendJson(res, 200, {
+          ok: false,
+          needAgent: true,
+          agentOutdated: true,
+          message: `这台电脑上的催收小助手是 v${agentVer}，还不支持登录 1688。请下载安装 v${ALI_LOGIN_MIN_AGENT} 及以上版本。`,
+        });
+      }
+      const taskId = 'alilogin-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+      const ctx = {
+        taskId, userId: Number(tenantId), status: 'pending', message: '',
+        cookieCount: 0, writtenAt: null, createdAt: Date.now(),
+        expiresAt: Date.now() + ALI_LOGIN_TTL_MS,
+      };
+      const sent = agentHub.send(aUid, {
+        type: 'ali_login',
+        taskId,
+        url: (process.env.ALI_LOGIN_URL || 'https://login.1688.com/member/signin.htm'),
+        timeoutMs: ALI_LOGIN_TIMEOUT_MS,
+      });
+      if (!sent) {
+        return sendJson(res, 200, {
+          ok: false, needAgent: true,
+          message: '下发登录任务失败：本机助手连接已断开，请确认助手正在运行。',
+        });
+      }
+      ALI_LOGINS.set(taskId, ctx);
+      await logOp(user, 'ali.login.start', { tenantId, agentUid: aUid });
+      return sendJson(res, 200, {
+        ok: true, pending: true, taskId,
+        message: (onMyPc ? '已在「' + ((await tenantLabelOf(tenantId)) || '该账号') + '」的电脑上打开 1688 登录窗口，' : '已在你本机的助手窗口里打开 1688 登录，')
+          + '请在弹出的窗口里完成登录（支持扫码/短信验证）。',
+      });
+    }
+
+    // 轮询「登录1688」进度（status: pending / done / failed）
+    if (method === 'GET' && p === '/api/ali/login-status') {
+      const ctx = ALI_LOGINS.get(String(url.searchParams.get('taskId') || ''));
+      const mine = ctx && (ctx.userId === Number(user.id) || (isAdmin && ctx.userId === Number(tenantId)));
+      if (!mine) return sendJson(res, 404, { error: '登录任务不存在或已结束' });
+      return sendJson(res, 200, {
+        status: ctx.status,
+        ok: ctx.status === 'done',
+        message: ctx.message || '',
+        cookieCount: ctx.cookieCount,
+        writtenAt: ctx.writtenAt,
+      });
+    }
+
+    // 退出1688（双清联动）：① 清服务器侧 Cookie 文件（data/ali-cookie.txt）
+    // ② 下发 logout 指令让本机助手清掉 persist:1688 分区并等回执（最多 6 秒）。
+    // 只清①的话，本机分区还留着旧账号，发消息窗口会免登进旧号（看起来像没退掉）。
+    if (method === 'POST' && p === '/api/ali/logout') {
+      const cleared = aliOrders.clearCookie();
+      const agent = await agentLogout(agentUidFor(user, tenantId) || tenantId, '1688');
+      await logOp(user, 'ali.logout', { tenantId, agentCleared: !!agent.ok, hadFile: cleared.hadFile });
+      let note;
+      if (agent.ok) {
+        note = '已退出 1688：服务器登录态与本机助手登录态都已清除。';
+      } else if (agent.offline) {
+        note = '已清除服务器登录态，但助手离线，请手动在助手面板点退出。';
+      } else if (agent.timeout) {
+        note = '已清除服务器登录态，但助手 6 秒内没有回应退出指令，视为助手离线，请手动在助手面板点退出。';
+      } else if (agent.outdated) {
+        note = `已清除服务器登录态，但本机助手是 v${agent.agentVer}，不支持自动退出本机登录态：请升级助手，或在助手面板点「1688 · 退出」。`;
+      } else {
+        note = `已清除服务器登录态，但本机助手退出登录态失败（${agent.error || '未知原因'}），请手动在助手面板点退出。`;
+      }
+      if (cleared.envOverridden) {
+        note += ' 注意：环境变量 ALI_COOKIE 仍在生效，清文件不影响它 —— 需要彻底退出请同时去掉该环境变量。';
+      }
+      return sendJson(res, 200, {
+        ok: true,
+        agentCleared: !!agent.ok,
+        agentOffline: !!agent.offline,
+        hadFile: cleared.hadFile,
+        message: note,
+      });
+    }
+
     if (method === 'POST' && p === '/api/ali/orders-sync') {
       writeGuard();
       const b = await readBody(req).catch(() => ({}));
@@ -2972,7 +3104,7 @@ const server = http.createServer(async (req, res) => {
       if (!st.configured) {
         return sendJson(res, 200, {
           ok: false, pending: false, needLogin: true,
-          message: '未配置 1688 登录态：接口需要真实买家登录 Cookie，请把浏览器登录 1688 后的 Cookie 保存到 data/ali-cookie.txt 再试',
+          message: '未配置 1688 登录态：接口需要真实买家登录 Cookie，请到「1688发票」页点「登录1688」，在助手窗口里登录（登录态自动回传服务器）',
         });
       }
       await logOp(user, 'ali.orders.sync', { tenantId, startDateTime: forcedStart });
@@ -4487,50 +4619,13 @@ const server = http.createServer(async (req, res) => {
           sdc.shops(base),
           sdc.countShops(base),
         ]);
-        return sendJson(res, 200, { rows, total: cnt.count, amount: cnt.amount });
+        return sendJson(res, 200, { rows, total: cnt.count, amount: cnt.amount, pending: cnt.pending });
       }
 
       if (method === 'GET' && p === '/api/sdc/summary') {
         return sendJson(res, 200, await sdc.summary(sdcUid));
       }
 
-      // ── 开票抬头（一人多条，催收前选一条）──
-      // 归属跟随当前身份：普通用户是自己的 id；超级管理员切了身份就是被切换那个账号的
-      if (method === 'GET' && p === '/api/sdc/titles') {
-        return sendJson(res, 200, { rows: await invoiceTitles.list(Number(sdcUid)) });
-      }
-      if (method === 'POST' && p === '/api/sdc/titles') {
-        writeGuard();
-        const b = await readBody(req).catch(() => ({}));
-        try {
-          const out = await invoiceTitles.save(Number(sdcUid), b);
-          await logOp(user, 'sdc.title.save', { tenantId: sdcUid, id: out.id, title: String(b.title || '').slice(0, 60) });
-          return sendJson(res, 200, { ok: true, id: out.id, rows: await invoiceTitles.list(Number(sdcUid)) });
-        } catch (e) {
-          return sendJson(res, 200, { ok: false, message: (e && e.message) || '保存失败' });
-        }
-      }
-      if (method === 'POST' && p === '/api/sdc/titles/default') {
-        writeGuard();
-        const b = await readBody(req).catch(() => ({}));
-        try {
-          await invoiceTitles.setDefault(Number(sdcUid), b.id);
-          return sendJson(res, 200, { ok: true, rows: await invoiceTitles.list(Number(sdcUid)) });
-        } catch (e) {
-          return sendJson(res, 200, { ok: false, message: (e && e.message) || '设置失败' });
-        }
-      }
-      if (method === 'POST' && p === '/api/sdc/titles/delete') {
-        writeGuard();
-        const b = await readBody(req).catch(() => ({}));
-        try {
-          await invoiceTitles.remove(Number(sdcUid), b.id);
-          await logOp(user, 'sdc.title.delete', { tenantId: sdcUid, id: Number(b.id) || 0 });
-          return sendJson(res, 200, { ok: true, rows: await invoiceTitles.list(Number(sdcUid)) });
-        } catch (e) {
-          return sendJson(res, 200, { ok: false, message: (e && e.message) || '删除失败' });
-        }
-      }
 
       if (method === 'GET' && p === '/api/sdc/msg-history') {
         const shopId = url.searchParams.get('shopId');

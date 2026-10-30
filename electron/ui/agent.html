@@ -80,7 +80,6 @@
   <div class="card" id="taskCard">
     <div class="row"><span class="k">发送状态</span><span class="v" id="taskState">空闲</span></div>
     <div class="btns" style="margin-top:10px">
-      <button class="primary" id="btnLogin">打开 1688 登录窗口</button>
       <button class="danger hide" id="btnStop">停止发送</button>
     </div>
   </div>
@@ -121,7 +120,8 @@
   </div>
 
   <p class="tip" style="margin-top:12px">
-    隐私说明：本程序<b>不读取、不上传</b>你的 1688 账号密码与 Cookie；登录态只保存在本机；
+    隐私说明：本程序<b>不读取、不保存</b>你的 1688 账号密码；登录只在弹出窗口里完成，
+    完成后把 1688 站点 Cookie 回传给你自己的服务器（用于拉取订单与发票数据）；
     除连接你自己的服务器外不发起任何网络请求。
   </p>
 </div>
@@ -154,7 +154,6 @@ function render(s){
   } else st.textContent = '空闲';
   document.getElementById('btnStop').classList.toggle('hide', !S.sending);
 }
-document.getElementById('btnLogin').onclick = () => window.xsh.openLoginWindow();
 document.getElementById('btnStop').onclick = () => window.xsh.stopTask();
 
 // ── 本机登录态：只区分「已登录 / 未登录」，并支持手动退出 ──

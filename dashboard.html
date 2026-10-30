@@ -468,11 +468,16 @@
             <el-button size="small" type="primary" plain :loading="boardLoading" @click="applyFilters" title="按当前筛选条件重新请求数据">查询</el-button>
             <el-button size="small" :loading="boardLoading || aliSync.running" @click="syncAliOrders"
                        :title="aliSync.running ? '正在从 1688 拉取订单…' : '从 1688 拉取订单：下单时间起点 ' + (aliSync.startDateTime || '库中最近下单时间（自动回退 1 天重叠）') + '，逐页拉到没有下一页为止；拉完再按开票时间增量刷新「已开票」状态'">刷新</el-button>
+            <!-- 1688 登录态：未登录时显示「登录1688」（唤起助手弹窗），已登录时显示「退出1688」（双清联动） -->
+            <el-button size="small" :type="(aliSession && aliSession.configured) ? 'default' : 'success'"
+                       :loading="aliLogin.loading"
+                       @click="(aliSession && aliSession.configured) ? logoutAli() : onAliLoginBtn()"
+                       :title="(aliSession && aliSession.configured) ? '退出 1688：同时清除服务器登录态与本机助手登录态（双清联动）' : '在本机助手里弹出 1688 登录窗口，登录后 Cookie 自动回传服务器，不用再手工粘贴'">{{ (aliSession && aliSession.configured) ? '退出1688' : '登录1688' }}</el-button>
             <span class="spacer"></span>
             <el-button size="small" @click="openUpload('orders')" title="导入1688订单数据：上传从 1688 导出的订单 Excel 并导入（重复订单按最新数据更新）">导入订单</el-button>
             <el-button size="small" @click="openUpload('invoices')" title="导入税务局发票数据：上传从电子税务局导出的发票 Excel 并导入（重复发票按最新数据更新）">导入发票</el-button>
             <el-button size="small" type="primary" :disabled="readonly" @click="batchSend"
-                       title="发送前会先弹框选一条开票抬头（话术里的抬头/税号/邮箱取自选中的那条）">发送催收消息 ({{ selectedCount }})</el-button>
+                       title="发送话术里的抬头/税号/邮箱取本账号默认抬头（系统管理 → 用户管理 维护）">发送催收消息 ({{ selectedCount }})</el-button>
           </div>
           <!-- 订单同步进度：只在同步中/刚结束时出现，不占用常驻版面 -->
           <div v-if="aliSync.running || aliSync.text" class="ali-sync-bar">
@@ -2191,7 +2196,7 @@
             </el-button>
             <el-button size="small" type="warning" plain :disabled="!chatSelCount"
                        :loading="pd.applying" @click="sendPddBatch"
-                       title="发送前会先弹框选一条开票抬头（话术里的抬头/税号/邮箱取自选中的那条）">
+                       title="发送话术里的抬头/税号/邮箱取本账号默认抬头（系统管理 → 用户管理 维护）">
               批量催商家开票{{ chatSelCount ? '（' + chatSelCount + '）' : '' }}
             </el-button>
             <span style="flex:1"></span>
@@ -2287,7 +2292,7 @@
                            @click="applyPddRows([p.row])">申请发票</el-button>
                 <el-button v-if="p.row.chatable" type="text" size="mini" :disabled="pd.applying"
                            style="color:#e6a23c" @click="sendPddMsgRows([p.row])"
-                           title="发送前会先弹框选一条开票抬头">发送催收消息</el-button>
+                           title="发送话术里的抬头/税号/邮箱取本账号默认抬头">发送催收消息</el-button>
                 <!-- 已完成 + 未同步开票：平台已关闭开票入口、且订单接口拿不到数字 mall_id（聊天页必须要它），
                      自动催收发不出去 → 给「去平台催」，在平台订单页里点「联系商家」走线下开票 -->
                 <el-tooltip v-if="!p.row.applyable && !p.row.chatable && p.row.manualChat" placement="top"
@@ -2476,8 +2481,10 @@
                 <div class="loginid">{{ p.row.orderCount }} 单</div>
               </template>
             </el-table-column>
-            <!-- 待开票 = 订单总金额 − 已申请开票金额（已申请/已开票的算「已有着落」） -->
-            <el-table-column label="待开票" width="120">
+            <!-- 待开票 = 可催收金额 = Σ应付(可申请+已申请+不支持线上)，
+                 与概况卡「待开票金额」、催收实际发送金额同一把尺子；已开票/已关闭的不计 -->
+            <el-table-column label="待开票" width="120"
+                             title="可申请 + 已申请 + 不支持线上开票 三档的应付金额合计，等于点「催收消息」时发出的金额；已开票与已关闭的不计入">
               <template slot-scope="p">
                 <span class="amount" :style="p.row.pendingAmount > 0 ? 'color:#d1580a' : ''">{{ yuan(p.row.pendingAmount) }}</span>
                 <div class="loginid" v-if="p.row.appliedAmount">已申请 {{ yuan(p.row.appliedAmount) }}</div>
@@ -2530,63 +2537,6 @@
             <span class="loginid">表头复选框 = 全选当前页（翻页后已勾选的仍保留）；未勾选店铺时点「发送催收消息」= 对所有店铺的<b>可申请开票 + 已申请开票 + 不支持线上开票</b>订单批量催收（已开票的不催）</span>
           </div>
         </el-card>
-      </div>
-
-      <!-- ══════════ 抬头配置 ══════════ -->
-      <div v-show="page === 'invtitle'" id="page-invtitle">
-        <div class="page-head">
-          <h2>抬头配置</h2>
-          <div class="meta-line">
-            维护本账号的开票抬头（可多条）。催收消息里的 <b>公司名称 / 税号 / 邮箱</b> 取自发送时弹框里选中的那条；
-            标「默认」的那条会被自动预选。
-          </div>
-        </div>
-
-        <el-card class="section-card" shadow="never">
-          <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
-            <el-button size="small" type="primary" @click="openTitleForm()">新增抬头</el-button>
-            <span style="flex:1"></span>
-            <span class="loginid">共 {{ it.rows.length }} 条</span>
-          </div>
-          <el-table :data="it.rows" size="small" border v-loading="it.loading" empty-text="还没有抬头，点「新增抬头」加一条">
-            <el-table-column label="发票抬头" min-width="240">
-              <template slot-scope="p">
-                <span>{{ p.row.title }}</span>
-                <el-tag v-if="p.row.isDefault" size="mini" style="margin-left:6px">默认</el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column prop="taxNo" label="纳税人识别号" width="230" show-overflow-tooltip></el-table-column>
-            <el-table-column prop="email" label="收票邮箱" min-width="200" show-overflow-tooltip></el-table-column>
-            <el-table-column label="操作" width="220" fixed="right">
-              <template slot-scope="p">
-                <el-button type="text" size="mini" @click="openTitleForm(p.row)">编辑</el-button>
-                <el-button type="text" size="mini" :disabled="!!p.row.isDefault" @click="setDefaultTitle(p.row)">设为默认</el-button>
-                <el-button type="text" size="mini" style="color:#e6a23c" @click="delTitle(p.row)">删除</el-button>
-              </template>
-            </el-table-column>
-          </el-table>
-        </el-card>
-
-        <el-dialog :title="it.form.id ? '编辑抬头' : '新增抬头'" :visible.sync="it.dialog" width="520px" append-to-body>
-          <el-form label-width="96px" size="small">
-            <el-form-item label="发票抬头" required>
-              <el-input v-model="it.form.title" maxlength="200" placeholder="公司名称（税局登记全称）"></el-input>
-            </el-form-item>
-            <el-form-item label="税号">
-              <el-input v-model="it.form.taxNo" maxlength="64" placeholder="纳税人识别号"></el-input>
-            </el-form-item>
-            <el-form-item label="收票邮箱">
-              <el-input v-model="it.form.email" maxlength="160" placeholder="电子发票接收邮箱"></el-input>
-            </el-form-item>
-            <el-form-item label="设为默认">
-              <el-switch v-model="it.form.isDefault"></el-switch>
-            </el-form-item>
-          </el-form>
-          <span slot="footer">
-            <el-button size="small" @click="it.dialog = false">取消</el-button>
-            <el-button size="small" type="primary" :loading="it.saving" @click="saveTitle">保存</el-button>
-          </span>
-        </el-dialog>
       </div>
 
       <!-- 全局页脚：版权归属（主体来自 config.json 的 copyright，缺省回退系统名；年份服务端按当年生成） -->
@@ -2790,30 +2740,7 @@
     </div>
   </el-dialog>
 
-  <!-- ══════════ 发送前选开票抬头（1688 / 拼多多 / 闪电帮帮共用同一个弹框） ══════════ -->
-  <el-dialog :title="tp.title" :visible.sync="tp.visible" width="560px" append-to-body
-             :close-on-click-modal="false" @closed="cancelPickTitle">
-    <div class="form-tip" style="margin-bottom:10px" v-if="tp.desc">{{ tp.desc }}</div>
-    <div v-if="tp.previewTpl" class="preview-box" style="margin-bottom:12px">{{ tpPreviewText }}</div>
-    <el-radio-group v-model="tp.titleId" style="display:block" v-loading="tp.loading">
-      <el-radio v-for="t in tp.rows" :key="t.id" :label="t.id"
-                style="display:block;margin:0 0 10px;height:auto;line-height:1.6">
-        <b>{{ t.title }}</b>
-        <span v-if="t.isDefault" class="el-tag el-tag--mini" style="margin-left:6px">默认</span>
-        <div class="loginid" style="font-size:12px;color:#888">
-          税号 {{ t.taxNo || '未填' }} · 邮箱 {{ t.email || '未填' }}
-        </div>
-      </el-radio>
-    </el-radio-group>
-    <div class="form-tip" v-if="!tp.loading && !tp.rows.length">
-      还没有开票抬头：先到左侧「抬头配置」新增一条（抬头 / 税号 / 邮箱），再回来发送。
-    </div>
-    <span slot="footer">
-      <el-button size="small" @click="cancelPickTitle">取消</el-button>
-      <el-button size="small" type="primary" :disabled="!tp.titleId" :loading="tp.sending"
-                 @click="confirmPickTitle">{{ tp.confirmText }}</el-button>
-    </span>
-  </el-dialog>
+
 </div>
 
 <!-- 前端本地依赖（项目自带 vendor 目录，不依赖外网 CDN） -->
@@ -3043,7 +2970,8 @@ const vm = new Vue({
       // 闪电帮帮发票：同样用 pd.picked 那套跨页多选（selected 是当前选中行数组）
       sd: {
         loading: false, syncing: false, sending: false,
-        rows: [], total: 0, amount: 0, page: 1, size: 20,
+        // pendingTotal = 筛选后的全量待开票合计（后端聚合；必须在这里声明，Vue 2 对新增属性不做响应式）
+        rows: [], total: 0, amount: 0, pendingTotal: 0, page: 1, size: 20,
         // 主表是店铺维度：sort 用 SHOP_SORTS 那套（默认按可开票金额从高到低）
         // 档位不再作为筛选条件（2026-10-29 按要求删除），要看档位分布直接看列表里的「开票档位」列
         filter: { sent: '', invoice: '', keyword: '', sort: 'amount_desc' },
@@ -3057,22 +2985,12 @@ const vm = new Vue({
       sdcDefaultSort: { prop: 'payable_amount', order: 'descending' },
       // 闪电帮帮展开行缓存（店铺 key → { loading, orders, logs, error }）——与 1688 的 detailCache 同构，放顶层才能正常响应
       sdDC: {},
-      // 抬头配置页（一人多条，催收前选一条）
-      it: {
-        loading: false, saving: false, rows: [], dialog: false,
-        form: { id: 0, title: '', taxNo: '', email: '', isDefault: false },
-      },
-      // 发送前选开票抬头：1688 / 拼多多 / 闪电帮帮共用一个弹框（话术变量同源，都是 {companyName}/{taxNo}/{email}）
-      tp: {
-        visible: false, loading: false, sending: false, rows: [], titleId: 0,
-        title: '选择开票抬头', desc: '', confirmText: '按这个抬头发送',
-        previewTpl: '',   // 有模板时按选中的抬头实时渲染预览（拼多多用；1688 无预览）
-      },
       // 1688发票数据
       companies: [], sent: {}, invSummary: null, boardLoading: false,
       // 1688 订单同步（刷新按钮拉 mtop 订单接口）
       aliSync: { running: false, taskId: '', page: 0, totalPages: 0, total: 0, fetched: 0, saved: 0, newCount: 0, text: '', startDateTime: '', timer: null },
       aliSession: null,   // /api/ali/orders-session 结果：1688 登录态 + 增量起点
+      aliLogin: { loading: false },   // 登录1688 / 退出1688 按钮的 loading
       // 商品列表（前置仓补货参考）
       product: {
         loading: false, rows: [], total: 0, page: 1, size: 20,
@@ -3191,7 +3109,6 @@ const vm = new Vue({
           { key: 'pdd', label: '拼多多发票', icon: 'el-icon-s-order' },
           { key: 'sdc', label: '闪电帮帮发票', icon: 'el-icon-truck' },
           { key: 'mapping', label: '税名核对', icon: 'el-icon-edit-outline' },
-          { key: 'invtitle', label: '抬头配置', icon: 'el-icon-postcard' },
         ] },
         { title: '核对与商品', items: [
           this.canProduct ? { key: 'product', label: '商品列表', icon: 'el-icon-goods' } : null,
@@ -3243,7 +3160,7 @@ const vm = new Vue({
     agentBindTitle() {
       if (this.guide.binding) return '正在唤起本机助手并等待连接（最多 1 分钟）';
       if (this.agent && this.agent.online) {
-        return '本机助手已连接' + (this.agent.loggedIn ? '（1688 已登录）' : '（1688 未登录，需在本机助手里登录）')
+        return '本机助手已连接' + (this.agent.loggedIn ? '（1688 已登录）' : '（1688 未登录，可在 1688发票 页点「登录1688」）')
           + '，无需重复绑定';
       }
       return '点击唤起并绑定本机助手（浏览器会问是否打开「催收小助手」，点「打开」即可）';
@@ -3285,7 +3202,7 @@ const vm = new Vue({
         mom = '较上月 ' + (diff >= 0 ? '+' : '') + diff.toFixed(1) + '%';
       }
       const auto = cur.auto || {};
-      const plat = (Number(auto.auto_1688) || 0) + (Number(auto.auto_pdd) || 0);
+      const plat = (Number(auto.auto_1688) || 0) + (Number(auto.auto_pdd) || 0) + (Number(auto.auto_sdc) || 0);
       return [
         { key: 'net', num: this.yuan(t.net), label: '本月净利润 · ' + this.monthText(cur.month), sub: mom },
         { key: 'income', num: this.yuan(t.income), label: '本月总收入', sub: '美团 / 淘宝 / 京东' },
@@ -3331,20 +3248,6 @@ const vm = new Vue({
         companyName: u.companyName || '（未设置公司全称）',
         taxNo: u.taxNo || '（未设置税号）',
         email: u.email || '（未设置邮箱）',
-        orderSn: '261022-076095220081773',
-        amount: '15.11',
-      };
-      return tpl.replace(/\{(companyName|taxNo|email|orderSn|amount)\}/g, (m, k) => vars[k] || '');
-    },
-    // 选抬头弹框里的实时预览：切换抬头时立刻按那条抬头重新渲染（示例订单号/金额固定）
-    tpPreviewText() {
-      const tpl = String(this.tp.previewTpl || '');
-      if (!tpl) return '';
-      const t = (this.tp.rows || []).find((r) => Number(r.id) === Number(this.tp.titleId)) || {};
-      const vars = {
-        companyName: t.title || '（未设置抬头）',
-        taxNo: t.taxNo || '（未设置税号）',
-        email: t.email || '（未设置邮箱）',
         orderSn: '261022-076095220081773',
         amount: '15.11',
       };
@@ -3550,7 +3453,7 @@ const vm = new Vue({
         {
           label: '待开票金额',
           value: yuan(Math.max(0, a(applyable) + a(applied) + a(blocked))),
-          sub: `可催收 ${n(applyable) + n(applied) + n(blocked)} 单（可申请 + 已申请 + 不支持线上，已关闭的不算）`,
+          sub: `可催收 ${n(applyable) + n(applied) + n(blocked)} 单（可申请 + 已申请 + 不支持线上；已开票与已关闭的不算，金额与实际发送的催收金额一致）`,
         },
       ];
     },
@@ -3559,9 +3462,9 @@ const vm = new Vue({
     /** 勾选/催收的最小单位是店铺（发送时同一家店合并成一条消息） */
     sdcSelCount() { return (this.sd.selected || []).length; },
     sdcStageAmount() { return Number(this.sd.amount || 0).toFixed(2); },
-    /** 当前页的待开票合计（订单总额 − 已申请开票金额） */
+    /** 筛选后的全量待开票合计（后端聚合，翻页不跳变；口径与概况卡、催收发送金额一致） */
     sdcPendingTotal() {
-      return (this.sd.rows || []).reduce((a, r) => a + (Number(r.pendingAmount) || 0), 0).toFixed(2);
+      return Number(this.sd.pendingTotal || 0).toFixed(2);
     },
     /** 登录条要一个 cookie 形的对象（复用牵牛花那个组件） */
     sdLoginCookie() {
@@ -3747,7 +3650,6 @@ const vm = new Vue({
       if (p === 'market') this.loadMarket();
       if (p === 'billing') this.loadBilling();
       if (p === 'sdc') { this.clearSdcPicked(); this.loadSdcStatus(); this.loadSdcOrders(); }
-      if (p === 'invtitle') this.loadTitles();
     },
     'detail.visible'(v) { if (!v) this.detail.q = ''; },
   },
@@ -3916,6 +3818,93 @@ const vm = new Vue({
         if (d && d.latestOrderTime) this.aliSync.startDateTime = d.latestOrderTime;
         this.aliSession = d || null;
       } catch (e) { /* 读不到就保持"自动"，不影响同步 */ }
+    },
+    /** 「登录1688」按钮：与「登录拼多多」同一套路（本机助手弹窗 → 轮询结果 → Cookie 自动回传写文件） */
+    async onAliLoginBtn() {
+      if (this.aliLogin.loading) return;
+      if (this.qnhNeedPick) { this.$message.warning('请先选择要以哪个账号的身份登录'); return; }
+      const who = this.isAdmin ? ('「' + (this.qnhWhoLabel || '所选账号') + '」') : '你';
+      try {
+        await this.$confirm(
+          `登录在${who}的电脑上完成：点「开始登录」后，「催收小助手」会在那台电脑上弹出 1688 登录窗口，`
+          + '在窗口里扫码或短信验证即可（最多等 5 分钟）。\n登录完成后 Cookie 自动回传服务器并保存，不再需要手工粘贴 Cookie。',
+          '登录1688',
+          { confirmButtonText: '开始登录', cancelButtonText: '取消', type: 'warning' }
+        );
+      } catch (e) { return; }
+
+      this.aliLogin.loading = true;
+      try {
+        const d = await this.api('/api/ali/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+        if (d.needAgent) { this.promptAgentIssue(d); return; }
+        if (!d.pending || !d.taskId) {
+          this.$message.error(d.message || d.error || '发起登录失败');
+          return;
+        }
+        this.$message.info(d.message || '已打开 1688 登录窗口，请在助手里完成登录…');
+        const r = await this.pollAliLogin(d.taskId);
+        if (r === 'done') {
+          await this.loadAliSession();
+          this.$message.success('已登录 1688，登录态已保存（后续刷新订单/发票直接可用）');
+          return;
+        }
+        if (r === 'failed') this.$message.error('登录未完成：' + (this._aliLoginMsg || '未获取到登录态'));
+        else this.$message.warning('等待登录超时：请在 1688 窗口里登录后，再点一次「登录1688」');
+        await this.loadAliSession();
+      } catch (e) {
+        this.$message.error('登录失败：' + e.message);
+      } finally {
+        this.aliLogin.loading = false;
+      }
+    },
+    async pollAliLogin(taskId) {
+      const deadline = Date.now() + 5.5 * 60 * 1000;
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 2000));
+        let d = null;
+        try { d = await this.api('/api/ali/login-status?taskId=' + encodeURIComponent(taskId)); } catch (e) { continue; }
+        if (!d) continue;
+        this._aliLoginMsg = d.message || '';
+        if (d.status === 'done') return 'done';
+        if (d.status === 'failed') return 'failed';
+        if (d.error) return 'gone';
+      }
+      return 'timeout';
+    },
+    /** 「退出1688」：双清联动 —— 服务器删 Cookie 文件 + 助手清本机分区（离线/超时按提示人工兜底） */
+    async logoutAli() {
+      if (this.aliLogin.loading) return;
+      if (this.qnhNeedPick) { this.$message.warning('请先选择要以哪个账号的身份操作'); return; }
+      try {
+        await this.$confirm(
+          '退出后服务器会清除 1688 登录态（删除 Cookie 文件），之后刷新订单、刷新发票状态都需要重新登录。'
+          + '\n本机助手里 1688 的登录态会一并清除；助手不在线时，请手动在助手面板点退出。'
+          + '\n已同步的订单与发票数据不受影响，不会被删除。',
+          '退出1688',
+          { confirmButtonText: '退出登录', cancelButtonText: '取消', type: 'warning' }
+        );
+      } catch (e) { return; }
+
+      this.aliLogin.loading = true;
+      try {
+        const d = await this.api('/api/ali/logout', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+        if (d && d.error) { this.$message.error(d.error); return; }
+        await this.loadAliSession();
+        if (d && d.agentCleared) {
+          this.$message.success((d && d.message) || '已退出 1688');
+        } else {
+          // 本机登录态没清掉：必须让用户看见，否则下次点登录还是旧账号
+          this.$alert(
+            (d && d.message) || '已退出 1688',
+            '已退出，但本机登录态可能还在',
+            { confirmButtonText: '知道了', type: 'warning' }
+          );
+        }
+      } catch (e) {
+        this.$message.error('退出失败：' + e.message);
+      } finally {
+        this.aliLogin.loading = false;
+      }
     },
     async syncAliOrders() {
       if (this.aliSync.running) return;
@@ -4214,42 +4203,14 @@ const vm = new Vue({
     // ── 发送 ──
     async sendOne(loginId) {
       if (this.readonly) return;
-      // 把会员名（= 1688 店铺）显示在弹框里，避免「点了哪家」记不清
-      const owner = (this.companies || []).find((c) => (c.members || []).some((x) => x.loginId === loginId));
-      const m = owner ? (owner.members || []).find((x) => x.loginId === loginId) : null;
-      const label = (m && (m.sellerLogin || m.loginId)) || loginId;
-      const titleId = await this.pickTitle({
-        desc: '给「' + label + '」发送催收消息前，先选一条发票抬头'
-          + '（话术里的 {companyName}/{taxNo}/{email} 取自这里）',
-        confirmText: '按这个抬头发送',
-      });
-      if (!titleId) return;
-      await this.doSend([loginId], titleId);
+      // 发送用本账号默认抬头（app_user 公司全称/税号/邮箱，管理员在「系统管理 → 用户管理」里维护）
+      await this.doSend([loginId], 0);
     },
     async batchSend() {
       if (this.readonly) { this.$message.warning('只读模式下不能发送催收消息'); return; }
       if (this.selectedCount === 0) { this.$message.warning('请先勾选会员名（展开公司后可用公司/会员名复选框勾选）'); return; }
-      const gap = await this.getGapHint();
-      const titleId = await this.pickTitle({
-        desc: `将给 ${this.selectedCount} 个会员名发送催收消息：每个会员名 3 条消息（模板 + 订单清单 + 提醒），`
-          + `金额与订单号按该会员名统计；间隔 ${gap}。话术里的 {companyName}/{taxNo}/{email} 取自下面选中的抬头。`,
-        confirmText: `发送给 ${this.selectedCount} 个会员名`,
-      });
-      if (!titleId) return;
-      await this.doSend(Object.keys(this.selected), titleId);
-    },
-    async getGapHint() {
-      try {
-        const d = await this.api('/api/config');
-        const rt = (d.config && d.config.runtime) || {};
-        const lo = Number(rt.sendGapMinSec) || 15, hi = Number(rt.sendGapMaxSec) || 30;
-        const prefetch = String(rt.prefetchNextSeller) !== 'false';
-        // 保底间隔与「下一家会话加载」并行计时：加载通常 20~35s，比间隔还慢时不必额外等，
-        // 所以按 max(间隔均值, 典型加载) 估算，再加上每条消息的发送耗时（约 15s）。
-        const between = Math.max((lo + hi) / 2, prefetch ? 25 : 0) + (prefetch ? 0 : lo);
-        const perSeller = between + 15;
-        return `${lo}~${hi}秒（已提前加载下一家，通常不再额外等待），预计总时长约${Math.round(this.selectedCount * perSeller / 60)}分钟`;
-      } catch (e) { return '15~30秒'; }
+      // 发送用本账号默认抬头（app_user 公司全称/税号/邮箱，管理员在「系统管理 → 用户管理」里维护）
+      await this.doSend(Object.keys(this.selected), 0);
     },
     async doSend(ids, titleId) {
       if (!this.agent.online) {
@@ -5111,20 +5072,12 @@ const vm = new Vue({
       if (!list.length) { this.$message.warning('请先勾选「商家处理中」的订单'); return; }
       if (this.pd.applying) return;
       if (this.qnhNeedPick) { this.$message.warning('请先选择要以哪个账号的身份操作'); return; }
-      // 先选抬头：话术里的 {companyName}/{taxNo}/{email} 由选中的那条渲染，预览实时跟着变
-      const titleId = await this.pickTitle({
-        desc: '将给 ' + list.length + ' 个商家发送催收消息'
-          + '（同一商家的多笔订单会自动合并成一条，避免重复打扰）。下面话术按选中的抬头实时渲染：',
-        previewTpl: String(this.cfg.pddChat || ''),
-        confirmText: '发送给 ' + list.length + ' 个商家',
-      });
-      if (!titleId) return;
-
+      // 发送用本账号默认抬头（app_user 公司全称/税号/邮箱，管理员在「系统管理 → 用户管理」里维护）
       this.pd.applying = true;
       try {
         let d = await this.pddApi('/api/pdd/send', {
           method: 'POST', headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ orderSns: list.map((r) => r.orderSn), titleId }),
+          body: JSON.stringify({ orderSns: list.map((r) => r.orderSn), titleId: 0 }),
         });
         // 助手未连接 → 自动唤起（xsh://run 深链 + 等待重连），成功后重试一次
         if (d.needAgent) {
@@ -5137,7 +5090,7 @@ const vm = new Vue({
           this.$message.success('助手已连接，继续发送');
           d = await this.pddApi('/api/pdd/send', {
             method: 'POST', headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ orderSns: list.map((r) => r.orderSn), titleId }),
+            body: JSON.stringify({ orderSns: list.map((r) => r.orderSn), titleId: 0 }),
           });
         }
         if (d.error || !d.ok) {
@@ -5518,6 +5471,8 @@ const vm = new Vue({
         this.sd.rows = d.rows || [];
         this.sd.total = d.total || 0;
         this.sd.amount = d.amount || 0;
+        // 筛选后的全量待开票合计（后端按当前筛选条件聚合，不是当前页累加）
+        this.sd.pendingTotal = d.pending || 0;
       } catch (e) {
         this.$message.error('加载闪电帮帮店铺失败：' + e.message);
       } finally {
@@ -5744,15 +5699,8 @@ const vm = new Vue({
     async openSdcSend(rows) {
       const picked = Array.isArray(rows) ? rows : (this.sd.selected || []);
       const ids = picked.map((r) => r.shop_id).filter(Boolean);
-      const titleId = await this.pickTitle({
-        desc: ids.length
-          ? `将向勾选的 ${ids.length} 家店铺发送催收消息（同一家店合并成一条）。`
-            + '话术里的 {companyName}/{taxNo}/{email} 取自下面选中的抬头：'
-          : '没有勾选店铺：将对库里所有店铺的「可申请开票 + 已申请开票 + 不支持线上开票」订单批量催收。'
-            + '话术里的 {companyName}/{taxNo}/{email} 取自下面选中的抬头：',
-      });
-      if (!titleId) return;
-      await this.doSendSdc(ids, titleId);
+      // 发送用本账号默认抬头（app_user 公司全称/税号/邮箱，管理员在「系统管理 → 用户管理」里维护）
+      await this.doSendSdc(ids, 0);
     },
 
     async doSendSdc(shopIds, titleId) {
@@ -5775,125 +5723,6 @@ const vm = new Vue({
       } finally {
         this.sd.sending = false;
       }
-    },
-
-    // ══════ 发送前选开票抬头（1688 / 拼多多 / 闪电帮帮 三处共用同一个弹框） ══════
-    /**
-     * 弹框选一条抬头：resolve 出抬头 id；用户取消 → resolve(0)，调用方据此 return。
-     * @param {{desc?:string, previewTpl?:string, confirmText?:string, title?:string}} opts
-     * @returns {Promise<number>}
-     */
-    pickTitle(opts) {
-      const o = opts || {};
-      return new Promise((resolve) => {
-        this._tpResolve = resolve;
-        this.tp.title = o.title || '选择开票抬头';
-        this.tp.desc = o.desc || '';
-        this.tp.previewTpl = o.previewTpl || '';
-        this.tp.confirmText = o.confirmText || '按这个抬头发送';
-        this.tp.rows = [];
-        this.tp.titleId = 0;
-        this.tp.sending = false;
-        this.tp.visible = true;
-        this.loadPickTitles();
-      });
-    },
-    async loadPickTitles() {
-      this.tp.loading = true;
-      try {
-        const d = await this.sdcApi('/api/sdc/titles');
-        if (d && d.error) { this.$message.error(d.error); this.tp.rows = []; return; }
-        this.tp.rows = (d && d.rows) || [];
-        // 默认选中「默认抬头」，没有默认就选第一条：避免用户以为已选中、点确认才发现没选
-        const def = this.tp.rows.find((t) => t.isDefault) || this.tp.rows[0];
-        this.tp.titleId = def ? def.id : 0;
-      } catch (e) {
-        this.tp.rows = [];
-        this.$message.error('加载抬头失败：' + e.message);
-      } finally { this.tp.loading = false; }
-    },
-    confirmPickTitle() {
-      const id = Number(this.tp.titleId) || 0;
-      this._tpResolveDone(id);
-      this.tp.visible = false;
-    },
-    /** 取消 / 右上角关闭：一律按「放弃发送」处理（resolve 0） */
-    cancelPickTitle() {
-      this._tpResolveDone(0);
-      if (this.tp.visible) this.tp.visible = false;
-    },
-    /** 只 resolve 一次：确认后再触发 @closed 不会把结果改写回 0 */
-    _tpResolveDone(id) {
-      const fn = this._tpResolve;
-      this._tpResolve = null;
-      if (fn) fn(id);
-    },
-
-    // ══════ 抬头配置（本账号可维护多条：抬头 / 税号 / 收票邮箱；催收时弹框选一条） ══════
-    async loadTitles() {
-      this.it.loading = true;
-      try {
-        const d = await this.sdcApi('/api/sdc/titles');
-        if (d && d.error) { this.$message.error(d.error); return; }
-        this.it.rows = (d && d.rows) || [];
-      } catch (e) {
-        this.$message.error('加载抬头失败：' + e.message);
-      } finally { this.it.loading = false; }
-    },
-    /** 传 row = 编辑；不传 = 新增（首条自动勾成默认，省得用户忘记设） */
-    openTitleForm(row) {
-      this.it.form = row
-        ? { id: row.id, title: row.title || '', taxNo: row.taxNo || '', email: row.email || '', isDefault: !!row.isDefault }
-        : { id: 0, title: '', taxNo: '', email: '', isDefault: this.it.rows.length === 0 };
-      this.it.dialog = true;
-    },
-    async saveTitle() {
-      const f = this.it.form;
-      if (!String(f.title || '').trim()) { this.$message.warning('请先填写发票抬头（公司全称）'); return; }
-      this.it.saving = true;
-      try {
-        const d = await this.sdcApi('/api/sdc/titles', {
-          method: 'POST', headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({
-            id: Number(f.id) || 0,
-            title: f.title, taxNo: f.taxNo, email: f.email, isDefault: !!f.isDefault,
-          }),
-        });
-        if (d && d.error) { this.$message.error(d.error); return; }
-        if (d && d.ok === false) { this.$message({ message: d.message || '保存失败', type: 'warning', duration: 5000 }); return; }
-        this.it.rows = (d && d.rows) || [];
-        this.it.dialog = false;
-        this.$message.success(f.id ? '抬头已更新' : '抬头已新增');
-      } catch (e) {
-        this.$message.error('保存失败：' + e.message);
-      } finally { this.it.saving = false; }
-    },
-    async setDefaultTitle(row) {
-      if (!row || !row.id) return;
-      try {
-        const d = await this.sdcApi('/api/sdc/titles/default', {
-          method: 'POST', headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ id: row.id }),
-        });
-        if (d && d.error) { this.$message.error(d.error); return; }
-        if (d && d.ok === false) { this.$message({ message: d.message || '设置失败', type: 'warning', duration: 5000 }); return; }
-        this.it.rows = (d && d.rows) || [];
-        this.$message.success('已设为默认抬头');
-      } catch (e) { this.$message.error('设置失败：' + e.message); }
-    },
-    async delTitle(row) {
-      if (!row || !row.id) return;
-      try { await this.$confirm(`确定删除抬头「${row.title}」？`, '删除确认', { type: 'warning' }); } catch (e) { return; }
-      try {
-        const d = await this.sdcApi('/api/sdc/titles/delete', {
-          method: 'POST', headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ id: row.id }),
-        });
-        if (d && d.error) { this.$message.error(d.error); return; }
-        if (d && d.ok === false) { this.$message({ message: d.message || '删除失败', type: 'warning', duration: 5000 }); return; }
-        this.it.rows = (d && d.rows) || [];
-        this.$message.success('已删除');
-      } catch (e) { this.$message.error('删除失败：' + e.message); }
     },
 
     // ══════ 税名核对（所有人可用；普通用户只见自己发票里的销方，映射全平台共享） ══════
