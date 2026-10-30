@@ -468,6 +468,11 @@
             <el-button size="small" type="primary" plain :loading="boardLoading" @click="applyFilters" title="按当前筛选条件重新请求数据">查询</el-button>
             <el-button size="small" :loading="boardLoading || aliSync.running" @click="syncAliOrders"
                        :title="aliSync.running ? '正在从 1688 拉取订单…' : '从 1688 拉取订单：下单时间起点 ' + (aliSync.startDateTime || '库中最近下单时间（自动回退 1 天重叠）') + '，逐页拉到没有下一页为止；拉完再按开票时间增量刷新「已开票」状态'">刷新</el-button>
+            <!-- 1688 登录态：未登录时显示「登录1688」（唤起助手弹窗），已登录时显示「退出1688」（双清联动） -->
+            <el-button size="small" :type="(aliSession && aliSession.configured) ? 'default' : 'success'"
+                       :loading="aliLogin.loading"
+                       @click="(aliSession && aliSession.configured) ? logoutAli() : onAliLoginBtn()"
+                       :title="(aliSession && aliSession.configured) ? '退出 1688：同时清除服务器登录态与本机助手登录态（双清联动）' : '在本机助手里弹出 1688 登录窗口，登录后 Cookie 自动回传服务器，不用再手工粘贴'">{{ (aliSession && aliSession.configured) ? '退出1688' : '登录1688' }}</el-button>
             <span class="spacer"></span>
             <el-button size="small" @click="openUpload('orders')" title="导入1688订单数据：上传从 1688 导出的订单 Excel 并导入（重复订单按最新数据更新）">导入订单</el-button>
             <el-button size="small" @click="openUpload('invoices')" title="导入税务局发票数据：上传从电子税务局导出的发票 Excel 并导入（重复发票按最新数据更新）">导入发票</el-button>
@@ -3076,6 +3081,7 @@ const vm = new Vue({
       // 1688 订单同步（刷新按钮拉 mtop 订单接口）
       aliSync: { running: false, taskId: '', page: 0, totalPages: 0, total: 0, fetched: 0, saved: 0, newCount: 0, text: '', startDateTime: '', timer: null },
       aliSession: null,   // /api/ali/orders-session 结果：1688 登录态 + 增量起点
+      aliLogin: { loading: false },   // 登录1688 / 退出1688 按钮的 loading
       // 商品列表（前置仓补货参考）
       product: {
         loading: false, rows: [], total: 0, page: 1, size: 20,
@@ -3246,7 +3252,7 @@ const vm = new Vue({
     agentBindTitle() {
       if (this.guide.binding) return '正在唤起本机助手并等待连接（最多 1 分钟）';
       if (this.agent && this.agent.online) {
-        return '本机助手已连接' + (this.agent.loggedIn ? '（1688 已登录）' : '（1688 未登录，需在本机助手里登录）')
+        return '本机助手已连接' + (this.agent.loggedIn ? '（1688 已登录）' : '（1688 未登录，可在 1688发票 页点「登录1688」）')
           + '，无需重复绑定';
       }
       return '点击唤起并绑定本机助手（浏览器会问是否打开「催收小助手」，点「打开」即可）';
@@ -3919,6 +3925,93 @@ const vm = new Vue({
         if (d && d.latestOrderTime) this.aliSync.startDateTime = d.latestOrderTime;
         this.aliSession = d || null;
       } catch (e) { /* 读不到就保持"自动"，不影响同步 */ }
+    },
+    /** 「登录1688」按钮：与「登录拼多多」同一套路（本机助手弹窗 → 轮询结果 → Cookie 自动回传写文件） */
+    async onAliLoginBtn() {
+      if (this.aliLogin.loading) return;
+      if (this.qnhNeedPick) { this.$message.warning('请先选择要以哪个账号的身份登录'); return; }
+      const who = this.isAdmin ? ('「' + (this.qnhWhoLabel || '所选账号') + '」') : '你';
+      try {
+        await this.$confirm(
+          `登录在${who}的电脑上完成：点「开始登录」后，「催收小助手」会在那台电脑上弹出 1688 登录窗口，`
+          + '在窗口里扫码或短信验证即可（最多等 5 分钟）。\n登录完成后 Cookie 自动回传服务器并保存，不再需要手工粘贴 Cookie。',
+          '登录1688',
+          { confirmButtonText: '开始登录', cancelButtonText: '取消', type: 'warning' }
+        );
+      } catch (e) { return; }
+
+      this.aliLogin.loading = true;
+      try {
+        const d = await this.api('/api/ali/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+        if (d.needAgent) { this.promptAgentIssue(d); return; }
+        if (!d.pending || !d.taskId) {
+          this.$message.error(d.message || d.error || '发起登录失败');
+          return;
+        }
+        this.$message.info(d.message || '已打开 1688 登录窗口，请在助手里完成登录…');
+        const r = await this.pollAliLogin(d.taskId);
+        if (r === 'done') {
+          await this.loadAliSession();
+          this.$message.success('已登录 1688，登录态已保存（后续刷新订单/发票直接可用）');
+          return;
+        }
+        if (r === 'failed') this.$message.error('登录未完成：' + (this._aliLoginMsg || '未获取到登录态'));
+        else this.$message.warning('等待登录超时：请在 1688 窗口里登录后，再点一次「登录1688」');
+        await this.loadAliSession();
+      } catch (e) {
+        this.$message.error('登录失败：' + e.message);
+      } finally {
+        this.aliLogin.loading = false;
+      }
+    },
+    async pollAliLogin(taskId) {
+      const deadline = Date.now() + 5.5 * 60 * 1000;
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 2000));
+        let d = null;
+        try { d = await this.api('/api/ali/login-status?taskId=' + encodeURIComponent(taskId)); } catch (e) { continue; }
+        if (!d) continue;
+        this._aliLoginMsg = d.message || '';
+        if (d.status === 'done') return 'done';
+        if (d.status === 'failed') return 'failed';
+        if (d.error) return 'gone';
+      }
+      return 'timeout';
+    },
+    /** 「退出1688」：双清联动 —— 服务器删 Cookie 文件 + 助手清本机分区（离线/超时按提示人工兜底） */
+    async logoutAli() {
+      if (this.aliLogin.loading) return;
+      if (this.qnhNeedPick) { this.$message.warning('请先选择要以哪个账号的身份操作'); return; }
+      try {
+        await this.$confirm(
+          '退出后服务器会清除 1688 登录态（删除 Cookie 文件），之后刷新订单、刷新发票状态都需要重新登录。'
+          + '\n本机助手里 1688 的登录态会一并清除；助手不在线时，请手动在助手面板点退出。'
+          + '\n已同步的订单与发票数据不受影响，不会被删除。',
+          '退出1688',
+          { confirmButtonText: '退出登录', cancelButtonText: '取消', type: 'warning' }
+        );
+      } catch (e) { return; }
+
+      this.aliLogin.loading = true;
+      try {
+        const d = await this.api('/api/ali/logout', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+        if (d && d.error) { this.$message.error(d.error); return; }
+        await this.loadAliSession();
+        if (d && d.agentCleared) {
+          this.$message.success((d && d.message) || '已退出 1688');
+        } else {
+          // 本机登录态没清掉：必须让用户看见，否则下次点登录还是旧账号
+          this.$alert(
+            (d && d.message) || '已退出 1688',
+            '已退出，但本机登录态可能还在',
+            { confirmButtonText: '知道了', type: 'warning' }
+          );
+        }
+      } catch (e) {
+        this.$message.error('退出失败：' + e.message);
+      } finally {
+        this.aliLogin.loading = false;
+      }
     },
     async syncAliOrders() {
       if (this.aliSync.running) return;

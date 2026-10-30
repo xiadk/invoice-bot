@@ -16,6 +16,7 @@ const { app, BrowserWindow, Tray, Menu, ipcMain, shell, nativeImage, nativeTheme
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
+const { spawn } = require('child_process');
 
 const { createStore } = require('./store');
 const { AgentClient } = require('./agent/ws-client');
@@ -23,6 +24,7 @@ const sender = require('./agent/sender');
 const orderExport = require('./agent/order-export');
 const qnhLogin = require('./agent/qnh-login');
 const pddLogin = require('./agent/pdd-login');
+const aliLogin = require('./agent/ali-login');
 const pddApply = require('./agent/pdd-apply');
 const pddSend = require('./agent/pdd-send');
 const sdc = require('./agent/sdc');
@@ -103,8 +105,9 @@ function hasTray() { return !!tray && !tray.isDestroyed(); }
 const LOGOUT_WINDOWS = {
   pdd: [() => pddLogin.peekWindow(), () => pddApply.peekWindow(), () => pddSend.peekWindow()],
   qnh: [() => qnhLogin.peekWindow()],
-  // 1688 的发送窗没有 peek（getSendWindow 会懒创建），直接调 closeSendWindow 关掉
-  1688: [() => { try { sender.closeSendWindow(); } catch (e) { /* 忽略 */ } return null; }],
+  // 1688 的发送窗没有 peek（getSendWindow 会懒创建），直接调 closeSendWindow 关掉；
+  // 登录窗（ali-login 内核）有自己的 peek
+  1688: [() => { try { sender.closeSendWindow(); } catch (e) { /* 忽略 */ } return null; }, () => aliLogin.peekWindow()],
   // 闪电帮帮：登录窗口 + 承载页内请求的后台窗口 + 客服会话窗口
   sdc: [() => sdc.peekWindow(), () => sdc.peekApiWindow(), () => sdc.peekChatWindow()],
 };
@@ -194,7 +197,6 @@ function refreshTray() {
     { label: s.sending ? '正在发送…' : '空闲', enabled: false },
     { type: 'separator' },
     { label: '打开状态面板', click: () => showStatusWin() },
-    { label: '打开 1688 登录窗口', click: () => openLogin() },
     { label: '打开 牵牛花 登录窗口', click: () => qnhLogin.openLogin() },
   { label: '打开 拼多多 登录窗口', click: () => pddLogin.openLogin() },
   { label: '打开 闪电帮帮 登录窗口', click: () => sdc.openLogin() },
@@ -237,21 +239,6 @@ function setAutoStart(on) {
   try {
     app.setLoginItemSettings({ openAtLogin: !!on, path: process.execPath, args: [] });
   } catch (e) { log('设置开机自启失败: ' + e.message); }
-}
-
-/** 统一入口：打开 1688 登录窗口，并启动「登录看门狗」实时反映登录态 */
-let _loginWatch = null;
-function openLogin() {
-  sender.openLoginWindow();
-  if (_loginWatch) return;
-  _loginWatch = setInterval(() => {
-    const win = sender.getSendWindow ? sender.getSendWindow() : null;
-    if (!win || win.isDestroyed()) { clearInterval(_loginWatch); _loginWatch = null; return; }
-    const url = win.webContents.getURL();
-    const onLoginPage = /login\.1688\.com|signin/i.test(url);
-    if (client) client.reportLoginState(!onLoginPage, url);
-    if (!onLoginPage) { clearInterval(_loginWatch); _loginWatch = null; } // 已离开登录页 → 视为已登录，停止轮询
-  }, 2000);
 }
 
 // ── 助手主体 ──
@@ -308,6 +295,11 @@ function startAgent() {
   // 「登录拼多多」内核：与牵牛花同一套路（服务器没有浏览器，登录只在本机完成），
   // 差别是走手机端 H5，回传的是一整条 Cookie 串（服务器直接放进请求头拉发票订单）。
   client.setPddLoginHandler(pddLogin.createLoginHandler({
+    log: (m) => { log(m); pushState(); },
+  }));
+  // 「登录1688」内核：同一套路，桌面窗口 + persist:1688 分区（与发消息内核共用登录态），
+  // 回传的 Cookie 串由服务器写进 data/ali-cookie.txt（mtop 直连取数用的就是它）。
+  client.setAliLoginHandler(aliLogin.createLoginHandler({
     log: (m) => { log(m); pushState(); },
   }));
   // 「拼多多批量申请发票」内核：加载真实开票页逐单提交，anti-content 由页面自己生成。
@@ -497,7 +489,24 @@ function updateFileName(msg) {
   return `催收小助手-Setup-${(msg && msg.latest) || 'latest'}.exe`;
 }
 
-/** 下载安装包（跟随 3xx；流式写盘，实时回调百分比） */
+// 换个文件名：同名旧包可能正被上一次的安装程序占着，删不掉就别硬覆盖
+function uniqueInstallerPath(dest) {
+  return dest.replace(/\.exe$/i, '') + '-' + Date.now() + '.exe';
+}
+
+/**
+ * 下载安装包（跟随 3xx；流式写盘，实时回调百分比）
+ *
+ * 两个坑：
+ *   ① 等 writeStream 的 **'close'**（句柄真正关闭）再交接。'finish' 只保证数据写完，
+ *      fd 是否已释放并没有承诺；交给系统执行时一旦撞上共享冲突，连重试的机会都没有。
+ *   ② 先写 .part 再改名：中途断了，临时目录里不会留半截 exe 被误执行；同名旧包
+ *      正被上一次的安装程序占着时，改用带时间戳的新名字，绝不硬覆盖。
+ *
+ * 真正让 Windows 弹「另一程序正在使用此文件」的，多半是包刚落地那几秒：
+ * Defender 首次扫描 / 索引器还攥着这个 80MB 的 exe（实测锁住约 1.5 秒后自动放行），
+ * 所以「拉起」这一步必须带重试，而不是打开一次就认定成功。
+ */
 function downloadInstaller(url, dest, onProgress) {
   return new Promise((resolve, reject) => {
     const mod = /^https:/i.test(url) ? require('https') : require('http');
@@ -512,9 +521,17 @@ function downloadInstaller(url, dest, onProgress) {
         return;
       }
       if (code !== 200) { res.resume(); reject(new Error('下载失败：HTTP ' + code)); return; }
+
       const total = Number(res.headers['content-length']) || 0;
       let got = 0;
-      const ws = fs.createWriteStream(dest);
+      let settled = false;
+      const done = (fn, v) => { if (!settled) { settled = true; fn(v); } };
+
+      const part = dest + '.part';
+      try { fs.unlinkSync(part); } catch (e) { /* 残留的半截文件，没有更正常 */ }
+      const ws = fs.createWriteStream(part);
+      ws.on('error', (e) => done(reject, e));
+      res.on('error', (e) => { try { ws.destroy(); } catch (er) { /* 忽略 */ } done(reject, e); });
       res.on('data', (c) => {
         got += c.length;
         if (total) {
@@ -522,14 +539,79 @@ function downloadInstaller(url, dest, onProgress) {
             `已下载 ${(got / 1048576).toFixed(1)} / ${(total / 1048576).toFixed(1)} MB`);
         }
       });
-      res.on('error', (e) => { try { ws.close(); } catch (er) { /* 忽略 */ } reject(e); });
-      ws.on('error', reject);
-      ws.on('finish', () => { onProgress(100, '下载完成，正在打开安装程序…'); resolve(dest); });
+      // 'close' = 句柄已释放，此时才敢把文件交出去
+      ws.on('close', () => {
+        if (settled) return;
+        if (total && got !== total) { done(reject, new Error(`安装包不完整：${got}/${total} 字节`)); return; }
+        try {
+          let final = dest;
+          try { if (fs.existsSync(final)) fs.unlinkSync(final); }
+          catch (e) { final = uniqueInstallerPath(dest); }
+          fs.renameSync(part, final);
+          onProgress(100, '下载完成，正在打开安装程序…');
+          done(resolve, final);
+        } catch (e) {
+          try { fs.unlinkSync(part); } catch (er) { /* 忽略 */ }
+          done(reject, new Error('安装包写入失败：' + e.message));
+        }
+      });
       res.pipe(ws);
     });
     req.on('timeout', () => { try { req.destroy(new Error('下载超时（20 秒无响应）')); } catch (e) { /* 忽略 */ } });
     req.on('error', reject);
   });
+}
+
+/**
+ * 打开安装程序。
+ *
+ * 不用 shell.openPath：它走 ShellExecute，文件被占用时 Windows 会自己弹一个
+ * 「另一程序正在使用此文件」的模态框（还会盖住自己的界面），而且我们拿不到可判定的错误。
+ * 改用 spawn —— 失败只会得到 error 事件（EBUSY/EPERM/EACCES），可以静默重试。
+ *
+ * 为什么会被占用：80MB 的 exe 刚落地，Defender 的首次扫描 / 索引器会短暂持有它。
+ * 所以这里退避重试约 10 秒，而不是让用户看到一个吓人的报错。
+ */
+function trySpawn(file) {
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = spawn(file, [], { detached: true, stdio: 'ignore' });
+    } catch (e) {
+      // 注意：Node 22 在 EBUSY 时是**同步抛出**的，不会走 'error' 事件。
+      // 不接住的话主进程直接崩，比原来的弹框还糟。
+      resolve(e.code || e.message || 'unknown');
+      return;
+    }
+    let settled = false;
+    child.on('error', (e) => {
+      if (settled) return;
+      settled = true;
+      resolve(e.code || e.message || 'unknown');
+    });
+    child.on('spawn', () => {
+      if (settled) return;
+      settled = true;
+      try { child.unref(); } catch (e) { /* 忽略 */ }
+      resolve('');
+    });
+  });
+}
+
+async function openInstaller(file) {
+  let lastErr = '';
+  for (let i = 0; i < 10; i++) {
+    // 首次等待久一点，给杀软扫完；之后逐步拉长
+    await new Promise((r) => setTimeout(r, i === 0 ? 800 : 400 * i));
+    const err = await trySpawn(file);
+    if (!err) {
+      log('✓ 安装程序已拉起（第 ' + (i + 1) + ' 次尝试）');
+      return '';
+    }
+    lastErr = err;
+    log('⚠ 拉起安装程序失败（第 ' + (i + 1) + ' 次）：' + err);
+  }
+  return lastErr;
 }
 
 /** 面板「立即更新」按钮 */
@@ -549,18 +631,19 @@ async function doSelfUpdate() {
     updater.message = '正在连接服务器…';
     updater.error = '';
     pushUpdate();
-    const dest = path.join(app.getPath('temp'), updateFileName(updater.info));
-    await downloadInstaller(url, dest, (percent, message) => {
-      updater.percent = percent;
-      updater.message = message;
-      pushUpdate();
-    });
+    const dest = await downloadInstaller(
+      url, path.join(app.getPath('temp'), updateFileName(updater.info)),
+      (percent, message) => {
+        updater.percent = percent;
+        updater.message = message;
+        pushUpdate();
+      });
     updater.file = dest;
-    updater.phase = 'installing';
-    updater.message = '安装程序已打开：按向导一路下一步，装完会自动拉开新版助手';
-    log('✓ 更新包已就绪：' + dest);
+    updater.percent = 100;
+    updater.message = '下载完成，正在打开安装程序…';
     pushUpdate();
-    const err = await shell.openPath(dest);
+    log('✓ 更新包已就绪：' + dest);
+    const err = await openInstaller(dest);
     if (err) {
       updater.phase = 'error';
       updater.error = '打开安装程序失败：' + err + '（可手动到 ' + dest + ' 安装）';
@@ -568,6 +651,10 @@ async function doSelfUpdate() {
       pushUpdate();
       return { ok: false, error: updater.error, file: dest };
     }
+    // 打开成功后才切到「安装中」，避免没拉起来却告诉用户已经打开了
+    updater.phase = 'installing';
+    updater.message = '安装程序已打开：按向导一路下一步，装完会自动拉开新版助手';
+    pushUpdate();
     // 让安装向导先拉起来，再退出自己 —— 否则 NSIS 会弹「程序正在运行，要关闭吗」
     setTimeout(() => { quitting = true; try { app.quit(); } catch (e) { /* 忽略 */ } }, 1500);
     return { ok: true, file: dest };
@@ -593,7 +680,6 @@ ipcMain.handle('agent:getState', () => {
     dataDir: app.getPath('userData'),
   };
 });
-ipcMain.handle('agent:openLoginWindow', () => { openLogin(); return true; });
 /** 面板「退出」按钮：只退出本机浏览器分区里的登录态，不动服务器上的数据 */
 ipcMain.handle('agent:logout', async (_e, target) => doLocalLogout(target));
 ipcMain.handle('agent:localState', () => localLoginStates());

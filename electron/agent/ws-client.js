@@ -55,6 +55,7 @@ class AgentClient extends EventEmitter {
     this._helloTimer = null;
     this._qnhBusy = false;
     this._sdcBusy = false;
+    this._aliBusy = false;
   }
 
   /** 连接地址（供测试断言） */
@@ -109,7 +110,8 @@ class AgentClient extends EventEmitter {
       pdd: !!this._pddBusy,
       qnh: !!this._qnhBusy,
       sdc: !!this._sdcBusy,
-      any: !!(this.sending || this._pddBusy || this._qnhBusy || this._sdcBusy),
+      ali: !!this._aliBusy,
+      any: !!(this.sending || this._pddBusy || this._qnhBusy || this._sdcBusy || this._aliBusy),
     };
   }
 
@@ -186,6 +188,7 @@ class AgentClient extends EventEmitter {
     if (m.type === 'qnh_login') { this._runQnhLogin(m).catch((e) => this.log('牵牛花登录异常: ' + e.message)); return; }
     if (m.type === 'qnh_fetch') { this._runQnhFetch(m).catch((e) => this.log('牵牛花页内请求异常: ' + e.message)); return; }
     if (m.type === 'pdd_login') { this._runPddLogin(m).catch((e) => this.log('拼多多登录异常: ' + e.message)); return; }
+    if (m.type === 'ali_login') { this._runAliLogin(m).catch((e) => this.log('1688 登录异常: ' + e.message)); return; }
     if (m.type === 'pdd_apply') { this._runPddApply(m).catch((e) => this.log('拼多多申请异常: ' + e.message)); return; }
     if (m.type === 'pdd_send') { this._runPddSend(m).catch((e) => this.log('拼多多催收异常: ' + e.message)); return; }
     if (m.type === 'sdc_login') { this._runSdcLogin(m).catch((e) => this.log('闪电帮帮登录异常: ' + e.message)); return; }
@@ -262,6 +265,8 @@ class AgentClient extends EventEmitter {
 
   /** 注册「登录拼多多」处理器（main.js 注入 pdd-login 模块） */
   setPddLoginHandler(fn) { this._pddLoginHandler = fn; }
+  /** 注册「1688 登录」处理器（main.js 注入 ali-login.createLoginHandler） */
+  setAliLoginHandler(fn) { this._aliLoginHandler = fn; }
   /** 注册「拼多多批量申请发票」处理器（main.js 注入 pdd-apply.createApplyHandler） */
   setPddApplyHandler(fn) { this._pddApplyHandler = fn; }
   /** 注册「拼多多批量催商家开票」处理器（main.js 注入 pdd-send.createSendHandler） */
@@ -505,6 +510,50 @@ class AgentClient extends EventEmitter {
       done({ ok: false, error: String((e && e.message) || e).slice(0, 200) });
     } finally {
       this._pddBusy = false;
+      this.stopFlag = false;
+      this.currentTaskId = null;
+      this._emitState();
+    }
+  }
+
+  /**
+   * 执行一次「登录1688」：在本机弹桌面窗口让用户登录，完成后把 Cookie 串回传服务器。
+   * 与拼多多登录各自独立（不同窗口、不同站点分区），只在发送催收消息时互斥。
+   */
+  async _runAliLogin(m) {
+    const done = (payload) => this.send(Object.assign({
+      type: 'ali_login_done', taskId: m.taskId,
+    }, payload || {}));
+
+    if (this._aliBusy) { done({ ok: false, error: '已有 1688 登录任务在进行中' }); return; }
+    if (this.sending) {
+      done({ ok: false, error: '正在发送催收消息，请等发送完成后再登录 1688' });
+      return;
+    }
+    if (typeof this._aliLoginHandler !== 'function') {
+      done({ ok: false, error: '助手版本过旧，不支持登录 1688，请重新下载安装助手' });
+      return;
+    }
+    this._aliBusy = true;
+    this.stopFlag = false;
+    this.currentTaskId = m.taskId;
+    this._emitState();
+    const api = {
+      log: (text) => this.send({ type: 'log', text: String(text == null ? '' : text).slice(0, 200) }),
+      isStopped: () => this.stopFlag,
+      sleep: async (ms) => {
+        for (let waited = 0; waited < ms && !this.stopFlag; waited += 300) {
+          await new Promise((r) => setTimeout(r, Math.min(300, ms - waited)));
+        }
+      },
+      report: done,
+    };
+    try {
+      await this._aliLoginHandler(m, api);
+    } catch (e) {
+      done({ ok: false, error: String((e && e.message) || e).slice(0, 200) });
+    } finally {
+      this._aliBusy = false;
       this.stopFlag = false;
       this.currentTaskId = null;
       this._emitState();
