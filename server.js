@@ -2547,8 +2547,12 @@ const server = http.createServer(async (req, res) => {
     if (method === 'GET' && (p === '/login' || p === '/login.html')) return sendHtml(res, 'login.html');
     // 公开下载落地页（无需登录，供用户获取本机发送扩展）
     if (method === 'GET' && (p === '/download' || p === '/download.html')) return sendHtml(res, 'download.html');
-    // 公开官网首页（路径 /，无需登录；登录后的看板在 /home）
-    if (method === 'GET' && (p === '/' || p === '/index.html')) return sendHtml(res, 'home.html');
+    // 官网首页（路径 /）：未登录停留在这里；已登录自动进看板 /home
+    if (method === 'GET' && (p === '/' || p === '/index.html')) {
+      const u = await currentUser(req);
+      if (u) return redirect(res, '/home');
+      return sendHtml(res, 'home.html');
+    }
     // 书签工具落地页（登录可用，零安装方案；未登录跳转登录页）
     if (method === 'GET' && (p === '/bookmarklet' || p === '/bookmarklet.html')) {
       const bu = await currentUser(req);
@@ -2562,10 +2566,10 @@ const server = http.createServer(async (req, res) => {
     if (method === 'GET' && p.startsWith('/assets/')) return sendAsset(req, res, decodeURIComponent(p.slice('/assets/'.length)));
     // 前端本地依赖（免外网 CDN）：/vendor/vue.min.js、/vendor/echarts.min.js、/vendor/element-ui/*
     if (method === 'GET' && p.startsWith('/vendor/')) return sendVendor(res, decodeURIComponent(p.slice('/vendor/'.length)));
-    // 登录后的看板（路径 /home；未登录跳登录页）
+    // 登录后的看板（路径 /home）：已登录进看板；未登录回官网首页 /
     if (method === 'GET' && (p === '/home' || p === '/home.html')) {
       const u = await currentUser(req);
-      if (!u) return redirect(res, '/login');
+      if (!u) return redirect(res, '/');
       return sendHtml(res, 'dashboard.html');
     }
 
