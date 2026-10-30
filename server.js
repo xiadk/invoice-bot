@@ -3532,10 +3532,27 @@ const server = http.createServer(async (req, res) => {
     if (method === 'GET' && p === '/api/qht/session') {
       return sendJson(res, 200, await qht.sessionStatus(tenantId));
     }
-    if (method === 'POST' && p === '/api/qht/session') {
+    // 账号密码登录：直接换回 x-token / x-user 写进当前账号，不用再去浏览器里手工拷贝
+    if (method === 'POST' && p === '/api/qht/login') {
       writeGuard();
       const b = await readBody(req);
-      return sendJson(res, 200, await qht.saveSession(tenantId, { token: b.token, xUser: b.xUser }));
+      try {
+        const r = await qht.login({ account: b.account, password: b.password, openid: b.openid });
+        await qht.saveSession(tenantId, { token: r.token, xUser: r.xUser });
+        return sendJson(res, 200, { ok: true, ...(await qht.sessionStatus(tenantId)) });
+      } catch (e) {
+        return sendJson(res, 200, {
+          ok: false,
+          error: String((e && e.message) || e).slice(0, 300),
+          code: (e && e.code) || 'unknown',
+          ...(await qht.sessionStatus(tenantId)),
+        });
+      }
+    }
+    // 退出：清掉库里的齐货通登录态（本机浏览器分区不参与——齐货通不走浏览器登录）
+    if (method === 'POST' && p === '/api/qht/logout') {
+      writeGuard();
+      return sendJson(res, 200, await qht.clearSession(tenantId));
     }
     if (method === 'GET' && p === '/api/qht/search') {
       try {

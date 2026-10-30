@@ -932,7 +932,8 @@
             <el-tag size="small" :type="rp.session.configured ? 'success' : 'warning'">
               齐货通登录态：{{ rp.session.configured ? ('已配置 ' + rp.session.tokenMasked) : '未配置（取价/加购都用不了）' }}
             </el-tag>
-            <el-button size="small" @click="openQhtDlg">登录态设置</el-button>
+            <el-button size="small" :type="rp.session.configured ? 'danger' : 'primary'"
+                       @click="onQhtBtn">{{ rp.session.configured ? '退出齐货通' : '登录齐货通' }}</el-button>
             <el-button size="small" :loading="rp.pricing" @click="loadQhtPrices">重新取价</el-button>
             <span class="loginid">共 {{ rp.total }} 个商品</span>
             <span v-if="rp.expect && rp.total < rp.expect" style="font-size:12px;color:#e6a23c">
@@ -1045,21 +1046,23 @@
           </div>
         </el-dialog>
 
-        <!-- 齐货通登录态：用户自己粘贴 x-token / 手机号 -->
-        <el-dialog :visible.sync="qhtDlg.visible" title="齐货通登录态" width="520px" append-to-body>
+        <!-- 齐货通登录：账号密码换 token（服务器代发登录请求，密码不落盘） -->
+        <el-dialog :visible.sync="qhtDlg.visible" title="登录齐货通" width="520px" append-to-body>
           <el-alert type="info" :closable="false" show-icon style="margin-bottom:12px"
-            title="登录齐货通网页/小程序后，按 F12 → 网络 → 随便点一个 mall/api 请求，把请求头里的 x-token（登录态）和 x-user（登录手机号）复制过来。过期后接口会报「安全参数不可用」，重贴一次即可。"></el-alert>
+            title="填你在齐货通网页/小程序的登录账号和密码，点登录后系统会自动取回登录态（x-token / 手机号）。这个登录态会过期，过期后重新登录一次即可。"></el-alert>
           <el-form label-position="top" size="small">
-            <el-form-item label="x-token">
-              <el-input v-model="qhtDlg.token" size="small" placeholder="如 25b3690c-e272-4322-abf0-d9b7564fbb05"></el-input>
+            <el-form-item label="账号（用户名 / 手机号）">
+              <el-input v-model="qhtDlg.account" size="small" placeholder="如 13047901299"
+                        @keyup.enter.native="submitQhtLogin"></el-input>
             </el-form-item>
-            <el-form-item label="x-user（登录手机号）">
-              <el-input v-model="qhtDlg.xUser" size="small" placeholder="如 13047901299"></el-input>
+            <el-form-item label="密码">
+              <el-input v-model="qhtDlg.password" size="small" type="password" show-password
+                        placeholder="请输入密码" @keyup.enter.native="submitQhtLogin"></el-input>
             </el-form-item>
           </el-form>
           <div slot="footer">
             <el-button size="small" @click="qhtDlg.visible = false">取消</el-button>
-            <el-button size="small" type="primary" :loading="qhtDlg.saving" @click="saveQhtSession">保存</el-button>
+          <el-button size="small" type="primary" :loading="qhtDlg.saving" @click="submitQhtLogin">登录</el-button>
           </div>
         </el-dialog>
 
@@ -3004,7 +3007,7 @@ const vm = new Vue({
       tblH: { rp: 500, link: 320 },
       rpLink: { visible: false, sku: '', keyword: '', rows: [], loading: false, error: '', picked: null, total: 0, page: 1, size: 20 },
       rpBuy: { visible: false, sku: '', goodsId: null, goodsName: '', qty: 1, saving: false },
-      qhtDlg: { visible: false, token: '', xUser: '', saving: false },
+      qhtDlg: { visible: false, account: '', password: '', saving: false },
       // 发布到交易市场（单个/批量共用弹窗）
       publish: { visible: false, title: '', discount: 100, items: [], saving: false },
       // 交易市场
@@ -6504,25 +6507,41 @@ const vm = new Vue({
         this.$message.success('本地价已保存');
       } catch (e) { this.$message.error('本地价保存失败: ' + e.message); }
     },
-    async openQhtDlg() {
+    /** 补货页齐货通按钮：未登录 → 弹登录框；已登录 → 退出 */
+    async onQhtBtn() {
       await this.loadQhtSession();
-      const s = this.rp.session || {};
-      this.qhtDlg = { visible: true, token: '', xUser: s.xUser || '', saving: false };
+      if (this.rp.session && this.rp.session.configured) { await this.logoutQht(); return; }
+      this.qhtDlg = { visible: true, account: '', password: '', saving: false };
     },
-    async saveQhtSession() {
+    /** 账号密码登录：服务器代发登录请求换回 x-token / 手机号（密码不落盘、不写日志） */
+    async submitQhtLogin() {
+      const account = String(this.qhtDlg.account || '').trim();
+      const password = String(this.qhtDlg.password || '');
+      if (!account || !password) { this.$message.warning('请填写账号和密码'); return; }
       this.qhtDlg.saving = true;
       try {
-        const d = await this.api('/api/qht/session', {
+        const d = await this.api('/api/qht/login', {
           method: 'POST', headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ token: this.qhtDlg.token, xUser: this.qhtDlg.xUser }),
+          body: JSON.stringify({ account, password }),
         });
-        if (d.error) { this.$message.error('保存失败: ' + d.error); return; }
-        this.qhtDlg.visible = false;
-        await this.loadQhtSession();
-        this.$message.success('齐货通登录态已保存');
-        await this.loadQhtPrices();
-      } catch (e) { this.$message.error('保存失败: ' + e.message); }
+        if (d.ok) {
+          this.qhtDlg = { visible: false, account: '', password: '', saving: false };
+          await this.loadQhtSession();
+          this.$message.success('齐货通登录成功，登录态已保存');
+          return;
+        }
+        this.$message.error('登录失败：' + ((d && d.error) || '未知错误'));
+      } catch (e) { this.$message.error('登录请求失败: ' + e.message); }
       finally { this.qhtDlg.saving = false; }
+    },
+    async logoutQht() {
+      try {
+        const d = await this.api('/api/qht/logout', {
+          method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+        });
+        await this.loadQhtSession();
+        this.$message.success(d && d.ok ? '已退出齐货通登录态' : ('退出失败：' + ((d && d.error) || '未知错误')));
+      } catch (e) { this.$message.error('退出失败: ' + e.message); }
     },
 
     // ══════ 交易市场 ══════
