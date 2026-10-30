@@ -6534,13 +6534,28 @@ const vm = new Vue({
       } catch (e) { this.$message.error('登录请求失败: ' + e.message); }
       finally { this.qhtDlg.saving = false; }
     },
+    /** 退出齐货通：先调对方「解除绑定」让 token 作废，再清掉本地登录态 */
     async logoutQht() {
+      try {
+        await this.$confirm(
+          '是否确定解除绑定？\n解除后齐货通那侧的登录态立即失效，重新取价与加入购物车都需要重新登录。'
+          + '\n已关联的商品关系与本地价不受影响，不会被清除。',
+          '退出齐货通',
+          { confirmButtonText: '解除绑定', cancelButtonText: '取消', type: 'warning' }
+        );
+      } catch (e) { return; }
+
       try {
         const d = await this.api('/api/qht/logout', {
           method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
         });
         await this.loadQhtSession();
-        this.$message.success(d && d.ok ? '已退出齐货通登录态' : ('退出失败：' + ((d && d.error) || '未知错误')));
+        if (d && d.ok && d.unbind && d.unbind.ok) {
+          this.$message.success('已解除绑定并退出齐货通');
+          return;
+        }
+        const why = (d && d.unbind && d.unbind.error) || '远端解除绑定失败';
+        this.$message.warning('本地登录态已清除（' + why + '）');
       } catch (e) { this.$message.error('退出失败: ' + e.message); }
     },
 

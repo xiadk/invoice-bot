@@ -3549,10 +3549,18 @@ const server = http.createServer(async (req, res) => {
         });
       }
     }
-    // 退出：清掉库里的齐货通登录态（本机浏览器分区不参与——齐货通不走浏览器登录）
+    // 退出：先在齐货通那侧解除绑定（token 作废），再清掉库里登录态
+    //      远端解绑失败也继续清本地——否则「登录态已过期」时用户永远退不出来
     if (method === 'POST' && p === '/api/qht/logout') {
       writeGuard();
-      return sendJson(res, 200, await qht.clearSession(tenantId));
+      let unb = { ok: false, error: '' };
+      try {
+        unb = await qht.unbind(tenantId);
+      } catch (e) {
+        unb = { ok: false, error: String((e && e.message) || e).slice(0, 200) };
+      }
+      const r = await qht.clearSession(tenantId);
+      return sendJson(res, 200, { ...r, unbind: unb });
     }
     if (method === 'GET' && p === '/api/qht/search') {
       try {
