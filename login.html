@@ -69,7 +69,7 @@ new Vue({
   methods: {
     // 已登录则直接进入看板
     async checkLogged() {
-      try { const r = await fetch('/api/auth/me', { credentials: 'same-origin' }); if (r.ok) location.href = '/'; } catch (e) {}
+      try { const r = await fetch('/api/auth/me', { credentials: 'same-origin' }); if (r.ok) location.href = '/home'; } catch (e) {}
     },
     async submit() {
       this.err = '';
@@ -83,7 +83,7 @@ new Vue({
           body: JSON.stringify({ username, password }),
         });
         const d = await r.json().catch(() => ({}));
-        if (r.ok) { location.href = '/'; return; }
+        if (r.ok) { location.href = '/home'; return; }
         this.err = d.error || ('登录失败（HTTP ' + r.status + '）');
       } catch (e) { this.err = '网络异常：' + e.message; }
       this.loading = false;
