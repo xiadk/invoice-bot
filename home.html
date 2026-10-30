@@ -1,0 +1,460 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>开票助手 · 自动催收发票，回款快人一步</title>
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="icon" type="image/png" sizes="256x256" href="/assets/logo-icon.png">
+<style>
+  :root {
+    --bg: #EEF1F6;
+    --card: #FFFFFF;
+    --card-alt: #F7F9FC;
+    --border: #E4E8F0;
+    --border-strong: #D3DAE6;
+    --text: #16202E;
+    --sub: #5A6473;
+    --weak: #8A95A8;
+    --primary: #FF6A00;
+    --pdd: #E2251B;
+    --sdb: #4262FF;
+    --green: #1A9D5C;
+    --green-bg: #D8F5E6;
+    --amber: #C8841A;
+    --graybar: #C7CCD6;
+    --radius: 16px;
+    --shadow: 0 12px 32px rgba(13,0,56,0.06);
+    --shadow-sm: 0 8px 24px rgba(13,0,56,0.06);
+    --font-cn: "Noto Sans SC", "Microsoft YaHei", "PingFang SC", -apple-system, sans-serif;
+    --font-num: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    font-family: var(--font-cn);
+    color: var(--text);
+    background: var(--bg);
+    -webkit-font-smoothing: antialiased;
+    line-height: 1.5;
+  }
+  a { text-decoration: none; color: inherit; }
+  .wrap { max-width: 1200px; margin: 0 auto; padding: 0 24px; }
+  .num { font-family: var(--font-num); font-variant-numeric: tabular-nums; }
+
+  /* ── 导航 ── */
+  .nav {
+    position: sticky; top: 0; z-index: 50;
+    background: rgba(255,255,255,0.92);
+    backdrop-filter: saturate(180%) blur(12px);
+    border-bottom: 1px solid var(--border);
+  }
+  .nav-inner { display: flex; align-items: center; height: 64px; }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 19px; }
+  .brand .logo {
+    width: 32px; height: 32px; border-radius: 8px;
+    background: var(--primary); color: #fff;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 17px; font-weight: 700;
+  }
+  .nav-links { display: flex; gap: 28px; margin-left: 48px; }
+  .nav-links a { font-size: 15px; color: var(--sub); transition: color .15s; }
+  .nav-links a:hover { color: var(--text); }
+  .nav-links a.active { color: var(--text); font-weight: 600; }
+  .nav-right { margin-left: auto; display: flex; align-items: center; gap: 12px; }
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center;
+    border-radius: 9999px; font-size: 14px; font-weight: 600; cursor: pointer;
+    border: 1px solid transparent; transition: transform .12s, box-shadow .15s, background .15s;
+    font-family: var(--font-cn);
+  }
+  .btn:hover { transform: translateY(-1px); }
+  .btn-login { padding: 0 22px; height: 36px; border-color: var(--border-strong); background: #fff; color: var(--text); }
+  .btn-login:hover { border-color: var(--primary); color: var(--primary); }
+  .btn-primary { padding: 0 24px; height: 36px; background: var(--primary); color: #fff; }
+  .btn-primary:hover { box-shadow: 0 8px 20px rgba(255,106,0,.3); }
+
+  /* ── Hero ── */
+  .hero { background: var(--card-alt); padding: 72px 0 88px; }
+  .hero-grid { display: grid; grid-template-columns: 1fr 492px; gap: 48px; align-items: center; }
+  .hero h1 { font-size: 46px; line-height: 1.18; font-weight: 700; letter-spacing: -0.5px; }
+  .hero .sub { margin-top: 20px; font-size: 18px; color: var(--sub); line-height: 1.7; max-width: 560px; }
+  .cta-row { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 32px; }
+  .cta {
+    height: 52px; padding: 0 26px; border-radius: 9999px; color: #fff; font-size: 16px; font-weight: 600;
+  }
+  .cta-1688 { background: var(--primary); }
+  .cta-pdd { background: var(--pdd); }
+  .cta-sdb { background: var(--sdb); }
+  .cta-1688:hover { box-shadow: 0 8px 22px rgba(255,106,0,.32); }
+  .cta-pdd:hover { box-shadow: 0 8px 22px rgba(226,37,27,.3); }
+  .cta-sdb:hover { box-shadow: 0 8px 22px rgba(66,98,255,.32); }
+  .stats { display: flex; gap: 48px; margin-top: 44px; }
+  .stat .v { font-size: 34px; font-weight: 700; }
+  .stat .v.green { color: var(--green); }
+  .stat .l { font-size: 14px; color: var(--weak); margin-top: 4px; }
+
+  .hero-card {
+    background: #fff; border: 1px solid var(--border); border-radius: var(--radius);
+    box-shadow: var(--shadow); padding: 24px; height: fit-content;
+  }
+  .hero-card h3 { font-size: 16px; margin-bottom: 14px; }
+  .hc-row {
+    display: grid; grid-template-columns: 64px 1fr auto; gap: 8px; align-items: center;
+    padding: 10px 0; border-bottom: 1px dashed var(--border); font-size: 13.5px; color: var(--sub);
+  }
+  .hc-row:last-of-type { border-bottom: none; }
+  .hc-row .plat { font-weight: 600; color: var(--text); }
+  .hc-row .amt { font-weight: 600; color: var(--text); }
+  .pill { font-size: 12px; padding: 2px 10px; border-radius: 9999px; white-space: nowrap; }
+  .pill.done { background: var(--green-bg); color: var(--green); }
+  .pill.doing { background: #FFF3E0; color: var(--amber); }
+  .pill.wait { background: #EEF1F6; color: var(--weak); }
+  .hc-note { margin-top: 14px; font-size: 12px; color: var(--weak); }
+
+  /* ── 区块通用 ── */
+  section.block { padding: 80px 0; }
+  .sec-title { font-size: 32px; font-weight: 700; }
+  .sec-sub { margin-top: 12px; font-size: 16px; color: var(--sub); }
+
+  .plat-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; margin-top: 40px; }
+  .plat-card { background: #fff; border: 1px solid var(--border); border-radius: var(--radius); padding: 28px; box-shadow: var(--shadow-sm); transition: transform .15s, box-shadow .15s; }
+  .plat-card:hover { transform: translateY(-3px); box-shadow: var(--shadow); }
+  .plat-ic { width: 48px; height: 48px; border-radius: 12px; display: flex; align-items: center; justify-content: center; color: #fff; font-size: 20px; font-weight: 700; }
+  .plat-card h4 { font-size: 22px; margin-top: 14px; }
+  .plat-card .tag { font-size: 13px; color: var(--weak); margin-top: 2px; }
+  .plat-card ul { list-style: none; margin-top: 16px; }
+  .plat-card li { font-size: 14px; color: var(--sub); padding: 5px 0; }
+  .plat-card .go { display: inline-block; margin-top: 14px; font-size: 14px; font-weight: 600; }
+
+  /* ── 催收 ── */
+  .collection { background: var(--card-alt); }
+  .col-grid { display: grid; grid-template-columns: 480px 1fr; gap: 32px; margin-top: 40px; align-items: start; }
+  .benefits { background: #fff; border: 1px solid var(--border); border-radius: var(--radius); padding: 28px; box-shadow: var(--shadow-sm); }
+  .benefits li { display: flex; align-items: flex-start; gap: 14px; list-style: none; padding: 16px 0; border-bottom: 1px dashed var(--border); font-size: 16px; }
+  .benefits li:last-child { border-bottom: none; }
+  .benefits .ck { flex: none; width: 26px; height: 26px; border-radius: 9999px; background: var(--green); color: #fff; display: flex; align-items: center; justify-content: center; font-size: 14px; font-weight: 700; }
+
+  .cmp-card { background: #fff; border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); padding: 28px; }
+  .cmp-head { display: flex; align-items: center; gap: 16px; }
+  .cmp-card h3 { font-size: 18px; }
+  .badge { background: var(--green-bg); color: var(--green); font-size: 13px; font-weight: 600; padding: 7px 14px; border-radius: 9999px; }
+  .cmp-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 0; margin-top: 22px; }
+  .cmp-col { padding: 0 4px; }
+  .cmp-col .lab { font-size: 14px; font-weight: 600; color: var(--weak); margin-bottom: 12px; }
+  .cmp-col.after .lab { color: var(--green); }
+  .cmp-item { margin-bottom: 18px; }
+  .cmp-item .v { font-size: 30px; font-weight: 700; font-family: var(--font-num); }
+  .cmp-item .v.red { color: var(--pdd); }
+  .cmp-item .v.gray { color: var(--sub); }
+  .cmp-item .v.green { color: var(--green); }
+  .cmp-item .v.amber { color: var(--amber); }
+  .cmp-item .l { font-size: 13px; color: var(--weak); margin-top: 2px; }
+  .cmp-divider { width: 1px; background: var(--border); margin: 0 18px; }
+  .plots { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 24px; }
+  .plot { background: var(--card-alt); border: 1px solid var(--border); border-radius: 8px; padding: 12px; }
+  .plot .bars { display: flex; align-items: flex-end; gap: 6px; height: 130px; }
+  .plot .bars .bar { flex: 1; border-radius: 3px 3px 0 0; min-height: 6px; }
+  .plot .cap { font-size: 11.5px; color: var(--weak); margin-top: 10px; }
+
+  /* ── 账单统计 ── */
+  .bill-grid { display: grid; grid-template-columns: 1fr 480px; gap: 32px; margin-top: 40px; align-items: start; }
+  .chart-card, .table-card { background: #fff; border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); padding: 24px; }
+  .chart-card h3, .table-card h3 { font-size: 18px; margin-bottom: 16px; }
+  .legend { display: flex; gap: 20px; margin-bottom: 14px; font-size: 14px; color: var(--sub); }
+  .legend .sw { display: inline-block; width: 14px; height: 14px; border-radius: 4px; margin-right: 6px; vertical-align: -2px; }
+  .plot-bill { display: flex; align-items: flex-end; justify-content: space-between; gap: 6px; height: 260px; padding: 0 4px; }
+  .pair { display: flex; align-items: flex-end; gap: 4px; height: 100%; }
+  .pair .bar { width: 22px; border-radius: 4px 4px 0 0; }
+  .xlabels { display: flex; justify-content: space-between; margin-top: 10px; font-size: 12px; color: var(--weak); }
+  .xlabels span { flex: 1; text-align: center; }
+  .xlabels span:nth-child(odd) { margin-right: 26px; }
+
+  .trow { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; padding: 13px 8px; font-size: 15px; align-items: center; }
+  .trow.head { background: var(--card-alt); border-radius: 8px; font-size: 14px; color: var(--weak); font-weight: 600; }
+  .trow + .trow:not(.head) { border-top: 1px solid var(--border); }
+  .trow .d { text-align: right; font-weight: 600; }
+  .trow .d.plus { color: var(--green); }
+  .trow .e, .trow .i { text-align: right; color: var(--sub); font-family: var(--font-num); }
+  .trow .m { font-weight: 600; }
+  .t-note { margin-top: 16px; font-size: 12px; color: var(--weak); }
+
+  /* ── 评价 ── */
+  .testi-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; margin-top: 40px; }
+  .testi { background: #fff; border: 1px solid var(--border); border-radius: var(--radius); padding: 28px; box-shadow: var(--shadow-sm); }
+  .testi .q { font-size: 16px; line-height: 1.7; color: var(--text); }
+  .testi .who { display: flex; align-items: center; gap: 12px; margin-top: 22px; }
+  .testi .av { width: 44px; height: 44px; border-radius: 9999px; color: #fff; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 17px; flex: none; }
+  .testi .nm { font-size: 15px; font-weight: 600; }
+  .testi .rl { font-size: 13px; color: var(--weak); }
+
+  /* ── CTA 带 ── */
+  .cta-band { background: var(--primary); padding: 56px 0; }
+  .cta-band .wrap { display: flex; align-items: center; justify-content: space-between; gap: 24px; flex-wrap: wrap; }
+  .cta-band h2 { color: #fff; font-size: 28px; font-weight: 700; }
+  .btn-white { height: 56px; padding: 0 32px; background: #fff; color: var(--primary); font-size: 16px; }
+
+  /* ── 页脚 ── */
+  footer { background: #1C1C1F; color: #fff; padding: 56px 0 36px; }
+  .foot-grid { display: grid; grid-template-columns: 1.4fr 1fr 1fr 1fr; gap: 32px; }
+  footer .fbrand { font-size: 20px; font-weight: 700; }
+  footer .fdesc { font-size: 14px; color: #A5A8B5; margin-top: 12px; line-height: 1.7; max-width: 280px; }
+  footer .fcol h5 { font-size: 15px; margin-bottom: 14px; }
+  footer .fcol a { display: block; font-size: 14px; color: #A5A8B5; padding: 5px 0; }
+  footer .fcol a:hover { color: #fff; }
+  footer .fcopy { margin-top: 40px; padding-top: 20px; border-top: 1px solid #2E2E33; font-size: 13px; color: var(--weak); }
+
+  /* ── 响应式 ── */
+  @media (max-width: 900px) {
+    .wrap { padding: 0 16px; }
+    .nav-links { display: none; }
+    .hero { padding: 48px 0 56px; }
+    .hero-grid { grid-template-columns: 1fr; gap: 36px; }
+    .hero h1 { font-size: 32px; }
+    .hero .sub { font-size: 16px; }
+    .hero-card { max-width: 100%; }
+    .stats { gap: 28px; }
+    .stat .v { font-size: 26px; }
+    .plat-grid { grid-template-columns: 1fr; }
+    .col-grid { grid-template-columns: 1fr; }
+    .bill-grid { grid-template-columns: 1fr; }
+    .testi-grid { grid-template-columns: 1fr; }
+    .sec-title { font-size: 26px; }
+    section.block { padding: 56px 0; }
+    .cta-band h2 { font-size: 22px; }
+    .foot-grid { grid-template-columns: 1fr 1fr; gap: 24px; }
+  }
+  @media (max-width: 520px) {
+    .cta-row { flex-direction: column; align-items: stretch; }
+    .cta { width: 100%; }
+    .stats { flex-wrap: wrap; gap: 20px; }
+    .cmp-cols { grid-template-columns: 1fr; }
+    .cmp-divider { display: none; }
+    .plots { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<!-- 导航 -->
+<nav class="nav">
+  <div class="wrap nav-inner">
+    <a class="brand" href="/"><span class="logo">票</span>开票助手</a>
+    <div class="nav-links">
+      <a class="active" href="/">首页</a>
+      <a href="#features">功能</a>
+      <a href="#platforms">平台</a>
+      <a href="#pricing">价格</a>
+      <a href="#help">帮助</a>
+    </div>
+    <div class="nav-right">
+      <a class="btn btn-login" href="/login">登录</a>
+      <a class="btn btn-primary" href="/login">免费试用</a>
+    </div>
+  </div>
+</nav>
+
+<!-- Hero -->
+<header class="hero">
+  <div class="wrap hero-grid">
+    <div>
+      <h1>自动催收发票，<br>回款快人一步</h1>
+      <p class="sub">覆盖 1688 · 拼多多 · 闪电帮帮，自动抓取订单、生成发票、定时催收，让每一笔应收准时到账。</p>
+      <div class="cta-row">
+        <a class="btn cta cta-1688" href="/login">1688 开票</a>
+        <a class="btn cta cta-pdd" href="/login">拼多多 开票</a>
+        <a class="btn cta cta-sdb" href="/login">闪电帮帮 开票</a>
+      </div>
+      <div class="stats">
+        <div class="stat"><div class="v num">128<span style="font-size:20px">万张</span></div><div class="l">累计自动催收发票</div></div>
+        <div class="stat"><div class="v num">98.3%</div><div class="l">平均回款率</div></div>
+        <div class="stat"><div class="v green num">↓ 90%</div><div class="l">财务工时下降</div></div>
+      </div>
+    </div>
+    <aside class="hero-card">
+      <h3>催收看板 · 今日</h3>
+      <div class="hc-row"><span class="plat">1688</span><span>某优选旗舰店 · <span class="amt num">¥12,480</span></span><span class="pill done">已催收</span></div>
+      <div class="hc-row"><span class="plat">拼多多</span><span>某家居专营店 · <span class="amt num">¥8,640</span></span><span class="pill doing">催收中</span></div>
+      <div class="hc-row"><span class="plat">闪电帮帮</span><span>某百货商行 · <span class="amt num">¥5,210</span></span><span class="pill done">已回款</span></div>
+      <div class="hc-row"><span class="plat">1688</span><span>某食品旗舰店 · <span class="amt num">¥3,980</span></span><span class="pill wait">待催收</span></div>
+      <div class="hc-row"><span class="plat">拼多多</span><span>某数码专营店 · <span class="amt num">¥2,350</span></span><span class="pill done">已催收</span></div>
+      <div class="hc-note">示例数据已脱敏，仅用于演示</div>
+    </aside>
+  </div>
+</header>
+
+<!-- 平台 -->
+<section class="block" id="platforms">
+  <div class="wrap">
+    <h2 class="sec-title">支持三大采购平台，自动开票</h2>
+    <p class="sec-sub">无需登录各平台后台，一键授权即可自动同步订单与发票</p>
+    <div class="plat-grid">
+      <div class="plat-card">
+        <div class="plat-ic" style="background:var(--primary)">1688</div>
+        <h4>1688</h4>
+        <div class="tag">采购批发</div>
+        <ul>
+          <li>· 订单自动同步，开票零手工</li>
+          <li>· 按店铺 / 税号批量开票</li>
+          <li>· 逾期发票自动催收提醒</li>
+        </ul>
+        <a class="go" style="color:var(--primary)" href="/login">去开票 →</a>
+      </div>
+      <div class="plat-card">
+        <div class="plat-ic" style="background:var(--pdd)">拼</div>
+        <h4>拼多多</h4>
+        <div class="tag">社交电商</div>
+        <ul>
+          <li>· 店铺订单自动拉取</li>
+          <li>· 退货单自动冲红</li>
+          <li>· 逾期自动催收提醒</li>
+        </ul>
+        <a class="go" style="color:var(--pdd)" href="/login">去开票 →</a>
+      </div>
+      <div class="plat-card">
+        <div class="plat-ic" style="background:var(--sdb)">闪</div>
+        <h4>闪电帮帮</h4>
+        <div class="tag">即时零售</div>
+        <ul>
+          <li>· 订单实时同步开票</li>
+          <li>· 多门店统一对账</li>
+          <li>· 逾期自动催收提醒</li>
+        </ul>
+        <a class="go" style="color:var(--sdb)" href="/login">去开票 →</a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- 催收（重点） -->
+<section class="block collection" id="features">
+  <div class="wrap">
+    <h2 class="sec-title">智能催收，让每一张发票准时回款</h2>
+    <p class="sec-sub">逾期发票自动提醒、多级触达、回款看板——把财务从催账里解放出来</p>
+    <div class="col-grid">
+      <ul class="benefits">
+        <li><span class="ck">✓</span><span>逾期发票自动提醒，不再靠人盯</span></li>
+        <li><span class="ck">✓</span><span>电话 / 短信 / 站内信 多级自动触达</span></li>
+        <li><span class="ck">✓</span><span>回款进度实时看板，老板随时掌握</span></li>
+        <li><span class="ck">✓</span><span>催收记录全程留痕，合规可追溯</span></li>
+      </ul>
+      <div class="cmp-card">
+        <div class="cmp-head">
+          <h3>催收效果对比 · 使用前 vs 使用后</h3>
+          <span class="badge">回款率提升 +36.3%</span>
+        </div>
+        <div class="plots">
+          <div class="plot">
+            <div class="bars">
+              <div class="bar" style="height:46%;background:var(--graybar)"></div>
+              <div class="bar" style="height:62%;background:var(--graybar)"></div>
+              <div class="bar" style="height:54%;background:var(--graybar)"></div>
+              <div class="bar" style="height:78%;background:var(--graybar)"></div>
+              <div class="bar" style="height:70%;background:var(--graybar)"></div>
+              <div class="bar" style="height:86%;background:var(--graybar)"></div>
+              <div class="bar" style="height:58%;background:var(--graybar)"></div>
+            </div>
+            <div class="cap">每日催收回收金额（万）· 使用前</div>
+          </div>
+          <div class="plot">
+            <div class="bars">
+              <div class="bar" style="height:30%;background:var(--green)"></div>
+              <div class="bar" style="height:62%;background:var(--green)"></div>
+              <div class="bar" style="height:45%;background:var(--green)"></div>
+              <div class="bar" style="height:95%;background:var(--green)"></div>
+              <div class="bar" style="height:52%;background:var(--green)"></div>
+              <div class="bar" style="height:85%;background:var(--green)"></div>
+              <div class="bar" style="height:70%;background:var(--green)"></div>
+            </div>
+            <div class="cap">每日催收回收金额（万）· 使用后</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- 账单统计 -->
+<section class="block" id="billing">
+  <div class="wrap">
+    <h2 class="sec-title">每月账单统计 · 实际支出与实际收入</h2>
+    <p class="sec-sub">自动汇总各平台采购与回款，月月对账一目了然（示例数据已脱敏）</p>
+    <div class="bill-grid">
+      <div class="chart-card">
+        <h3>近 6 个月 · 实际支出 vs 实际收入（万元）</h3>
+        <div class="legend">
+          <span><span class="sw" style="background:var(--primary)"></span>实际支出</span>
+          <span><span class="sw" style="background:var(--green)"></span>实际收入</span>
+        </div>
+        <div class="plot-bill">
+          <div class="pair"><div class="bar" style="height:168px;background:var(--primary)"></div><div class="bar" style="height:217px;background:var(--green)"></div></div>
+          <div class="pair"><div class="bar" style="height:146px;background:var(--primary)"></div><div class="bar" style="height:198px;background:var(--green)"></div></div>
+          <div class="pair"><div class="bar" style="height:185px;background:var(--primary)"></div><div class="bar" style="height:234px;background:var(--green)"></div></div>
+          <div class="pair"><div class="bar" style="height:157px;background:var(--primary)"></div><div class="bar" style="height:221px;background:var(--green)"></div></div>
+          <div class="pair"><div class="bar" style="height:175px;background:var(--primary)"></div><div class="bar" style="height:245px;background:var(--green)"></div></div>
+          <div class="pair"><div class="bar" style="height:153px;background:var(--primary)"></div><div class="bar" style="height:205px;background:var(--green)"></div></div>
+        </div>
+        <div class="xlabels"><span>1月</span><span>2月</span><span>3月</span><span>4月</span><span>5月</span><span>6月</span></div>
+      </div>
+      <div class="table-card">
+        <h3>月度账单明细（万元）</h3>
+        <div class="trow head"><span>月份</span><span class="e">实际支出</span><span class="i">实际收入</span><span class="d">差额</span></div>
+        <div class="trow"><span class="m">1月</span><span class="e num">32.4</span><span class="i num">41.8</span><span class="d plus num">+9.4</span></div>
+        <div class="trow"><span class="m">2月</span><span class="e num">28.1</span><span class="i num">38.2</span><span class="d plus num">+10.1</span></div>
+        <div class="trow"><span class="m">3月</span><span class="e num">35.6</span><span class="i num">45.0</span><span class="d plus num">+9.4</span></div>
+        <div class="trow"><span class="m">4月</span><span class="e num">30.2</span><span class="i num">42.5</span><span class="d plus num">+12.3</span></div>
+        <div class="trow"><span class="m">5月</span><span class="e num">33.8</span><span class="i num">47.3</span><span class="d plus num">+13.5</span></div>
+        <div class="trow"><span class="m">6月</span><span class="e num">29.5</span><span class="i num">39.6</span><span class="d plus num">+10.1</span></div>
+        <div class="t-note">示例数据已脱敏，仅用于演示</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- 评价 -->
+<section class="block collection" id="help">
+  <div class="wrap">
+    <h2 class="sec-title">他们用开票助手，催收不再头疼</h2>
+    <div class="testi-grid">
+      <div class="testi">
+        <p class="q">“以前每月要人工跟进上百张发票，现在系统自动催收，回款率从 60% 提到 98%。”</p>
+        <div class="who"><div class="av" style="background:var(--primary)">贸</div><div><div class="nm">某贸易公司 · 财务总监</div><div class="rl">1688 + 拼多多 双平台</div></div></div>
+      </div>
+      <div class="testi">
+        <p class="q">“闪电帮帮的订单也能自动开票对账，多门店账目终于清清楚楚。”</p>
+        <div class="who"><div class="av" style="background:var(--pdd)">零</div><div><div class="nm">某连锁零售 · 门店财务</div><div class="rl">闪电帮帮 多门店</div></div></div>
+      </div>
+      <div class="testi">
+        <p class="q">“催收记录全程留痕，税务稽查时直接导出，省心太多。”</p>
+        <div class="who"><div class="av" style="background:var(--sdb)">食</div><div><div class="nm">某食品商行 · 老板</div><div class="rl">1688 + 闪电帮帮</div></div></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- CTA 带 -->
+<section class="cta-band">
+  <div class="wrap">
+    <h2>立即开启自动催收，让每一笔回款都不拖延</h2>
+    <a class="btn btn-white" href="/login">免费试用</a>
+  </div>
+</section>
+
+<!-- 页脚 -->
+<footer id="pricing">
+  <div class="wrap">
+    <div class="foot-grid">
+      <div>
+        <div class="fbrand">开票助手</div>
+        <div class="fdesc">覆盖 1688 · 拼多多 · 闪电帮帮 的自动开票与催收平台</div>
+      </div>
+      <div class="fcol"><h5>产品</h5><a href="#features">功能介绍</a><a href="#pricing">价格方案</a></div>
+      <div class="fcol"><h5>平台</h5><a href="#platforms">1688 开票</a><a href="#platforms">拼多多 开票</a><a href="#platforms">闪电帮帮 开票</a></div>
+      <div class="fcol"><h5>联系</h5><a href="#help">帮助中心</a><a href="#help">商务合作</a></div>
+    </div>
+    <div class="fcopy">© 2026 开票助手 · 示例演示页面</div>
+  </div>
+</footer>
+
+</body>
+</html>

@@ -72,7 +72,6 @@ const pddOrders = require('./lib/pdd-orders');
 const aliOrders = require('./lib/ali-orders');
 const psync = require('./lib/pdd-sync');
 const sdc = require('./lib/sdc');
-const invoiceTitles = require('./lib/invoice-titles');
 
 const PORT = Number(process.env.PORT) || 8787;
 const ROOT = __dirname;
@@ -748,20 +747,16 @@ async function buyerInfoOf(userId) {
 }
 
 /**
- * 发送时用哪条抬头：优先用户在下拉里选的那条（app_invoice_title），
- * 没选就用默认抬头；一条都没有才回落到账号上的老字段（兼容升级前只配过一份抬头的账号）。
- * 三个渠道（1688 / 拼多多 / 闪电帮帮）共用同一个口径，保证话术变量来源一致。
+ * 发送话术用的开票抬头：一律用本账号默认抬头（app_user.company_name / tax_no / email，
+ * 在「系统管理 → 用户管理 → 编辑」里由超级管理员维护）。
+ * 2026-10-30 起取消「发送前选抬头」的步骤（相关菜单与 app_invoice_title 多抬头功能一并下线），
+ * 三个渠道（1688 / 拼多多 / 闪电帮帮）共用同一口径，保证话术变量来源一致。
  * @param {number} userId
- * @param {number} [titleId] 0/缺省 = 默认抬头
+ * @param {number} [titleId] 忽略，保留参数仅为兼容旧调用签名
  * @returns {Promise<{companyName:string, taxNo:string, email:string, titleId:number}>}
  */
 async function buyerOfSend(userId, titleId) {
-  // get() 传 0 时返回默认抬头（并按需从 app_user 播种），取不到才走老字段
-  const t = await invoiceTitles.get(Number(userId) || 0, Number(titleId) || 0).catch(() => null);
-  if (t) {
-    return { companyName: t.title || '', taxNo: t.taxNo || '', email: t.email || '', titleId: Number(t.id) || 0 };
-  }
-  const old = await buyerInfoOf(userId).catch(() => null);
+  const old = await buyerInfoOf(Number(userId) || 0).catch(() => null);
   return {
     companyName: (old && old.companyName) || '',
     taxNo: (old && old.taxNo) || '',
@@ -850,8 +845,6 @@ const OP_ACTIONS = {
   'sdc.sync': (d) => d.ok === false
     ? `拉取闪电帮帮订单失败${d.reason ? '：' + d.reason : ''}`
     : `拉取了闪电帮帮订单（可申请 ${d.applyable || 0} 单、已申请 ${d.applied || 0} 单）`,
-  'sdc.title.save': (d) => `保存了开票抬头${d.title ? '「' + d.title + '」' : ''}`,
-  'sdc.title.delete': () => '删除了一条开票抬头',
   'sdc.send.start': (d) => `发起了闪电帮帮批量催收（${d.total || 0} 家店铺${d.title ? '，抬头 ' + d.title : ''}）`,
   'sdc.send': (d) => d.ok === false
     ? `闪电帮帮批量催收失败${d.reason ? '：' + d.reason : ''}`
@@ -1983,7 +1976,7 @@ async function resumeLoginIds(userId, taskId, scope) {
  * @param {string[]} loginIds 要发送的卖家内部 loginId
  * @param {{resumeOf?:number, titleId?:number}} [opts]
  *   resumeOf=断线续跑时被接续的任务 id（仅用于审计与日志）
- *   titleId = 发送时选用的发票抬头（app_invoice_title.id），0/缺省=回落账号老字段
+ *   titleId = 保留参数（2026-10-30 起已无选抬头，恒为账号默认抬头）；agent_task.title_id 留作审计
  */
 async function doClientSend(userId, loginIds, opts = {}) {
   const resumeOf = Number(opts.resumeOf) || null;
@@ -2554,6 +2547,8 @@ const server = http.createServer(async (req, res) => {
     if (method === 'GET' && (p === '/login' || p === '/login.html')) return sendHtml(res, 'login.html');
     // 公开下载落地页（无需登录，供用户获取本机发送扩展）
     if (method === 'GET' && (p === '/download' || p === '/download.html')) return sendHtml(res, 'download.html');
+    // 公开营销首页（无需登录，访客落地页；已登录用户走下方 / 的 dashboard 分支）
+    if (method === 'GET' && (p === '/home' || p === '/home.html')) return sendHtml(res, 'home.html');
     // 书签工具落地页（登录可用，零安装方案；未登录跳转登录页）
     if (method === 'GET' && (p === '/bookmarklet' || p === '/bookmarklet.html')) {
       const bu = await currentUser(req);
@@ -2569,7 +2564,7 @@ const server = http.createServer(async (req, res) => {
     if (method === 'GET' && p.startsWith('/vendor/')) return sendVendor(res, decodeURIComponent(p.slice('/vendor/'.length)));
     if (method === 'GET' && (p === '/' || p === '/index.html')) {
       const u = await currentUser(req);
-      if (!u) return redirect(res, '/login');
+      if (!u) return sendHtml(res, 'home.html');   // 未登录 → 公开营销首页（访客落地页）
       return sendHtml(res, 'dashboard.html');
     }
 
@@ -4631,43 +4626,6 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 200, await sdc.summary(sdcUid));
       }
 
-      // ── 开票抬头（一人多条，催收前选一条）──
-      // 归属跟随当前身份：普通用户是自己的 id；超级管理员切了身份就是被切换那个账号的
-      if (method === 'GET' && p === '/api/sdc/titles') {
-        return sendJson(res, 200, { rows: await invoiceTitles.list(Number(sdcUid)) });
-      }
-      if (method === 'POST' && p === '/api/sdc/titles') {
-        writeGuard();
-        const b = await readBody(req).catch(() => ({}));
-        try {
-          const out = await invoiceTitles.save(Number(sdcUid), b);
-          await logOp(user, 'sdc.title.save', { tenantId: sdcUid, id: out.id, title: String(b.title || '').slice(0, 60) });
-          return sendJson(res, 200, { ok: true, id: out.id, rows: await invoiceTitles.list(Number(sdcUid)) });
-        } catch (e) {
-          return sendJson(res, 200, { ok: false, message: (e && e.message) || '保存失败' });
-        }
-      }
-      if (method === 'POST' && p === '/api/sdc/titles/default') {
-        writeGuard();
-        const b = await readBody(req).catch(() => ({}));
-        try {
-          await invoiceTitles.setDefault(Number(sdcUid), b.id);
-          return sendJson(res, 200, { ok: true, rows: await invoiceTitles.list(Number(sdcUid)) });
-        } catch (e) {
-          return sendJson(res, 200, { ok: false, message: (e && e.message) || '设置失败' });
-        }
-      }
-      if (method === 'POST' && p === '/api/sdc/titles/delete') {
-        writeGuard();
-        const b = await readBody(req).catch(() => ({}));
-        try {
-          await invoiceTitles.remove(Number(sdcUid), b.id);
-          await logOp(user, 'sdc.title.delete', { tenantId: sdcUid, id: Number(b.id) || 0 });
-          return sendJson(res, 200, { ok: true, rows: await invoiceTitles.list(Number(sdcUid)) });
-        } catch (e) {
-          return sendJson(res, 200, { ok: false, message: (e && e.message) || '删除失败' });
-        }
-      }
 
       if (method === 'GET' && p === '/api/sdc/msg-history') {
         const shopId = url.searchParams.get('shopId');
