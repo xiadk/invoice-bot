@@ -645,6 +645,13 @@ async function migrate(conn, dbName) {
       "COMMENT '是否允许查看账单页（1=开启，超级管理员始终可见）'"
     );
   }
+  // ── 补货菜单权限（v0.2.79）：默认 0 = 所有用户默认不授权，由超管逐个开启
+  if (!(await colExists('app_user', 'replenish_enabled'))) {
+    await q(
+      'ALTER TABLE `app_user` ADD COLUMN `replenish_enabled` TINYINT(1) NOT NULL DEFAULT 0 ' +
+      "COMMENT '是否允许查看补货页（含导入补货参考文件、齐货通/阿发取价加购；1=开启，超级管理员始终可见）'"
+    );
+  }
   // ── 账单新增支出项「中心仓」（v0.2.43）：排在「人工」之后，手工录入，计入支出合计
   if (await tableExists('billing_month') && !(await colExists('billing_month', 'exp_warehouse'))) {
     await q(
@@ -696,6 +703,7 @@ async function migrate(conn, dbName) {
       ['qht_goods_id', "VARCHAR(64) DEFAULT NULL COMMENT '关联的齐货通商品ID（goodsId，用于实时取价与加购）'"],
       ['afa_goods_id', "VARCHAR(64) DEFAULT NULL COMMENT '关联的城配速达商品ID（goodsId，用于实时取价与加购）'"],
       ['local_price', "DECIMAL(12,2) DEFAULT NULL COMMENT '本地价（手工填写并保存，仅作比价参考）'"],
+      ['image_url', "VARCHAR(512) DEFAULT NULL COMMENT '商品主图（由「商品同步」从牵牛花拉取，按 sku 匹配更新）'"],
     ]) {
       if (!(await colExists('product_item', col))) {
         await q(`ALTER TABLE \`product_item\` ADD COLUMN \`${col}\` ${decl}`);

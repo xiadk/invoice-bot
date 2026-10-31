@@ -334,6 +334,8 @@ function publicUser(u) {
     marketEnabled: u.role === 'admin' ? true : !!Number(u.market_enabled),
     // 账单页权限（同上，独立开关）
     billingEnabled: u.role === 'admin' ? true : !!Number(u.billing_enabled),
+    // 补货页权限（独立菜单，默认所有用户不授权；含导入补货参考文件、齐货通/阿发取价加购）
+    replenishEnabled: u.role === 'admin' ? true : !!Number(u.replenish_enabled),
     lastLoginAt: u.last_login_at,
     createdAt: u.created_at,
   };
@@ -2406,6 +2408,8 @@ async function listUsers() {
     productEnabled: u.role === 'admin' ? true : !!Number(u.product_enabled),
     marketEnabled: u.role === 'admin' ? true : !!Number(u.market_enabled),
     billingEnabled: u.role === 'admin' ? true : !!Number(u.billing_enabled),
+    // 补货页权限（独立菜单，默认所有用户不授权；含导入补货参考文件、齐货通/阿发取价加购）
+    replenishEnabled: u.role === 'admin' ? true : !!Number(u.replenish_enabled),
     lastLoginAt: u.last_login_at, createdAt: u.created_at, updatedAt: u.updated_at,
     orderCount: Number(u.order_count) || 0,
     companyCount: Number(u.company_count) || 0,
@@ -3498,7 +3502,7 @@ const server = http.createServer(async (req, res) => {
       const totalR = await db.query(`SELECT COUNT(*) AS n FROM product_item WHERE user_id = ? ${w}`, [tenantId, ...args]);
       const rows = await db.query(`
         SELECT id, sku, goods_name, purchase_price, available_stock, transit_stock, purchase_status, sales_30d,
-               suggest_qty, qht_goods_id, local_price, source_file, updated_at
+               suggest_qty, qht_goods_id, local_price, source_file, updated_at, image_url
         FROM product_item WHERE user_id = ? ${w}
         ORDER BY ${order} LIMIT ${size} OFFSET ${(page - 1) * size}
       `, [tenantId, ...args]);
@@ -3693,6 +3697,14 @@ const server = http.createServer(async (req, res) => {
       }
       await db.exec('UPDATE product_item SET local_price = ? WHERE user_id = ? AND sku = ?', [v, tenantId, sku]);
       return sendJson(res, 200, { ok: true, sku, localPrice: v });
+    }
+
+    // 商品同步（仅超级管理员）：按页拉取牵牛花前置仓商品，按 sku 回写 image_url（与取价/加购同套牵牛花签名通道）
+    if (method === 'POST' && p === '/api/admin/products/sync') {
+      if (!isAdmin) return sendJson(res, 403, { error: '仅超级管理员可同步商品' });
+      const out = await qnh.syncProducts({ userId: user.id, tenantId, onProgress: null });
+      await logOp(user, 'product.sync', { ok: !!out.ok, total: out.total, matched: out.matched, updated: out.updated, failed: out.failed });
+      return sendJson(res, 200, out);
     }
 
     // ── 交易市场（跨用户共享） ──
@@ -5035,6 +5047,7 @@ const server = http.createServer(async (req, res) => {
           product: { col: 'product_enabled', label: '商品列表', field: 'productEnabled' },
           market: { col: 'market_enabled', label: '交易市场', field: 'marketEnabled' },
           billing: { col: 'billing_enabled', label: '账单', field: 'billingEnabled' },
+          replenish: { col: 'replenish_enabled', label: '补货', field: 'replenishEnabled' },
         };
         const m = MENU[menu];
         if (!m) return sendJson(res, 400, { error: '未知的菜单：' + menu });

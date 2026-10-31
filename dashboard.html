@@ -845,9 +845,9 @@
             </template>
           </span>
           <span class="pb-actions">
-            <el-button size="small" type="primary" :disabled="readonly"
-                       title="上传「前置仓补货参考批量导出」Excel（重复商品按本次文件内容更新）"
-                       @click="openUpload('products')">导入补货参考文件</el-button>
+            <el-button v-if="isAdmin" size="small" type="warning" plain :loading="product.syncing"
+                       title="按页拉取牵牛花前置仓商品，按 SKU 回写商品主图（仅超级管理员）"
+                       @click="syncProducts">商品同步{{ product.syncing ? '中…' : '' }}</el-button>
           </span>
         </div>
 
@@ -896,8 +896,16 @@
             <span class="loginid">当前筛选总货值：{{ yuan(product.filteredValue) }}</span>
           </div>
           <el-table :data="product.rows" size="small" border style="width:100%" v-loading="product.loading"
-                    empty-text="暂无商品（点「导入补货参考文件」上传 Excel）" @selection-change="v => product.selected = v">
+                    empty-text="暂无商品（去「补货」页导入补货参考文件）" @selection-change="v => product.selected = v">
             <el-table-column type="selection" width="42"></el-table-column>
+            <el-table-column label="商品图片" width="72">
+              <template slot-scope="p">
+                <img v-if="p.row.image_url" :src="p.row.image_url" :alt="p.row.goods_name"
+                     style="width:48px;height:48px;object-fit:cover;border-radius:4px;display:block"
+                     @error="e => { e.target.style.display='none'; }" />
+                <span v-else class="loginid">—</span>
+              </template>
+            </el-table-column>
             <el-table-column label="商品名称" min-width="260"><template slot-scope="p"><span :title="p.row.goods_name">{{ p.row.goods_name }}</span></template></el-table-column>
             <el-table-column label="商品SKU" width="180"><template slot-scope="p"><span class="loginid" style="font-family:Consolas,monospace">{{ p.row.sku }}</span></template></el-table-column>
             <el-table-column label="采购价" width="100"><template slot-scope="p"><span class="amount">{{ yuan(p.row.purchase_price) }}</span></template></el-table-column>
@@ -922,9 +930,20 @@
                            @current-change="v => { product.page = v; loadProducts(); }"></el-pagination>
           </div>
         </el-card>
+      </div>
 
-        <!-- ══════ 补货界面（导入完成后进入）══════ -->
-        <el-dialog :visible.sync="rp.visible" title="补货" width="94%" top="3vh" append-to-body :close-on-click-modal="false">
+      <!-- ══════ 补货（独立菜单页：导入补货参考文件 + 齐货通/阿发取价加购）══════ -->
+      <div v-show="page === 'replenish'" id="page-replenish">
+        <div class="page-bar">
+          <span class="pb-info">
+            补货参考 · 按导入批次展示商品；齐货通价 / 阿发价实时取自对应平台
+          </span>
+          <span class="pb-actions">
+            <el-button size="small" type="primary" :disabled="readonly"
+                       title="上传「前置仓补货参考批量导出」Excel（重复商品按本次文件内容更新）"
+                       @click="openUpload('products')">导入补货参考文件</el-button>
+          </span>
+        </div>
           <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px">
             <el-alert type="info" :closable="false" show-icon style="flex:1;min-width:340px"
               title="齐货通价 = 一件价格 ÷ 一件瓶数（实时取自齐货通商品详情，两位小数四舍五入）；还没关联的商品点「关联」，搜到齐货通商品后绑定即可取价。">
@@ -949,6 +968,14 @@
           </div>
           <el-table :data="rp.rows" size="small" border :max-height="tblH.rp" class="rp-table" style="width:100%" v-loading="rp.loading"
                     empty-text="本次导入没有商品">
+            <el-table-column label="商品图片" width="64">
+              <template slot-scope="p">
+                <img v-if="p.row.image_url" :src="p.row.image_url" :alt="p.row.goods_name"
+                     style="width:46px;height:46px;object-fit:cover;border-radius:4px;display:block"
+                     @error="e => { e.target.style.display='none'; }" />
+                <span v-else class="loginid">—</span>
+              </template>
+            </el-table-column>
             <el-table-column label="商品名称" min-width="200">
               <template slot-scope="p"><span :title="p.row.goods_name">{{ p.row.goods_name }}</span></template>
             </el-table-column>
@@ -958,34 +985,56 @@
             <el-table-column label="采购价" width="80">
               <template slot-scope="p"><span class="amount">{{ yuan(p.row.purchase_price) }}</span></template>
             </el-table-column>
-            <el-table-column label="齐货通价" min-width="190" class-name="col-price">
+            <el-table-column label="齐货通价" min-width="215" class-name="col-price">
               <template slot-scope="p">
                 <template v-if="p.row.qht_goods_id">
                   <template v-if="rp.prices[p.row.qht_goods_id] && rp.prices[p.row.qht_goods_id].ok">
-                    <span class="amount ok">¥{{ rp.prices[p.row.qht_goods_id].unitPrice }}</span>
-                    <span class="loginid" style="margin-left:6px">
-                      （{{ rp.prices[p.row.qht_goods_id].saleIP }}/{{ rp.prices[p.row.qht_goods_id].packingSpecification }}{{ rp.prices[p.row.qht_goods_id].smallUnit }}）
-                    </span>
+                    <div style="display:flex;flex-direction:column;gap:2px;min-width:120px">
+                      <img v-if="rp.prices[p.row.qht_goods_id].picture || p.row.image_url"
+                           :src="rp.prices[p.row.qht_goods_id].picture || p.row.image_url" :alt="p.row.goods_name"
+                           style="width:40px;height:40px;object-fit:cover;border-radius:4px;display:block"
+                           @error="e => { e.target.style.display='none'; }" />
+                      <div style="display:flex;justify-content:space-between;gap:8px;font-size:12px;line-height:18px">
+                        <span class="loginid">单价</span><b class="amount ok">¥{{ rp.prices[p.row.qht_goods_id].unitPrice }}</b>
+                      </div>
+                      <div style="display:flex;justify-content:space-between;gap:8px;font-size:12px;line-height:18px">
+                        <span class="loginid">整件价</span><b>¥{{ rp.prices[p.row.qht_goods_id].saleIP }}</b>
+                      </div>
+                      <div style="display:flex;justify-content:space-between;gap:8px;font-size:12px;line-height:18px">
+                        <span class="loginid">规格</span><span class="loginid">{{ rp.prices[p.row.qht_goods_id].packingSpecification }}{{ rp.prices[p.row.qht_goods_id].smallUnit }}</span>
+                      </div>
+                    </div>
+                    <el-button size="mini" type="primary" plain style="margin-top:4px" @click="openBuy(p.row)">选购</el-button>
                   </template>
                   <span v-else-if="rp.prices[p.row.qht_goods_id]" class="loginid" style="color:#f56c6c">取价失败</span>
                   <span v-else class="loginid">取价中…</span>
-                  <el-button size="mini" type="primary" plain style="margin-left:6px" @click="openBuy(p.row)">选购</el-button>
                 </template>
                 <el-button v-else size="mini" type="warning" plain @click="openLinkDlg(p.row)">关联</el-button>
               </template>
             </el-table-column>
-            <el-table-column label="阿发价" min-width="200" class-name="col-price">
+            <el-table-column label="阿发价" min-width="215" class-name="col-price">
               <template slot-scope="p">
                 <template v-if="p.row.afa_goods_id">
                   <template v-if="rp.afaPrices[p.row.afa_goods_id] && rp.afaPrices[p.row.afa_goods_id].ok">
-                    <span class="amount ok">¥{{ rp.afaPrices[p.row.afa_goods_id].unitPrice }}</span>
-                    <span class="loginid" style="margin-left:6px">
-                      （{{ rp.afaPrices[p.row.afa_goods_id].salePrice }}/{{ rp.afaPrices[p.row.afa_goods_id].factorName }}）
-                    </span>
+                    <div style="display:flex;flex-direction:column;gap:2px;min-width:120px">
+                      <img v-if="rp.afaPrices[p.row.afa_goods_id].picture || p.row.image_url"
+                           :src="rp.afaPrices[p.row.afa_goods_id].picture || p.row.image_url" :alt="p.row.goods_name"
+                           style="width:40px;height:40px;object-fit:cover;border-radius:4px;display:block"
+                           @error="e => { e.target.style.display='none'; }" />
+                      <div style="display:flex;justify-content:space-between;gap:8px;font-size:12px;line-height:18px">
+                        <span class="loginid">单价</span><b class="amount ok">¥{{ rp.afaPrices[p.row.afa_goods_id].unitPrice }}</b>
+                      </div>
+                      <div style="display:flex;justify-content:space-between;gap:8px;font-size:12px;line-height:18px">
+                        <span class="loginid">整件价</span><b>¥{{ rp.afaPrices[p.row.afa_goods_id].salePrice }}</b>
+                      </div>
+                      <div style="display:flex;justify-content:space-between;gap:8px;font-size:12px;line-height:18px">
+                        <span class="loginid">规格</span><span class="loginid">{{ rp.afaPrices[p.row.afa_goods_id].factorName }}</span>
+                      </div>
+                    </div>
+                    <el-button size="mini" type="primary" plain style="margin-top:4px" @click="openAfaBuy(p.row)">选购</el-button>
                   </template>
                   <span v-else-if="rp.afaPrices[p.row.afa_goods_id]" class="loginid" style="color:#f56c6c">取价失败</span>
                   <span v-else class="loginid">取价中…</span>
-                  <el-button size="mini" type="primary" plain style="margin-left:6px" @click="openAfaBuy(p.row)">选购</el-button>
                 </template>
                 <el-button v-else size="mini" type="warning" plain @click="openAfaLinkDlg(p.row)">关联</el-button>
               </template>
@@ -1005,7 +1054,7 @@
                            :current-page="rp.page" :page-sizes="[20, 50, 100, 2000]"
                            @size-change="onRpSize" @current-change="onRpPage"></el-pagination>
           </div>
-        </el-dialog>
+      </div>
 
         <!-- 关联齐货通商品：搜关键字 → 选商品 → 确认 -->
         <el-dialog title="关联齐货通商品" :visible.sync="rpLink.visible" width="760px" top="4vh" append-to-body>
@@ -2792,6 +2841,13 @@
       </div>
       <el-switch v-model="menuPermit.billing"></el-switch>
     </div>
+    <div class="menu-perm-row">
+      <div>
+        <b>补货</b>
+        <div class="loginid">导入补货参考文件、齐货通/阿发取价与加购（默认关闭，与商品列表相互独立）</div>
+      </div>
+      <el-switch v-model="menuPermit.replenish"></el-switch>
+    </div>
     <div slot="footer">
       <el-button @click="menuPermit.visible = false">取消</el-button>
       <el-button type="primary" :loading="menuPermit.saving" @click="saveMenuPermit">保存</el-button>
@@ -3096,6 +3152,7 @@ const vm = new Vue({
         loading: false, rows: [], total: 0, page: 1, size: 20,
         draftQ: '', status: '', priceSort: '', selected: [],
         filteredValue: 0, latestBatch: null, trend: [],
+        syncing: false, syncMsg: '',
       },
       // 补货界面（导入完成后进入）+ 关联的齐货通弹窗
       // 补货默认 20 条/页（页码可翻）；页大小可切 20/50/100/全部(2000)
@@ -3169,8 +3226,8 @@ const vm = new Vue({
       creatingUser: false, createOk: false,
       userEdit: { visible: false, id: null, title: '', company: '', taxNo: '', email: '', note: '', hint: '', lockCompany: false, saving: false },
       // 菜单权限弹窗（退单列表 / 实时毛利监控）
-      menuPermit: { visible: false, id: null, username: '', refund: false, profit: false, product: false, market: false, billing: false, saving: false,
-                    origin: { refund: false, profit: false, product: false, market: false, billing: false } },
+      menuPermit: { visible: false, id: null, username: '', refund: false, profit: false, product: false, market: false, billing: false, replenish: false, saving: false,
+                    origin: { refund: false, profit: false, product: false, market: false, billing: false, replenish: false } },
       // 操作日志（仅超级管理员）
       opLog: { draftUsername: '', username: '', page: 1, size: 20, total: 0, rows: [], loading: false, summary: {} },
       // 退单列表（牵牛花）
@@ -3216,6 +3273,7 @@ const vm = new Vue({
         ] },
         { title: '核对与商品', items: [
           this.canProduct ? { key: 'product', label: '商品列表', icon: 'el-icon-goods' } : null,
+          this.canReplenish ? { key: 'replenish', label: '补货', icon: 'el-icon-shopping-cart' } : null,
           this.canMarket ? { key: 'market', label: '交易市场', icon: 'el-icon-s-marketing' } : null,
           this.canBilling ? { key: 'billing', label: '账单', icon: 'el-icon-wallet' } : null,
         ].filter(Boolean) },
@@ -3279,6 +3337,8 @@ const vm = new Vue({
     canMarket() { return !!(this.me && (this.me.role === 'admin' || this.me.marketEnabled)); },
     // 账单权限（同上，独立开关；默认所有用户不授权）
     canBilling() { return !!(this.me && (this.me.role === 'admin' || this.me.billingEnabled)); },
+    // 补货权限（独立菜单，默认所有用户不授权；含导入补货参考文件、齐货通/阿发取价加购）
+    canReplenish() { return !!(this.me && (this.me.role === 'admin' || this.me.replenishEnabled)); },
     /** 账单：收入组二级列（美团/淘宝/京东，均可手工编辑） */
     billIncomeItems() { return (this.bill.items || []).filter((i) => i.group === 'income'); },
     /** 账单：支出组二级列（前两项系统统计只读，其余手工编辑） */
@@ -3866,6 +3926,7 @@ const vm = new Vue({
       if (p === 'qnhcfg' && !(this.canProfit || this.canRefund)) p = 'board';
       if (p === 'profit' && !this.canProfit) p = 'board';
       if (p === 'product' && !this.canProduct) p = 'board';
+      if (p === 'replenish' && !this.canReplenish) p = 'product';
       if (p === 'market' && !this.canMarket) p = 'board';
       if (p === 'billing' && !this.canBilling) p = 'board';
       this.page = p;
@@ -6110,12 +6171,12 @@ const vm = new Vue({
         visible: true, id: row.id, username: row.username,
         refund: !!row.qnhRefundEnabled, profit: !!row.qnhProfitEnabled,
         product: !!row.productEnabled, market: !!row.marketEnabled,
-        billing: !!row.billingEnabled,
+        billing: !!row.billingEnabled, replenish: !!row.replenishEnabled,
         saving: false,
         origin: {
           refund: !!row.qnhRefundEnabled, profit: !!row.qnhProfitEnabled,
           product: !!row.productEnabled, market: !!row.marketEnabled,
-          billing: !!row.billingEnabled,
+          billing: !!row.billingEnabled, replenish: !!row.replenishEnabled,
         },
       };
     },
@@ -6129,6 +6190,7 @@ const vm = new Vue({
       if (m.product !== m.origin.product) changes.push({ menu: 'product', enabled: m.product, field: 'productEnabled', label: '商品列表' });
       if (m.market !== m.origin.market) changes.push({ menu: 'market', enabled: m.market, field: 'marketEnabled', label: '交易市场' });
       if (m.billing !== m.origin.billing) changes.push({ menu: 'billing', enabled: m.billing, field: 'billingEnabled', label: '账单' });
+      if (m.replenish !== m.origin.replenish) changes.push({ menu: 'replenish', enabled: m.replenish, field: 'replenishEnabled', label: '补货' });
       if (!changes.length) { m.visible = false; return; }
       m.saving = true;
       const row = (this.users || []).find((u) => u.id === m.id);
@@ -6406,6 +6468,31 @@ const vm = new Vue({
       } catch (e) { this.$message.error('商品加载失败: ' + e.message); }
       finally { this.product.loading = false; }
     },
+    /** 商品同步（仅超级管理员）：按页拉取牵牛花前置仓商品，按 sku 回写商品主图；进度通过按钮 loading 体现，结果用提示告知 */
+    async syncProducts() {
+      if (!this.isAdmin) { this.$message.warning('仅超级管理员可同步商品'); return; }
+      if (this.product.syncing) return;
+      this.product.syncing = true;
+      this.product.syncMsg = '';
+      try {
+        const d = await this.api('/api/admin/products/sync', {
+          method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+        });
+        if (d && d.ok) {
+          this.$message.success(d.message || '商品同步完成');
+          // 同步改的是商品主图，刷新列表让图片列立即体现
+          if (this.page === 'product') this.loadProducts();
+          if (this.page === 'replenish') this.loadReplenish();
+        } else {
+          this.$message.error((d && d.message) || '商品同步失败');
+        }
+        this.product.syncMsg = (d && d.message) || '';
+      } catch (e) {
+        this.$message.error('商品同步请求失败: ' + e.message);
+      } finally {
+        this.product.syncing = false;
+      }
+    },
     togglePriceSort() {
       this.product.priceSort = this.product.priceSort === '' ? 'desc' : (this.product.priceSort === 'desc' ? 'asc' : '');
       this.product.page = 1;
@@ -6479,12 +6566,13 @@ const vm = new Vue({
       } catch (e) { this.$message.error('发布失败：' + e.message); }
       finally { p.saving = false; }
     },
-    // ══════ 补货界面（导入完成后询问是否进入）══════
+    // ══════ 补货界面（导入完成后进入，现为独立菜单页）══════
     async openReplenish(batchId, expectTotal) {
-      this.rp.visible = true;
+      this.page = 'replenish';
       this.rp.batchId = batchId || null;
       this.rp.rows = [];
       this.rp.prices = {};
+      this.rp.afaPrices = {};
       this.rp.total = 0;
       this.rp.page = 1;
       this.rp.size = 20; // 默认 20 条/页，页码可翻；要一次看全在分页器里选「2000」
