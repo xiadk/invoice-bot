@@ -758,6 +758,7 @@ async function migrate(conn, dbName) {
       "  `available_stock` INT NOT NULL DEFAULT 0 COMMENT '可用库存（inStoreValidStockQty）'," +
       "  `transit_stock` INT NOT NULL DEFAULT 0 COMMENT '在途库存（inTransitQty）'," +
       "  `purchase_status` VARCHAR(32) NOT NULL DEFAULT '' COMMENT '采购状态（purchaseStatusDesc）'," +
+      "  `purchase_status_code` TINYINT NOT NULL DEFAULT 0 COMMENT '采购状态码（接口 purchaseStatuses：1=正常采购 2=已停采）'," +
       "  `sales_30d` INT NOT NULL DEFAULT 0 COMMENT '30天销量（sale30Num）'," +
       "  `synced_at` DATETIME DEFAULT NULL COMMENT '最近一次同步时间'," +
       "  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '首次同步时间'," +
@@ -768,6 +769,19 @@ async function migrate(conn, dbName) {
       '  KEY `idx_bp_sku` (`sku`)' +
       ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='品牌商品（商品同步写入；同品牌全员共享）'"
     );
+  }
+  // 采购状态码（v0.2.84）：同步会分别拉「正常采购(1)」与「已停采(2)」两轮，
+  // 光靠 purchaseStatusDesc 中文文案判断停采不稳，单独存状态码供统计/筛选使用。
+  if (await tableExists('brand_product')) {
+    if (!(await colExists('brand_product', 'purchase_status_code'))) {
+      await q(
+        "ALTER TABLE `brand_product` ADD COLUMN `purchase_status_code` TINYINT NOT NULL DEFAULT 0 " +
+        "COMMENT '采购状态码（接口 purchaseStatuses：1=正常采购 2=已停采）'"
+      );
+    }
+    if (!(await idxExists('brand_product', 'idx_bp_brand_scode'))) {
+      await q('ALTER TABLE `brand_product` ADD KEY `idx_bp_brand_scode` (`brand_id`, `purchase_status_code`)');
+    }
   }
   // 牵牛花登录态按品牌方隔离：每个品牌方一个账号，老登录态归默认品牌（优购哆）
   if (await tableExists('qnh_session')) {

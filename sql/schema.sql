@@ -387,6 +387,7 @@ CREATE TABLE IF NOT EXISTS `brand_product` (
   `available_stock` INT           NOT NULL DEFAULT 0    COMMENT '可用库存（inStoreValidStockQty）',
   `transit_stock`   INT           NOT NULL DEFAULT 0    COMMENT '在途库存（inTransitQty）',
   `purchase_status` VARCHAR(32)   NOT NULL DEFAULT ''   COMMENT '采购状态（purchaseStatusDesc）',
+  `purchase_status_code` TINYINT  NOT NULL DEFAULT 0    COMMENT '采购状态码（接口 purchaseStatuses：1=正常采购 2=已停采）',
   `sales_30d`       INT           NOT NULL DEFAULT 0    COMMENT '30天销量（sale30Num）',
   `synced_at`       DATETIME      DEFAULT NULL          COMMENT '最近一次同步时间',
   `created_at`      DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '首次同步时间',
@@ -394,6 +395,7 @@ CREATE TABLE IF NOT EXISTS `brand_product` (
   PRIMARY KEY (`id`),
   UNIQUE KEY `uk_bp_brand_sku` (`brand_id`, `sku`),
   KEY `idx_bp_brand_status` (`brand_id`, `purchase_status`),
+  KEY `idx_bp_brand_scode` (`brand_id`, `purchase_status_code`),
   KEY `idx_bp_sku` (`sku`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   COMMENT='品牌商品（商品同步写入；同品牌全员共享）';

@@ -1250,7 +1250,8 @@
         <el-dialog title="商品同步 · 选择品牌方" :visible.sync="product.syncDlg.visible" width="540px" append-to-body>
           <div class="form-tip" style="margin-bottom:10px">
             每个品牌方有独立的牵牛花账号，拉取到的商品写入该品牌方（同品牌下所有用户共享一套商品数据）。
-            单个品牌约 170 页、每页停 1 秒，需要 4~5 分钟；同步会<b>覆盖更新</b>采购价 / 可用库存 / 在途库存 / 30天销量 / 采购状态 / 主图。
+            同步分两轮：<b>先拉全部「正常采购」商品，拉完再拉全部「停止采购」商品</b>（停采商品同样入库，可在商品列表按状态看到，并单独统计货值）。
+            单个品牌每轮约 170 页、每页停 1 秒；两轮下来约 8~10 分钟。同步会<b>覆盖更新</b>采购价 / 可用库存 / 在途库存 / 30天销量 / 采购状态 / 主图。
           </div>
           <el-checkbox-group v-model="product.syncDlg.brandIds">
             <div v-for="b in product.syncDlg.brandsQnh" :key="b.id"
@@ -3250,7 +3251,9 @@ const vm = new Vue({
         filteredValue: 0, latestBatch: null, trend: [],
         syncing: false, syncMsg: '',
         // 品牌方：普通用户固定看自己品牌；超管默认看全部，可用下拉收窄（''=全部品牌）
-        brand: '', brandStats: [], brandAll: true, lastSyncAt: null,
+        brand: '', brandStats: [], brandAll: true,
+        // 停采商品（同步第二轮拉的 purchase_status_code=2）货值与条数，统计卡用
+        stoppedValue: 0, stoppedCount: 0,
         // 商品同步弹框（仅超管）：勾选要同步的品牌方（含各品牌牵牛花登录状态）
         syncDlg: { visible: false, brandIds: [], brandsQnh: [], saving: false },
       },
@@ -3480,9 +3483,8 @@ const vm = new Vue({
     /** 商品列表统计卡（设计稿 4 卡）：全部取自现有接口字段，未新增接口 */
     productStatCards() {
       const p = this.product;
-      const lb = p.latestBatch;
       // 商品列表现在是「品牌商品」（商品同步写入、同品牌共享），品牌维度放前两张卡；
-      // 个人导入批次仍显示在补货页，这里只作参考放后两张
+      // 第 4 卡是停采商品货值（同步第二轮单独拉「已停采」，purchase_status_code=2）
       const brandLabel = p.brandAll
         ? ('全部品牌方（' + ((p.brandStats || []).length) + ' 个）')
         : (this.brandNameById(p.brand) || (this.me && this.me.brandName) || '我的品牌');
@@ -3490,8 +3492,8 @@ const vm = new Vue({
         { key: 'total', num: p.total, label: '商品总数', sub: '按当前筛选条件统计' },
         { key: 'value', num: this.yuan(p.filteredValue), label: '当前筛选总货值', sub: 'Σ(可用 + 在途) × 采购价' },
         { key: 'brand', num: brandLabel, label: '数据归属', sub: '同品牌方用户共用一套商品' },
-        { key: 'sync', num: p.lastSyncAt ? this.fmtMinute(p.lastSyncAt) : '—', label: '最近同步时间',
-          sub: lb ? ('个人最近导入：' + lb.item_count + ' 个商品') : '还未做过商品同步' },
+        { key: 'stopped', num: this.yuan(p.stoppedValue), label: '停采商品货值',
+          sub: (p.stoppedCount || 0) + ' 个停止采购商品 · Σ(可用 + 在途) × 采购价' },
       ];
     },
     /** 交易市场统计卡（设计稿 4 卡）：summary 由 /api/market 下发（一条只读聚合） */
@@ -6648,10 +6650,11 @@ const vm = new Vue({
         this.product.rows = d.rows || [];
         this.product.total = d.total || 0;
         this.product.filteredValue = d.filteredValue || 0;
+        this.product.stoppedValue = d.stoppedValue || 0;
+        this.product.stoppedCount = d.stoppedCount || 0;
         this.product.latestBatch = d.latestBatch || null;
         this.product.brandStats = d.brandStats || [];
         this.product.brandAll = d.brandFilter ? !!d.brandFilter.all : true;
-        this.product.lastSyncAt = d.lastSyncAt || null;
         // 数据刷新后，剔除已不在结果里的勾选
         const alive = new Set((d.rows || []).map((r) => r.sku));
         this.product.selected = (this.product.selected || []).filter((r) => alive.has(r.sku));

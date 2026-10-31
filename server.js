@@ -3614,6 +3614,14 @@ const server = http.createServer(async (req, res) => {
         SELECT ROUND(SUM((available_stock + transit_stock) * purchase_price), 2) AS v,
                SUM(purchase_price IS NOT NULL AND purchase_price > 0) AS priced
         FROM brand_product WHERE 1=1 ${bWhere}${w}`, [...bArgs, ...args]);
+      // 停采商品货值（v0.2.84）：同步会单独拉一轮「已停采」商品并落 purchase_status_code=2。
+      // 这张卡是「存量」口径，只跟品牌方筛选走，不跟关键词/状态筛选跳动。
+      const stoppedR = await db.query(`
+        SELECT COUNT(*) AS n,
+               ROUND(COALESCE(SUM((available_stock + transit_stock) * purchase_price), 0), 2) AS v
+        FROM brand_product WHERE 1=1 ${bWhere} AND purchase_status_code = 2`, [...bArgs]).catch(() => []);
+      const stoppedCount = stoppedR[0] ? Number(stoppedR[0].n) || 0 : 0;
+      const stoppedValue = stoppedR[0] ? Number(stoppedR[0].v) || 0 : 0;
       // 超管：各品牌商品数，供前端品牌筛选下拉展示
       let brandStats = null;
       if (isAdmin) {
@@ -3623,17 +3631,13 @@ const server = http.createServer(async (req, res) => {
           GROUP BY bp.brand_id, b.name ORDER BY bp.brand_id ASC
         `);
       }
-      // 最近一次同步时间（当前筛选口径），页面统计卡用
-      const syncR = await db.query(
-        `SELECT MAX(synced_at) AS t FROM brand_product WHERE 1=1 ${bWhere}${w}`, [...bArgs, ...args]
-      ).catch(() => []);
-      const lastSyncAt = syncR[0] ? syncR[0].t : null;
       return sendJson(res, 200, {
         total: totalR[0] ? totalR[0].n : 0, page, size, rows, source: 'brand',
         filteredValue: valueR[0] ? (valueR[0].v || 0) : 0,
+        stoppedValue, stoppedCount,
         latestBatch: latest[0] || null,
         brandFilter: { brandId: bo.brandId, all: bo.all },
-        brandStats, lastSyncAt,
+        brandStats,
       });
     }
 
