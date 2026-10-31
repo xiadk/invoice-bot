@@ -3614,6 +3614,13 @@ const server = http.createServer(async (req, res) => {
         SELECT ROUND(SUM((available_stock + transit_stock) * purchase_price), 2) AS v,
                SUM(purchase_price IS NOT NULL AND purchase_price > 0) AS priced
         FROM brand_product WHERE 1=1 ${bWhere}${w}`, [...bArgs, ...args]);
+      // 在途货值（v0.2.85）：Σ 在途库存 × 采购价，口径跟当前筛选一致（与「当前筛选总货值」对齐）
+      const transitR = await db.query(`
+        SELECT ROUND(COALESCE(SUM(transit_stock * purchase_price), 0), 2) AS v,
+               COALESCE(SUM(transit_stock), 0) AS qty
+        FROM brand_product WHERE 1=1 ${bWhere}${w}`, [...bArgs, ...args]).catch(() => []);
+      const transitValue = transitR[0] ? Number(transitR[0].v) || 0 : 0;
+      const transitQty = transitR[0] ? Number(transitR[0].qty) || 0 : 0;
       // 停采商品货值（v0.2.84）：同步会单独拉一轮「已停采」商品并落 purchase_status_code=2。
       // 这张卡是「存量」口径，只跟品牌方筛选走，不跟关键词/状态筛选跳动。
       const stoppedR = await db.query(`
@@ -3635,6 +3642,7 @@ const server = http.createServer(async (req, res) => {
         total: totalR[0] ? totalR[0].n : 0, page, size, rows, source: 'brand',
         filteredValue: valueR[0] ? (valueR[0].v || 0) : 0,
         stoppedValue, stoppedCount,
+        transitValue, transitQty,
         latestBatch: latest[0] || null,
         brandFilter: { brandId: bo.brandId, all: bo.all },
         brandStats,
@@ -3939,6 +3947,20 @@ const server = http.createServer(async (req, res) => {
       if (!canBilling) return denyBilling();
       const months = url.searchParams.get('months');
       return sendJson(res, 200, await billing.overview(tenantId, { months }));
+    }
+    // 账单里三个系统统计项（1688 / 拼多多 / 闪电帮帮）的订单明细：用于核对金额，口径与账单完全一致
+    if (method === 'GET' && p === '/api/billing/orders') {
+      if (!canBilling) return denyBilling();
+      try {
+        return sendJson(res, 200, await billing.orderList(tenantId, {
+          platform: url.searchParams.get('platform'),
+          month: url.searchParams.get('month'),
+          page: url.searchParams.get('page'),
+          size: url.searchParams.get('size'),
+        }));
+      } catch (e) {
+        return sendJson(res, 400, { error: String((e && e.message) || e) });
+      }
     }
     if (method === 'POST' && p === '/api/billing/cell') {
       if (!canBilling) return denyBilling();

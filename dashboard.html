@@ -317,6 +317,14 @@
   /* 独立配置页的返回入口（面包屑式，左侧页头内） */
   .back-link { color: var(--text-2); cursor: pointer; margin-right: 10px; transition: color .15s; }
   .back-link:hover { color: var(--brand); }
+  /* 账单「系统」支出项：金额可点开订单明细，右侧跟一个「N 单」用于核对 */
+  .bill-auto { display: inline-flex; align-items: baseline; gap: 6px; cursor: pointer; }
+  .bill-auto .amt { color: var(--primary); border-bottom: 1px dashed transparent; transition: border-color .15s; }
+  .bill-auto:hover .amt { border-bottom-color: var(--primary); }
+  .bill-auto .cnt { color: var(--text-3); font-size: 11px; font-variant-numeric: tabular-nums; }
+  .bill-detail .bd-row .v.bill-auto-v { cursor: pointer; }
+  .bill-detail .bd-row .v.bill-auto-v:hover { color: var(--primary); }
+  .bill-detail .bd-row .v .cnt { color: var(--text-3); font-style: normal; margin-left: 4px; }
   /* 账单两级表头：一级分组（收入 / 支出 / 净收入）压深一档，与二级细项区分。
      vendor/element-ui 里给表头统一加了 th.el-table__cell{background:#F5F7FA}，
      且固定列会复制一份表头，故这里两处都写并用 !important 压过库样式。 */
@@ -864,14 +872,6 @@
 
         <el-card shadow="never" class="section-card">
           <div slot="header" style="display:flex;align-items:center;gap:10px">
-            <b>总货值趋势</b>
-            <span class="loginid">每次导入记一个批次点</span>
-          </div>
-          <div ref="ptrend" id="product-trend" style="height:260px;width:100%"></div>
-        </el-card>
-
-        <el-card shadow="never" class="section-card">
-          <div slot="header" style="display:flex;align-items:center;gap:10px">
             <b>商品</b>
             <span class="loginid">（勾选后可批量发布到交易市场）</span>
             <span style="flex:1"></span>
@@ -1378,7 +1378,9 @@
                     <div class="bd-row" v-for="it in billExpenseItems" :key="it.key">
                       <span class="k">{{ it.label }}<el-tag v-if="it.source === 'auto'" size="mini" type="info"
                                               style="margin-left:4px">系统</el-tag></span>
-                      <span class="v">{{ yuan(it.source === 'auto' ? p.row.auto[it.key] : p.row.cells[it.key]) }}</span>
+                      <span class="v" :class="{ 'bill-auto-v': it.source === 'auto' }"
+                            @click="it.source === 'auto' && openBillOrders(p.row, it)">{{ yuan(it.source === 'auto' ? p.row.auto[it.key] : p.row.cells[it.key]) }}<em
+                            v-if="it.source === 'auto'" class="cnt">{{ (p.row.autoCount && p.row.autoCount[it.key]) || 0 }} 单</em></span>
                     </div>
                     <div class="bd-row bd-sum"><span class="k">支出合计</span><span class="v">{{ yuan(p.row.totals.expense) }}</span></div>
                   </div>
@@ -1414,10 +1416,10 @@
               </el-table-column>
             </el-table-column>
 
-            <!-- 一级列 3：支出（二级 = 两个系统统计项 + 11 个手工项 + 支出合计） -->
+            <!-- 一级列 3：支出（二级 = 三个系统统计项 + 手工项 + 支出合计） -->
             <el-table-column label="支出" label-class-name="bill-grp">
               <el-table-column v-for="it in billExpenseItems" :key="it.key" :label="it.label"
-                               :width="it.source === 'auto' ? 186 : 132">
+                               :width="it.source === 'auto' ? 208 : 132">
                 <template slot="header">
                   <span>{{ it.label }}</span>
                   <el-tag v-if="it.source === 'auto'" size="mini" type="info" style="margin-left:4px">系统</el-tag>
@@ -1426,7 +1428,12 @@
                   <el-input-number v-if="it.source === 'manual'" :value="p.row.cells[it.key]" :min="0" :precision="2"
                                    :controls="false" size="mini" style="width:104px"
                                    @change="v => saveBillCell(p.row, it.key, v)"></el-input-number>
-                  <span v-else class="loginid" title="系统按当月账单实时统计，不可手工修改">{{ yuan(p.row.auto[it.key]) }}</span>
+                  <!-- 系统项：金额 + 参与统计的订单数（点金额看明细核对） -->
+                  <span v-else class="bill-auto" title="点击查看参与统计的全部订单明细"
+                        @click="openBillOrders(p.row, it)">
+                    <span class="amt">{{ yuan(p.row.auto[it.key]) }}</span>
+                    <span class="cnt">{{ (p.row.autoCount && p.row.autoCount[it.key]) || 0 }} 单</span>
+                  </span>
                 </template>
               </el-table-column>
               <el-table-column label="支出合计" width="132">
@@ -1463,6 +1470,35 @@
           <div slot="footer">
             <el-button @click="billAdd.visible = false">取消</el-button>
             <el-button type="primary" :loading="billAdd.saving" @click="confirmAddMonth">确定</el-button>
+          </div>
+        </el-dialog>
+
+        <!-- 订单明细：点账单里「系统」支出项的金额打开，用来核对条数与合计（口径与账单完全一致） -->
+        <el-dialog :title="billOrders.title || '订单明细'" :visible.sync="billOrders.visible" width="920px" append-to-body>
+          <div class="form-tip" style="margin-bottom:10px">
+            账期 <b>{{ monthText(billOrders.month) }}</b> · 参与统计 <b>{{ billOrders.total }}</b> 单 · 合计
+            <b>{{ yuan(billOrders.sum) }}</b>
+          </div>
+          <el-table :data="billOrders.rows" size="mini" border max-height="420" v-loading="billOrders.loading"
+                    empty-text="该月没有符合条件的订单">
+            <el-table-column label="单号" min-width="170">
+              <template slot-scope="p"><span class="loginid">{{ p.row.no }}</span></template>
+            </el-table-column>
+            <el-table-column prop="who" label="卖家 / 店铺" min-width="150" show-overflow-tooltip></el-table-column>
+            <el-table-column prop="goods" label="商品" min-width="200" show-overflow-tooltip></el-table-column>
+            <el-table-column prop="t" label="时间" width="140"></el-table-column>
+            <el-table-column label="金额" width="110" align="right">
+              <template slot-scope="p"><span class="amount plain">{{ yuan(p.row.amount) }}</span></template>
+            </el-table-column>
+            <el-table-column prop="status" label="状态" width="110" show-overflow-tooltip></el-table-column>
+          </el-table>
+          <div slot="footer" style="display:flex;align-items:center;gap:12px">
+            <span class="loginid">合计 {{ yuan(billOrders.sum) }}（{{ billOrders.total }} 单）</span>
+            <span style="flex:1"></span>
+            <el-pagination background layout="prev, pager, next" :page-size="billOrders.size"
+                           :current-page="billOrders.page" :total="billOrders.total"
+                           @current-change="loadBillOrders"></el-pagination>
+            <el-button size="small" @click="billOrders.visible = false">关闭</el-button>
           </div>
         </el-dialog>
       </div>
@@ -3248,12 +3284,14 @@ const vm = new Vue({
       product: {
         loading: false, rows: [], total: 0, page: 1, size: 20,
         draftQ: '', status: '', priceSort: '', selected: [],
-        filteredValue: 0, latestBatch: null, trend: [],
+        filteredValue: 0, latestBatch: null,
         syncing: false, syncMsg: '',
         // 品牌方：普通用户固定看自己品牌；超管默认看全部，可用下拉收窄（''=全部品牌）
         brand: '', brandStats: [], brandAll: true,
         // 停采商品（同步第二轮拉的 purchase_status_code=2）货值与条数，统计卡用
         stoppedValue: 0, stoppedCount: 0,
+        // 在途货值（当前筛选口径）：Σ在途 × 采购价
+        transitValue: 0, transitQty: 0,
         // 商品同步弹框（仅超管）：勾选要同步的品牌方（含各品牌牵牛花登录状态）
         syncDlg: { visible: false, brandIds: [], brandsQnh: [], saving: false },
       },
@@ -3276,6 +3314,8 @@ const vm = new Vue({
       // 账单（按月）：cols = 每个月一列 { month, hasRow, cells(手工项), auto(1688/拼多多), totals }
       bill: { loading: false, items: [], cols: [] },
       billAdd: { visible: false, month: '', copyFrom: '', saving: false },
+      // 账单「系统」支出项的订单明细弹窗（点金额打开，用于核对条数与合计）
+      billOrders: { visible: false, loading: false, platform: '', month: '', title: '', rows: [], total: 0, sum: 0, page: 1, size: 50 },
       quotes: { visible: false, loading: false, sku: '', goodsName: '', rows: [] },
       meta: '', tenantLabel: '', copyright: '',
       // 筛选（草稿 vs 生效）
@@ -3480,18 +3520,15 @@ const vm = new Vue({
         { key: 'rate', num: (Number(t.rate) || 0) + '%', label: '本月净利率', sub: '净利润 ÷ 总收入' },
       ];
     },
-    /** 商品列表统计卡（设计稿 4 卡）：全部取自现有接口字段，未新增接口 */
+    /** 商品列表统计卡（4 卡）：全部取自现有接口字段，未新增接口 */
     productStatCards() {
       const p = this.product;
-      // 商品列表现在是「品牌商品」（商品同步写入、同品牌共享），品牌维度放前两张卡；
-      // 第 4 卡是停采商品货值（同步第二轮单独拉「已停采」，purchase_status_code=2）
-      const brandLabel = p.brandAll
-        ? ('全部品牌方（' + ((p.brandStats || []).length) + ' 个）')
-        : (this.brandNameById(p.brand) || (this.me && this.me.brandName) || '我的品牌');
+      // 商品列表是「品牌商品」（商品同步写入、同品牌共享）：总数 / 总货值 / 在途货值 / 停采货值
       return [
         { key: 'total', num: p.total, label: '商品总数', sub: '按当前筛选条件统计' },
         { key: 'value', num: this.yuan(p.filteredValue), label: '当前筛选总货值', sub: 'Σ(可用 + 在途) × 采购价' },
-        { key: 'brand', num: brandLabel, label: '数据归属', sub: '同品牌方用户共用一套商品' },
+        { key: 'transit', num: this.yuan(p.transitValue), label: '在途货值',
+          sub: (p.transitQty || 0) + ' 件在途 · Σ在途 × 采购价' },
         { key: 'stopped', num: this.yuan(p.stoppedValue), label: '停采商品货值',
           sub: (p.stoppedCount || 0) + ' 个停止采购商品 · Σ(可用 + 在途) × 采购价' },
       ];
@@ -3921,7 +3958,7 @@ const vm = new Vue({
       this.$nextTick(() => setTimeout(() => { if (this.page === p) this.onResize(); }, 60));
       if (p === 'refund') this.$nextTick(() => this.renderRefundTrend());
       if (p === 'profit') this.$nextTick(() => this.renderProfitTrend());
-      if (p === 'product') { this.loadProducts(); this.loadProductTrend(); }
+      if (p === 'product') { this.loadProducts(); }
       if (p === 'market') this.loadMarket();
       if (p === 'billing') this.loadBilling();
       if (p === 'sdc') { this.clearSdcPicked(); this.loadSdcStatus(); this.loadSdcOrders(); }
@@ -6605,7 +6642,7 @@ const vm = new Vue({
           this.up.result = { ok: true, html };
           this.loadData();
           if (this.page === 'mapping') this.loadMapping();
-          if (this.page === 'product') { this.loadProducts(); this.loadProductTrend(); }
+          if (this.page === 'product') { this.loadProducts(); }
           // 商品导入完成：询问是否进入补货（否=关闭弹框，是=打开补货界面）
           if (kind === 'products') {
             this.$nextTick(() => {
@@ -6652,6 +6689,8 @@ const vm = new Vue({
         this.product.filteredValue = d.filteredValue || 0;
         this.product.stoppedValue = d.stoppedValue || 0;
         this.product.stoppedCount = d.stoppedCount || 0;
+        this.product.transitValue = d.transitValue || 0;
+        this.product.transitQty = d.transitQty || 0;
         this.product.latestBatch = d.latestBatch || null;
         this.product.brandStats = d.brandStats || [];
         this.product.brandAll = d.brandFilter ? !!d.brandFilter.all : true;
@@ -6748,42 +6787,6 @@ const vm = new Vue({
       this.product.priceSort = this.product.priceSort === '' ? 'desc' : (this.product.priceSort === 'desc' ? 'asc' : '');
       this.product.page = 1;
       this.loadProducts();
-    },
-    async loadProductTrend() {
-      try {
-        const d = await this.api('/api/products/trend');
-        this.product.trend = d.days || [];
-        this.$nextTick(() => this.renderProductTrend());
-      } catch (e) { /* 趋势失败不阻塞列表 */ }
-    },
-    renderProductTrend() {
-      if (this.page !== 'product') return;
-      const EC = ecLib();
-      const dom = document.getElementById('product-trend');
-      if (!EC || !dom) return;
-      this._pTrendChart = this._pTrendChart || EC.init(dom);
-      const days = this.product.trend || [];
-      this._pTrendChart.setOption({
-        grid: { left: 6, right: 10, top: 26, bottom: 4, containLabel: true },
-        tooltip: {
-          trigger: 'axis', confine: true,
-          backgroundColor: 'rgba(38,40,44,.92)', borderWidth: 0, textStyle: { color: '#fff', fontSize: 12 },
-          formatter: (ps) => {
-            const d = days[ps && ps[0] ? ps[0].dataIndex : 0] || {};
-            return `<b>${String(d.imported_at || '').slice(0, 16)}</b><br/>总货值：<b style="color:#9be09b">${yuan(d.total_value)}</b>`
-              + `<br/>商品：${d.item_count || 0} 个`
-              + (d.source_file ? `<br/>文件：${this.esc(String(d.source_file).slice(0, 40))}` : '');
-          },
-        },
-        xAxis: { type: 'category', data: days.map((d) => String(d.imported_at || '').slice(5, 16)) },
-        yAxis: { type: 'value', scale: true },
-        series: [{
-          type: 'line', smooth: true, symbolSize: 7,
-          data: days.map((d) => Number(d.total_value) || 0),
-          lineStyle: { color: '#409eff' }, itemStyle: { color: '#409eff' },
-          areaStyle: { color: 'rgba(64,158,255,.12)' },
-        }],
-      }, true);
     },
     // 发布到交易市场：skus 传数组；单个时传 row；批量用勾选行。展示缺行也没关系——服务端按 sku 取真实数据
     openPublish(skus, row) {
@@ -7168,6 +7171,38 @@ const vm = new Vue({
         else { this.$message.success('已保存：' + this.monthText(col.month)); }
       } catch (e) { this.$message.error('保存失败: ' + e.message); }
       await this.loadBilling(true);
+    },
+    /** 打开某月某平台的订单明细（账单里「系统」支出项点金额触发，用于核对条数与合计） */
+    openBillOrders(row, it) {
+      if (!row || !it || it.source !== 'auto') return;
+      this.billOrders = {
+        visible: true, loading: true, platform: it.key, month: row.month,
+        title: it.label + ' · ' + this.monthText(row.month),
+        rows: [], total: 0, sum: 0, page: 1, size: 50,
+      };
+      this.loadBillOrders(1);
+    },
+    async loadBillOrders(page) {
+      const b = this.billOrders;
+      if (!b || !b.platform) return;
+      b.page = Math.max(1, Number(page) || 1);
+      b.loading = true;
+      try {
+        const qs = '?platform=' + encodeURIComponent(b.platform)
+          + '&month=' + encodeURIComponent(b.month)
+          + '&page=' + b.page + '&size=' + b.size;
+        const d = await this.api('/api/billing/orders' + qs);
+        if (d && d.error) {
+          this.$message.error(d.error);
+          b.rows = []; b.total = 0; b.sum = 0;
+          return;
+        }
+        b.rows = (d && d.rows) || [];
+        b.total = (d && d.total) || 0;
+        b.sum = (d && d.sum) || 0;
+      } catch (e) {
+        this.$message.error('订单明细加载失败: ' + e.message);
+      } finally { b.loading = false; }
     },
     /** 新增月份：默认下一个月 + 复制当前最后一列 */
     openAddMonth() {
