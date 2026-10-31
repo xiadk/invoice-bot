@@ -811,6 +811,7 @@ const OP_ACTIONS = {
     : `打开了版本更新提示（v${d.current || '?'}，宽限期还剩 ${d.days || 0} 天）`,
   'agent.bind': (d) => `绑定了本机助手${d.deviceName ? '（' + d.deviceName + '）' : ''}`,
   'agent.build': () => '重新打包了本机助手安装包',
+  'product.sync': (d) => `同步了牵牛花前置仓商品（拉取 ${d.total || 0} 个，新增 ${d.inserted || 0} 个，更新主图 ${d.updated || 0} 个，失败 ${d.failed || 0} 个）${d.ok ? '' : '（失败）'}`,
   'qnh.sync': (d) => `在退单列表点击了「立即刷新数据」${d.ok ? '（成功）' : '（失败）'}`,
   'qnh.profit_pull': (d) => `拉取了毛利明细（${d.rows || 0} 条，告警 ${d.alerts || 0} 条）`,
   'qnh.notify_pending': (d) => `手动触发了超时退单提醒${d.ok ? `（推送 ${d.sent || 0} 条）` : '（失败）'}`,
@@ -3699,11 +3700,24 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { ok: true, sku, localPrice: v });
     }
 
-    // 商品同步（仅超级管理员）：按页拉取牵牛花前置仓商品，按 sku 回写 image_url（与取价/加购同套牵牛花签名通道）
+    // 商品同步（仅超级管理员）：按页拉取牵牛花前置仓商品（筛选「正常采购」），
+    // 按 sku 回写商品主图 —— 表里已有则更新、没有则插入；超管一次写所有「已有商品数据」的租户（B 方案）
     if (method === 'POST' && p === '/api/admin/products/sync') {
       if (!isAdmin) return sendJson(res, 403, { error: '仅超级管理员可同步商品' });
-      const out = await qnh.syncProducts({ userId: user.id, tenantId, onProgress: null });
-      await logOp(user, 'product.sync', { ok: !!out.ok, total: out.total, matched: out.matched, updated: out.updated, failed: out.failed });
+      const body = await readBody(req).catch(() => ({}));
+      // 诊断模式：只拉第 1 页，回报真实字段名与样本（不写库），用于字段映射不对时快速校准
+      if (body && body.diagnose) {
+        return sendJson(res, 200, await qnh.syncProducts({ userId: user.id, tenantId, diagnose: true }));
+      }
+      // 超管同步：目标租户 = 所有已经导入过商品的租户（没有商品数据的租户不写，避免污染空库）
+      const trows = await db.query('SELECT DISTINCT user_id AS uid FROM product_item');
+      const tenantIds = trows.map((r) => Number(r.uid)).filter((x) => Number.isInteger(x) && x > 0);
+      // 只读扫描：全量拉一遍但不写库，只回报「接口商品 ↔ 库里商品」的匹配率
+      if (body && body.dryRun) {
+        return sendJson(res, 200, await qnh.syncProducts({ userId: user.id, tenantId, tenantIds, dryRun: true }));
+      }
+      const out = await qnh.syncProducts({ userId: user.id, tenantId, tenantIds, onProgress: null });
+      await logOp(user, 'product.sync', { ok: !!out.ok, total: out.total, inserted: out.inserted, updated: out.updated, failed: out.failed });
       return sendJson(res, 200, out);
     }
 
