@@ -60,6 +60,7 @@ const auth = require('./lib/auth');
 const tenancy = require('./lib/tenancy');
 const { runImport, importOrderUpload, importInvoiceUpload } = require('./import-to-db');
 const qht = require('./lib/qht');
+const afa = require('./lib/afa');
 const products = require('./lib/products');
 const billing = require('./lib/billing');
 const { loadConfig } = require('./lib/config');
@@ -3593,7 +3594,77 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
-    // 关联齐货通商品（按 user+sku）/ 保存本地价
+    // ── 城配速达（阿发）── 随「商品列表」菜单权限一同放行；本项目只做 Token 配置，不做登录/解绑
+    if (p.startsWith('/api/afa/') && !canProduct) return denyProduct();
+    if (method === 'GET' && p === '/api/afa/session') {
+      return sendJson(res, 200, await afa.sessionStatus(tenantId));
+    }
+    // 配置 Token（用户粘贴城配速达 authorization + 门店/小程序参数，过期需重贴）
+    if (method === 'POST' && p === '/api/afa/token') {
+      writeGuard();
+      const b = await readBody(req);
+      try {
+        const r = await afa.saveSession(tenantId, { token: b.token, storeId: b.storeId, appId: b.appId });
+        return sendJson(res, 200, { ok: true, ...r });
+      } catch (e) {
+        return sendJson(res, 200, {
+          ok: false,
+          error: String((e && e.message) || e).slice(0, 300),
+          code: (e && e.code) || 'unknown',
+          ...(await afa.sessionStatus(tenantId)),
+        });
+      }
+    }
+    if (method === 'POST' && p === '/api/afa/clear') {
+      writeGuard();
+      const r = await afa.clearSession(tenantId);
+      return sendJson(res, 200, r);
+    }
+    if (method === 'GET' && p === '/api/afa/search') {
+      try {
+        return sendJson(res, 200, await afa.searchGoods(tenantId, url.searchParams.get('keyword'), {
+          pageNum: url.searchParams.get('pageNum'),
+          pageSize: url.searchParams.get('pageSize'),
+        }));
+      } catch (e) {
+        return sendJson(res, 200, { error: String((e && e.message) || e), code: (e && e.code) || 'unknown', rows: [], total: 0 });
+      }
+    }
+    // 批量取价：ids=37207,1002（城配速达商品ID，逗号分隔）
+    if (method === 'GET' && p === '/api/afa/prices') {
+      const ids = String(url.searchParams.get('ids') || '').split(',').map((s) => s.trim()).filter(Boolean);
+      if (!ids.length) return sendJson(res, 200, { prices: {} });
+      try {
+        return sendJson(res, 200, await afa.pricesByGoodsIds(tenantId, ids));
+      } catch (e) {
+        return sendJson(res, 200, { error: String((e && e.message) || e), code: (e && e.code) || 'unknown', prices: {} });
+      }
+    }
+    // 加入购物车：会在用户自己的城配速达账号里真实加一件，只在用户点确认后调用一次
+    if (method === 'POST' && p === '/api/afa/cart') {
+      writeGuard();
+      const b = await readBody(req);
+      try {
+        return sendJson(res, 200, await afa.addToCart(tenantId, b));
+      } catch (e) {
+        return sendJson(res, 200, { error: String((e && e.message) || e), code: (e && e.code) || 'unknown' });
+      }
+    }
+
+    // 关联城配速达商品（按 user+sku）/ 保存本地价
+    if (method === 'POST' && p === '/api/products/link-afa') {
+      if (!canProduct) return denyProduct();
+      writeGuard();
+      const b = await readBody(req);
+      const sku = String(b.sku || '').trim();
+      const goodsId = String(b.goodsId == null ? '' : b.goodsId).trim();
+      if (!sku) return sendJson(res, 200, { error: '缺少 sku' });
+      const r = await db.exec(
+        'UPDATE product_item SET afa_goods_id = ? WHERE user_id = ? AND sku = ?',
+        [goodsId || null, tenantId, sku]
+      );
+      return sendJson(res, 200, { ok: true, sku, goodsId: goodsId || null, affected: r.affectedRows || 0 });
+    }
     if (method === 'POST' && p === '/api/products/link') {
       if (!canProduct) return denyProduct();
       writeGuard();

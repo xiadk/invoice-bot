@@ -668,11 +668,33 @@ async function migrate(conn, dbName) {
     );
   }
 
+  // ── 阿发（城配速达）登录态（v0.2.78）：用户粘贴城配速达小程序的 authorization（JWT）及其门店/小程序参数
+  //    本项目只做「Token 配置」不做「登录/解绑」：小程序无退出按钮，过期后重新粘贴即可
+  if (!(await colExists('app_user', 'afa_token'))) {
+    await q(
+      "ALTER TABLE `app_user` ADD COLUMN `afa_token` VARCHAR(1024) DEFAULT NULL " +
+      "COMMENT '城配速达接口鉴权 JWT（Bearer 内容，用户自行粘贴，过期需重贴）'"
+    );
+  }
+  if (!(await colExists('app_user', 'afa_store_id'))) {
+    await q(
+      "ALTER TABLE `app_user` ADD COLUMN `afa_store_id` VARCHAR(32) DEFAULT NULL " +
+      "COMMENT '城配速达门店ID（JWT 内不含 mid，storeId 需用户配置）'"
+    );
+  }
+  if (!(await colExists('app_user', 'afa_app_id'))) {
+    await q(
+      "ALTER TABLE `app_user` ADD COLUMN `afa_app_id` VARCHAR(64) DEFAULT NULL " +
+      "COMMENT '城配速达小程序 appId（默认 wxc050ff76c31c4371）'"
+    );
+  }
+
   // ── 商品列表补列（v0.2.31）：补货界面要的建议量 / 齐货通商品ID / 本地价 ──
   if (await tableExists('product_item')) {
     for (const [col, decl] of [
       ['suggest_qty', "INT NOT NULL DEFAULT 0 COMMENT '建议量（基础单位，来自补货参考文件的「建议量(基础单位)」列）'"],
       ['qht_goods_id', "VARCHAR(64) DEFAULT NULL COMMENT '关联的齐货通商品ID（goodsId，用于实时取价与加购）'"],
+      ['afa_goods_id', "VARCHAR(64) DEFAULT NULL COMMENT '关联的城配速达商品ID（goodsId，用于实时取价与加购）'"],
       ['local_price', "DECIMAL(12,2) DEFAULT NULL COMMENT '本地价（手工填写并保存，仅作比价参考）'"],
     ]) {
       if (!(await colExists('product_item', col))) {
