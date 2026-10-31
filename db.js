@@ -711,6 +711,86 @@ async function migrate(conn, dbName) {
     }
   }
 
+  // ── 品牌方（v0.2.83）──────────────────────────────────────────────────────
+  //   业务背景：一个代运营团队可能同时承运多个品牌方（各自有独立的牵牛花账号/门店仓），
+  //   同一品牌方下的多个用户共用一套「品牌商品」数据（商品同步拉取的采购价/库存/销量等）。
+  //   表关系：
+  //     · brand            品牌方字典（超管可在后台新增）
+  //     · app_user.brand_id 用户归属品牌方（新建用户默认「优购哆」）
+  //     · brand_product    品牌级商品主数据（「商品同步」写入，品牌内全员共享，唯一键 brand_id+sku）
+  //     · product_item     保持个人隔离（「导入补货参考文件」的数据仍归各自用户）
+  //     · qnh_session      牵牛花登录态按品牌方隔离（每个品牌一个账号）
+  if (!(await tableExists('brand'))) {
+    await q(
+      'CREATE TABLE `brand` (' +
+      "  `id` INT NOT NULL AUTO_INCREMENT COMMENT '品牌方ID'," +
+      "  `name` VARCHAR(64) NOT NULL COMMENT '品牌方名称'," +
+      "  `status` ENUM('active','disabled') NOT NULL DEFAULT 'active' COMMENT '状态：active=启用，disabled=停用'," +
+      "  `note` VARCHAR(255) DEFAULT NULL COMMENT '备注（如牵牛花登录账号）'," +
+      "  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间'," +
+      "  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间'," +
+      '  PRIMARY KEY (`id`),' +
+      '  UNIQUE KEY `uk_brand_name` (`name`)' +
+      ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='品牌方字典（商品数据按品牌方共享）'"
+    );
+  }
+  // 种子：优购哆（id=1）。INSERT IGNORE 保证重复执行不报错、也不覆盖已改过的名称。
+  await q("INSERT IGNORE INTO `brand` (`id`, `name`, `note`) VALUES (1, '优购哆', '系统内置默认品牌方')");
+  if (!(await colExists('app_user', 'brand_id'))) {
+    await q(
+      "ALTER TABLE `app_user` ADD COLUMN `brand_id` INT NOT NULL DEFAULT 1 " +
+      "COMMENT '所属品牌方（brand.id，默认优购哆）'"
+    );
+  }
+  if (!(await idxExists('app_user', 'idx_app_user_brand'))) {
+    await q('ALTER TABLE `app_user` ADD KEY `idx_app_user_brand` (`brand_id`)');
+  }
+  // 品牌级商品主数据：一次同步写入，同品牌下所有用户共享
+  if (!(await tableExists('brand_product'))) {
+    await q(
+      'CREATE TABLE `brand_product` (' +
+      "  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT," +
+      "  `brand_id` INT NOT NULL COMMENT '品牌方（brand.id）'," +
+      "  `sku` VARCHAR(64) NOT NULL COMMENT '商品SKU（= 牵牛花 goodsId，19 位长数字用文本存储）'," +
+      "  `goods_name` VARCHAR(512) NOT NULL DEFAULT '' COMMENT '商品名称（goodsName）'," +
+      "  `image_url` VARCHAR(512) DEFAULT NULL COMMENT '商品主图（picUrl）'," +
+      "  `purchase_price` DECIMAL(12,2) NOT NULL DEFAULT 0 COMMENT '采购价（purchasePrice）'," +
+      "  `available_stock` INT NOT NULL DEFAULT 0 COMMENT '可用库存（inStoreValidStockQty）'," +
+      "  `transit_stock` INT NOT NULL DEFAULT 0 COMMENT '在途库存（inTransitQty）'," +
+      "  `purchase_status` VARCHAR(32) NOT NULL DEFAULT '' COMMENT '采购状态（purchaseStatusDesc）'," +
+      "  `sales_30d` INT NOT NULL DEFAULT 0 COMMENT '30天销量（sale30Num）'," +
+      "  `synced_at` DATETIME DEFAULT NULL COMMENT '最近一次同步时间'," +
+      "  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '首次同步时间'," +
+      "  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '最近更新时间'," +
+      '  PRIMARY KEY (`id`),' +
+      '  UNIQUE KEY `uk_bp_brand_sku` (`brand_id`, `sku`),' +
+      '  KEY `idx_bp_brand_status` (`brand_id`, `purchase_status`),' +
+      '  KEY `idx_bp_sku` (`sku`)' +
+      ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='品牌商品（商品同步写入；同品牌全员共享）'"
+    );
+  }
+  // 牵牛花登录态按品牌方隔离：每个品牌方一个账号，老登录态归默认品牌（优购哆）
+  if (await tableExists('qnh_session')) {
+    if (!(await colExists('qnh_session', 'brand_id'))) {
+      await q(
+        "ALTER TABLE `qnh_session` ADD COLUMN `brand_id` INT NOT NULL DEFAULT 1 " +
+        "COMMENT '登录态所属品牌方（brand.id）：每个品牌方一套牵牛花账号'"
+      );
+    }
+    if (!(await idxExists('qnh_session', 'idx_qnhs_brand'))) {
+      await q('ALTER TABLE `qnh_session` ADD KEY `idx_qnhs_brand` (`brand_id`)');
+    }
+    // 唯一键口径由「每个用户一份」改为「每个品牌一份」（同一品牌下所有用户共用该品牌的牵牛花账号）
+    if (await idxExists('qnh_session', 'uk_qs_user')) {
+      // 同品牌只保留最近写入的一条，避免加唯一键时冲突
+      await q('DELETE s1 FROM `qnh_session` s1 JOIN `qnh_session` s2 ON s1.brand_id = s2.brand_id AND s1.id < s2.id');
+      await q('ALTER TABLE `qnh_session` DROP INDEX `uk_qs_user`');
+    }
+    if (!(await idxExists('qnh_session', 'uk_qs_brand'))) {
+      await q('ALTER TABLE `qnh_session` ADD UNIQUE KEY `uk_qs_brand` (`brand_id`)');
+    }
+  }
+
   // ── 拼多多订单补列（老库）：订单列表接口带来的平台状态 / 实付金额 / 来源 ──
   if (await tableExists('pdd_order')) {
     for (const [col, decl] of [

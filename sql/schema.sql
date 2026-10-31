@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS `app_user` (
   `email`                VARCHAR(160)  DEFAULT NULL            COMMENT '开票抬头：收票邮箱（催收消息 {email}）',
   `display_name`         VARCHAR(64)   DEFAULT NULL            COMMENT '显示名（可选，看板右上角展示）',
   `note`                 VARCHAR(255)  DEFAULT NULL            COMMENT '备注（管理员填写，如所属业务线）',
+  `brand_id`             INT           NOT NULL DEFAULT 1      COMMENT '所属品牌方（brand.id，默认 1=优购哆）',
   `qht_token`            VARCHAR(128)  DEFAULT NULL            COMMENT '齐货通接口登录态 x-token（用户自行粘贴，过期需重贴）',
   `qht_x_user`           VARCHAR(64)   DEFAULT NULL            COMMENT '齐货通接口登录态 x-user（一般是登录手机号）',
   `product_enabled`      TINYINT(1)    NOT NULL DEFAULT 0      COMMENT '是否允许查看商品列表页（含补货/齐货通；1=开启，超级管理员始终可见）',
@@ -56,9 +57,29 @@ CREATE TABLE IF NOT EXISTS `app_user` (
   `updated_at`           DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
   PRIMARY KEY (`id`),
   UNIQUE KEY `uk_app_user_username` (`username`),
-  KEY `idx_app_user_role` (`role`)
+  KEY `idx_app_user_role` (`role`),
+  KEY `idx_app_user_brand` (`brand_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   COMMENT='账号表（多用户登录；role=admin 为超级管理员）';
+
+-- ----------------------------------------------------------------------------
+-- 表 0.1: brand —— 品牌方字典
+--   一个代运营团队可能承运多个品牌方，每个品牌方有独立的牵牛花账号/门店仓。
+--   同品牌方下的用户共用一套「品牌商品」数据（见 brand_product）。
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `brand` (
+  `id`         INT           NOT NULL AUTO_INCREMENT COMMENT '品牌方ID',
+  `name`       VARCHAR(64)   NOT NULL                COMMENT '品牌方名称',
+  `status`     ENUM('active','disabled') NOT NULL DEFAULT 'active' COMMENT '状态：active=启用，disabled=停用',
+  `note`       VARCHAR(255)  DEFAULT NULL            COMMENT '备注（如牵牛花登录账号）',
+  `created_at` DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  `updated_at` DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_brand_name` (`name`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  COMMENT='品牌方字典（商品数据按品牌方共享）';
+
+INSERT IGNORE INTO `brand` (`id`, `name`, `note`) VALUES (1, '优购哆', '系统内置默认品牌方');
 
 -- ----------------------------------------------------------------------------
 -- （login_state 表已废除：2026-10-13 起服务器不保存 1688 登录态、不用服务端浏览器发送，
@@ -349,6 +370,33 @@ CREATE TABLE IF NOT EXISTS `operation_log` (
   KEY `idx_op_log_created` (`created_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   COMMENT='操作日志（仅超级管理员可查看）';
+
+-- ----------------------------------------------------------------------------
+-- brand_product —— 品牌商品主数据（「商品同步」写入；同品牌方全员共享）
+--   一个品牌方一套商品，品牌内所有用户看到的是同一份数据（采购价/库存/在途/销量/状态/主图）。
+--   数据源：牵牛花 前置仓补货参考（store-warehouse/page-query），字段映射见 lib/qnh.js。
+--   唯一键 (brand_id, sku)：重复同步按品牌+SKU 覆盖更新。
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `brand_product` (
+  `id`              BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `brand_id`        INT           NOT NULL              COMMENT '品牌方（brand.id）',
+  `sku`             VARCHAR(64)   NOT NULL              COMMENT '商品SKU（= 牵牛花 goodsId）',
+  `goods_name`      VARCHAR(512)  NOT NULL DEFAULT ''   COMMENT '商品名称（goodsName）',
+  `image_url`       VARCHAR(512)  DEFAULT NULL          COMMENT '商品主图（picUrl）',
+  `purchase_price`  DECIMAL(12,2) NOT NULL DEFAULT 0    COMMENT '采购价（purchasePrice）',
+  `available_stock` INT           NOT NULL DEFAULT 0    COMMENT '可用库存（inStoreValidStockQty）',
+  `transit_stock`   INT           NOT NULL DEFAULT 0    COMMENT '在途库存（inTransitQty）',
+  `purchase_status` VARCHAR(32)   NOT NULL DEFAULT ''   COMMENT '采购状态（purchaseStatusDesc）',
+  `sales_30d`       INT           NOT NULL DEFAULT 0    COMMENT '30天销量（sale30Num）',
+  `synced_at`       DATETIME      DEFAULT NULL          COMMENT '最近一次同步时间',
+  `created_at`      DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '首次同步时间',
+  `updated_at`      DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '最近更新时间',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_bp_brand_sku` (`brand_id`, `sku`),
+  KEY `idx_bp_brand_status` (`brand_id`, `purchase_status`),
+  KEY `idx_bp_sku` (`sku`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  COMMENT='品牌商品（商品同步写入；同品牌全员共享）';
 
 -- ----------------------------------------------------------------------------
 -- product_item —— 商品列表（前置仓补货参考批量导出导入；按用户隔离）

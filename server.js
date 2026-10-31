@@ -299,7 +299,12 @@ function startAgentBuild() {
 async function currentUser(req) {
   const sess = auth.sessionFromRequest(req);
   if (!sess) return null;
-  const rows = await db.query('SELECT * FROM app_user WHERE id = ?', [sess.u]);
+  // 带上品牌方名称：前端要展示当前账号所属品牌（商品数据按品牌共享）
+  const rows = await db.query(
+    `SELECT u.*, b.name AS brand_name
+       FROM app_user u LEFT JOIN brand b ON b.id = u.brand_id
+      WHERE u.id = ?`, [sess.u]
+  );
   const u = rows[0];
   if (!u) return null;
   if (u.status !== 'active') return null;
@@ -336,6 +341,9 @@ function publicUser(u) {
     billingEnabled: u.role === 'admin' ? true : !!Number(u.billing_enabled),
     // 补货页权限（独立菜单，默认所有用户不授权；含导入补货参考文件、齐货通/阿发取价加购）
     replenishEnabled: u.role === 'admin' ? true : !!Number(u.replenish_enabled),
+    // 所属品牌方（商品数据按品牌方共享：同品牌下所有用户看到同一套商品）
+    brandId: Number(u.brand_id) || 1,
+    brandName: u.brand_name || '',
     lastLoginAt: u.last_login_at,
     createdAt: u.created_at,
   };
@@ -355,6 +363,28 @@ function tenantOf(req, url, user) {
     }
   }
   return user.id;
+}
+
+/**
+ * 解析本次请求要看的「品牌方」商品：
+ *   · 普通用户 → 固定为自己所属品牌（忽略任何参数，杜绝越权看别家商品）
+ *   · 超级管理员 → 默认「全部品牌」，可用 ?brand=<id> 或请求头 x-brand-id 收窄到某个品牌
+ * 返回 { brandId, all }，brandId=0 / all=true 表示全部品牌。
+ */
+function brandOf(req, url, user) {
+  const own = Number(user.brand_id) || 1;
+  if (user.role !== 'admin') return { brandId: own, all: false };
+  const raw = url.searchParams.get('brand') != null ? url.searchParams.get('brand') : req.headers['x-brand-id'];
+  if (raw === undefined || raw === null || String(raw).trim() === '') return { brandId: 0, all: true };
+  const n = Number(raw);
+  if (Number.isInteger(n) && n > 0) return { brandId: n, all: false };
+  return { brandId: 0, all: true }; // 0 / 非法值 → 全部品牌
+}
+
+/** 某个用户所属的品牌方 id（商品数据按品牌方共享；查不到回落优购哆） */
+async function brandIdOfUser(userId) {
+  const rows = await db.query('SELECT brand_id FROM app_user WHERE id = ?', [userId]).catch(() => []);
+  return Number(rows[0] && rows[0].brand_id) || 1;
 }
 
 /** 写操作只允许作用于自己的数据（管理员查看他人为只读） */
@@ -811,7 +841,9 @@ const OP_ACTIONS = {
     : `打开了版本更新提示（v${d.current || '?'}，宽限期还剩 ${d.days || 0} 天）`,
   'agent.bind': (d) => `绑定了本机助手${d.deviceName ? '（' + d.deviceName + '）' : ''}`,
   'agent.build': () => '重新打包了本机助手安装包',
-  'product.sync': (d) => `同步了牵牛花前置仓商品（拉取 ${d.total || 0} 个，新增 ${d.inserted || 0} 个，更新主图 ${d.updated || 0} 个，失败 ${d.failed || 0} 个）${d.ok ? '' : '（失败）'}`,
+  'product.sync': (d) => `同步了牵牛花前置仓商品（拉取 ${d.total || 0} 个，新增 ${d.inserted || 0} 个，更新 ${d.updated || 0} 个，失败 ${d.failed || 0} 个）${d.ok ? '' : '（失败）'}`,
+  'brand.create': (d) => `新增品牌方「${d.name || ''}」`,
+  'brand.update': (d) => `修改品牌方「${d.name || ''}」（${d.status === 'disabled' ? '停用' : '启用'}）`,
   'qnh.sync': (d) => `在退单列表点击了「立即刷新数据」${d.ok ? '（成功）' : '（失败）'}`,
   'qnh.profit_pull': (d) => `拉取了毛利明细（${d.rows || 0} 条，告警 ${d.alerts || 0} 条）`,
   'qnh.notify_pending': (d) => `手动触发了超时退单提醒${d.ok ? `（推送 ${d.sent || 0} 条）` : '（失败）'}`,
@@ -1165,7 +1197,7 @@ const AGENT_LOGOUT_TIMEOUT_MS = 6000;
  * @param {'pdd'|'qnh'|'1688'} target
  * @returns {Promise<{ok:boolean,offline?:boolean,outdated?:boolean,timeout?:boolean,agentVer?:string,cleared?:number,error?:string}>}
  */
-function agentLogout(uid, target) {
+function agentLogout(uid, target, brandId) {
   return new Promise((resolve) => {
     if (!agentHub.isOnline(uid)) { resolve({ ok: false, offline: true }); return; }
     const agentVer = agentHub.status(uid).agentVer || '';
@@ -1180,7 +1212,8 @@ function agentLogout(uid, target) {
     }, AGENT_LOGOUT_TIMEOUT_MS);
     if (timer.unref) timer.unref();
     AGENT_LOGOUTS.set(taskId, { resolve, timer });
-    const sent = agentHub.send(uid, { type: 'logout', taskId, target });
+    // brandId：牵牛花登录态按品牌方隔离，登出要清对应品牌的那个浏览器分区
+    const sent = agentHub.send(uid, { type: 'logout', taskId, target, brandId: Number(brandId) || 0 });
     if (!sent) {
       clearTimeout(timer);
       AGENT_LOGOUTS.delete(taskId);
@@ -1304,7 +1337,8 @@ function onQnhLoginDone(uid, msg) {
     return;
   }
   qnh.saveLoginState({
-    userId: ctx.userId,
+    brandId: ctx.brandId,
+    userId: ctx.userId,   // 只记录"谁登录的"，登录态归属品牌方
     cookies: msg.cookies,
     account: msg.account,
     tenantId: msg.tenantId,
@@ -2391,12 +2425,14 @@ async function listUsers() {
     SELECT u.id, u.username, u.role, u.status, u.company_name, u.tax_no, u.email, u.display_name, u.note,
            u.must_change_password, u.last_login_at, u.created_at, u.updated_at,
            u.qnh_refund_enabled, u.qnh_profit_enabled, u.product_enabled, u.market_enabled, u.billing_enabled,
+           u.replenish_enabled, u.brand_id, b.name AS brand_name,
            (SELECT COUNT(*) FROM invoice_order o WHERE o.user_id = u.id)              AS order_count,
            (SELECT COUNT(DISTINCT o.seller_company) FROM invoice_order o WHERE o.user_id = u.id) AS company_count,
            (SELECT COUNT(*) FROM issued_invoice i WHERE i.user_id = u.id)             AS invoice_rows,
            (SELECT COUNT(*) FROM seller_name_mapping m WHERE m.user_id = u.id)        AS mapping_count,
            (SELECT COUNT(*) FROM send_log s WHERE s.user_id = u.id AND s.result='ok') AS send_ok_count
-    FROM app_user u ORDER BY u.role = 'admin' DESC, u.id ASC
+    FROM app_user u LEFT JOIN brand b ON b.id = u.brand_id
+    ORDER BY u.role = 'admin' DESC, u.id ASC
   `);
   return users.map((u) => ({
     id: u.id, username: u.username, role: u.role, status: u.status,
@@ -2411,6 +2447,9 @@ async function listUsers() {
     billingEnabled: u.role === 'admin' ? true : !!Number(u.billing_enabled),
     // 补货页权限（独立菜单，默认所有用户不授权；含导入补货参考文件、齐货通/阿发取价加购）
     replenishEnabled: u.role === 'admin' ? true : !!Number(u.replenish_enabled),
+    // 所属品牌方（商品数据按品牌方共享）
+    brandId: Number(u.brand_id) || 1,
+    brandName: u.brand_name || '',
     lastLoginAt: u.last_login_at, createdAt: u.created_at, updatedAt: u.updated_at,
     orderCount: Number(u.order_count) || 0,
     companyCount: Number(u.company_count) || 0,
@@ -2430,7 +2469,17 @@ function validUsername(name) {
   return typeof name === 'string' && /^[\u4e00-\u9fa5A-Za-z0-9_.·()（）-]{2,64}$/.test(name);
 }
 
-async function createUser({ username, password, companyName, taxNo, email, role, displayName, note }, byUser) {
+/** 校验品牌方是否存在（新增/编辑用户时用；不传则默认优购哆 id=1） */
+async function assertBrand(brandId) {
+  if (brandId === undefined || brandId === null || String(brandId).trim() === '') return 1;
+  const id = Number(brandId);
+  if (!Number.isInteger(id) || id <= 0) throw new Error('品牌方参数非法');
+  const rows = await db.query('SELECT id FROM brand WHERE id = ?', [id]);
+  if (!rows.length) throw new Error('品牌方不存在（id=' + id + '）');
+  return id;
+}
+
+async function createUser({ username, password, companyName, taxNo, email, role, displayName, note, brandId }, byUser) {
   // 账号 = 公司全称：前端只填一个「公司全称」字段，这里做兜底（未传 username 时直接取 companyName）
   const uname = String(username || companyName || '').trim();
   const cname = String(companyName || uname || '').trim();
@@ -2438,22 +2487,24 @@ async function createUser({ username, password, companyName, taxNo, email, role,
   if (!password || String(password).length < 4) throw new Error('密码至少 4 位');
   const dup = await db.query('SELECT id FROM app_user WHERE username = ?', [uname]);
   if (dup.length) throw new Error('账号已存在: ' + uname);
+  // 所属品牌方（商品数据按品牌方共享；不传默认优购哆）
+  const bid = await assertBrand(brandId);
   // 超级管理员是纯系统账号，不承载业务数据 → 不落开票抬头
   const isAdminRole = role === 'admin';
   const r = await db.exec(
-    `INSERT INTO app_user (username, password_hash, role, status, company_name, tax_no, email, display_name, note, created_by)
-     VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO app_user (username, password_hash, role, status, company_name, tax_no, email, display_name, note, created_by, brand_id)
+     VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?)`,
     [uname, auth.hashPassword(password), isAdminRole ? 'admin' : 'user',
       isAdminRole ? null : (cname || null),
       isAdminRole ? null : (taxNo || null),
       isAdminRole ? null : (email || null),
-      displayName || null, note || null, byUser.id]
+      displayName || null, note || null, byUser.id, bid]
   );
   tenancy.ensureUserDirs(r.insertId);
-  return { ok: true, id: r.insertId, username: uname };
+  return { ok: true, id: r.insertId, username: uname, brandId: bid };
 }
 
-async function updateUser({ id, username, companyName, taxNo, email, role, displayName, note }) {
+async function updateUser({ id, username, companyName, taxNo, email, role, displayName, note, brandId }) {
   const rows = await db.query('SELECT * FROM app_user WHERE id = ?', [id]);
   if (!rows.length) throw new Error('用户不存在');
   const u = rows[0];
@@ -2480,17 +2531,19 @@ async function updateUser({ id, username, companyName, taxNo, email, role, displ
   // 超级管理员是纯系统账号，不承载业务数据 → 不维护开票抬头（用户列表中只保留「重置密码」）。
   // 这里对 admin 账号强制清空抬头，避免通过接口绕过界面停住一个与设计相悖的状态。
   const isAdminAccount = nextRole === 'admin';
+  // 所属品牌方：传了就按传的改（校验存在），没传保持原值
+  const nextBrand = brandId === undefined ? (Number(u.brand_id) || 1) : await assertBrand(brandId);
   await db.exec(
-    `UPDATE app_user SET username = ?, company_name = ?, tax_no = ?, email = ?, display_name = ?, note = ?, role = ? WHERE id = ?`,
+    `UPDATE app_user SET username = ?, company_name = ?, tax_no = ?, email = ?, display_name = ?, note = ?, role = ?, brand_id = ? WHERE id = ?`,
     [nextUsername,
       isAdminAccount ? null : (nextCompany || null),
       isAdminAccount ? null : (taxNo === undefined ? u.tax_no : (String(taxNo).trim() || null)),
       isAdminAccount ? null : (email === undefined ? u.email : (String(email).trim() || null)),
       displayName === undefined ? u.display_name : (String(displayName).trim() || null),
       note === undefined ? u.note : (String(note).trim() || null),
-      nextRole, id]
+      nextRole, nextBrand, id]
   );
-  return { ok: true, username: nextUsername, companyName: isAdminAccount ? '' : nextCompany };
+  return { ok: true, username: nextUsername, companyName: isAdminAccount ? '' : nextCompany, brandId: nextBrand };
 }
 
 async function resetUserPassword({ id, password }) {
@@ -3406,7 +3459,7 @@ const server = http.createServer(async (req, res) => {
         ? await importInvoiceUpload(tenantId, dest, safeName)
         : kind === 'orders'
         ? await importOrderUpload(tenantId, dest, safeName)
-        : await products.importReplenishFile(tenantId, dest, safeName);
+        : await products.importReplenishFile(tenantId, dest, safeName, await brandIdOfUser(tenantId));
       if (!r.ok) {
         taskLog(t, `✗ 导入失败：${r.error}`);
         return sendJson(res, 400, { ok: false, kind, error: r.error, file: safeName });
@@ -3480,7 +3533,10 @@ const server = http.createServer(async (req, res) => {
       writeGuard(); return sendJson(res, 200, await ignoreMapping(user.id, body));
     }
 
-    // ── 商品列表（前置仓补货参考导入） ── 所有登录用户可用（菜单不做逐用户授权）
+    // ── 商品列表 ── 所有登录用户可用（菜单不做逐用户授权）
+    //   两种数据源：
+    //     · 带 batch：补货页 / 个人导入的 product_item（个人隔离），主图按「品牌+SKU」从品牌商品补
+    //     · 不带 batch：商品列表页 / 品牌商品 brand_product（同品牌全员共享；超管默认看全部品牌）
     if (method === 'GET' && p === '/api/products') {
       if (!canProduct) return denyProduct();
       const page = Math.max(1, Number(url.searchParams.get('page')) || 1);
@@ -3488,37 +3544,96 @@ const server = http.createServer(async (req, res) => {
       const size = Math.min(2000, Math.max(1, Number(url.searchParams.get('size')) || 20));
       const q = (url.searchParams.get('q') || '').trim();
       const status = (url.searchParams.get('status') || '').trim();
-      const sort = url.searchParams.get('sort') || ''; // ''=最近更新 | price_asc | price_desc
+      const sort = (url.searchParams.get('sort') || '') === 'price_asc' ? 'price_asc'
+        : (url.searchParams.get('sort') || '') === 'price_desc' ? 'price_desc' : '';
       const batch = (url.searchParams.get('batch') || '').trim(); // 补货界面：只取某次导入的商品
-      const w = (q ? 'AND (sku LIKE ? OR goods_name LIKE ?) ' : '')
-        + (status ? 'AND purchase_status = ? ' : '')
-        + (batch ? 'AND batch_id = ? ' : '');
-      const args = [];
-      if (q) args.push(`%${q}%`, `%${q}%`);
-      if (status) args.push(status);
-      if (batch) args.push(batch);
       const order = sort === 'price_asc' ? 'purchase_price ASC, id ASC'
         : sort === 'price_desc' ? 'purchase_price DESC, id DESC'
         : 'updated_at DESC, id DESC';
-      const totalR = await db.query(`SELECT COUNT(*) AS n FROM product_item WHERE user_id = ? ${w}`, [tenantId, ...args]);
-      const rows = await db.query(`
-        SELECT id, sku, goods_name, purchase_price, available_stock, transit_stock, purchase_status, sales_30d,
-               suggest_qty, qht_goods_id, local_price, source_file, updated_at, image_url
-        FROM product_item WHERE user_id = ? ${w}
-        ORDER BY ${order} LIMIT ${size} OFFSET ${(page - 1) * size}
-      `, [tenantId, ...args]);
-      // 当前筛选口径下的总货值（(可用+在途)×采购价 合计），与趋势图口径一致
-      const valueR = await db.query(`
-        SELECT ROUND(SUM((available_stock + transit_stock) * purchase_price), 2) AS v,
-               SUM(purchase_price IS NOT NULL AND purchase_price > 0) AS priced
-        FROM product_item WHERE user_id = ? ${w}`, [tenantId, ...args]);
       const latest = await db.query(
         'SELECT id, source_file, item_count, total_value, imported_at FROM product_import_batch WHERE user_id = ? ORDER BY imported_at DESC, id DESC LIMIT 1', [tenantId]
       );
+
+      // ① 补货页：个人导入的补货参考（按 batch 过滤）。主图优先用自己那一行，没有则按品牌商品补同 SKU 的图。
+      if (batch) {
+        const w = (q ? 'AND (pi.sku LIKE ? OR pi.goods_name LIKE ?) ' : '')
+          + (status ? 'AND pi.purchase_status = ? ' : '')
+          + 'AND pi.batch_id = ? ';
+        const args = [];
+        if (q) args.push(`%${q}%`, `%${q}%`);
+        if (status) args.push(status);
+        args.push(batch);
+        const bo = brandOf(req, url, user);
+        const brandJoin = bo.all ? 'LEFT JOIN brand_product bp ON bp.sku = pi.sku'
+          : 'LEFT JOIN brand_product bp ON bp.brand_id = ' + Number(bo.brandId) + ' AND bp.sku = pi.sku';
+        const totalR = await db.query(`SELECT COUNT(*) AS n FROM product_item pi WHERE pi.user_id = ? ${w}`, [tenantId, ...args]);
+        const rows = await db.query(`
+          SELECT pi.id, pi.sku, pi.goods_name, pi.purchase_price, pi.available_stock, pi.transit_stock,
+                 pi.purchase_status, pi.sales_30d, pi.suggest_qty, pi.qht_goods_id, pi.afa_goods_id,
+                 pi.local_price, pi.source_file, pi.updated_at,
+                 COALESCE(NULLIF(pi.image_url, ''), bp.image_url) AS image_url
+          FROM product_item pi ${brandJoin}
+          WHERE pi.user_id = ? ${w}
+          ORDER BY ${order.replace(/\bid\b/g, 'pi.id').replace(/\bpurchase_price\b/g, 'pi.purchase_price').replace(/\bupdated_at\b/g, 'pi.updated_at')}
+          LIMIT ${size} OFFSET ${(page - 1) * size}
+        `, [tenantId, ...args]);
+        const valueR = await db.query(`
+          SELECT ROUND(SUM((available_stock + transit_stock) * purchase_price), 2) AS v,
+                 SUM(purchase_price IS NOT NULL AND purchase_price > 0) AS priced
+          FROM product_item WHERE user_id = ? ${w.replace(/\bpi\./g, '')}`, [tenantId, ...args]);
+        return sendJson(res, 200, {
+          total: totalR[0] ? totalR[0].n : 0, page, size, rows, source: 'import',
+          filteredValue: valueR[0] ? (valueR[0].v || 0) : 0,
+          latestBatch: latest[0] || null,
+        });
+      }
+
+      // ② 商品列表：品牌商品（同品牌全员共享；超管可切品牌 / 看全部）
+      const bo = brandOf(req, url, user);
+      const w = (q ? 'AND (sku LIKE ? OR goods_name LIKE ?) ' : '')
+        + (status ? 'AND purchase_status = ? ' : '');
+      const args = [];
+      if (q) args.push(`%${q}%`, `%${q}%`);
+      if (status) args.push(status);
+      const bWhere = bo.all ? '' : 'AND brand_id = ? ';
+      const bArgs = bo.all ? [] : [bo.brandId];
+      const totalR = await db.query(
+        `SELECT COUNT(*) AS n FROM brand_product WHERE 1=1 ${bWhere}${w}`, [...bArgs, ...args]
+      );
+      const rows = await db.query(`
+        SELECT bp.id, bp.brand_id, b.name AS brand_name, bp.sku, bp.goods_name, bp.purchase_price,
+               bp.available_stock, bp.transit_stock, bp.purchase_status, bp.sales_30d,
+               bp.image_url, bp.synced_at, bp.updated_at,
+               0 AS suggest_qty, NULL AS qht_goods_id, NULL AS local_price, NULL AS source_file
+        FROM brand_product bp LEFT JOIN brand b ON b.id = bp.brand_id
+        WHERE 1=1 ${bWhere.replace(/\bbrand_id\b/g, 'bp.brand_id')}${w.replace(/\bsku\b/g, 'bp.sku').replace(/\bgoods_name\b/g, 'bp.goods_name').replace(/\bpurchase_status\b/g, 'bp.purchase_status')}
+        ORDER BY ${order.replace(/\bid\b/g, 'bp.id').replace(/\bpurchase_price\b/g, 'bp.purchase_price').replace(/\bupdated_at\b/g, 'bp.updated_at')}
+        LIMIT ${size} OFFSET ${(page - 1) * size}
+      `, [...bArgs, ...args]);
+      const valueR = await db.query(`
+        SELECT ROUND(SUM((available_stock + transit_stock) * purchase_price), 2) AS v,
+               SUM(purchase_price IS NOT NULL AND purchase_price > 0) AS priced
+        FROM brand_product WHERE 1=1 ${bWhere}${w}`, [...bArgs, ...args]);
+      // 超管：各品牌商品数，供前端品牌筛选下拉展示
+      let brandStats = null;
+      if (isAdmin) {
+        brandStats = await db.query(`
+          SELECT bp.brand_id, b.name AS brand_name, COUNT(*) AS n
+          FROM brand_product bp LEFT JOIN brand b ON b.id = bp.brand_id
+          GROUP BY bp.brand_id, b.name ORDER BY bp.brand_id ASC
+        `);
+      }
+      // 最近一次同步时间（当前筛选口径），页面统计卡用
+      const syncR = await db.query(
+        `SELECT MAX(synced_at) AS t FROM brand_product WHERE 1=1 ${bWhere}${w}`, [...bArgs, ...args]
+      ).catch(() => []);
+      const lastSyncAt = syncR[0] ? syncR[0].t : null;
       return sendJson(res, 200, {
-        total: totalR[0] ? totalR[0].n : 0, page, size, rows,
+        total: totalR[0] ? totalR[0].n : 0, page, size, rows, source: 'brand',
         filteredValue: valueR[0] ? (valueR[0].v || 0) : 0,
         latestBatch: latest[0] || null,
+        brandFilter: { brandId: bo.brandId, all: bo.all },
+        brandStats, lastSyncAt,
       });
     }
 
@@ -3705,20 +3820,92 @@ const server = http.createServer(async (req, res) => {
     if (method === 'POST' && p === '/api/admin/products/sync') {
       if (!isAdmin) return sendJson(res, 403, { error: '仅超级管理员可同步商品' });
       const body = await readBody(req).catch(() => ({}));
+      // 目标品牌方：前端弹框多选；不传则默认当前超管所属品牌（优购哆）
+      const bo = brandOf(req, url, user);
+      let brandIds = Array.isArray(body && body.brandIds) ? body.brandIds.map((x) => Number(x)) : [];
+      brandIds = brandIds.filter((x) => Number.isInteger(x) && x > 0);
+      if (!brandIds.length) brandIds = [bo.all ? (Number(user.brand_id) || 1) : bo.brandId];
       // 诊断模式：只拉第 1 页，回报真实字段名与样本（不写库），用于字段映射不对时快速校准
       if (body && body.diagnose) {
-        return sendJson(res, 200, await qnh.syncProducts({ userId: user.id, tenantId, diagnose: true }));
+        return sendJson(res, 200, await qnh.syncProducts({ userId: user.id, brandIds, diagnose: true }));
       }
-      // 超管同步：目标租户 = 所有已经导入过商品的租户（没有商品数据的租户不写，避免污染空库）
-      const trows = await db.query('SELECT DISTINCT user_id AS uid FROM product_item');
-      const tenantIds = trows.map((r) => Number(r.uid)).filter((x) => Number.isInteger(x) && x > 0);
       // 只读扫描：全量拉一遍但不写库，只回报「接口商品 ↔ 库里商品」的匹配率
       if (body && body.dryRun) {
-        return sendJson(res, 200, await qnh.syncProducts({ userId: user.id, tenantId, tenantIds, dryRun: true }));
+        return sendJson(res, 200, await qnh.syncProducts({ userId: user.id, brandIds, dryRun: true }));
       }
-      const out = await qnh.syncProducts({ userId: user.id, tenantId, tenantIds, onProgress: null });
-      await logOp(user, 'product.sync', { ok: !!out.ok, total: out.total, inserted: out.inserted, updated: out.updated, failed: out.failed });
+      const out = await qnh.syncProducts({ userId: user.id, brandIds, onProgress: null });
+      await logOp(user, 'product.sync', {
+        ok: !!out.ok, total: out.total, inserted: out.inserted,
+        updated: out.updated, failed: out.failed, brandIds,
+      });
       return sendJson(res, 200, out);
+    }
+
+    // ── 品牌方（超管可增改；商品数据按品牌方共享）──
+    if (method === 'GET' && p === '/api/brands') {
+      if (!isAdmin) return sendJson(res, 403, { error: '仅超级管理员可查看品牌方' });
+      const rows = await db.query('SELECT id, name, status, note, created_at FROM brand ORDER BY id ASC');
+      return sendJson(res, 200, { rows });
+    }
+    if (method === 'POST' && p === '/api/admin/brands') {
+      if (!isAdmin) return sendJson(res, 403, { error: '仅超级管理员可新增品牌方' });
+      const body = await readBody(req).catch(() => ({}));
+      const name = String((body && body.name) || '').trim();
+      if (!name) return sendJson(res, 400, { error: '请填写品牌方名称' });
+      if (name.length > 64) return sendJson(res, 400, { error: '品牌方名称最长 64 个字符' });
+      const dup = await db.query('SELECT id FROM brand WHERE name = ?', [name]);
+      if (dup.length) return sendJson(res, 400, { error: '品牌方已存在：' + name });
+      const r = await db.exec('INSERT INTO brand (name, note) VALUES (?, ?)',
+        [name, String((body && body.note) || '').trim() || null]);
+      await logOp(user, 'brand.create', { id: r.insertId, name });
+      return sendJson(res, 200, { ok: true, id: r.insertId, name });
+    }
+    if (method === 'POST' && p === '/api/admin/brands/update') {
+      if (!isAdmin) return sendJson(res, 403, { error: '仅超级管理员可修改品牌方' });
+      const body = await readBody(req).catch(() => ({}));
+      const id = Number(body && body.id);
+      if (!Number.isInteger(id) || id <= 0) return sendJson(res, 400, { error: '品牌方 ID 非法' });
+      const rows = await db.query('SELECT * FROM brand WHERE id = ?', [id]);
+      if (!rows.length) return sendJson(res, 404, { error: '品牌方不存在' });
+      const name = body.name === undefined ? rows[0].name : String(body.name).trim();
+      if (!name) return sendJson(res, 400, { error: '品牌方名称不能为空' });
+      if (name.length > 64) return sendJson(res, 400, { error: '品牌方名称最长 64 个字符' });
+      const dup = await db.query('SELECT id FROM brand WHERE name = ? AND id <> ?', [name, id]);
+      if (dup.length) return sendJson(res, 400, { error: '品牌方名称已被占用：' + name });
+      const status = body.status === undefined ? rows[0].status
+        : (body.status === 'disabled' ? 'disabled' : 'active');
+      const note = body.note === undefined ? rows[0].note : (String(body.note).trim() || null);
+      await db.exec('UPDATE brand SET name = ?, status = ?, note = ? WHERE id = ?', [name, status, note, id]);
+      await logOp(user, 'brand.update', { id, name, status });
+      return sendJson(res, 200, { ok: true });
+    }
+    // 各品牌方的牵牛花登录态概览（超管：商品同步弹框里显示"已登录/未登录"，并可逐个发起登录）
+    if (method === 'GET' && p === '/api/brands/qnh') {
+      if (!isAdmin) return sendJson(res, 403, { error: '仅超级管理员可查看' });
+      const rows = await db.query('SELECT id, name, status FROM brand ORDER BY id ASC');
+      const sess = await db.query(
+        'SELECT brand_id, account_name, tenant_id, cookie_count, written_at FROM qnh_session'
+      ).catch(() => []);
+      const byBrand = new Map();
+      for (const s of sess) byBrand.set(Number(s.brand_id), s);
+      const cnt = await db.query(
+        'SELECT brand_id, COUNT(*) AS n FROM brand_product GROUP BY brand_id'
+      ).catch(() => []);
+      const byCnt = new Map();
+      for (const c of cnt) byCnt.set(Number(c.brand_id), Number(c.n) || 0);
+      return sendJson(res, 200, {
+        rows: rows.map((b) => {
+          const s = byBrand.get(Number(b.id));
+          return {
+            id: b.id, name: b.name, status: b.status,
+            logined: !!s,
+            accountName: (s && s.account_name) || '',
+            writtenAt: (s && s.written_at) || null,
+            cookieCount: s ? Number(s.cookie_count) || 0 : 0,
+            productCount: byCnt.get(Number(b.id)) || 0,
+          };
+        }),
+      });
     }
 
     // ── 交易市场（跨用户共享） ──
@@ -3740,7 +3927,7 @@ const server = http.createServer(async (req, res) => {
       if (!canMarket) return denyMarket();
       writeGuard();
       const body = await readBody(req);
-      return sendJson(res, 200, await products.publishToMarket(user.id, body.skus, body.discount));
+      return sendJson(res, 200, await products.publishToMarket(user.id, body.skus, body.discount, await brandIdOfUser(tenantId)));
     }
 
     // ── 账单（按月收支；1688 / 拼多多金额由系统实时统计，其余手工录入）──
@@ -4041,6 +4228,10 @@ const server = http.createServer(async (req, res) => {
         // 登录态仍写进 qnhUid 名下。
         const aUid = agentUidFor(user, qnhUid);
         const onMyPc = aUid && Number(aUid) !== Number(qnhUid);
+        const loginBody = await readBody(req).catch(() => ({}));
+        // 品牌方：每个品牌一套牵牛花账号。超管可指定（商品页给某品牌登录）；普通用户固定自己所属品牌
+        let loginBrand = Number(loginBody && loginBody.brandId) > 0 ? Number(loginBody.brandId) : 0;
+        if (!loginBrand || !isAdmin) loginBrand = await brandIdOfUser(qnhUid);
         if (!aUid) {
           return sendJson(res, 200, {
             ok: false,
@@ -4062,7 +4253,7 @@ const server = http.createServer(async (req, res) => {
         }
         const taskId = 'qnh-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
         const ctx = {
-          taskId, userId: Number(qnhUid), status: 'pending', message: '',
+          taskId, userId: Number(qnhUid), brandId: loginBrand, status: 'pending', message: '',
           cookieCount: 0, writtenAt: null, createdAt: Date.now(),
           expiresAt: Date.now() + QNH_LOGIN_TTL_MS,
         };
@@ -4071,6 +4262,7 @@ const server = http.createServer(async (req, res) => {
           taskId,
           url: (process.env.QNH_BASE_URL || 'https://qnh.meituan.com').replace(/\/+$/, ''),
           timeoutMs: QNH_LOGIN_TIMEOUT_MS,
+          brandId: loginBrand,   // 助手按品牌用独立浏览器窗口（每个品牌一套账号）
         });
         if (!sent) {
           return sendJson(res, 200, {
@@ -4106,11 +4298,15 @@ const server = http.createServer(async (req, res) => {
       // 「退出牵牛花账号」：删库里的登录态 + 让本机助手清掉浏览器分区里的 Cookie。
       // 退单列表与实时毛利监控共用同一个牵牛花登录态，所以一处退出两处都回到未登录。
       if (method === 'POST' && p === '/api/qnh/logout') {
-        const info = await qnh.sessionInfo(qnhUid).catch(() => null);
-        await qnh.clearLoginState(qnhUid);
-        const agent = await agentLogout(agentUidFor(user, qnhUid) || qnhUid, 'qnh');
+        // 登录态按品牌方隔离：清对应品牌的登录态 + 助手对应窗口的 Cookie
+        const logoutBrand = Number(url.searchParams.get('brand')) > 0
+          ? Number(url.searchParams.get('brand'))
+          : await brandIdOfUser(qnhUid);
+        const info = await qnh.sessionInfo(logoutBrand).catch(() => null);
+        await qnh.clearLoginState(logoutBrand);
+        const agent = await agentLogout(agentUidFor(user, qnhUid) || qnhUid, 'qnh', logoutBrand);
         await logOp(user, 'qnh.logout', {
-          tenantId: qnhUid,
+          tenantId: qnhUid, brandId: logoutBrand,
           accountName: (info && info.accountName) || '',
           agentCleared: !!agent.ok,
         });

@@ -839,18 +839,16 @@
       <div v-show="page === 'product'" id="page-product">
         <div class="page-bar">
           <span class="pb-info">
-            补货参考 · 总货值口径 <b>Σ((可用库存 + 在途库存) × 采购价)</b>
-            <template v-if="product.latestBatch">
-              · 最近导入 {{ fmtMinute(product.latestBatch.imported_at) }}（{{ product.latestBatch.item_count }} 个商品 / {{ yuan(product.latestBatch.total_value) }}）
-            </template>
+            品牌商品 · 总货值口径 <b>Σ((可用库存 + 在途库存) × 采购价)</b>
+            · 数据由「商品同步」从牵牛花拉取，<b>同一品牌方的所有用户共用这一套商品</b>
           </span>
           <span class="pb-actions">
-            <span v-if="isAdmin && !viewTenant" style="color:#E6A23C;font-size:12px;margin-right:10px">
-              超管默认只看自己账号的商品；要看某个账号的商品，请到「用户管理」点该账号的「查看数据」
+            <span v-if="isAdmin" class="loginid" style="margin-right:8px">
+              当前查看：<b>{{ product.brandAll ? '全部品牌方' : (brandNameById(product.brand) || '我的品牌') }}</b>
             </span>
             <el-button v-if="isAdmin" size="small" type="warning" plain :loading="product.syncing"
-                       title="按页拉取牵牛花前置仓商品，按 SKU 回写商品主图（仅超级管理员）"
-                       @click="syncProducts">商品同步{{ product.syncing ? '中…' : '' }}</el-button>
+                       title="选择品牌方后，按页拉取牵牛花前置仓商品写入该品牌方（同品牌用户共享）"
+                       @click="openSyncDlg">商品同步{{ product.syncing ? '中…' : '' }}</el-button>
           </span>
         </div>
 
@@ -884,6 +882,11 @@
           </div>
           <!-- 筛选条（设计稿 .s125）：独立一行，与表头留一条分隔线 -->
           <div class="filter-bar">
+            <el-select v-if="isAdmin" v-model="product.brand" size="small" style="width:170px" @change="onBrandChange">
+              <el-option label="全部品牌方" value=""></el-option>
+              <el-option v-for="s in product.brandStats" :key="s.brand_id"
+                         :label="(s.brand_name || ('品牌#' + s.brand_id)) + '（' + s.n + '）'" :value="String(s.brand_id)"></el-option>
+            </el-select>
             <el-input v-model="product.draftQ" size="small" clearable placeholder="搜商品SKU / 名称" style="width:220px"
                       @keyup.enter.native="loadProducts" @clear="loadProducts"></el-input>
             <el-select v-model="product.status" size="small" style="width:130px" @change="loadProducts">
@@ -899,8 +902,14 @@
             <span class="loginid">当前筛选总货值：{{ yuan(product.filteredValue) }}</span>
           </div>
           <el-table :data="product.rows" size="small" border style="width:100%" v-loading="product.loading"
-                    empty-text="暂无商品（去「补货」页导入补货参考文件）" @selection-change="v => product.selected = v">
+                    empty-text="暂无商品（超级管理员点「商品同步」选择品牌方拉取）" @selection-change="v => product.selected = v">
             <el-table-column type="selection" width="42"></el-table-column>
+            <el-table-column v-if="isAdmin" label="品牌方" width="110">
+              <template slot-scope="p">
+                <el-tag v-if="p.row.brand_name" size="mini" type="success">{{ p.row.brand_name }}</el-tag>
+                <span v-else class="loginid">—</span>
+              </template>
+            </el-table-column>
             <el-table-column label="商品图片" width="72">
               <template slot-scope="p">
                 <img v-if="p.row.image_url" :src="p.row.image_url" :alt="p.row.goods_name"
@@ -1234,6 +1243,35 @@
           <div slot="footer">
             <el-button size="small" @click="publish.visible = false">取消</el-button>
             <el-button size="small" type="primary" :loading="publish.saving" @click="doPublish">确认发布</el-button>
+          </div>
+        </el-dialog>
+
+        <!-- 商品同步（仅超管）：选择品牌方后拉取牵牛花商品，写入该品牌方的商品库 -->
+        <el-dialog title="商品同步 · 选择品牌方" :visible.sync="product.syncDlg.visible" width="540px" append-to-body>
+          <div class="form-tip" style="margin-bottom:10px">
+            每个品牌方有独立的牵牛花账号，拉取到的商品写入该品牌方（同品牌下所有用户共享一套商品数据）。
+            单个品牌约 170 页、每页停 1 秒，需要 4~5 分钟；同步会<b>覆盖更新</b>采购价 / 可用库存 / 在途库存 / 30天销量 / 采购状态 / 主图。
+          </div>
+          <el-checkbox-group v-model="product.syncDlg.brandIds">
+            <div v-for="b in product.syncDlg.brandsQnh" :key="b.id"
+                 style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+              <el-checkbox :label="b.id" :disabled="b.status === 'disabled' || !b.logined">
+                {{ b.name }}<span class="loginid"> · 现有商品 {{ b.productCount }} 个</span>
+              </el-checkbox>
+              <el-tag v-if="b.logined" size="mini" type="success">牵牛花：{{ b.accountName || '已登录' }}</el-tag>
+              <el-tag v-else size="mini" type="warning">未登录牵牛花</el-tag>
+              <el-button size="mini" plain @click.stop="loginBrandQnh(b.id)">{{ b.logined ? '重登' : '登录' }}</el-button>
+            </div>
+          </el-checkbox-group>
+          <div class="form-tip" style="margin-top:6px">
+            每个品牌方必须先用<b>它自己的牵牛花账号</b>登录一次，才能同步该品牌的商品（登录窗口在本机助手里弹出）。
+          </div>
+          <div slot="footer">
+            <el-button size="small" @click="product.syncDlg.visible = false">取消</el-button>
+            <el-button size="small" type="primary" :loading="product.syncing"
+                       :disabled="!product.syncDlg.brandIds.length" @click="doSyncProducts">
+              {{ product.syncing ? '同步中…请稍候' : '开始同步' }}
+            </el-button>
           </div>
         </el-dialog>
 
@@ -1606,7 +1644,12 @@
       <!-- ══════════ 用户管理（仅超级管理员；账号 / 抬头 / 逐项菜单权限） ══════════ -->
       <div v-show="page === 'users'" id="page-users">
         <div class="page-bar">
+          <span class="pb-info">
+            品牌方是商品数据的归属单位：同一品牌方下的用户<b>共用一套商品数据</b>（商品同步拉取的采购价/库存/销量），
+            每个品牌方有自己的牵牛花账号。
+          </span>
           <span class="pb-actions">
+            <el-button size="small" @click="openBrandDlg">品牌方管理</el-button>
             <el-button size="small" type="primary" @click="openUserCreate">+ 新增用户</el-button>
           </span>
         </div>
@@ -1635,6 +1678,12 @@
               <template slot-scope="p"><b>{{ p.row.username }}</b><div v-if="p.row.mustChangePassword" class="loginid">需改密</div></template>
             </el-table-column>
             <el-table-column label="角色" width="110"><template slot-scope="p"><el-tag size="mini" :type="p.row.role === 'admin' ? 'warning' : 'info'">{{ p.row.role === 'admin' ? '超级管理员' : '普通用户' }}</el-tag></template></el-table-column>
+            <el-table-column label="品牌方" width="120">
+              <template slot-scope="p">
+                <el-tag v-if="p.row.brandName" size="mini" type="success">{{ p.row.brandName }}</el-tag>
+                <span v-else class="loginid">—</span>
+              </template>
+            </el-table-column>
             <el-table-column label="状态" width="80"><template slot-scope="p"><el-tag size="mini" :type="p.row.status === 'active' ? 'success' : 'danger'">{{ p.row.status === 'active' ? '正常' : '已禁用' }}</el-tag></template></el-table-column>
             <el-table-column label="公司名称 / 抬头" min-width="170"><template slot-scope="p">{{ p.row.companyName || '—' }}<div v-if="p.row.note" class="loginid">{{ p.row.note }}</div></template></el-table-column>
             <el-table-column label="税号" width="170"><template slot-scope="p"><span class="loginid">{{ p.row.taxNo || '—' }}</span></template></el-table-column>
@@ -1681,6 +1730,11 @@
               <el-col :xs="24" :md="8"><el-form-item label="初始密码 *"><el-input v-model="newUser.password" placeholder="至少 4 位"></el-input></el-form-item></el-col>
               <el-col :xs="24" :md="8"><el-form-item label="角色">
                 <el-select v-model="newUser.role" style="width:100%"><el-option label="普通用户" value="user"></el-option><el-option label="超级管理员" value="admin"></el-option></el-select>
+              </el-form-item></el-col>
+              <el-col :xs="24" :md="8"><el-form-item label="品牌方（商品数据归属）">
+                <el-select v-model="newUser.brandId" style="width:100%" placeholder="默认优购哆">
+                  <el-option v-for="b in brands" :key="b.id" :label="b.name" :value="b.id"></el-option>
+                </el-select>
               </el-form-item></el-col>
               <el-col :xs="24" :md="8"><el-form-item label="纳税人识别号"><el-input v-model="newUser.taxNo"></el-input></el-form-item></el-col>
               <el-col :xs="24" :md="8"><el-form-item label="收票邮箱"><el-input v-model="newUser.email"></el-input></el-form-item></el-col>
@@ -2793,6 +2847,11 @@
       <el-form-item label="公司全称（= 登录账号）"><el-input v-model="userEdit.company" :disabled="userEdit.lockCompany" placeholder="如：中山仕赫贸易有限公司"></el-input></el-form-item>
       <el-form-item label="纳税人识别号"><el-input v-model="userEdit.taxNo"></el-input></el-form-item>
       <el-form-item label="收票邮箱"><el-input v-model="userEdit.email" placeholder="发票接收邮箱"></el-input></el-form-item>
+      <el-form-item label="品牌方（决定能看到哪套商品数据）">
+        <el-select v-model="userEdit.brandId" style="width:100%">
+          <el-option v-for="b in brands" :key="b.id" :label="b.name + (b.status === 'disabled' ? '（已停用）' : '')" :value="b.id"></el-option>
+        </el-select>
+      </el-form-item>
       <el-form-item label="备注"><el-input v-model="userEdit.note" placeholder="可选"></el-input></el-form-item>
     </el-form>
     <div class="form-tip" v-html="userEdit.hint"></div>
@@ -2800,6 +2859,41 @@
       <el-button @click="userEdit.visible = false">取消</el-button>
       <el-button type="primary" :loading="userEdit.saving" @click="saveUserEdit">保存</el-button>
     </div>
+  </el-dialog>
+
+  <!-- ══════════ 品牌方管理（超管：新增 / 改名 / 启停） ══════════ -->
+  <el-dialog title="品牌方管理" :visible.sync="brandDlg.visible" width="660px" append-to-body>
+    <div class="form-tip" style="margin-bottom:10px">
+      商品数据按<b>品牌方</b>共享：同一品牌方下的用户看到同一套商品（由「商品同步」从牵牛花拉取）。
+      每个品牌方对应一套牵牛花账号，新增后需在「商品列表 → 商品同步」里为该品牌方登录牵牛花。
+    </div>
+    <div style="display:flex;gap:8px;margin-bottom:12px;align-items:center">
+      <el-input v-model="brandDlg.newName" size="small" placeholder="新品牌方名称，如：优购哆" style="width:180px"></el-input>
+      <el-input v-model="brandDlg.newNote" size="small" placeholder="备注（可选，如牵牛花账号）" style="width:220px"></el-input>
+      <el-button size="small" type="primary" :loading="brandDlg.saving" @click="createBrand">新增品牌方</el-button>
+      <span style="flex:1"></span>
+      <el-button size="small" @click="loadBrands">刷新</el-button>
+    </div>
+    <el-table :data="brandDlg.rows" size="small" border style="width:100%" v-loading="brandDlg.loading" empty-text="还没有品牌方">
+      <el-table-column prop="id" label="ID" width="60"></el-table-column>
+      <el-table-column label="品牌方" min-width="200">
+        <template slot-scope="p">
+          <el-tag size="mini" type="success">{{ p.row.name }}</el-tag>
+          <div v-if="p.row.note" class="loginid">{{ p.row.note }}</div>
+        </template>
+      </el-table-column>
+      <el-table-column label="状态" width="90">
+        <template slot-scope="p"><el-tag size="mini" :type="p.row.status === 'active' ? 'success' : 'info'">{{ p.row.status === 'active' ? '启用' : '停用' }}</el-tag></template>
+      </el-table-column>
+      <el-table-column label="操作" width="170">
+        <template slot-scope="p">
+          <el-button size="mini" @click="renameBrand(p.row)">改名</el-button>
+          <el-button size="mini" :type="p.row.status === 'active' ? 'danger' : 'success'" plain
+                     @click="toggleBrand(p.row)">{{ p.row.status === 'active' ? '停用' : '启用' }}</el-button>
+        </template>
+      </el-table-column>
+    </el-table>
+    <div slot="footer"><el-button @click="brandDlg.visible = false">关闭</el-button></div>
   </el-dialog>
 
   <!-- ══════════ 菜单权限（逐用户开放功能） ══════════ -->
@@ -3155,6 +3249,10 @@ const vm = new Vue({
         draftQ: '', status: '', priceSort: '', selected: [],
         filteredValue: 0, latestBatch: null, trend: [],
         syncing: false, syncMsg: '',
+        // 品牌方：普通用户固定看自己品牌；超管默认看全部，可用下拉收窄（''=全部品牌）
+        brand: '', brandStats: [], brandAll: true, lastSyncAt: null,
+        // 商品同步弹框（仅超管）：勾选要同步的品牌方（含各品牌牵牛花登录状态）
+        syncDlg: { visible: false, brandIds: [], brandsQnh: [], saving: false },
       },
       // 补货界面（导入完成后进入）+ 关联的齐货通弹窗
       // 补货默认 20 条/页（页码可翻）；页大小可切 20/50/100/全部(2000)
@@ -3220,13 +3318,16 @@ const vm = new Vue({
       defaultPddChat: '你好，麻烦尽快开一下发票，在平台都已经申请！！！如需线下开票，我的抬头：{companyName}，'
         + '税号：{taxNo}，邮箱：{email}，非常感谢，已经在平台申请！！！',
       previewText: '', saveOk: false,
-      users: [], newUser: { company: '', password: '', role: 'user', taxNo: '', email: '', note: '' },
+      users: [], newUser: { company: '', password: '', role: 'user', taxNo: '', email: '', note: '', brandId: 1 },
+      // 品牌方（商品数据按品牌方共享）：列表 + 管理弹框
+      brands: [],
+      brandDlg: { visible: false, loading: false, saving: false, newName: '', newNote: '', rows: [] },
       // 新增用户收进弹框 + 用户列表按 公司名/税号/账号 模糊搜索
       newUserDlg: false, userKw: '',
       build: { running: false, ok: null, error: '', version: '', installer: null, installers: [], platform: '', log: [] },
       uploading: false, uploadProgress: 0, uploadMsg: '',
       creatingUser: false, createOk: false,
-      userEdit: { visible: false, id: null, title: '', company: '', taxNo: '', email: '', note: '', hint: '', lockCompany: false, saving: false },
+      userEdit: { visible: false, id: null, title: '', company: '', taxNo: '', email: '', note: '', brandId: 1, hint: '', lockCompany: false, saving: false },
       // 菜单权限弹窗（退单列表 / 实时毛利监控）
       menuPermit: { visible: false, id: null, username: '', refund: false, profit: false, product: false, market: false, billing: false, replenish: false, saving: false,
                     origin: { refund: false, profit: false, product: false, market: false, billing: false, replenish: false } },
@@ -3380,11 +3481,17 @@ const vm = new Vue({
     productStatCards() {
       const p = this.product;
       const lb = p.latestBatch;
+      // 商品列表现在是「品牌商品」（商品同步写入、同品牌共享），品牌维度放前两张卡；
+      // 个人导入批次仍显示在补货页，这里只作参考放后两张
+      const brandLabel = p.brandAll
+        ? ('全部品牌方（' + ((p.brandStats || []).length) + ' 个）')
+        : (this.brandNameById(p.brand) || (this.me && this.me.brandName) || '我的品牌');
       return [
         { key: 'total', num: p.total, label: '商品总数', sub: '按当前筛选条件统计' },
         { key: 'value', num: this.yuan(p.filteredValue), label: '当前筛选总货值', sub: 'Σ(可用 + 在途) × 采购价' },
-        { key: 'batch', num: lb ? lb.item_count : '—', label: '最近导入商品数', sub: lb ? this.fmtMinute(lb.imported_at) : '还没有导入记录' },
-        { key: 'bval', num: lb ? this.yuan(lb.total_value) : '—', label: '最近导入总货值', sub: '该批次导入时的货值' },
+        { key: 'brand', num: brandLabel, label: '数据归属', sub: '同品牌方用户共用一套商品' },
+        { key: 'sync', num: p.lastSyncAt ? this.fmtMinute(p.lastSyncAt) : '—', label: '最近同步时间',
+          sub: lb ? ('个人最近导入：' + lb.item_count + ' 个商品') : '还未做过商品同步' },
       ];
     },
     /** 交易市场统计卡（设计稿 4 卡）：summary 由 /api/market 下发（一条只读聚合） */
@@ -6158,12 +6265,81 @@ const vm = new Vue({
       this.reportOp('agent.download');
       window.open('/download', '_blank');
     },
+    // ── 品牌方（商品数据按品牌方共享；每品牌一套牵牛花账号）──
+    async loadBrands() {
+      if (!this.isAdmin) return;
+      try {
+        const d = await this.api('/api/brands');
+        if (d && !d.error) {
+          this.brands = d.rows || [];
+          this.brandDlg.rows = this.brands.slice();
+        }
+      } catch (e) { /* 品牌列表失败不阻塞页面 */ }
+    },
+    /** 按品牌 id 取名称（模板里调用 → 必须放 methods；放 computed 会让模板抛错、Vue 放弃 patch） */
+    brandNameById(id) {
+      const n = Number(id) || 0;
+      if (!n) return '';
+      const b = (this.brands || []).find((x) => Number(x.id) === n);
+      return b ? b.name : '';
+    },
+    onBrandChange() {
+      this.product.page = 1;
+      this.loadProducts();
+    },
+    openBrandDlg() {
+      this.brandDlg.visible = true;
+      this.loadBrands();
+    },
+    async createBrand() {
+      const name = (this.brandDlg.newName || '').trim();
+      if (!name) { this.$message.warning('请填写品牌方名称'); return; }
+      this.brandDlg.saving = true;
+      try {
+        const d = await this.api('/api/admin/brands', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ name, note: (this.brandDlg.newNote || '').trim() }),
+        });
+        if (d && d.error) this.$message.error(d.error);
+        else {
+          this.$message.success('已新增品牌方：' + name);
+          this.brandDlg.newName = '';
+          this.brandDlg.newNote = '';
+          await this.loadBrands();
+        }
+      } catch (e) { this.$message.error('新增失败: ' + e.message); }
+      this.brandDlg.saving = false;
+    },
+    async renameBrand(row) {
+      let v;
+      try {
+        const r = await this.$prompt('品牌方新名称：', '改名', {
+          inputValue: row.name, inputValidator: (x) => !!(x && x.trim()) || '名称不能为空',
+        });
+        v = String(r.value).trim();
+      } catch (e) { return; }
+      await this.saveBrand({ id: row.id, name: v });
+    },
+    async toggleBrand(row) {
+      await this.saveBrand({ id: row.id, status: row.status === 'active' ? 'disabled' : 'active' });
+    },
+    async saveBrand(payload) {
+      try {
+        const d = await this.api('/api/admin/brands/update', {
+          method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload),
+        });
+        if (d && d.error) this.$message.error(d.error);
+        else { await this.loadBrands(); await this.loadUsers(); }
+      } catch (e) { this.$message.error('保存失败: ' + e.message); }
+    },
     async loadUsers() {
       if (!this.isAdmin) return;
       try {
         const d = await this.api('/api/admin/users');
         if (d.error) { this.$message.error(d.error); return; }
         this.users = d.users || [];
+        // 用户列表带品牌方名称；同时刷新品牌字典供下拉使用
+        if (!this.brands.length) this.loadBrands();
       } catch (e) { this.$message.error('加载失败: ' + e.message); }
     },
     // 开关某个账号的「退单列表」权限
@@ -6218,43 +6394,50 @@ const vm = new Vue({
         companyName: (this.newUser.company || '').trim(), username: (this.newUser.company || '').trim(),
         password: this.newUser.password, role: this.newUser.role,
         taxNo: (this.newUser.taxNo || '').trim(), email: (this.newUser.email || '').trim(), note: (this.newUser.note || '').trim(),
+        brandId: Number(this.newUser.brandId) || 1,   // 所属品牌方（默认优购哆）
       };
       if (!payload.username || !payload.password) { this.$message.warning('请填写「公司全称（= 登录账号）」与初始密码'); return; }
       this.creatingUser = true;
       try {
         const d = await this.api('/api/admin/users/create', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) });
         if (d.error) { this.$message.error('创建失败: ' + d.error); this.creatingUser = false; return; }
-        this.newUser = { company: '', password: '', role: 'user', taxNo: '', email: '', note: '' };
+        this.newUser = { company: '', password: '', role: 'user', taxNo: '', email: '', note: '', brandId: (this.brands[0] && this.brands[0].id) || 1 };
         this.createOk = true; setTimeout(() => { this.createOk = false; }, 2500);
         this.newUserDlg = false;       // 创建成功即关弹框，列表在下方已刷新
         await this.loadUsers();
       } catch (e) { this.$message.error('创建失败: ' + e.message); }
       this.creatingUser = false;
     },
-    /** 打开「新增用户」弹框：每次都是干净的空表单 */
+    /** 打开「新增用户」弹框：每次都是干净的空表单（品牌方默认优购哆 / 第一个可用品牌） */
     openUserCreate() {
-      this.newUser = { company: '', password: '', role: 'user', taxNo: '', email: '', note: '' };
+      this.newUser = { company: '', password: '', role: 'user', taxNo: '', email: '', note: '', brandId: (this.brands[0] && this.brands[0].id) || 1 };
       this.createOk = false;
       this.newUserDlg = true;
+      if (!this.brands.length) this.loadBrands();
     },
     viewUserData(u) { this.setTenantView(u.id, u.companyName || u.username); },
     openUserEdit(u) {
       this.userEdit = {
         visible: true, id: u.id, title: `编辑用户 #${u.id}（${u.username}）`,
         company: u.companyName || u.username || '', taxNo: u.taxNo || '', email: u.email || '', note: u.note || '',
+        brandId: Number(u.brandId) || 1,
         lockCompany: u.username === 'admin',
         hint: u.username === 'admin'
           ? '内置超级管理员 <b>admin</b> 的登录账号名固定，这里只改它的开票抬头。'
           : '公司全称即<b>登录账号</b>，改这里会同时改掉该账号的登录名（当前：<b>' + this.esc(u.username) + '</b>）。',
         saving: false,
       };
+      if (!this.brands.length) this.loadBrands();
     },
     async saveUserEdit() {
       const ue = this.userEdit;
       const u = (this.users || []).find(x => x.id === ue.id) || {};
       const company = (ue.company || '').trim();
       if (!company) { this.$message.warning('公司全称不能为空'); return; }
-      const payload = { id: ue.id, companyName: company, taxNo: (ue.taxNo || '').trim(), email: (ue.email || '').trim(), note: (ue.note || '').trim(), role: u.role };
+      const payload = {
+        id: ue.id, companyName: company, taxNo: (ue.taxNo || '').trim(), email: (ue.email || '').trim(),
+        note: (ue.note || '').trim(), role: u.role, brandId: Number(ue.brandId) || 1,
+      };
       if (u.username !== 'admin') payload.username = company;
       ue.saving = true;
       try {
@@ -6459,31 +6642,94 @@ const vm = new Vue({
         if (this.product.draftQ.trim()) q.set('q', this.product.draftQ.trim());
         if (this.product.status) q.set('status', this.product.status);
         if (this.product.priceSort) q.set('sort', this.product.priceSort === 'asc' ? 'price_asc' : 'price_desc');
+        // 品牌方筛选（仅超管；空 = 全部品牌）。普通用户后端固定按自己品牌过滤，传了也无效
+        if (this.isAdmin && this.product.brand) q.set('brand', this.product.brand);
         const d = await this.api('/api/products?' + q.toString());
         this.product.rows = d.rows || [];
         this.product.total = d.total || 0;
         this.product.filteredValue = d.filteredValue || 0;
         this.product.latestBatch = d.latestBatch || null;
+        this.product.brandStats = d.brandStats || [];
+        this.product.brandAll = d.brandFilter ? !!d.brandFilter.all : true;
+        this.product.lastSyncAt = d.lastSyncAt || null;
         // 数据刷新后，剔除已不在结果里的勾选
         const alive = new Set((d.rows || []).map((r) => r.sku));
         this.product.selected = (this.product.selected || []).filter((r) => alive.has(r.sku));
       } catch (e) { this.$message.error('商品加载失败: ' + e.message); }
       finally { this.product.loading = false; }
     },
-    /** 商品同步（仅超级管理员）：按页拉取牵牛花前置仓商品，按 sku 回写商品主图；进度通过按钮 loading 体现，结果用提示告知 */
-    async syncProducts() {
+    /**
+     * 商品同步（仅超管）：先弹框选品牌方，再按品牌依次拉取牵牛花商品写入 brand_product。
+     * 每个品牌方一套牵牛花账号，单个品牌约 170 页 × 1 秒，耗时 4~5 分钟。
+     */
+    openSyncDlg() {
       if (!this.isAdmin) { this.$message.warning('仅超级管理员可同步商品'); return; }
+      // 默认勾选当前筛选的品牌；没筛选时勾自己所属品牌
+      const pre = this.product.brand
+        ? [Number(this.product.brand)]
+        : [(this.me && Number(this.me.brandId)) || 1];
+      this.product.syncDlg.brandIds = pre.filter((x) => Number.isInteger(x) && x > 0);
+      this.product.syncDlg.visible = true;
+      this.loadBrandsQnh();
+    },
+    /** 各品牌方的牵牛花登录状态 + 现有商品数（同步弹框里展示） */
+    async loadBrandsQnh() {
+      if (!this.isAdmin) return;
+      try {
+        const d = await this.api('/api/brands/qnh');
+        if (d && !d.error) {
+          this.product.syncDlg.brandsQnh = d.rows || [];
+          // 同步给用户管理/编辑用户用的品牌字典（保持一致）
+          this.brands = (d.rows || []).map((b) => ({ id: b.id, name: b.name, status: b.status, note: b.note }));
+          this.brandDlg.rows = this.brands.slice();
+          // 只勾选「已登录」的品牌，未登录的勾了也会被后端拒绝
+          const okIds = new Set((d.rows || []).filter((b) => b.logined).map((b) => Number(b.id)));
+          this.product.syncDlg.brandIds = (this.product.syncDlg.brandIds || []).filter((x) => okIds.has(Number(x)));
+        }
+      } catch (e) { /* 状态拿不到不阻塞弹框 */ }
+    },
+    /** 为某个品牌方发起牵牛花登录（助手弹窗人工登录，随后轮询结果） */
+    async loginBrandQnh(brandId) {
+      try {
+        const d = await this.api('/api/qnh/login', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ brandId: Number(brandId) || 0 }),
+        });
+        if (!d || !d.ok) { this.$message.error((d && d.message) || '发起登录失败'); return; }
+        this.$message.info(d.message || '请在弹出的助手窗口里完成登录');
+        const taskId = d.taskId;
+        const t0 = Date.now();
+        const timer = setInterval(async () => {
+          if (Date.now() - t0 > 5 * 60 * 1000) { clearInterval(timer); return; }
+          try {
+            const s = await this.api('/api/qnh/login-status?taskId=' + encodeURIComponent(taskId));
+            if (s && s.status === 'done') {
+              clearInterval(timer);
+              this.$message.success('牵牛花登录成功');
+              await this.loadBrandsQnh();
+            } else if (s && s.status === 'failed') {
+              clearInterval(timer);
+              this.$message.error(s.message || '登录失败');
+            }
+          } catch (e) { /* 继续轮询 */ }
+        }, 2500);
+      } catch (e) { this.$message.error('发起登录失败: ' + e.message); }
+    },
+    async doSyncProducts() {
       if (this.product.syncing) return;
+      const ids = (this.product.syncDlg.brandIds || []).filter((x) => Number(x) > 0);
+      if (!ids.length) { this.$message.warning('请勾选要同步的品牌方'); return; }
       this.product.syncing = true;
       this.product.syncMsg = '';
       try {
         const d = await this.api('/api/admin/products/sync', {
-          method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ brandIds: ids }),
         });
         if (d && d.ok) {
           this.$message.success(d.message || '商品同步完成');
-          // 同步改的是商品主图，刷新列表让图片列立即体现
-          if (this.page === 'product') this.loadProducts();
+          this.product.syncDlg.visible = false;
+          await this.loadProducts();
           if (this.page === 'replenish') this.loadReplenish();
         } else {
           this.$message.error((d && d.message) || '商品同步失败');

@@ -326,6 +326,8 @@ function startAgent() {
   client.setLogoutHandler(logoutKernel.createLogoutHandler({
     log: (m) => { log(m); pushState(); },
     windows: LOGOUT_WINDOWS,
+    // 牵牛花按品牌方分区：登出时关掉对应品牌自己的那个登录窗口
+    windowFor: (target, brandId) => (target === 'qnh' ? qnhLogin.peekWindow(brandId) : null),
   }));
   client.on('ready', () => { log('已连接服务器'); refreshTray(); pushState(); });
   client.on('connected', () => { refreshTray(); pushState(); });
