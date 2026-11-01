@@ -1191,6 +1191,34 @@ async function migrate(conn, dbName) {
     }
   }
 
+  // ── 平台商品价格缓存（v0.2.94）──
+  //    齐货通 / 阿发取过一次价就落库，页面查询优先读库（不打平台），
+  //    只有点「重新取价」才强制去平台拉新并更新本表。唯一键 kind+brand_id+goods_id：按品牌方共用一份。
+  if (!(await tableExists('goods_price_cache'))) {
+    await q(
+      'CREATE TABLE `goods_price_cache` (' +
+      '  `id`          BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,' +
+      "  `kind`        VARCHAR(8)    NOT NULL              COMMENT '价格来源：qht=齐货通 / afa=城配速达'," +
+      "  `brand_id`    INT           NOT NULL DEFAULT 0    COMMENT '品牌方（brand.id）：同品牌共用一份'," +
+      "  `goods_id`    VARCHAR(64)   NOT NULL              COMMENT '平台商品ID（齐货通/阿发 goodsId）'," +
+      "  `goods_name`  VARCHAR(512)  NOT NULL DEFAULT ''   COMMENT '商品名称（取价时的快照）'," +
+      "  `unit_price`  DECIMAL(12,4) DEFAULT NULL          COMMENT '折合小单位单价'," +
+      "  `pack_price`  DECIMAL(12,2) DEFAULT NULL          COMMENT '整件价（qht=saleIP / afa=salesPrice）'," +
+      "  `pack_qty`    DECIMAL(12,2) DEFAULT NULL          COMMENT '一件含多少小单位'," +
+      "  `spec`        VARCHAR(64)   DEFAULT NULL          COMMENT '规格文案'," +
+      "  `small_unit`  VARCHAR(16)   DEFAULT NULL          COMMENT '小单位（瓶/罐/支，仅齐货通有）'," +
+      "  `picture`     VARCHAR(512)  DEFAULT NULL          COMMENT '平台商品图'," +
+      "  `raw_json`    MEDIUMTEXT    DEFAULT NULL          COMMENT '上游原始返回（排查用）'," +
+      "  `fetched_at`  DATETIME      NOT NULL              COMMENT '取价时间'," +
+      "  `updated_at`  DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '最近写入时间'," +
+      '  PRIMARY KEY (`id`),' +
+      '  UNIQUE KEY `uk_pc_scope` (`kind`, `brand_id`, `goods_id`),' +
+      '  KEY `idx_pc_goods` (`kind`, `goods_id`)' +
+      ') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci' +
+      "  COMMENT='平台商品价格缓存（取一次即持久化，按品牌方共用）'"
+    );
+  }
+
   // ── 种子化超级管理员 + 存量数据归属 ──
   await seedAdmin(conn, dbName);
 }

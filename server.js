@@ -3719,8 +3719,9 @@ const server = http.createServer(async (req, res) => {
       });
     }
 
-    // ── 取价目标（v0.2.92）── 「阿发重新取价 / 齐货通重新取价」按**当前筛选结果**取 id（跨页），
+    // ── 取价目标（v0.2.92；v0.2.94 起按品牌分组）── 「阿发重新取价 / 齐货通重新取价」按**当前筛选结果**取 id（跨页），
     //   不拉整行数据。与 /api/products 共用 productScope，保证「列表看到的」和「取价的」是同一批。
+    //   价格缓存按品牌方隔离，所以这里连 brand_id 一起取出来分组：前端按品牌逐组调用取价接口，避免跨品牌串价。
     if (method === 'GET' && p === '/api/products/targets') {
       if (!canProduct) return denyProduct();
       const q = (url.searchParams.get('q') || '').trim();
@@ -3732,7 +3733,7 @@ const server = http.createServer(async (req, res) => {
       let rows;
       try {
         rows = await db.query(`
-          SELECT ${sc.qhtExpr} AS qht, ${sc.afaExpr} AS afa
+          SELECT ${sc.brandExpr} AS brand, ${sc.qhtExpr} AS qht, ${sc.afaExpr} AS afa
           FROM ${sc.from} ${sc.where}
           ORDER BY ${sc.order} LIMIT ${CAP + 1}`, sc.args);
       } catch (e) {
@@ -3740,12 +3741,30 @@ const server = http.createServer(async (req, res) => {
       }
       const truncated = rows.length > CAP;
       const use = truncated ? rows.slice(0, CAP) : rows;
-      const uniq = (key) => [...new Set(use.map((r) => r[key]).filter(Boolean).map(String))];
-      const qhtIds = uniq('qht');
-      const afaIds = uniq('afa');
+      // 按品牌分组（缓存键 = kind + brand_id + goods_id）；brand 为空时并入当前用户品牌
+      const ownBrand = Number(user.brand_id) || 1;
+      const groups = new Map();
+      const add = (bid, key, id) => {
+        if (!id) return;
+        const b = Number(bid) || ownBrand;
+        if (!groups.has(b)) groups.set(b, { brandId: b, qhtIds: new Set(), afaIds: new Set() });
+        groups.get(b)[key].add(String(id));
+      };
+      for (const r of use) { add(r.brand, 'qhtIds', r.qht); add(r.brand, 'afaIds', r.afa); }
+      const byBrand = [...groups.values()].map((g) => ({
+        brandId: g.brandId,
+        qhtIds: [...g.qhtIds],
+        afaIds: [...g.afaIds],
+        qhtCount: g.qhtIds.size,
+        afaCount: g.afaIds.size,
+      }));
+      const flat = (key) => [...new Set(byBrand.flatMap((g) => g[key]))];
+      const qhtIds = flat('qhtIds');
+      const afaIds = flat('afaIds');
       return sendJson(res, 200, {
         ok: true, total: use.length, truncated, cap: CAP,
         qhtIds, afaIds, qhtCount: qhtIds.length, afaCount: afaIds.length,
+        byBrand,
         batch: batch || null,
       });
     }
@@ -3807,13 +3826,21 @@ const server = http.createServer(async (req, res) => {
       }
     }
     // 批量取价：ids=37207,1002（齐货通商品ID，逗号分隔）
+    //   mode=cache  ：只读价格缓存表（列表加载用，**不打平台**）；没缓存的商品不返回，页面显示「未取价」
+    //   mode=refresh：强制去平台取新价并写库（点「重新取价」用；默认，保持老行为）
+    //   brand       ：参与缓存键（同品牌方共用一份价格）；普通用户强制自己品牌
     if (method === 'GET' && p === '/api/qht/prices') {
       const ids = String(url.searchParams.get('ids') || '').split(',').map((s) => s.trim()).filter(Boolean);
-      if (!ids.length) return sendJson(res, 200, { prices: {} });
+      if (!ids.length) return sendJson(res, 200, { prices: {}, cached: 0, fetched: 0 });
+      const bo = brandOf(req, url, user);
+      const brandId = bo.brandId || (Number(user.brand_id) || 1);
+      const mode = String(url.searchParams.get('mode') || 'refresh').toLowerCase() === 'cache' ? 'cache' : 'refresh';
       try {
-        return sendJson(res, 200, await qht.pricesByGoodsIds(tenantId, ids));
+        return sendJson(res, 200, await qht.pricesByGoodsIds(tenantId, ids, { brandId, mode }));
       } catch (e) {
-        return sendJson(res, 200, { error: String((e && e.message) || e), code: (e && e.code) || 'unknown', prices: {} });
+        return sendJson(res, 200, {
+          error: String((e && e.message) || e), code: (e && e.code) || 'unknown', prices: {}, cached: 0, fetched: 0,
+        });
       }
     }
     // 加入购物车：会在用户自己的齐货通账号里真实加一件，只在用户点确认后调用一次
@@ -3864,13 +3891,21 @@ const server = http.createServer(async (req, res) => {
       }
     }
     // 批量取价：ids=37207,1002（城配速达商品ID，逗号分隔）
+    //   mode=cache  ：只读价格缓存表（列表加载用，**不打平台**）；没缓存的商品不返回，页面显示「未取价」
+    //   mode=refresh：强制去平台取新价并写库（点「阿发重新取价」用；默认，保持老行为）
+    //   brand       ：参与缓存键（同品牌方共用一份价格）；普通用户强制自己品牌
     if (method === 'GET' && p === '/api/afa/prices') {
       const ids = String(url.searchParams.get('ids') || '').split(',').map((s) => s.trim()).filter(Boolean);
-      if (!ids.length) return sendJson(res, 200, { prices: {} });
+      if (!ids.length) return sendJson(res, 200, { prices: {}, cached: 0, fetched: 0 });
+      const bo = brandOf(req, url, user);
+      const brandId = bo.brandId || (Number(user.brand_id) || 1);
+      const mode = String(url.searchParams.get('mode') || 'refresh').toLowerCase() === 'cache' ? 'cache' : 'refresh';
       try {
-        return sendJson(res, 200, await afa.pricesByGoodsIds(tenantId, ids));
+        return sendJson(res, 200, await afa.pricesByGoodsIds(tenantId, ids, { brandId, mode }));
       } catch (e) {
-        return sendJson(res, 200, { error: String((e && e.message) || e), code: (e && e.code) || 'unknown', prices: {} });
+        return sendJson(res, 200, {
+          error: String((e && e.message) || e), code: (e && e.code) || 'unknown', prices: {}, cached: 0, fetched: 0,
+        });
       }
     }
     // 加入购物车：会在用户自己的城配速达账号里真实加一件，只在用户点确认后调用一次

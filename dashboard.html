@@ -1034,25 +1034,29 @@
             <el-table-column label="齐货通价" min-width="215" class-name="col-price">
               <template slot-scope="p">
                 <template v-if="p.row.qht_goods_id">
-                  <template v-if="rp.prices[p.row.qht_goods_id] && rp.prices[p.row.qht_goods_id].ok">
+                  <template v-if="rp.prices[pkey(p.row, 'qht')] && rp.prices[pkey(p.row, 'qht')].ok">
                     <div style="display:flex;flex-direction:column;gap:2px;min-width:120px">
-                      <img v-if="rp.prices[p.row.qht_goods_id].picture || p.row.image_url"
-                           :src="rp.prices[p.row.qht_goods_id].picture || p.row.image_url" :alt="p.row.goods_name"
+                      <img v-if="rp.prices[pkey(p.row, 'qht')].picture || p.row.image_url"
+                           :src="rp.prices[pkey(p.row, 'qht')].picture || p.row.image_url" :alt="p.row.goods_name"
                            style="width:40px;height:40px;object-fit:cover;border-radius:4px;display:block"
                            @error="e => { e.target.style.display='none'; }" />
                       <div style="display:flex;justify-content:space-between;gap:8px;font-size:12px;line-height:18px">
-                        <span class="loginid">单价</span><b class="amount ok">¥{{ rp.prices[p.row.qht_goods_id].unitPrice }}</b>
+                        <span class="loginid">单价</span><b class="amount ok">¥{{ rp.prices[pkey(p.row, 'qht')].unitPrice }}</b>
                       </div>
                       <div style="display:flex;justify-content:space-between;gap:8px;font-size:12px;line-height:18px">
-                        <span class="loginid">整件价</span><b>¥{{ rp.prices[p.row.qht_goods_id].saleIP }}</b>
+                        <span class="loginid">整件价</span><b>¥{{ rp.prices[pkey(p.row, 'qht')].saleIP }}</b>
                       </div>
                       <div style="display:flex;justify-content:space-between;gap:8px;font-size:12px;line-height:18px">
-                        <span class="loginid">规格</span><span class="loginid">{{ rp.prices[p.row.qht_goods_id].packingSpecification }}{{ rp.prices[p.row.qht_goods_id].smallUnit }}</span>
+                        <span class="loginid">规格</span><span class="loginid">{{ rp.prices[pkey(p.row, 'qht')].packingSpecification }}{{ rp.prices[pkey(p.row, 'qht')].smallUnit }}</span>
+                      <div v-if="rp.prices[pkey(p.row, 'qht')].fetchedAt"
+                           style="font-size:11px;line-height:14px;color:#909399">
+                        缓存于 {{ rp.prices[pkey(p.row, 'qht')].fetchedAt }}
+                      </div>
                       </div>
                     </div>
                     <el-button size="mini" type="primary" plain style="margin-top:4px" @click="openBuy(p.row)">选购</el-button>
                   </template>
-                  <span v-else-if="rp.prices[p.row.qht_goods_id]" class="loginid" style="color:#f56c6c">取价失败</span>
+                  <span v-else-if="rp.prices[pkey(p.row, 'qht')]" class="loginid" style="color:#f56c6c">取价失败</span>
                   <span v-else class="loginid">未取价</span>
                 </template>
                 <el-button v-else size="mini" type="warning" plain @click="openLinkDlg(p.row)">关联</el-button>
@@ -1061,20 +1065,24 @@
             <el-table-column label="阿发价" min-width="215" class-name="col-price">
               <template slot-scope="p">
                 <template v-if="p.row.afa_goods_id">
-                  <template v-if="rp.afaPrices[p.row.afa_goods_id] && rp.afaPrices[p.row.afa_goods_id].ok">
+                  <template v-if="rp.afaPrices[pkey(p.row, 'afa')] && rp.afaPrices[pkey(p.row, 'afa')].ok">
                     <div style="display:flex;flex-direction:column;gap:2px;min-width:120px">
-                      <img v-if="rp.afaPrices[p.row.afa_goods_id].picture || p.row.image_url"
-                           :src="rp.afaPrices[p.row.afa_goods_id].picture || p.row.image_url" :alt="p.row.goods_name"
+                      <img v-if="rp.afaPrices[pkey(p.row, 'afa')].picture || p.row.image_url"
+                           :src="rp.afaPrices[pkey(p.row, 'afa')].picture || p.row.image_url" :alt="p.row.goods_name"
                            style="width:40px;height:40px;object-fit:cover;border-radius:4px;display:block"
                            @error="e => { e.target.style.display='none'; }" />
                       <div style="display:flex;justify-content:space-between;gap:8px;font-size:12px;line-height:18px">
-                        <span class="loginid">单价</span><b class="amount ok">¥{{ rp.afaPrices[p.row.afa_goods_id].unitPrice }}</b>
+                        <span class="loginid">单价</span><b class="amount ok">¥{{ rp.afaPrices[pkey(p.row, 'afa')].unitPrice }}</b>
                       </div>
                       <div style="display:flex;justify-content:space-between;gap:8px;font-size:12px;line-height:18px">
-                        <span class="loginid">整件价</span><b>¥{{ rp.afaPrices[p.row.afa_goods_id].salePrice }}</b>
+                        <span class="loginid">整件价</span><b>¥{{ rp.afaPrices[pkey(p.row, 'afa')].salePrice }}</b>
                       </div>
                       <div style="display:flex;justify-content:space-between;gap:8px;font-size:12px;line-height:18px">
-                        <span class="loginid">规格</span><span class="loginid">{{ rp.afaPrices[p.row.afa_goods_id].factorName }}</span>
+                        <span class="loginid">规格</span><span class="loginid">{{ rp.afaPrices[pkey(p.row, 'afa')].factorName }}</span>
+                      <div v-if="rp.afaPrices[pkey(p.row, 'afa')].fetchedAt"
+                           style="font-size:11px;line-height:14px;color:#909399">
+                        缓存于 {{ rp.afaPrices[pkey(p.row, 'afa')].fetchedAt }}
+                      </div>
                       </div>
                     </div>
                     <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:4px">
@@ -1083,7 +1091,7 @@
                       <el-button size="mini" type="danger" plain title="解除后可重新自动匹配" @click="unlinkAfaRow(p.row)">解除</el-button>
                     </div>
                   </template>
-                  <span v-else-if="rp.afaPrices[p.row.afa_goods_id]" class="loginid" style="color:#f56c6c">取价失败</span>
+                  <span v-else-if="rp.afaPrices[pkey(p.row, 'afa')]" class="loginid" style="color:#f56c6c">取价失败</span>
                   <span v-else class="loginid">未取价</span>
                 </template>
                 <el-button v-else size="mini" type="warning" plain @click="openAfaLinkDlg(p.row)">关联</el-button>
@@ -6993,6 +7001,9 @@ const vm = new Vue({
         if (this.rp.page > maxPage) { this.rp.page = maxPage; await this.loadReplenish(); }
       } catch (e) { this.$message.error('补货列表加载失败: ' + e.message); }
       finally { this.rp.loading = false; }
+      // 列表一出来就把库里已缓存的价格带出来（mode=cache 只读本地库，绝不去平台取价）
+      await this.loadQhtPrices(this.rp.rows, { mode: 'cache' });
+      await this.loadAfaPrices(this.rp.rows, { mode: 'cache' });
     },
     async onRpSize(v) { this.rp.size = v; this.rp.page = 1; await this.loadReplenish(); },
     async onRpPage(v) { this.rp.page = v; await this.loadReplenish(); },
@@ -7002,8 +7013,9 @@ const vm = new Vue({
       await this.loadReplenish();
     },
     /**
-     * 重新取价（v0.2.92）：作用于**当前筛选出来的全部商品**（跨页），不是全量、也不是只有当前页。
-     * 先向 /api/products/targets 要 id 列表（与列表共用同一份 WHERE），再批量取价。
+     * 重新取价（v0.2.92 起只作用于**当前筛选出来的全部商品**，跨页而非全量；v0.2.94 起结果落库）
+     * 先向 /api/products/targets 要 id 列表（与列表共用同一份 WHERE，并按品牌分组），
+     * 再按品牌分组强制去平台刷新，取到的价格写入 goods_price_cache；以后打开列表直接读库。
      */
     async refreshRpPrices(kind) {
       const isAfa = kind === 'afa';
@@ -7017,53 +7029,103 @@ const vm = new Vue({
         d = await this.api('/api/products/targets?' + this.rpFilterParams(false).toString());
       } catch (e) { this.$message.error('取价范围查询失败: ' + e.message); return; }
       if (!d || d.error) { this.$message.error((d && d.error) || '取价范围查询失败'); return; }
-      const ids = (isAfa ? d.afaIds : d.qhtIds) || [];
-      if (!ids.length) {
+      // 价格缓存按品牌方隔离，服务端已按 brand 分好组；老接口没有 byBrand 时退回单组
+      const groups = (Array.isArray(d.byBrand) && d.byBrand.length)
+        ? d.byBrand
+        : [{ brandId: Number(this.me && this.me.brandId) || 1, qhtIds: d.qhtIds || [], afaIds: d.afaIds || [] }];
+      const pseudo = [];
+      for (const g of groups) {
+        for (const id of ((isAfa ? g.afaIds : g.qhtIds) || [])) {
+          pseudo.push(isAfa
+            ? { afa_goods_id: id, brand_id: g.brandId }
+            : { qht_goods_id: id, brand_id: g.brandId });
+        }
+      }
+      if (!pseudo.length) {
         this.$message.info(`当前筛选的 ${d.total || 0} 个商品里，没有已关联${label}的商品`);
         return;
       }
       if (d.truncated) this.$message.warning(`当前筛选结果超过 ${d.cap} 个，本次只取前 ${d.cap} 个商品的价格`);
-      if (ids.length > 60) {
+      if (pseudo.length > 60) {
         try {
           await this.$confirm(
-            `将对当前筛选出来的 <b>${ids.length}</b> 个已关联${label}的商品重新取价（约 ${Math.ceil(ids.length / 5) * 1}~${Math.ceil(ids.length / 5) * 3} 秒）。<br>`
-            + '只处理当前筛选结果，不会动其它商品。',
+            `将对当前筛选出来的 <b>${pseudo.length}</b> 个已关联${label}的商品<b>强制从平台重新取价</b>`
+            + `（约 ${Math.ceil(pseudo.length / 5)}~${Math.ceil(pseudo.length / 5) * 3} 秒）。<br>`
+            + '取到的价格会写入本地缓存，以后打开列表直接读库、不再请求平台；只处理当前筛选结果。',
             `${label}重新取价`, { dangerouslyUseHTMLString: true, confirmButtonText: '开始取价', cancelButtonText: '取消', type: 'warning' }
           );
         } catch (e) { return; }
       }
-      const pseudo = ids.map((id) => (isAfa ? { afa_goods_id: id } : { qht_goods_id: id }));
-      if (isAfa) await this.loadAfaPrices(pseudo); else await this.loadQhtPrices(pseudo);
+      const r = isAfa
+        ? await this.loadAfaPrices(pseudo, { mode: 'refresh' })
+        : await this.loadQhtPrices(pseudo, { mode: 'refresh' });
+      if (r && r.fetched) this.$message.success(`已刷新并缓存 ${r.fetched} 个${label}商品的价格`);
     },
     async loadQhtSession() {
       try { this.rp.session = await this.api('/api/qht/session'); } catch (e) { /* 静默：状态提示而已 */ }
     },
-    /** 批量取齐货通价：**只在点「重新取价」时调用**（v0.2.93 起不再自动取价）；rows 是按筛选取到的行 */
-    async loadQhtPrices(rows) {
+    /** 价格表键 = 品牌方 + 平台商品ID：同一个 goodsId 在不同品牌方价格可能不同，只用 goodsId 会串价 */
+    pkey(row, kind) {
+      if (!row) return '';
+      const id = kind === 'afa' ? row.afa_goods_id : row.qht_goods_id;
+      if (!id) return '';
+      const b = Number(row.brand_id) || Number(this.me && this.me.brandId) || 1;
+      return b + ':' + id;
+    },
+
+    /** 把行按品牌方分组（价格缓存键 = kind + brand_id + goods_id，必须分组请求，避免跨品牌串价） */
+    priceGroups(src, key) {
+      const own = Number(this.me && this.me.brandId) || 1;
+      const map = new Map();
+      for (const r of src || []) {
+        const id = r && r[key];
+        if (!id) continue;
+        const b = Number(r.brand_id) || own;
+        if (!map.has(b)) map.set(b, new Set());
+        map.get(b).add(String(id));
+      }
+      const out = new Map();
+      for (const [b, set] of map) out.set(b, [...set]);
+      return out;
+    },
+    /**
+     * 取齐货通价（v0.2.94：结果持久化，查询优先读库）
+     *   mode='cache'  ：只读库里的价格（列表加载用，**绝不打平台**）；没缓存的商品页面显示「未取价」
+     *   mode='refresh'：强制去平台取新价并写库（点「重新取价」用）
+     */
+    async loadQhtPrices(rows, opts) {
       const src = Array.isArray(rows) ? rows : (this.rp.rows || []);
-      const ids = [...new Set(src.map((r) => r.qht_goods_id).filter(Boolean))];
-      if (!ids.length) { if (!Array.isArray(rows)) this.rp.prices = {}; return; }
-      this.rp.pricing = true;
+      const mode = (opts && opts.mode) === 'cache' ? 'cache' : 'refresh';
+      const groups = this.priceGroups(src, 'qht_goods_id');
+      if (!groups.size) return { cached: 0, fetched: 0 };
+      const acc = {};
+      let cached = 0; let fetched = 0; let err = null;
+      if (mode === 'refresh') this.rp.pricing = true;
       try {
-        // 按 200 个一批请求：一次筛选可能上千个商品，全塞进 URL 会超长被拒
-        const acc = {};
-        let err = null;
-        for (let i = 0; i < ids.length; i += 200) {
-          const part = ids.slice(i, i + 200);
-          const d = await this.api('/api/qht/prices?ids=' + encodeURIComponent(part.join(',')));
-          if (d.error) { err = d; break; }
-          Object.assign(acc, d.prices || {});
+        for (const [brandId, ids] of groups) {
+          // 按 200 个一批请求：一次筛选可能上千个商品，全塞进 URL 会超长被拒
+          for (let i = 0; i < ids.length; i += 200) {
+            const part = ids.slice(i, i + 200);
+            const d = await this.api('/api/qht/prices?mode=' + mode + '&brand=' + brandId
+              + '&ids=' + encodeURIComponent(part.join(',')));
+            if (d.error) { err = d; break; }
+            // 键加品牌前缀：不同品牌方的同一 goodsId 价格不同，必须分开存
+            const pref = brandId + ':';
+            for (const [gid, v] of Object.entries(d.prices || {})) acc[pref + gid] = v;
+            cached += Number(d.cached) || 0;
+            fetched += Number(d.fetched) || 0;
+          }
+          if (err) break;
         }
-        if (err) {
-          if (!Array.isArray(rows)) this.rp.prices = {};
-          this.$message.warning('取价失败：' + err.error
-            + ((err.code === 'no_session' || err.code === 'auth') ? '（点右上角「登录态设置」重新粘贴）' : ''));
-          return;
-        }
-        // 合并而不是替换：补货页和商品列表共用一份「goodsId → 价格」缓存
-        this.rp.prices = Object.assign({}, this.rp.prices, acc);
       } catch (e) { this.$message.error('取价请求失败: ' + e.message); }
-      finally { this.rp.pricing = false; }
+      finally { if (mode === 'refresh') this.rp.pricing = false; }
+      // 整体替换而不是逐个加键：Vue2 对对象新增属性不响应，会「取到了但页面不刷新」
+      if (Object.keys(acc).length) this.rp.prices = Object.assign({}, this.rp.prices, acc);
+      if (err) {
+        this.$message.warning('取价失败：' + err.error
+          + ((err.code === 'no_session' || err.code === 'auth') ? '（点右上角「登录态设置」重新粘贴）' : ''));
+      }
+      return { cached, fetched };
     },
     /** 关联弹窗的数据源：src='rp' 补货页行，src='product' 商品列表行 */
     rowsOf(src) { return src === 'product' ? (this.product.rows || []) : (this.rp.rows || []); },
@@ -7146,31 +7208,43 @@ const vm = new Vue({
     async loadAfaSession() {
       try { this.rp.afaSession = await this.api('/api/afa/session'); } catch (e) { /* 静默：状态提示而已 */ }
     },
-    /** 批量取城配速达价：**只在点「阿发重新取价」时调用**（v0.2.93 起不再自动取价）；rows 是按筛选取到的行 */
-    async loadAfaPrices(rows) {
+    /**
+     * 取城配速达价（v0.2.94：结果持久化，查询优先读库）
+     *   mode='cache'  ：只读库里的价格（列表加载用，**绝不打平台**）
+     *   mode='refresh'：强制去平台取新价并写库（点「阿发重新取价」用）
+     */
+    async loadAfaPrices(rows, opts) {
       const src = Array.isArray(rows) ? rows : (this.rp.rows || []);
-      const ids = [...new Set(src.map((r) => r.afa_goods_id).filter(Boolean))];
-      if (!ids.length) { if (!Array.isArray(rows)) this.rp.afaPrices = {}; return; }
-      this.rp.afaPricing = true;
+      const mode = (opts && opts.mode) === 'cache' ? 'cache' : 'refresh';
+      const groups = this.priceGroups(src, 'afa_goods_id');
+      if (!groups.size) return { cached: 0, fetched: 0 };
+      const acc = {};
+      let cached = 0; let fetched = 0; let err = null;
+      if (mode === 'refresh') this.rp.afaPricing = true;
       try {
-        // 按 200 个一批请求：一次筛选可能上千个商品，全塞进 URL 会超长被拒
-        const acc = {};
-        let err = null;
-        for (let i = 0; i < ids.length; i += 200) {
-          const part = ids.slice(i, i + 200);
-          const d = await this.api('/api/afa/prices?ids=' + encodeURIComponent(part.join(',')));
-          if (d.error) { err = d; break; }
-          Object.assign(acc, d.prices || {});
+        for (const [brandId, ids] of groups) {
+          for (let i = 0; i < ids.length; i += 200) {
+            const part = ids.slice(i, i + 200);
+            const d = await this.api('/api/afa/prices?mode=' + mode + '&brand=' + brandId
+              + '&ids=' + encodeURIComponent(part.join(',')));
+            if (d.error) { err = d; break; }
+            // 键加品牌前缀（同 qht 口径）
+            const pref = brandId + ':';
+            for (const [gid, v] of Object.entries(d.prices || {})) acc[pref + gid] = v;
+            cached += Number(d.cached) || 0;
+            fetched += Number(d.fetched) || 0;
+          }
+          if (err) break;
         }
-        if (err) {
-          if (!Array.isArray(rows)) this.rp.afaPrices = {};
-          this.$message.warning('阿发取价失败：' + err.error
-            + ((err.code === 'no_session' || err.code === 'auth') ? '（点「配置阿发Token」重新粘贴）' : ''));
-          return;
-        }
-        this.rp.afaPrices = Object.assign({}, this.rp.afaPrices, acc);
       } catch (e) { this.$message.error('阿发取价请求失败: ' + e.message); }
-      finally { this.rp.afaPricing = false; }
+      finally { if (mode === 'refresh') this.rp.afaPricing = false; }
+      // 整体替换而不是逐个加键：Vue2 对对象新增属性不响应
+      if (Object.keys(acc).length) this.rp.afaPrices = Object.assign({}, this.rp.afaPrices, acc);
+      if (err) {
+        this.$message.warning('阿发取价失败：' + err.error
+          + ((err.code === 'no_session' || err.code === 'auth') ? '（点「配置阿发Token」重新粘贴）' : ''));
+      }
+      return { cached, fetched };
     },
     openAfaLinkDlg(row, src) {
       this.rpAfaLink = {
