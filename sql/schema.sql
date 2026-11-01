@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS `app_user` (
   `email`                VARCHAR(160)  DEFAULT NULL            COMMENT '开票抬头：收票邮箱（催收消息 {email}）',
   `display_name`         VARCHAR(64)   DEFAULT NULL            COMMENT '显示名（可选，看板右上角展示）',
   `note`                 VARCHAR(255)  DEFAULT NULL            COMMENT '备注（管理员填写，如所属业务线）',
+  `brand_id`             INT           NOT NULL DEFAULT 1      COMMENT '所属品牌方（brand.id，默认 1=优购哆）',
   `qht_token`            VARCHAR(128)  DEFAULT NULL            COMMENT '齐货通接口登录态 x-token（用户自行粘贴，过期需重贴）',
   `qht_x_user`           VARCHAR(64)   DEFAULT NULL            COMMENT '齐货通接口登录态 x-user（一般是登录手机号）',
   `product_enabled`      TINYINT(1)    NOT NULL DEFAULT 0      COMMENT '是否允许查看商品列表页（含补货/齐货通；1=开启，超级管理员始终可见）',
@@ -56,9 +57,29 @@ CREATE TABLE IF NOT EXISTS `app_user` (
   `updated_at`           DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
   PRIMARY KEY (`id`),
   UNIQUE KEY `uk_app_user_username` (`username`),
-  KEY `idx_app_user_role` (`role`)
+  KEY `idx_app_user_role` (`role`),
+  KEY `idx_app_user_brand` (`brand_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   COMMENT='账号表（多用户登录；role=admin 为超级管理员）';
+
+-- ----------------------------------------------------------------------------
+-- 表 0.1: brand —— 品牌方字典
+--   一个代运营团队可能承运多个品牌方，每个品牌方有独立的牵牛花账号/门店仓。
+--   同品牌方下的用户共用一套「品牌商品」数据（见 brand_product）。
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `brand` (
+  `id`         INT           NOT NULL AUTO_INCREMENT COMMENT '品牌方ID',
+  `name`       VARCHAR(64)   NOT NULL                COMMENT '品牌方名称',
+  `status`     ENUM('active','disabled') NOT NULL DEFAULT 'active' COMMENT '状态：active=启用，disabled=停用',
+  `note`       VARCHAR(255)  DEFAULT NULL            COMMENT '备注（如牵牛花登录账号）',
+  `created_at` DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  `updated_at` DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_brand_name` (`name`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  COMMENT='品牌方字典（商品数据按品牌方共享）';
+
+INSERT IGNORE INTO `brand` (`id`, `name`, `note`) VALUES (1, '优购哆', '系统内置默认品牌方');
 
 -- ----------------------------------------------------------------------------
 -- （login_state 表已废除：2026-10-13 起服务器不保存 1688 登录态、不用服务端浏览器发送，
@@ -351,6 +372,41 @@ CREATE TABLE IF NOT EXISTS `operation_log` (
   COMMENT='操作日志（仅超级管理员可查看）';
 
 -- ----------------------------------------------------------------------------
+-- brand_product —— 品牌商品主数据（「商品同步」写入；同品牌方全员共享）
+--   一个品牌方一套商品，品牌内所有用户看到的是同一份数据（采购价/库存/在途/销量/状态/主图）。
+--   数据源：牵牛花 前置仓补货参考（store-warehouse/page-query），字段映射见 lib/qnh.js。
+--   唯一键 (brand_id, sku)：重复同步按品牌+SKU 覆盖更新。
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `brand_product` (
+  `id`              BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `brand_id`        INT           NOT NULL              COMMENT '品牌方（brand.id）',
+  `sku`             VARCHAR(64)   NOT NULL              COMMENT '商品SKU（= 牵牛花 goodsId）',
+  `goods_name`      VARCHAR(512)  NOT NULL DEFAULT ''   COMMENT '商品名称（goodsName）',
+  `image_url`       VARCHAR(512)  DEFAULT NULL          COMMENT '商品主图（picUrl）',
+  `purchase_price`  DECIMAL(12,2) NOT NULL DEFAULT 0    COMMENT '采购价（purchasePrice）',
+  `available_stock` INT           NOT NULL DEFAULT 0    COMMENT '可用库存（inStoreValidStockQty）',
+  `transit_stock`   INT           NOT NULL DEFAULT 0    COMMENT '在途库存（inTransitQty）',
+  `purchase_status` VARCHAR(32)   NOT NULL DEFAULT ''   COMMENT '采购状态（purchaseStatusDesc）',
+  `purchase_status_code` TINYINT  NOT NULL DEFAULT 0    COMMENT '采购状态码（接口 purchaseStatuses：1=正常采购 2=已停采）',
+  `sales_30d`       INT           NOT NULL DEFAULT 0    COMMENT '30天销量（sale30Num）',
+  `qht_goods_id`    VARCHAR(64)   DEFAULT NULL          COMMENT '关联的齐货通商品ID（goodsId）',
+  `afa_goods_id`    VARCHAR(64)   DEFAULT NULL          COMMENT '关联的城配速达商品ID（goodsId）',
+  `local_price`     DECIMAL(12,2) DEFAULT NULL          COMMENT '本地价（手工填写，仅作比价参考）',
+  `afa_match_score` SMALLINT      DEFAULT NULL          COMMENT '阿发自动匹配得分（0-100；手工关联留空）',
+  `afa_match_at`    DATETIME      DEFAULT NULL          COMMENT '阿发自动匹配写入时间（非空=自动匹配结果）',
+  `synced_at`       DATETIME      DEFAULT NULL          COMMENT '最近一次同步时间',
+  `created_at`      DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '首次同步时间',
+  `updated_at`      DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '最近更新时间',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_bp_brand_sku` (`brand_id`, `sku`),
+  KEY `idx_bp_brand_status` (`brand_id`, `purchase_status`),
+  KEY `idx_bp_brand_scode` (`brand_id`, `purchase_status_code`),
+  KEY `idx_bp_afa` (`brand_id`, `afa_goods_id`),
+  KEY `idx_bp_sku` (`sku`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  COMMENT='品牌商品（商品同步写入；同品牌全员共享）';
+
+-- ----------------------------------------------------------------------------
 -- product_item —— 商品列表（前置仓补货参考批量导出导入；按用户隔离）
 --   商品SKU 为 19 位长数字，按 VARCHAR 文本存储（禁止数值类型，防精度丢失）
 --   重复导入按 (user_id, sku) 覆盖更新（与发票/订单导入同一惯例）
@@ -358,8 +414,10 @@ CREATE TABLE IF NOT EXISTS `operation_log` (
 CREATE TABLE IF NOT EXISTS `product_item` (
   `id`              BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   `user_id`         INT           NOT NULL              COMMENT '数据归属用户ID（app_user.id）',
+  `brand_id`        INT           NOT NULL DEFAULT 1    COMMENT '导入者所属品牌方（brand.id）：仅用于按品牌商品补主图',
   `sku`             VARCHAR(64)   NOT NULL              COMMENT '商品SKU（文本存储）',
   `goods_name`      VARCHAR(512)  NOT NULL DEFAULT ''   COMMENT '商品名称',
+  `image_url`       VARCHAR(512)  DEFAULT NULL          COMMENT '商品主图（按品牌商品补）',
   `purchase_price`  DECIMAL(12,2) NOT NULL DEFAULT 0    COMMENT '商品采购价（元，取「采购单价(基础单位)」）',
   `available_stock` INT           NOT NULL DEFAULT 0    COMMENT '可用库存（门店仓口径）',
   `transit_stock`   INT           NOT NULL DEFAULT 0    COMMENT '在途库存（门店仓口径）',
@@ -367,6 +425,7 @@ CREATE TABLE IF NOT EXISTS `product_item` (
   `sales_30d`       INT           NOT NULL DEFAULT 0    COMMENT '30天总销量',
   `suggest_qty`     INT           NOT NULL DEFAULT 0    COMMENT '建议量（基础单位，来自补货参考文件的「建议量(基础单位)」列）',
   `qht_goods_id`    VARCHAR(64)   DEFAULT NULL          COMMENT '关联的齐货通商品ID（goodsId，用于实时取价与加购）',
+  `afa_goods_id`    VARCHAR(64)   DEFAULT NULL          COMMENT '关联的城配速达商品ID（goodsId，用于实时取价与加购）',
   `local_price`    DECIMAL(12,2) DEFAULT NULL           COMMENT '本地价（手工填写并保存，仅作比价参考）',
   `batch_id`        BIGINT UNSIGNED NULL                COMMENT '最近一次导入批次（product_import_batch.id）',
   `source_file`     VARCHAR(255)  DEFAULT NULL          COMMENT '来源文件名',
@@ -375,6 +434,7 @@ CREATE TABLE IF NOT EXISTS `product_item` (
   PRIMARY KEY (`id`),
   UNIQUE KEY `uk_user_sku` (`user_id`, `sku`),
   KEY `idx_pi_user_status` (`user_id`, `purchase_status`),
+  KEY `idx_pi_brand` (`brand_id`),
   KEY `idx_pi_sku` (`sku`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   COMMENT='商品列表（前置仓补货参考导入；按用户隔离）';
@@ -451,3 +511,32 @@ CREATE TABLE IF NOT EXISTS `billing_month` (
   PRIMARY KEY (`user_id`, `month`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   COMMENT='账单（按月收支；1688/拼多多金额实时统计不落库）';
+
+-- ----------------------------------------------------------------------------
+-- goods_price_cache —— 平台商品价格缓存（齐货通 / 城配速达）
+--   需求：取过一次价就持久化，页面查询优先读库，只有点「重新取价」才去平台拉新。
+--   唯一键 (kind, brand_id, goods_id)：按品牌方共用一份（不同品牌方的协议价可能不同）。
+--   永久有效，不设过期；价格变化靠页面上的「强制刷新（重新取价）」更新。
+--   整件价口径：齐货通 pack_price = saleIP、阿发 pack_price = salesPrice；
+--   pack_qty 口径：齐货通 = packingSpecification（一件多少瓶/罐）、阿发 = unitFactor。
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `goods_price_cache` (
+  `id`          BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `kind`        VARCHAR(8)    NOT NULL              COMMENT '价格来源：qht=齐货通 / afa=城配速达',
+  `brand_id`    INT           NOT NULL DEFAULT 0    COMMENT '品牌方（brand.id）：同品牌共用一份',
+  `goods_id`    VARCHAR(64)   NOT NULL              COMMENT '平台商品ID（齐货通/阿发 goodsId）',
+  `goods_name`  VARCHAR(512)  NOT NULL DEFAULT ''   COMMENT '商品名称（取价时的快照）',
+  `unit_price`  DECIMAL(12,4) DEFAULT NULL          COMMENT '折合小单位单价（qht=saleIP÷规格 / afa=salesPrice÷unitFactor）',
+  `pack_price`  DECIMAL(12,2) DEFAULT NULL          COMMENT '整件价（qht=saleIP / afa=salesPrice）',
+  `pack_qty`    DECIMAL(12,2) DEFAULT NULL          COMMENT '一件含多少小单位（qht=packingSpecification / afa=unitFactor）',
+  `spec`        VARCHAR(64)   DEFAULT NULL          COMMENT '规格文案（qht=packingSpecification+smallUnit / afa=factorName）',
+  `small_unit`  VARCHAR(16)   DEFAULT NULL          COMMENT '小单位（瓶/罐/支，仅齐货通有）',
+  `picture`     VARCHAR(512)  DEFAULT NULL          COMMENT '平台商品图',
+  `raw_json`    MEDIUMTEXT    DEFAULT NULL          COMMENT '上游原始返回（排查用，非页面依赖）',
+  `fetched_at`  DATETIME      NOT NULL              COMMENT '取价时间（页面显示「缓存于 …」）',
+  `updated_at`  DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '最近写入时间',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_pc_scope` (`kind`, `brand_id`, `goods_id`),
+  KEY `idx_pc_goods` (`kind`, `goods_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  COMMENT='平台商品价格缓存（取一次即持久化，按品牌方共用）';

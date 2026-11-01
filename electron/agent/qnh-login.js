@@ -21,7 +21,15 @@ const REAL_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' 
 const API_PREFIX = '/api/v1';
 const DEFAULT_URL = 'https://qnh.meituan.com';
 
-let win = null;
+// 每个品牌方一套牵牛花账号 → 各用独立持久分区（Cookie/本地存储互不干扰）。
+// 品牌 1（优购哆/默认）继续用历史分区 persist:qnh，老用户升级后登录态仍然有效。
+const wins = new Map();   // partition -> BrowserWindow
+
+/** 品牌方 → Electron 持久分区名 */
+function partitionFor(brandId) {
+  const b = Number(brandId) || 0;
+  return b > 1 ? 'persist:qnh-b' + b : PARTITION;
+}
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -49,18 +57,24 @@ function isMeituan(url) {
   return !!h && /(^|\.)meituan\.com$/i.test(h);
 }
 
-/** 登录窗口（懒创建 + 复用；登录态存 persist:qnh 分区，下次免登录） */
 /** 当前登录窗口（没有就返回 null，绝不懒创建——退出登录时要「关掉已存在的窗口」而不是新开一个） */
-function peekWindow() { return (win && !win.isDestroyed()) ? win : null; }
+function peekWindow(brandId) {
+  const w = wins.get(partitionFor(brandId));
+  return (w && !w.isDestroyed()) ? w : null;
+}
 
-function getWindow() {
-  if (win && !win.isDestroyed()) return win;
-  const part = session.fromPartition(PARTITION);
+/** 登录窗口（懒创建 + 复用；登录态存该品牌自己的分区，下次免登录） */
+function getWindow(brandId) {
+  const partition = partitionFor(brandId);
+  const exist = wins.get(partition);
+  if (exist && !exist.isDestroyed()) return exist;
+  const part = session.fromPartition(partition);
   try { part.setUserAgent(REAL_UA); } catch (e) { /* 忽略 */ }
-  win = new BrowserWindow({
-    show: false, width: 1180, height: 820, title: '牵牛花（登录窗口）', autoHideMenuBar: true,
+  const brandLabel = Number(brandId) > 1 ? `（品牌#${Number(brandId)}）` : '';
+  const win = new BrowserWindow({
+    show: false, width: 1180, height: 820, title: '牵牛花（登录窗口）' + brandLabel, autoHideMenuBar: true,
     webPreferences: {
-      partition: PARTITION,
+      partition,
       nodeIntegration: false, contextIsolation: true, sandbox: true, webSecurity: true,
       backgroundThrottling: false,
     },
@@ -69,7 +83,8 @@ function getWindow() {
   // 只允许停留在美团域名内（登录跳转/扫码都在该域内），防钓鱼跳转
   win.webContents.setWindowOpenHandler(({ url }) => ({ action: isMeituan(url) ? 'allow' : 'deny' }));
   win.webContents.on('will-navigate', (e, url) => { if (!isMeituan(url)) e.preventDefault(); });
-  win.on('closed', () => { win = null; });
+  win.on('closed', () => { if (wins.get(partition) === win) wins.delete(partition); });
+  wins.set(partition, win);
   return win;
 }
 
@@ -109,8 +124,8 @@ async function probeLogin(wc) {
   return { logined: !!logined, account: body };
 }
 
-async function collectCookies(url) {
-  const part = session.fromPartition(PARTITION);
+async function collectCookies(url, brandId) {
+  const part = session.fromPartition(partitionFor(brandId));
   const all = await part.cookies.get({ url }).catch(() => []);
   return (all || []).map(packCookie);
 }
@@ -123,9 +138,11 @@ async function collectCookies(url) {
 async function runLogin(task, api) {
   const base = String((task && task.url) || DEFAULT_URL).replace(/\/+$/, '') || DEFAULT_URL;
   const timeoutMs = Number((task && task.timeoutMs) || 0) || 5 * 60 * 1000;
-  const w = getWindow();
+  // 品牌方：每个品牌一套牵牛花账号，各用独立浏览器分区（登录态互不覆盖）
+  const brandId = Number(task && task.brandId) || 0;
+  const w = getWindow(brandId);
 
-  api.log('已在本机打开牵牛花窗口，请在窗口里完成登录');
+  api.log('已在本机打开牵牛花窗口' + (brandId > 1 ? '（品牌 #' + brandId + '）' : '') + '，请在窗口里完成登录');
   try {
     const cur = w.webContents.getURL();
     if (!isMeituan(cur)) await w.loadURL(base + '/').catch(() => {});
@@ -146,7 +163,7 @@ async function runLogin(task, api) {
     }
     const p = await probeLogin(w.webContents);
     if (p.logined) {
-      const cookies = await collectCookies(base);
+      const cookies = await collectCookies(base, brandId);
       if (!cookies.length) {
         api.report({ ok: false, error: '已登录但没有取到 Cookie，请重试' });
         return;
@@ -173,8 +190,8 @@ async function runLogin(task, api) {
 }
 
 /** 手动打开牵牛花登录页（托盘菜单 / 状态面板用；已登录时直接展示） */
-function openLogin() {
-  const w = getWindow();
+function openLogin(brandId) {
+  const w = getWindow(brandId);
   try {
     if (!isMeituan(w.webContents.getURL())) w.loadURL(DEFAULT_URL + '/').catch(() => {});
   } catch (e) { /* 忽略 */ }
@@ -206,7 +223,9 @@ function createLoginHandler({ log = () => {} } = {}) {
  * 全程不弹窗（复用登录窗口，必要时隐藏加载页面），执行完把 JSON 回传服务器。
  */
 async function runFetch(task, api) {
-  const w = getWindow();
+  // 品牌方：用该品牌自己的浏览器分区（对应它自己的牵牛花账号）
+  const brandId = Number(task && task.brandId) || 0;
+  const w = getWindow(brandId);
 
   // 0. 目标页面路由：queryTable 这类 empower 组件接口会校验 Referer / qnhReferrer
   //    （抓包：qnhReferrer: /data/gross-profit-warn，Referer 为 home.html#/data/gross-profit-warn）。
@@ -463,4 +482,4 @@ function createFetchHandler({ log = () => {} } = {}) {
   };
 }
 
-module.exports = { createLoginHandler, createFetchHandler, runLogin, runFetch, openLogin, getWindow, peekWindow, PARTITION };
+module.exports = { createLoginHandler, createFetchHandler, runLogin, runFetch, openLogin, getWindow, peekWindow, partitionFor, PARTITION };

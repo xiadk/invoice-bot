@@ -40,11 +40,21 @@ function alive(w) {
   try { return !!w && typeof w.isDestroyed === 'function' && !w.isDestroyed(); } catch (e) { return false; }
 }
 
+/** 取某个登录目标实际使用的分区：牵牛花按品牌方分（每个品牌一套账号 / 一个分区） */
+function partitionFor(key, brandId) {
+  const t = TARGETS[key];
+  if (!t) return '';
+  const b = Number(brandId) || 0;
+  if (key === 'qnh' && b > 1) return 'persist:qnh-b' + b;
+  return t.partition;
+}
+
 /**
  * 清掉某个站点在本机的登录态。
  * @param {string} target  pdd / qnh / 1688
  * @param {object} [opt]
  * @param {Array<()=>BrowserWindow|null>} [opt.windows] 占用该分区的窗口取回函数（先关再清）
+ * @param {number} [opt.brandId] 牵牛花专用：品牌方 id（每个品牌一个持久分区）
  * @returns {Promise<{ok:boolean,target:string,label:string,cleared:number,remain:number,closedWindows:number,error:string}>}
  */
 async function clearLoginState(target, opt) {
@@ -65,7 +75,7 @@ async function clearLoginState(target, opt) {
     }
   }
 
-  const ses = session.fromPartition(t.partition);
+  const ses = session.fromPartition(partitionFor(key, o.brandId));
   let cleared = 0;
   try { cleared = (await ses.cookies.get({})).length; } catch (e) { cleared = 0; }
 
@@ -105,7 +115,13 @@ function createLogoutHandler(o) {
   const windowsOf = opt.windows || {};
   return async function handleLogout(task, api) {
     const key = normalizeTarget(task && task.target);
-    const r = await clearLoginState(key, { windows: windowsOf[key] || [] });
+    const brandId = Number(task && task.brandId) || 0;
+    // 牵牛花按品牌方分区：优先用 windowFor 取该品牌自己的窗口
+    let wins = windowsOf[key] || [];
+    if (typeof opt.windowFor === 'function' && key === 'qnh') {
+      wins = [() => opt.windowFor(key, brandId)];
+    }
+    const r = await clearLoginState(key, { windows: wins, brandId });
     if (!r.ok) {
       log(`退出${r.label || '登录'}态失败：${r.error || ('还剩 ' + r.remain + ' 个 Cookie')}`);
       api.report({

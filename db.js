@@ -645,6 +645,21 @@ async function migrate(conn, dbName) {
       "COMMENT '是否允许查看账单页（1=开启，超级管理员始终可见）'"
     );
   }
+  // ── 补货菜单权限（v0.2.79）：默认 0 = 所有用户默认不授权，由超管逐个开启
+  if (!(await colExists('app_user', 'replenish_enabled'))) {
+    await q(
+      'ALTER TABLE `app_user` ADD COLUMN `replenish_enabled` TINYINT(1) NOT NULL DEFAULT 0 ' +
+      "COMMENT '是否允许查看补货页（含导入补货参考文件、齐货通/阿发取价加购；1=开启，超级管理员始终可见）'"
+    );
+  }
+  // ── 平台取价权限（v0.2.95）：齐货通登录/重新取价、阿发 Token/自动匹配/阿发取价、选购加购
+  //    默认 0 = 非超管一律不可见（这些操作要动平台真实账号，必须由超管逐个授权）
+  if (!(await colExists('app_user', 'price_enabled'))) {
+    await q(
+      'ALTER TABLE `app_user` ADD COLUMN `price_enabled` TINYINT(1) NOT NULL DEFAULT 0 ' +
+      "COMMENT '是否允许平台取价操作（齐货通登录/重新取价、阿发Token/自动匹配/取价、选购加购；1=开启，超级管理员始终可见）'"
+    );
+  }
   // ── 账单新增支出项「中心仓」（v0.2.43）：排在「人工」之后，手工录入，计入支出合计
   if (await tableExists('billing_month') && !(await colExists('billing_month', 'exp_warehouse'))) {
     await q(
@@ -668,16 +683,167 @@ async function migrate(conn, dbName) {
     );
   }
 
+  // ── 阿发（城配速达）登录态（v0.2.78）：用户粘贴城配速达小程序的 authorization（JWT）及其门店/小程序参数
+  //    本项目只做「Token 配置」不做「登录/解绑」：小程序无退出按钮，过期后重新粘贴即可
+  if (!(await colExists('app_user', 'afa_token'))) {
+    await q(
+      "ALTER TABLE `app_user` ADD COLUMN `afa_token` VARCHAR(1024) DEFAULT NULL " +
+      "COMMENT '城配速达接口鉴权 JWT（Bearer 内容，用户自行粘贴，过期需重贴）'"
+    );
+  }
+  if (!(await colExists('app_user', 'afa_store_id'))) {
+    await q(
+      "ALTER TABLE `app_user` ADD COLUMN `afa_store_id` VARCHAR(32) DEFAULT NULL " +
+      "COMMENT '城配速达门店ID（JWT 内不含 mid，storeId 需用户配置）'"
+    );
+  }
+  if (!(await colExists('app_user', 'afa_app_id'))) {
+    await q(
+      "ALTER TABLE `app_user` ADD COLUMN `afa_app_id` VARCHAR(64) DEFAULT NULL " +
+      "COMMENT '城配速达小程序 appId（默认 wxc050ff76c31c4371）'"
+    );
+  }
+
   // ── 商品列表补列（v0.2.31）：补货界面要的建议量 / 齐货通商品ID / 本地价 ──
   if (await tableExists('product_item')) {
     for (const [col, decl] of [
       ['suggest_qty', "INT NOT NULL DEFAULT 0 COMMENT '建议量（基础单位，来自补货参考文件的「建议量(基础单位)」列）'"],
       ['qht_goods_id', "VARCHAR(64) DEFAULT NULL COMMENT '关联的齐货通商品ID（goodsId，用于实时取价与加购）'"],
+      ['afa_goods_id', "VARCHAR(64) DEFAULT NULL COMMENT '关联的城配速达商品ID（goodsId，用于实时取价与加购）'"],
       ['local_price', "DECIMAL(12,2) DEFAULT NULL COMMENT '本地价（手工填写并保存，仅作比价参考）'"],
+      ['image_url', "VARCHAR(512) DEFAULT NULL COMMENT '商品主图（由「商品同步」从牵牛花拉取，按 sku 匹配更新）'"],
     ]) {
       if (!(await colExists('product_item', col))) {
         await q(`ALTER TABLE \`product_item\` ADD COLUMN \`${col}\` ${decl}`);
       }
+    }
+    // 补货导入缺列（v0.2.87）：importReplenishFile 从 v0.2.83 起就往 INSERT 里写 brand_id
+    // （按「品牌 + SKU」回填主图用），但当时只改了代码没加列 → 一导入就 Unknown column 'brand_id'。
+    if (!(await colExists('product_item', 'brand_id'))) {
+      await q(
+        "ALTER TABLE `product_item` ADD COLUMN `brand_id` INT NOT NULL DEFAULT 1 " +
+        "COMMENT '导入者所属品牌方（brand.id）：仅用于按品牌商品补主图，补货数据仍按用户隔离'"
+      );
+      // 回填：老行按导入者当前所属品牌修正（加列时的默认值统一是 1）
+      await q('UPDATE `product_item` pi JOIN `app_user` u ON u.id = pi.user_id SET pi.brand_id = u.brand_id');
+    }
+    if (!(await idxExists('product_item', 'idx_pi_brand'))) {
+      await q('ALTER TABLE `product_item` ADD KEY `idx_pi_brand` (`brand_id`)');
+    }
+  }
+
+  // ── 品牌方（v0.2.83）──────────────────────────────────────────────────────
+  //   业务背景：一个代运营团队可能同时承运多个品牌方（各自有独立的牵牛花账号/门店仓），
+  //   同一品牌方下的多个用户共用一套「品牌商品」数据（商品同步拉取的采购价/库存/销量等）。
+  //   表关系：
+  //     · brand            品牌方字典（超管可在后台新增）
+  //     · app_user.brand_id 用户归属品牌方（新建用户默认「优购哆」）
+  //     · brand_product    品牌级商品主数据（「商品同步」写入，品牌内全员共享，唯一键 brand_id+sku）
+  //     · product_item     保持个人隔离（「导入补货参考文件」的数据仍归各自用户）
+  //     · qnh_session      牵牛花登录态按品牌方隔离（每个品牌一个账号）
+  if (!(await tableExists('brand'))) {
+    await q(
+      'CREATE TABLE `brand` (' +
+      "  `id` INT NOT NULL AUTO_INCREMENT COMMENT '品牌方ID'," +
+      "  `name` VARCHAR(64) NOT NULL COMMENT '品牌方名称'," +
+      "  `status` ENUM('active','disabled') NOT NULL DEFAULT 'active' COMMENT '状态：active=启用，disabled=停用'," +
+      "  `note` VARCHAR(255) DEFAULT NULL COMMENT '备注（如牵牛花登录账号）'," +
+      "  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间'," +
+      "  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间'," +
+      '  PRIMARY KEY (`id`),' +
+      '  UNIQUE KEY `uk_brand_name` (`name`)' +
+      ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='品牌方字典（商品数据按品牌方共享）'"
+    );
+  }
+  // 种子：优购哆（id=1）。INSERT IGNORE 保证重复执行不报错、也不覆盖已改过的名称。
+  await q("INSERT IGNORE INTO `brand` (`id`, `name`, `note`) VALUES (1, '优购哆', '系统内置默认品牌方')");
+  if (!(await colExists('app_user', 'brand_id'))) {
+    await q(
+      "ALTER TABLE `app_user` ADD COLUMN `brand_id` INT NOT NULL DEFAULT 1 " +
+      "COMMENT '所属品牌方（brand.id，默认优购哆）'"
+    );
+  }
+  if (!(await idxExists('app_user', 'idx_app_user_brand'))) {
+    await q('ALTER TABLE `app_user` ADD KEY `idx_app_user_brand` (`brand_id`)');
+  }
+  // 品牌级商品主数据：一次同步写入，同品牌下所有用户共享
+  if (!(await tableExists('brand_product'))) {
+    await q(
+      'CREATE TABLE `brand_product` (' +
+      "  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT," +
+      "  `brand_id` INT NOT NULL COMMENT '品牌方（brand.id）'," +
+      "  `sku` VARCHAR(64) NOT NULL COMMENT '商品SKU（= 牵牛花 goodsId，19 位长数字用文本存储）'," +
+      "  `goods_name` VARCHAR(512) NOT NULL DEFAULT '' COMMENT '商品名称（goodsName）'," +
+      "  `image_url` VARCHAR(512) DEFAULT NULL COMMENT '商品主图（picUrl）'," +
+      "  `purchase_price` DECIMAL(12,2) NOT NULL DEFAULT 0 COMMENT '采购价（purchasePrice）'," +
+      "  `available_stock` INT NOT NULL DEFAULT 0 COMMENT '可用库存（inStoreValidStockQty）'," +
+      "  `transit_stock` INT NOT NULL DEFAULT 0 COMMENT '在途库存（inTransitQty）'," +
+      "  `purchase_status` VARCHAR(32) NOT NULL DEFAULT '' COMMENT '采购状态（purchaseStatusDesc）'," +
+      "  `purchase_status_code` TINYINT NOT NULL DEFAULT 0 COMMENT '采购状态码（接口 purchaseStatuses：1=正常采购 2=已停采）'," +
+      "  `sales_30d` INT NOT NULL DEFAULT 0 COMMENT '30天销量（sale30Num）'," +
+      "  `synced_at` DATETIME DEFAULT NULL COMMENT '最近一次同步时间'," +
+      "  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '首次同步时间'," +
+      "  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '最近更新时间'," +
+      '  PRIMARY KEY (`id`),' +
+      '  UNIQUE KEY `uk_bp_brand_sku` (`brand_id`, `sku`),' +
+      '  KEY `idx_bp_brand_status` (`brand_id`, `purchase_status`),' +
+      '  KEY `idx_bp_sku` (`sku`)' +
+      ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='品牌商品（商品同步写入；同品牌全员共享）'"
+    );
+  }
+  // 采购状态码（v0.2.84）：同步会分别拉「正常采购(1)」与「已停采(2)」两轮，
+  // 光靠 purchaseStatusDesc 中文文案判断停采不稳，单独存状态码供统计/筛选使用。
+  if (await tableExists('brand_product')) {
+    if (!(await colExists('brand_product', 'purchase_status_code'))) {
+      await q(
+        "ALTER TABLE `brand_product` ADD COLUMN `purchase_status_code` TINYINT NOT NULL DEFAULT 0 " +
+        "COMMENT '采购状态码（接口 purchaseStatuses：1=正常采购 2=已停采）'"
+      );
+    }
+    if (!(await idxExists('brand_product', 'idx_bp_brand_scode'))) {
+      await q('ALTER TABLE `brand_product` ADD KEY `idx_bp_brand_scode` (`brand_id`, `purchase_status_code`)');
+    }
+  }
+  // ── 商品关联补列（v0.2.87）────────────────────────────────────────────────
+  //   齐货通/阿发/本地价原先只存在 product_item（个人级），而「商品列表」读的是 brand_product，
+  //   写接口也按 user_id+sku 更新 product_item → 商品列表里永远存不进、读不出。
+  //   商品主数据本身是品牌级的，关联统一改存 brand_product（同品牌共享）；
+  //   补货页 SELECT 里本来就已经 JOIN brand_product 补主图，直接顺带取这三列即可。
+  if (await tableExists('brand_product')) {
+    for (const [col, decl] of [
+      ['qht_goods_id', "VARCHAR(64) DEFAULT NULL COMMENT '关联的齐货通商品ID（goodsId，用于实时取价与加购）'"],
+      ['afa_goods_id', "VARCHAR(64) DEFAULT NULL COMMENT '关联的城配速达商品ID（goodsId，用于实时取价与加购）'"],
+      ['local_price', "DECIMAL(12,2) DEFAULT NULL COMMENT '本地价（手工填写，仅作比价参考）'"],
+      ['afa_match_score', "SMALLINT DEFAULT NULL COMMENT '阿发自动匹配得分（0-100；手工关联留空）'"],
+      ['afa_match_at', "DATETIME DEFAULT NULL COMMENT '阿发自动匹配写入时间（非空=自动匹配结果）'"],
+    ]) {
+      if (!(await colExists('brand_product', col))) {
+        await q(`ALTER TABLE \`brand_product\` ADD COLUMN \`${col}\` ${decl}`);
+      }
+    }
+    if (!(await idxExists('brand_product', 'idx_bp_afa'))) {
+      await q('ALTER TABLE `brand_product` ADD KEY `idx_bp_afa` (`brand_id`, `afa_goods_id`)');
+    }
+  }
+  // 牵牛花登录态按品牌方隔离：每个品牌方一个账号，老登录态归默认品牌（优购哆）
+  if (await tableExists('qnh_session')) {
+    if (!(await colExists('qnh_session', 'brand_id'))) {
+      await q(
+        "ALTER TABLE `qnh_session` ADD COLUMN `brand_id` INT NOT NULL DEFAULT 1 " +
+        "COMMENT '登录态所属品牌方（brand.id）：每个品牌方一套牵牛花账号'"
+      );
+    }
+    if (!(await idxExists('qnh_session', 'idx_qnhs_brand'))) {
+      await q('ALTER TABLE `qnh_session` ADD KEY `idx_qnhs_brand` (`brand_id`)');
+    }
+    // 唯一键口径由「每个用户一份」改为「每个品牌一份」（同一品牌下所有用户共用该品牌的牵牛花账号）
+    if (await idxExists('qnh_session', 'uk_qs_user')) {
+      // 同品牌只保留最近写入的一条，避免加唯一键时冲突
+      await q('DELETE s1 FROM `qnh_session` s1 JOIN `qnh_session` s2 ON s1.brand_id = s2.brand_id AND s1.id < s2.id');
+      await q('ALTER TABLE `qnh_session` DROP INDEX `uk_qs_user`');
+    }
+    if (!(await idxExists('qnh_session', 'uk_qs_brand'))) {
+      await q('ALTER TABLE `qnh_session` ADD UNIQUE KEY `uk_qs_brand` (`brand_id`)');
     }
   }
 
@@ -1031,6 +1197,34 @@ async function migrate(conn, dbName) {
       await q('ALTER TABLE `agent_task` ADD COLUMN `title_id` INT UNSIGNED DEFAULT NULL ' +
         "COMMENT '发送时选用的发票抬头（app_invoice_title.id；NULL=用账号上的老字段）'");
     }
+  }
+
+  // ── 平台商品价格缓存（v0.2.94）──
+  //    齐货通 / 阿发取过一次价就落库，页面查询优先读库（不打平台），
+  //    只有点「重新取价」才强制去平台拉新并更新本表。唯一键 kind+brand_id+goods_id：按品牌方共用一份。
+  if (!(await tableExists('goods_price_cache'))) {
+    await q(
+      'CREATE TABLE `goods_price_cache` (' +
+      '  `id`          BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,' +
+      "  `kind`        VARCHAR(8)    NOT NULL              COMMENT '价格来源：qht=齐货通 / afa=城配速达'," +
+      "  `brand_id`    INT           NOT NULL DEFAULT 0    COMMENT '品牌方（brand.id）：同品牌共用一份'," +
+      "  `goods_id`    VARCHAR(64)   NOT NULL              COMMENT '平台商品ID（齐货通/阿发 goodsId）'," +
+      "  `goods_name`  VARCHAR(512)  NOT NULL DEFAULT ''   COMMENT '商品名称（取价时的快照）'," +
+      "  `unit_price`  DECIMAL(12,4) DEFAULT NULL          COMMENT '折合小单位单价'," +
+      "  `pack_price`  DECIMAL(12,2) DEFAULT NULL          COMMENT '整件价（qht=saleIP / afa=salesPrice）'," +
+      "  `pack_qty`    DECIMAL(12,2) DEFAULT NULL          COMMENT '一件含多少小单位'," +
+      "  `spec`        VARCHAR(64)   DEFAULT NULL          COMMENT '规格文案'," +
+      "  `small_unit`  VARCHAR(16)   DEFAULT NULL          COMMENT '小单位（瓶/罐/支，仅齐货通有）'," +
+      "  `picture`     VARCHAR(512)  DEFAULT NULL          COMMENT '平台商品图'," +
+      "  `raw_json`    MEDIUMTEXT    DEFAULT NULL          COMMENT '上游原始返回（排查用）'," +
+      "  `fetched_at`  DATETIME      NOT NULL              COMMENT '取价时间'," +
+      "  `updated_at`  DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '最近写入时间'," +
+      '  PRIMARY KEY (`id`),' +
+      '  UNIQUE KEY `uk_pc_scope` (`kind`, `brand_id`, `goods_id`),' +
+      '  KEY `idx_pc_goods` (`kind`, `goods_id`)' +
+      ') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci' +
+      "  COMMENT='平台商品价格缓存（取一次即持久化，按品牌方共用）'"
+    );
   }
 
   // ── 种子化超级管理员 + 存量数据归属 ──
