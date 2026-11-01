@@ -2168,7 +2168,7 @@ async function doClientSend(userId, loginIds, opts = {}) {
   const emptyMsg = sellers.find((s) => !Array.isArray(s.messages) || !s.messages.length
     || s.messages.every((m) => !String(m || '').trim()));
   if (emptyMsg) {
-    throw new Error('催收消息模板为空，已取消发送。请到「配置」页填写消息模板（消息①模板 / 消息②订单清单 / 消息③提醒）后重试'
+    throw new Error('催收消息模板为空，已取消发送。请到「配置」页填写消息模板（消息①订单清单 / 消息②提醒）后重试'
       + '（当前 config.json 里这三项是空字符串，会覆盖系统默认文案）');
   }
 

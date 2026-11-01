@@ -1704,16 +1704,13 @@
         <el-card shadow="never" class="section-card">
           <div slot="header"><b>消息模板</b> <span class="loginid">（对所有用户生效；{companyName}/{taxNo}/{email} 取各用户自己的抬头）</span></div>
           <el-form label-position="top" size="small">
-            <el-form-item label="① 模板消息（开头语，含总金额与抬头）">
-              <el-input type="textarea" :rows="3" v-model="cfg.template" @input="updatePreview"></el-input>
-              <div class="form-tip">变量：{amount}=待开票总金额，{companyName}，{taxNo}，{email}</div>
-            </el-form-item>
-            <el-form-item label="② 订单清单条目格式（多个订单用「；」连接成一条消息）">
+            <el-form-item label="① 订单清单条目格式（多个订单用「；」连接成一条消息）">
               <el-input v-model="cfg.orderItem" @input="updatePreview"></el-input>
               <div class="form-tip">变量：{orderId}=订单号，{amount}=订单金额</div>
             </el-form-item>
-            <el-form-item label="③ 提醒消息（最后一条，固定文案）">
-              <el-input type="textarea" :rows="3" v-model="cfg.reminder" @input="updatePreview"></el-input>
+            <el-form-item label="② 提醒消息（最后一条）">
+              <el-input type="textarea" :rows="4" v-model="cfg.reminder" @input="updatePreview"></el-input>
+              <div class="form-tip">变量：{amount}=待开票总金额，{companyName}=抬头，{taxNo}=税号，{email}=收票邮箱</div>
             </el-form-item>
             <el-form-item label="消息预览">
               <div class="preview-box">{{ previewText }}</div>
@@ -3456,7 +3453,7 @@ const vm = new Vue({
       mapFilter: 'unmatched',
       // 系统管理
       cfg: {
-        gapMin: 15, gapMax: 30, chunkMax: 450, template: '', orderItem: '', reminder: '', serverUrl: '',
+        gapMin: 15, gapMax: 30, chunkMax: 450, orderItem: '', reminder: '', serverUrl: '',
         // 拼多多催收话术（与 1688 的 templates 完全分开，只有一条）
         pddChat: '', pddGapSec: 4,
         // 拼多多翻页上限（发票刷新与订单同步共用，默认 300 页）
@@ -6367,7 +6364,7 @@ const vm = new Vue({
         this.cfg = {
           gapMin: Number(rt.sendGapMinSec) || 15, gapMax: Number(rt.sendGapMaxSec) || 30,
           chunkMax: Number(m.orderChunkMax) || 450,
-          template: pick('template'), orderItem: pick('orderItem'), reminder: pick('reminder'),
+          orderItem: pick('orderItem'), reminder: pick('reminder'),
           serverUrl: c.serverUrl || c.server_url || '',
           // 拼多多话术：同样做字段级回退，避免把空值存回去
           pddChat: (typeof pm.chat === 'string' && pm.chat.trim()) ? pm.chat : (dpm.chat || this.defaultPddChat),
@@ -6392,9 +6389,10 @@ const vm = new Vue({
     updatePreview() {
       const vars = { amount: '1242.50', companyName: '（本账号抬头）', taxNo: '（本账号税号）', email: '（本账号邮箱）' };
       const orders = [{ orderId: '3316436906029083271', amount: '65.00' }, { orderId: '3316428087093083271', amount: '15.00' }];
-      const m1 = this.fillTpl(this.cfg.template, vars);
-      const m2 = orders.map(o => this.fillTpl(this.cfg.orderItem, o)).join('；');
-      this.previewText = `【消息①】\n${m1}\n\n【消息② 订单清单（多个订单用；连接成一条）】\n${m2}\n\n【消息③ 提醒】\n${this.cfg.reminder}`;
+      const m1 = orders.map(o => this.fillTpl(this.cfg.orderItem, o)).join('；');
+      // v0.2.96：开头语已删除，抬头/税号/邮箱/总金额并入提醒消息，预览要按真实发送顺序排
+      const m2 = this.fillTpl(this.cfg.reminder, vars);
+      this.previewText = `【消息① 订单清单（多个订单用；连接成一条）】\n${m1}\n\n【消息② 提醒（含抬头与总金额）】\n${m2}`;
     },
     async saveConfig() {
       if (!this.isAdmin) { this.$message.error('仅超级管理员可修改'); return; }
@@ -6414,7 +6412,7 @@ const vm = new Vue({
               ? 3 : Math.max(0, Math.min(30, Math.round(Number(this.cfg.agentGraceDays) || 0))),
             agentInstallerUrl: (this.cfg.agentInstallerUrl || '').trim(),
           },
-          messages: { template: this.cfg.template, orderItem: this.cfg.orderItem, orderChunkMax: Number(this.cfg.chunkMax) || 450, reminder: this.cfg.reminder },
+          messages: { orderItem: this.cfg.orderItem, orderChunkMax: Number(this.cfg.chunkMax) || 450, reminder: this.cfg.reminder },
           pddMessage: { chat: this.cfg.pddChat, gapMs: Math.max(1500, Math.round((Number(this.cfg.pddGapSec) || 4) * 1000)) },
         } }) });
         if (d.ok) { this.saveOk = true; setTimeout(() => { this.saveOk = false; }, 2500); }
