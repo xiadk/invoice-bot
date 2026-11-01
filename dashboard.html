@@ -921,46 +921,6 @@
             <el-table-column label="商品名称" min-width="260"><template slot-scope="p"><span :title="p.row.goods_name">{{ p.row.goods_name }}</span></template></el-table-column>
             <el-table-column label="商品SKU" width="180"><template slot-scope="p"><span class="loginid" style="font-family:Consolas,monospace">{{ p.row.sku }}</span></template></el-table-column>
             <el-table-column label="采购价" width="100"><template slot-scope="p"><span class="amount">{{ yuan(p.row.purchase_price) }}</span></template></el-table-column>
-            <el-table-column label="齐货通价" min-width="150">
-              <template slot-scope="p">
-                <template v-if="p.row.qht_goods_id">
-                  <template v-if="rp.prices[p.row.qht_goods_id] && rp.prices[p.row.qht_goods_id].ok">
-                    <div style="font-size:12px;line-height:18px">
-                      <span class="loginid">单价</span> <b class="amount ok">¥{{ rp.prices[p.row.qht_goods_id].unitPrice }}</b>
-                    </div>
-                    <div style="font-size:12px;line-height:18px">
-                      <span class="loginid">整件</span> ¥{{ rp.prices[p.row.qht_goods_id].saleIP }}
-                    </div>
-                  </template>
-                  <span v-else-if="rp.prices[p.row.qht_goods_id]" class="loginid" style="color:#f56c6c">取价失败</span>
-                  <span v-else class="loginid">取价中…</span>
-                </template>
-                <el-button v-else size="mini" type="warning" plain @click="openLinkDlg(p.row, 'product')">关联</el-button>
-              </template>
-            </el-table-column>
-            <el-table-column label="阿发价" min-width="150">
-              <template slot-scope="p">
-                <template v-if="p.row.afa_goods_id">
-                  <template v-if="rp.afaPrices[p.row.afa_goods_id] && rp.afaPrices[p.row.afa_goods_id].ok">
-                    <div style="font-size:12px;line-height:18px">
-                      <span class="loginid">单价</span> <b class="amount ok">¥{{ rp.afaPrices[p.row.afa_goods_id].unitPrice }}</b>
-                    </div>
-                    <div style="font-size:12px;line-height:18px">
-                      <span class="loginid">整件</span> ¥{{ rp.afaPrices[p.row.afa_goods_id].salePrice }}
-                    </div>
-                  </template>
-                  <span v-else-if="rp.afaPrices[p.row.afa_goods_id]" class="loginid" style="color:#f56c6c">取价失败</span>
-                  <span v-else class="loginid">取价中…</span>
-                </template>
-                <el-button v-else size="mini" type="warning" plain @click="openAfaLinkDlg(p.row, 'product')">关联</el-button>
-              </template>
-            </el-table-column>
-            <el-table-column label="本地价" width="118">
-              <template slot-scope="p">
-                <el-input v-model="p.row.local_price" size="mini" placeholder="可手工填写"
-                          @change="saveLocalPrice(p.row)" style="width:100px"></el-input>
-              </template>
-            </el-table-column>
             <el-table-column prop="available_stock" label="可用库存" width="90"></el-table-column>
             <el-table-column prop="transit_stock" label="在途库存" width="90"></el-table-column>
             <el-table-column label="采购状态" width="95">
@@ -1093,7 +1053,7 @@
                     <el-button size="mini" type="primary" plain style="margin-top:4px" @click="openBuy(p.row)">选购</el-button>
                   </template>
                   <span v-else-if="rp.prices[p.row.qht_goods_id]" class="loginid" style="color:#f56c6c">取价失败</span>
-                  <span v-else class="loginid">取价中…</span>
+                  <span v-else class="loginid">未取价</span>
                 </template>
                 <el-button v-else size="mini" type="warning" plain @click="openLinkDlg(p.row)">关联</el-button>
               </template>
@@ -1124,7 +1084,7 @@
                     </div>
                   </template>
                   <span v-else-if="rp.afaPrices[p.row.afa_goods_id]" class="loginid" style="color:#f56c6c">取价失败</span>
-                  <span v-else class="loginid">取价中…</span>
+                  <span v-else class="loginid">未取价</span>
                 </template>
                 <el-button v-else size="mini" type="warning" plain @click="openAfaLinkDlg(p.row)">关联</el-button>
               </template>
@@ -6847,10 +6807,6 @@ const vm = new Vue({
         // 数据刷新后，剔除已不在结果里的勾选
         const alive = new Set((d.rows || []).map((r) => r.sku));
         this.product.selected = (this.product.selected || []).filter((r) => alive.has(r.sku));
-        // 关联过的商品顺带取一次实时价（齐货通/阿发共用同一份 goodsId→价格 缓存）
-        const rows = this.product.rows;
-        if (rows.some((r) => r.qht_goods_id)) this.loadQhtPrices(rows);
-        if (rows.some((r) => r.afa_goods_id)) this.loadAfaPrices(rows);
       } catch (e) { this.$message.error('商品加载失败: ' + e.message); }
       finally { this.product.loading = false; }
     },
@@ -6991,8 +6947,6 @@ const vm = new Vue({
       this.rp.draftQ = '';
       this.rp.status = '';
       await Promise.all([this.loadReplenish(), this.loadQhtSession(), this.loadAfaSession()]);
-      await this.loadQhtPrices();
-      await this.loadAfaPrices();
       this._rpSkipWatch = false;
     },
     /** 「自动匹配 / 重新取价」的筛选条件：与列表用同一份，保证只作用于当前筛出来的商品 */
@@ -7019,15 +6973,11 @@ const vm = new Vue({
       this.rp.q = String(this.rp.draftQ || '').trim();
       this.rp.page = 1;
       await this.loadReplenish();
-      await this.loadQhtPrices();
-      await this.loadAfaPrices();
     },
     async resetRpFilter() {
       this.rp.draftQ = ''; this.rp.q = ''; this.rp.status = ''; this.rp.brand = '';
       this.rp.page = 1;
       await this.loadReplenish();
-      await this.loadQhtPrices();
-      await this.loadAfaPrices();
     },
     /** 当前列表数据（品牌方商品 / 本次导入文件里的商品）— 服务端分页，筛选条件与按钮共用 */
     async loadReplenish() {
@@ -7044,14 +6994,12 @@ const vm = new Vue({
       } catch (e) { this.$message.error('补货列表加载失败: ' + e.message); }
       finally { this.rp.loading = false; }
     },
-    async onRpSize(v) { this.rp.size = v; this.rp.page = 1; await this.loadReplenish(); await this.loadQhtPrices(); await this.loadAfaPrices(); },
-    async onRpPage(v) { this.rp.page = v; await this.loadReplenish(); await this.loadQhtPrices(); await this.loadAfaPrices(); },
+    async onRpSize(v) { this.rp.size = v; this.rp.page = 1; await this.loadReplenish(); },
+    async onRpPage(v) { this.rp.page = v; await this.loadReplenish(); },
     /** 去掉批次条件，看品牌方全部商品 */
     async showAllProducts() {
       this.rp.batchId = null; this.rp.expect = 0; this.rp.page = 1;
       await this.loadReplenish();
-      await this.loadQhtPrices();
-      await this.loadAfaPrices();
     },
     /**
      * 重新取价（v0.2.92）：作用于**当前筛选出来的全部商品**（跨页），不是全量、也不是只有当前页。
@@ -7090,7 +7038,7 @@ const vm = new Vue({
     async loadQhtSession() {
       try { this.rp.session = await this.api('/api/qht/session'); } catch (e) { /* 静默：状态提示而已 */ }
     },
-    /** 批量实时收取齐货通价（只查列表里已关联的商品）；rows 传入时按该批行取（商品列表页/按筛选取价） */
+    /** 批量取齐货通价：**只在点「重新取价」时调用**（v0.2.93 起不再自动取价）；rows 是按筛选取到的行 */
     async loadQhtPrices(rows) {
       const src = Array.isArray(rows) ? rows : (this.rp.rows || []);
       const ids = [...new Set(src.map((r) => r.qht_goods_id).filter(Boolean))];
@@ -7164,7 +7112,6 @@ const vm = new Vue({
         if (row) row.qht_goods_id = String(pick.goodsId);
         this.rpLink.visible = false;
         this.$message.success('已关联：' + pick.goodsName);
-        await this.loadQhtPrices(this.rowsOf(this.rpLink.src));
       } catch (e) { this.$message.error('关联失败: ' + e.message); }
     },
     openBuy(row) {
@@ -7199,7 +7146,7 @@ const vm = new Vue({
     async loadAfaSession() {
       try { this.rp.afaSession = await this.api('/api/afa/session'); } catch (e) { /* 静默：状态提示而已 */ }
     },
-    /** 批量实时取城配速达价（只查列表里已关联的商品）；rows 传入时按该批行取（商品列表页/按筛选取价） */
+    /** 批量取城配速达价：**只在点「阿发重新取价」时调用**（v0.2.93 起不再自动取价）；rows 是按筛选取到的行 */
     async loadAfaPrices(rows) {
       const src = Array.isArray(rows) ? rows : (this.rp.rows || []);
       const ids = [...new Set(src.map((r) => r.afa_goods_id).filter(Boolean))];
@@ -7280,7 +7227,6 @@ const vm = new Vue({
         }
         this.rpAfaLink.visible = false;
         this.$message.success('已关联城配速达：' + pick.goodsName);
-        await this.loadAfaPrices(this.rowsOf(this.rpAfaLink.src));
       } catch (e) { this.$message.error('关联失败: ' + e.message); }
     },
     // ══════ 自动匹配（按商品名称搜索 → 取第一条直接关联）══════
@@ -7328,11 +7274,10 @@ const vm = new Vue({
         this.rpMatch.items = d.items || [];
         this.rpMatch.message = d.message || '';
         if (apply !== false) {
-          // 把新关联回填到补货表当前页，阿发价列立刻从「关联」变成取价
+          // 把新关联回填到补货表当前页，阿发价列从「关联」回到「未取价」（点「阿发重新取价」才真正取价）
           const map = {};
           this.rpMatch.items.forEach((x) => { if (x.picked) map[x.sku] = x.picked; });
           (this.rp.rows || []).forEach((r) => { if (map[r.sku]) r.afa_goods_id = map[r.sku]; });
-          await this.loadAfaPrices();
         }
       } catch (e) { this.rpMatch.message = '匹配失败：' + e.message; }
       finally { this.rpMatch.loading = false; }
