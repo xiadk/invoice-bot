@@ -389,6 +389,11 @@ CREATE TABLE IF NOT EXISTS `brand_product` (
   `purchase_status` VARCHAR(32)   NOT NULL DEFAULT ''   COMMENT '采购状态（purchaseStatusDesc）',
   `purchase_status_code` TINYINT  NOT NULL DEFAULT 0    COMMENT '采购状态码（接口 purchaseStatuses：1=正常采购 2=已停采）',
   `sales_30d`       INT           NOT NULL DEFAULT 0    COMMENT '30天销量（sale30Num）',
+  `qht_goods_id`    VARCHAR(64)   DEFAULT NULL          COMMENT '关联的齐货通商品ID（goodsId）',
+  `afa_goods_id`    VARCHAR(64)   DEFAULT NULL          COMMENT '关联的城配速达商品ID（goodsId）',
+  `local_price`     DECIMAL(12,2) DEFAULT NULL          COMMENT '本地价（手工填写，仅作比价参考）',
+  `afa_match_score` SMALLINT      DEFAULT NULL          COMMENT '阿发自动匹配得分（0-100；手工关联留空）',
+  `afa_match_at`    DATETIME      DEFAULT NULL          COMMENT '阿发自动匹配写入时间（非空=自动匹配结果）',
   `synced_at`       DATETIME      DEFAULT NULL          COMMENT '最近一次同步时间',
   `created_at`      DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '首次同步时间',
   `updated_at`      DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '最近更新时间',
@@ -396,6 +401,7 @@ CREATE TABLE IF NOT EXISTS `brand_product` (
   UNIQUE KEY `uk_bp_brand_sku` (`brand_id`, `sku`),
   KEY `idx_bp_brand_status` (`brand_id`, `purchase_status`),
   KEY `idx_bp_brand_scode` (`brand_id`, `purchase_status_code`),
+  KEY `idx_bp_afa` (`brand_id`, `afa_goods_id`),
   KEY `idx_bp_sku` (`sku`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   COMMENT='品牌商品（商品同步写入；同品牌全员共享）';
@@ -408,8 +414,10 @@ CREATE TABLE IF NOT EXISTS `brand_product` (
 CREATE TABLE IF NOT EXISTS `product_item` (
   `id`              BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   `user_id`         INT           NOT NULL              COMMENT '数据归属用户ID（app_user.id）',
+  `brand_id`        INT           NOT NULL DEFAULT 1    COMMENT '导入者所属品牌方（brand.id）：仅用于按品牌商品补主图',
   `sku`             VARCHAR(64)   NOT NULL              COMMENT '商品SKU（文本存储）',
   `goods_name`      VARCHAR(512)  NOT NULL DEFAULT ''   COMMENT '商品名称',
+  `image_url`       VARCHAR(512)  DEFAULT NULL          COMMENT '商品主图（按品牌商品补）',
   `purchase_price`  DECIMAL(12,2) NOT NULL DEFAULT 0    COMMENT '商品采购价（元，取「采购单价(基础单位)」）',
   `available_stock` INT           NOT NULL DEFAULT 0    COMMENT '可用库存（门店仓口径）',
   `transit_stock`   INT           NOT NULL DEFAULT 0    COMMENT '在途库存（门店仓口径）',
@@ -417,6 +425,7 @@ CREATE TABLE IF NOT EXISTS `product_item` (
   `sales_30d`       INT           NOT NULL DEFAULT 0    COMMENT '30天总销量',
   `suggest_qty`     INT           NOT NULL DEFAULT 0    COMMENT '建议量（基础单位，来自补货参考文件的「建议量(基础单位)」列）',
   `qht_goods_id`    VARCHAR(64)   DEFAULT NULL          COMMENT '关联的齐货通商品ID（goodsId，用于实时取价与加购）',
+  `afa_goods_id`    VARCHAR(64)   DEFAULT NULL          COMMENT '关联的城配速达商品ID（goodsId，用于实时取价与加购）',
   `local_price`    DECIMAL(12,2) DEFAULT NULL           COMMENT '本地价（手工填写并保存，仅作比价参考）',
   `batch_id`        BIGINT UNSIGNED NULL                COMMENT '最近一次导入批次（product_import_batch.id）',
   `source_file`     VARCHAR(255)  DEFAULT NULL          COMMENT '来源文件名',
@@ -425,6 +434,7 @@ CREATE TABLE IF NOT EXISTS `product_item` (
   PRIMARY KEY (`id`),
   UNIQUE KEY `uk_user_sku` (`user_id`, `sku`),
   KEY `idx_pi_user_status` (`user_id`, `purchase_status`),
+  KEY `idx_pi_brand` (`brand_id`),
   KEY `idx_pi_sku` (`sku`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   COMMENT='商品列表（前置仓补货参考导入；按用户隔离）';

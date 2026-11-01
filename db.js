@@ -709,6 +709,19 @@ async function migrate(conn, dbName) {
         await q(`ALTER TABLE \`product_item\` ADD COLUMN \`${col}\` ${decl}`);
       }
     }
+    // 补货导入缺列（v0.2.87）：importReplenishFile 从 v0.2.83 起就往 INSERT 里写 brand_id
+    // （按「品牌 + SKU」回填主图用），但当时只改了代码没加列 → 一导入就 Unknown column 'brand_id'。
+    if (!(await colExists('product_item', 'brand_id'))) {
+      await q(
+        "ALTER TABLE `product_item` ADD COLUMN `brand_id` INT NOT NULL DEFAULT 1 " +
+        "COMMENT '导入者所属品牌方（brand.id）：仅用于按品牌商品补主图，补货数据仍按用户隔离'"
+      );
+      // 回填：老行按导入者当前所属品牌修正（加列时的默认值统一是 1）
+      await q('UPDATE `product_item` pi JOIN `app_user` u ON u.id = pi.user_id SET pi.brand_id = u.brand_id');
+    }
+    if (!(await idxExists('product_item', 'idx_pi_brand'))) {
+      await q('ALTER TABLE `product_item` ADD KEY `idx_pi_brand` (`brand_id`)');
+    }
   }
 
   // ── 品牌方（v0.2.83）──────────────────────────────────────────────────────
@@ -781,6 +794,27 @@ async function migrate(conn, dbName) {
     }
     if (!(await idxExists('brand_product', 'idx_bp_brand_scode'))) {
       await q('ALTER TABLE `brand_product` ADD KEY `idx_bp_brand_scode` (`brand_id`, `purchase_status_code`)');
+    }
+  }
+  // ── 商品关联补列（v0.2.87）────────────────────────────────────────────────
+  //   齐货通/阿发/本地价原先只存在 product_item（个人级），而「商品列表」读的是 brand_product，
+  //   写接口也按 user_id+sku 更新 product_item → 商品列表里永远存不进、读不出。
+  //   商品主数据本身是品牌级的，关联统一改存 brand_product（同品牌共享）；
+  //   补货页 SELECT 里本来就已经 JOIN brand_product 补主图，直接顺带取这三列即可。
+  if (await tableExists('brand_product')) {
+    for (const [col, decl] of [
+      ['qht_goods_id', "VARCHAR(64) DEFAULT NULL COMMENT '关联的齐货通商品ID（goodsId，用于实时取价与加购）'"],
+      ['afa_goods_id', "VARCHAR(64) DEFAULT NULL COMMENT '关联的城配速达商品ID（goodsId，用于实时取价与加购）'"],
+      ['local_price', "DECIMAL(12,2) DEFAULT NULL COMMENT '本地价（手工填写，仅作比价参考）'"],
+      ['afa_match_score', "SMALLINT DEFAULT NULL COMMENT '阿发自动匹配得分（0-100；手工关联留空）'"],
+      ['afa_match_at', "DATETIME DEFAULT NULL COMMENT '阿发自动匹配写入时间（非空=自动匹配结果）'"],
+    ]) {
+      if (!(await colExists('brand_product', col))) {
+        await q(`ALTER TABLE \`brand_product\` ADD COLUMN \`${col}\` ${decl}`);
+      }
+    }
+    if (!(await idxExists('brand_product', 'idx_bp_afa'))) {
+      await q('ALTER TABLE `brand_product` ADD KEY `idx_bp_afa` (`brand_id`, `afa_goods_id`)');
     }
   }
   // 牵牛花登录态按品牌方隔离：每个品牌方一个账号，老登录态归默认品牌（优购哆）

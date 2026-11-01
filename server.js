@@ -61,6 +61,7 @@ const tenancy = require('./lib/tenancy');
 const { runImport, importOrderUpload, importInvoiceUpload } = require('./import-to-db');
 const qht = require('./lib/qht');
 const afa = require('./lib/afa');
+const match = require('./lib/match');
 const products = require('./lib/products');
 const billing = require('./lib/billing');
 const { loadConfig } = require('./lib/config');
@@ -386,6 +387,34 @@ async function brandIdOfUser(userId) {
   const rows = await db.query('SELECT brand_id FROM app_user WHERE id = ?', [userId]).catch(() => []);
   return Number(rows[0] && rows[0].brand_id) || 1;
 }
+
+/**
+ * 写入商品关联（齐货通/阿发/本地价）。
+ * v0.2.87 起统一以「品牌商品」为主：商品列表读的是 brand_product，写 product_item 永远读不出来。
+ * 若该 SKU 还不在品牌商品表里（例如刚导入、品牌还没同步过这个 SKU），回退写个人补货行，至少补货页能用。
+ * @returns {{scope:'brand'|'item', affected:number}}
+ */
+async function writeProductLink(col, value, { brandId, userId, sku }) {
+  const ALLOWED = ['qht_goods_id', 'afa_goods_id', 'local_price'];
+  if (!ALLOWED.includes(col)) throw new Error('不允许写入的列：' + col);
+  const ex = await db.query('SELECT id FROM brand_product WHERE brand_id = ? AND sku = ? LIMIT 1', [brandId, sku]);
+  if (ex.length) {
+    await db.exec(`UPDATE brand_product SET ${col} = ? WHERE brand_id = ? AND sku = ?`, [value, brandId, sku]);
+    return { scope: 'brand', affected: 1 };
+  }
+  const r = await db.exec(`UPDATE product_item SET ${col} = ? WHERE user_id = ? AND sku = ?`, [value, userId, sku]);
+  return { scope: 'item', affected: r.affectedRows || 0 };
+}
+
+/** 关联写进哪个品牌：管理员可用 body.brandId 指定，其他人只能写自己品牌 */
+function linkBrandId(user, body) {
+  const own = Number(user.brand_id) || 1;
+  if (user.role !== 'admin') return own;
+  const n = Number(body && body.brandId);
+  return Number.isInteger(n) && n > 0 ? n : own;
+}
+
+const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /** 写操作只允许作用于自己的数据（管理员查看他人为只读） */
 function assertWritable(user, tenantId) {
@@ -3563,14 +3592,16 @@ const server = http.createServer(async (req, res) => {
         if (q) args.push(`%${q}%`, `%${q}%`);
         if (status) args.push(status);
         args.push(batch);
-        const bo = brandOf(req, url, user);
-        const brandJoin = bo.all ? 'LEFT JOIN brand_product bp ON bp.sku = pi.sku'
-          : 'LEFT JOIN brand_product bp ON bp.brand_id = ' + Number(bo.brandId) + ' AND bp.sku = pi.sku';
+        // 品牌商品 JOIN 一律用「导入时记的品牌」，不再按超管当前筛选拼条件：
+        // 超管看全部品牌时不带品牌条件会把同 SKU 的多品牌行 JOIN 成重复行。
+        const brandJoin = 'LEFT JOIN brand_product bp ON bp.brand_id = pi.brand_id AND bp.sku = pi.sku';
         const totalR = await db.query(`SELECT COUNT(*) AS n FROM product_item pi WHERE pi.user_id = ? ${w}`, [tenantId, ...args]);
         const rows = await db.query(`
-          SELECT pi.id, pi.sku, pi.goods_name, pi.purchase_price, pi.available_stock, pi.transit_stock,
-                 pi.purchase_status, pi.sales_30d, pi.suggest_qty, pi.qht_goods_id, pi.afa_goods_id,
-                 pi.local_price, pi.source_file, pi.updated_at,
+          SELECT pi.id, pi.sku, pi.brand_id, pi.goods_name, pi.purchase_price, pi.available_stock, pi.transit_stock,
+                 pi.purchase_status, pi.sales_30d, pi.suggest_qty, pi.source_file, pi.updated_at,
+                 COALESCE(pi.qht_goods_id, bp.qht_goods_id) AS qht_goods_id,
+                 COALESCE(pi.afa_goods_id, bp.afa_goods_id) AS afa_goods_id,
+                 COALESCE(pi.local_price, bp.local_price) AS local_price,
                  COALESCE(NULLIF(pi.image_url, ''), bp.image_url) AS image_url
           FROM product_item pi ${brandJoin}
           WHERE pi.user_id = ? ${w}
@@ -3604,7 +3635,8 @@ const server = http.createServer(async (req, res) => {
         SELECT bp.id, bp.brand_id, b.name AS brand_name, bp.sku, bp.goods_name, bp.purchase_price,
                bp.available_stock, bp.transit_stock, bp.purchase_status, bp.sales_30d,
                bp.image_url, bp.synced_at, bp.updated_at,
-               0 AS suggest_qty, NULL AS qht_goods_id, NULL AS local_price, NULL AS source_file
+               bp.qht_goods_id, bp.afa_goods_id, bp.local_price, bp.afa_match_score,
+               0 AS suggest_qty, NULL AS source_file
         FROM brand_product bp LEFT JOIN brand b ON b.id = bp.brand_id
         WHERE 1=1 ${bWhere.replace(/\bbrand_id\b/g, 'bp.brand_id')}${w.replace(/\bsku\b/g, 'bp.sku').replace(/\bgoods_name\b/g, 'bp.goods_name').replace(/\bpurchase_status\b/g, 'bp.purchase_status')}
         ORDER BY ${order.replace(/\bid\b/g, 'bp.id').replace(/\bpurchase_price\b/g, 'bp.purchase_price').replace(/\bupdated_at\b/g, 'bp.updated_at')}
@@ -3783,7 +3815,7 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
-    // 关联城配速达商品（按 user+sku）/ 保存本地价
+    // 关联城配速达商品（写品牌商品，缺失则回退个人补货行）/ 保存本地价
     if (method === 'POST' && p === '/api/products/link-afa') {
       if (!canProduct) return denyProduct();
       writeGuard();
@@ -3791,11 +3823,13 @@ const server = http.createServer(async (req, res) => {
       const sku = String(b.sku || '').trim();
       const goodsId = String(b.goodsId == null ? '' : b.goodsId).trim();
       if (!sku) return sendJson(res, 200, { error: '缺少 sku' });
-      const r = await db.exec(
-        'UPDATE product_item SET afa_goods_id = ? WHERE user_id = ? AND sku = ?',
-        [goodsId || null, tenantId, sku]
-      );
-      return sendJson(res, 200, { ok: true, sku, goodsId: goodsId || null, affected: r.affectedRows || 0 });
+      const bid = linkBrandId(user, b);
+      const w = await writeProductLink('afa_goods_id', goodsId || null, { brandId: bid, userId: tenantId, sku });
+      // 手工关联要把自动匹配痕迹清掉，界面才不会显示「自动匹配 xx 分」
+      if (w.scope === 'brand') {
+        await db.exec('UPDATE brand_product SET afa_match_score = NULL, afa_match_at = NULL WHERE brand_id = ? AND sku = ?', [bid, sku]);
+      }
+      return sendJson(res, 200, { ok: true, sku, goodsId: goodsId || null, scope: w.scope, affected: w.affected });
     }
     if (method === 'POST' && p === '/api/products/link') {
       if (!canProduct) return denyProduct();
@@ -3804,11 +3838,9 @@ const server = http.createServer(async (req, res) => {
       const sku = String(b.sku || '').trim();
       const goodsId = String(b.goodsId == null ? '' : b.goodsId).trim();
       if (!sku) return sendJson(res, 200, { error: '缺少 sku' });
-      const r = await db.exec(
-        'UPDATE product_item SET qht_goods_id = ? WHERE user_id = ? AND sku = ?',
-        [goodsId || null, tenantId, sku]
-      );
-      return sendJson(res, 200, { ok: true, sku, goodsId: goodsId || null, affected: r.affectedRows || 0 });
+      const bid = linkBrandId(user, b);
+      const w = await writeProductLink('qht_goods_id', goodsId || null, { brandId: bid, userId: tenantId, sku });
+      return sendJson(res, 200, { ok: true, sku, goodsId: goodsId || null, scope: w.scope, affected: w.affected });
     }
     if (method === 'POST' && p === '/api/products/local-price') {
       if (!canProduct) return denyProduct();
@@ -3823,8 +3855,117 @@ const server = http.createServer(async (req, res) => {
         if (!Number.isFinite(n) || n < 0) return sendJson(res, 200, { error: '本地价应为非负数字' });
         v = Math.round(n * 100) / 100;
       }
-      await db.exec('UPDATE product_item SET local_price = ? WHERE user_id = ? AND sku = ?', [v, tenantId, sku]);
-      return sendJson(res, 200, { ok: true, sku, localPrice: v });
+      const bid = linkBrandId(user, b);
+      const w = await writeProductLink('local_price', v, { brandId: bid, userId: tenantId, sku });
+      return sendJson(res, 200, { ok: true, sku, localPrice: v, scope: w.scope });
+    }
+
+    // ── 自动匹配阿发商品（v0.2.87）────────────────────────────────────────
+    // 思路：阿发没有全量商品接口 → 用「品牌词」搜索当候选池 → 按容量粗筛 → 桶内用
+    // 图片 dHash + 名称相似度 + 款式词打分，给出 top3；达到门槛（≥85 且图片或款式词对上）才算可自动采用。
+    // 入参 { batch?, apply? }：默认只预览、不写库；apply=true 时把达标项直接写进品牌商品的 afa_goods_id。
+    if (method === 'POST' && p === '/api/products/auto-match') {
+      if (!canProduct) return denyProduct();
+      const b = await readBody(req).catch(() => ({}));
+      const batch = String(b.batch || '').trim();
+      const apply = !!b.apply;
+      const args = [tenantId];
+      let w = '';
+      if (batch) { w = 'AND pi.batch_id = ? '; args.push(batch); }
+      let items;
+      try {
+        items = await db.query(`
+          SELECT pi.sku, pi.goods_name, pi.brand_id,
+                 COALESCE(NULLIF(pi.image_url, ''), bp.image_url) AS image_url,
+                 COALESCE(pi.afa_goods_id, bp.afa_goods_id) AS afa_goods_id,
+                 bp.id AS bp_id
+            FROM product_item pi
+            LEFT JOIN brand_product bp ON bp.brand_id = pi.brand_id AND bp.sku = pi.sku
+           WHERE pi.user_id = ? ${w}
+           ORDER BY pi.id ASC`, args);
+      } catch (e) {
+        return sendJson(res, 500, { error: '查询待匹配商品失败：' + e.message });
+      }
+      const todo = items.filter((it) => !it.afa_goods_id);
+      if (!todo.length) {
+        return sendJson(res, 200, { ok: true, total: items.length, todo: 0, items: [], message: '没有待匹配的商品（都关联过了）' });
+      }
+
+      const poolCache = new Map();
+      const out = [];
+      let auto = 0;
+      let pending = 0;
+      let none = 0;
+      let queried = 0;
+      let lastErr = '';
+
+      for (const it of todo) {
+        const kw = match.guessKeyword(it.goods_name);
+        let pool = poolCache.get(kw);
+        if (!pool) {
+          try {
+            pool = (await afa.searchPool(tenantId, kw, { pages: 2, size: 50 })).rows;
+            queried += 1;
+          } catch (e) {
+            pool = [];
+            lastErr = String((e && e.message) || e).slice(0, 160);
+          }
+          poolCache.set(kw, pool);
+          await sleepMs(300);   // 限速：别把对方接口打挂
+        }
+        const sysSpec = match.parseSpec(it.goods_name);
+        const sysHash = await match.imageHashOf(it.image_url);
+
+        // 容量粗筛（两边都有容量且不等 → 直接不是同一个规格），再按名称相似度取前 10 个去比图
+        const pre = [];
+        for (const c of pool) {
+          const cs = match.parseSpec(c.goodsName);
+          if (sysSpec.volNum && cs.volNum && sysSpec.volNum !== cs.volNum) continue;
+          pre.push({ c, s: match.textSim(sysSpec.norm, cs.norm) });
+        }
+        pre.sort((x, y) => y.s - x.s);
+        const cands = [];
+        for (const { c } of pre.slice(0, 10)) {
+          const ch = await match.imageHashOf(c.picture);
+          const r = match.scoreCandidate(it.goods_name, c, { sysHash, candHash: ch });
+          if (r.hard) continue;
+          cands.push({
+            goodsId: String(c.goodsId), goodsName: c.goodsName, picture: c.picture,
+            salePrice: c.salePrice, unitPrice: c.unitPrice, factorName: c.factorName,
+            score: r.score, reasons: r.reasons, imageScore: r.imageScore,
+          });
+        }
+        cands.sort((x, y) => y.score - x.score);
+        const top = cands.slice(0, 3);
+        const best = top[0];
+        const canAuto = !!best && best.score >= 85 && (best.imageScore > 0 || best.reasons.some((x) => x.indexOf('款式词一致') === 0));
+
+        let state = 'none';
+        if (best) state = canAuto ? 'auto' : 'pending';
+        if (canAuto && apply && it.bp_id) {
+          await db.exec(
+            `UPDATE brand_product SET afa_goods_id = ?, afa_match_score = ?, afa_match_at = NOW()
+              WHERE id = ? AND (afa_goods_id IS NULL OR afa_goods_id = '')`,
+            [best.goodsId, best.score, it.bp_id]
+          );
+          state = 'applied';
+        }
+        if (!best) none += 1;
+        else if (canAuto) auto += 1;
+        else pending += 1;
+        out.push({
+          sku: it.sku, goods_name: it.goods_name, image_url: it.image_url, brand_id: it.brand_id,
+          keyword: kw, state, picked: canAuto ? best.goodsId : '', candidates: top,
+          inBrand: !!it.bp_id,
+        });
+      }
+
+      const tip = lastErr ? `（阿发接口报错：${lastErr}，请检查是否已配置有效 Token）` : '';
+      return sendJson(res, 200, {
+        ok: true, total: items.length, todo: todo.length, queriedKeywords: queried,
+        auto, pending, none, applied: apply, items: out,
+        message: `扫描 ${todo.length} 个待匹配商品：可自动采用 ${auto} 个、待确认 ${pending} 个、没找到 ${none} 个${tip}`,
+      });
     }
 
     // 商品同步（仅超级管理员）：按页拉取牵牛花前置仓商品（筛选「正常采购」），
