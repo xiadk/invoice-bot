@@ -652,6 +652,14 @@ async function migrate(conn, dbName) {
       "COMMENT '是否允许查看补货页（含导入补货参考文件、齐货通/阿发取价加购；1=开启，超级管理员始终可见）'"
     );
   }
+  // ── 平台取价权限（v0.2.95）：齐货通登录/重新取价、阿发 Token/自动匹配/阿发取价、选购加购
+  //    默认 0 = 非超管一律不可见（这些操作要动平台真实账号，必须由超管逐个授权）
+  if (!(await colExists('app_user', 'price_enabled'))) {
+    await q(
+      'ALTER TABLE `app_user` ADD COLUMN `price_enabled` TINYINT(1) NOT NULL DEFAULT 0 ' +
+      "COMMENT '是否允许平台取价操作（齐货通登录/重新取价、阿发Token/自动匹配/取价、选购加购；1=开启，超级管理员始终可见）'"
+    );
+  }
   // ── 账单新增支出项「中心仓」（v0.2.43）：排在「人工」之后，手工录入，计入支出合计
   if (await tableExists('billing_month') && !(await colExists('billing_month', 'exp_warehouse'))) {
     await q(

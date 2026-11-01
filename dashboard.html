@@ -977,25 +977,18 @@
           <span class="fb-spacer"></span>
           <span class="loginid">共 {{ rp.total }} 个商品 · 当前筛选货值 {{ yuan(rp.filteredValue) }}</span>
         </div>
+          <!-- 平台取价操作（v0.2.95）：登录齐货通 / 重新取价 / 阿发Token / 自动匹配 / 阿发取价
+               都要动平台真实账号，只有超级管理员或被授权的账号可见（服务端同样按 priceEnabled 校验） -->
           <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px">
-            <el-alert type="info" :closable="false" show-icon style="flex:1;min-width:340px"
-              title="齐货通价 = 一件价格 ÷ 一件瓶数（实时取自齐货通商品详情，两位小数四舍五入）；还没关联的商品点「关联」，搜到齐货通商品后绑定即可取价。">
-            </el-alert>
-            <el-tag size="small" :type="rp.session.configured ? 'success' : 'warning'">
-              齐货通登录态：{{ rp.session.configured ? ('已配置 ' + rp.session.tokenMasked) : '未配置（取价/加购都用不了）' }}
-            </el-tag>
-            <el-button size="small" :type="rp.session.configured ? 'danger' : 'primary'"
+            <el-button v-if="canPrice" size="small" :type="rp.session.configured ? 'danger' : 'primary'"
                        @click="onQhtBtn">{{ rp.session.configured ? '退出齐货通' : '登录齐货通' }}</el-button>
-            <el-button size="small" :loading="rp.pricing" @click="refreshRpPrices('qht')"
+            <el-button v-if="canPrice" size="small" :loading="rp.pricing" @click="refreshRpPrices('qht')"
                        title="对当前筛选出来的全部商品重新取价（不是全量）">重新取价</el-button>
-            <el-tag size="small" :type="rp.afaSession.configured ? 'success' : 'info'">
-              阿发Token：{{ rp.afaSession.configured ? ('已配置 ' + rp.afaSession.tokenMasked) : '未配置（取价/加购用不了）' }}
-            </el-tag>
-            <el-button size="small" :type="rp.afaSession.configured ? 'danger' : 'primary'"
+            <el-button v-if="canPrice" size="small" :type="rp.afaSession.configured ? 'danger' : 'primary'"
                        @click="onAfaBtn">{{ rp.afaSession.configured ? '清除阿发Token' : '配置阿发Token' }}</el-button>
-            <el-button size="small" type="warning" plain :loading="rpMatch.loading" @click="openAutoMatch"
+            <el-button v-if="canPrice" size="small" type="warning" plain :loading="rpMatch.loading" @click="openAutoMatch"
                        title="用商品名称原样搜索城配速达，直接取搜索结果第一条关联；只对当前筛选出来的商品生效">自动匹配阿发</el-button>
-            <el-button size="small" :loading="rp.afaPricing" @click="refreshRpPrices('afa')"
+            <el-button v-if="canPrice" size="small" :loading="rp.afaPricing" @click="refreshRpPrices('afa')"
                        title="对当前筛选出来的全部商品重新取阿发价（不是全量）">阿发重新取价</el-button>
             <span class="loginid">共 {{ rp.total }} 个商品</span>
             <span v-if="rp.expect && rp.total < rp.expect" style="font-size:12px;color:#e6a23c">
@@ -1054,7 +1047,7 @@
                       </div>
                       </div>
                     </div>
-                    <el-button size="mini" type="primary" plain style="margin-top:4px" @click="openBuy(p.row)">选购</el-button>
+                    <el-button v-if="canPrice" size="mini" type="primary" plain style="margin-top:4px" @click="openBuy(p.row)">选购</el-button>
                   </template>
                   <span v-else-if="rp.prices[pkey(p.row, 'qht')]" class="loginid" style="color:#f56c6c">取价失败</span>
                   <span v-else class="loginid">未取价</span>
@@ -1086,7 +1079,7 @@
                       </div>
                     </div>
                     <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:4px">
-                      <el-button size="mini" type="primary" plain @click="openAfaBuy(p.row)">选购</el-button>
+                      <el-button v-if="canPrice" size="mini" type="primary" plain @click="openAfaBuy(p.row)">选购</el-button>
                       <el-button size="mini" type="primary" plain @click="openAfaLinkDlg(p.row)">修改</el-button>
                       <el-button size="mini" type="danger" plain title="解除后可重新自动匹配" @click="unlinkAfaRow(p.row)">解除</el-button>
                     </div>
@@ -3063,7 +3056,7 @@
     <div class="menu-perm-row">
       <div>
         <b>商品列表</b>
-        <div class="loginid">导入补货参考文件、补货、关联齐货通商品并加购（默认关闭）</div>
+        <div class="loginid">导入补货参考文件、补货、关联齐货通/阿发商品（默认关闭）</div>
       </div>
       <el-switch v-model="menuPermit.product"></el-switch>
     </div>
@@ -3084,9 +3077,16 @@
     <div class="menu-perm-row">
       <div>
         <b>补货</b>
-        <div class="loginid">导入补货参考文件、齐货通/阿发取价与加购（默认关闭，与商品列表相互独立）</div>
+        <div class="loginid">导入补货参考文件、查看品牌方商品与价格（默认关闭，与商品列表相互独立）</div>
       </div>
       <el-switch v-model="menuPermit.replenish"></el-switch>
+    </div>
+    <div class="menu-perm-row">
+      <div>
+        <b>平台取价</b>
+        <div class="loginid">登录齐货通、重新取价、配置阿发Token、自动匹配阿发、阿发取价、选购加购（默认关闭）</div>
+      </div>
+      <el-switch v-model="menuPermit.price"></el-switch>
     </div>
     <div slot="footer">
       <el-button @click="menuPermit.visible = false">取消</el-button>
@@ -3484,8 +3484,8 @@ const vm = new Vue({
       creatingUser: false, createOk: false,
       userEdit: { visible: false, id: null, title: '', company: '', taxNo: '', email: '', note: '', brandId: 1, hint: '', lockCompany: false, saving: false },
       // 菜单权限弹窗（退单列表 / 实时毛利监控）
-      menuPermit: { visible: false, id: null, username: '', refund: false, profit: false, product: false, market: false, billing: false, replenish: false, saving: false,
-                    origin: { refund: false, profit: false, product: false, market: false, billing: false, replenish: false } },
+      menuPermit: { visible: false, id: null, username: '', refund: false, profit: false, product: false, market: false, billing: false, replenish: false, price: false, saving: false,
+                    origin: { refund: false, profit: false, product: false, market: false, billing: false, replenish: false, price: false } },
       // 操作日志（仅超级管理员）
       opLog: { draftUsername: '', username: '', page: 1, size: 20, total: 0, rows: [], loading: false, summary: {} },
       // 退单列表（牵牛花）
@@ -3595,8 +3595,11 @@ const vm = new Vue({
     canMarket() { return !!(this.me && (this.me.role === 'admin' || this.me.marketEnabled)); },
     // 账单权限（同上，独立开关；默认所有用户不授权）
     canBilling() { return !!(this.me && (this.me.role === 'admin' || this.me.billingEnabled)); },
-    // 补货权限（独立菜单，默认所有用户不授权；含导入补货参考文件、齐货通/阿发取价加购）
+    // 补货权限（独立菜单，默认所有用户不授权；含导入补货参考文件）
     canReplenish() { return !!(this.me && (this.me.role === 'admin' || this.me.replenishEnabled)); },
+    // 平台取价权限（v0.2.95）：登录齐货通 / 重新取价 / 配置阿发Token / 自动匹配阿发 / 阿发重新取价 / 选购加购
+    //   这些操作要动平台真实账号，默认只给超级管理员，普通账号由超管在「菜单权限 → 平台取价」里授权
+    canPrice() { return !!(this.me && (this.me.role === 'admin' || this.me.priceEnabled)); },
     /** 账单：收入组二级列（美团/淘宝/京东，均可手工编辑） */
     billIncomeItems() { return (this.bill.items || []).filter((i) => i.group === 'income'); },
     /** 账单：支出组二级列（前两项系统统计只读，其余手工编辑） */
@@ -6507,11 +6510,13 @@ const vm = new Vue({
         refund: !!row.qnhRefundEnabled, profit: !!row.qnhProfitEnabled,
         product: !!row.productEnabled, market: !!row.marketEnabled,
         billing: !!row.billingEnabled, replenish: !!row.replenishEnabled,
+        price: !!row.priceEnabled,
         saving: false,
         origin: {
           refund: !!row.qnhRefundEnabled, profit: !!row.qnhProfitEnabled,
           product: !!row.productEnabled, market: !!row.marketEnabled,
           billing: !!row.billingEnabled, replenish: !!row.replenishEnabled,
+          price: !!row.priceEnabled,
         },
       };
     },
@@ -6526,6 +6531,7 @@ const vm = new Vue({
       if (m.market !== m.origin.market) changes.push({ menu: 'market', enabled: m.market, field: 'marketEnabled', label: '交易市场' });
       if (m.billing !== m.origin.billing) changes.push({ menu: 'billing', enabled: m.billing, field: 'billingEnabled', label: '账单' });
       if (m.replenish !== m.origin.replenish) changes.push({ menu: 'replenish', enabled: m.replenish, field: 'replenishEnabled', label: '补货' });
+      if (m.price !== m.origin.price) changes.push({ menu: 'price', enabled: m.price, field: 'priceEnabled', label: '平台取价' });
       if (!changes.length) { m.visible = false; return; }
       m.saving = true;
       const row = (this.users || []).find((u) => u.id === m.id);

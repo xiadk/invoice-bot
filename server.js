@@ -341,6 +341,8 @@ function publicUser(u) {
     billingEnabled: u.role === 'admin' ? true : !!Number(u.billing_enabled),
     // 补货页权限（独立菜单，默认所有用户不授权；含导入补货参考文件、齐货通/阿发取价加购）
     replenishEnabled: u.role === 'admin' ? true : !!Number(u.replenish_enabled),
+    // 平台取价权限（v0.2.95）：齐货通登录/重新取价、阿发Token/自动匹配/取价、选购加购
+    priceEnabled: u.role === 'admin' ? true : !!Number(u.price_enabled),
     // 所属品牌方（商品数据按品牌方共享：同品牌下所有用户看到同一套商品）
     brandId: Number(u.brand_id) || 1,
     brandName: u.brand_name || '',
@@ -2527,7 +2529,7 @@ async function listUsers() {
     SELECT u.id, u.username, u.role, u.status, u.company_name, u.tax_no, u.email, u.display_name, u.note,
            u.must_change_password, u.last_login_at, u.created_at, u.updated_at,
            u.qnh_refund_enabled, u.qnh_profit_enabled, u.product_enabled, u.market_enabled, u.billing_enabled,
-           u.replenish_enabled, u.brand_id, b.name AS brand_name,
+           u.replenish_enabled, u.price_enabled, u.brand_id, b.name AS brand_name,
            (SELECT COUNT(*) FROM invoice_order o WHERE o.user_id = u.id)              AS order_count,
            (SELECT COUNT(DISTINCT o.seller_company) FROM invoice_order o WHERE o.user_id = u.id) AS company_count,
            (SELECT COUNT(*) FROM issued_invoice i WHERE i.user_id = u.id)             AS invoice_rows,
@@ -2547,8 +2549,10 @@ async function listUsers() {
     productEnabled: u.role === 'admin' ? true : !!Number(u.product_enabled),
     marketEnabled: u.role === 'admin' ? true : !!Number(u.market_enabled),
     billingEnabled: u.role === 'admin' ? true : !!Number(u.billing_enabled),
-    // 补货页权限（独立菜单，默认所有用户不授权；含导入补货参考文件、齐货通/阿发取价加购）
+    // 补货页权限（独立菜单，默认所有用户不授权；含导入补货参考文件）
     replenishEnabled: u.role === 'admin' ? true : !!Number(u.replenish_enabled),
+    // 平台取价权限（v0.2.95）：齐货通登录/重新取价、阿发Token/自动匹配/取价、选购加购
+    priceEnabled: u.role === 'admin' ? true : !!Number(u.price_enabled),
     // 所属品牌方（商品数据按品牌方共享）
     brandId: Number(u.brand_id) || 1,
     brandName: u.brand_name || '',
@@ -2950,6 +2954,10 @@ const server = http.createServer(async (req, res) => {
     const canMarket = isAdmin || !!Number(user.market_enabled);
     const canBilling = isAdmin || !!Number(user.billing_enabled);
     const denyProduct = () => sendJson(res, 403, { error: '未开启商品列表权限，请联系超级管理员' });
+    // 平台取价权限（v0.2.95）：齐货通登录/取价、阿发Token/匹配/取价、选购加购都要动平台真实账号，
+    // 默认只给超级管理员；普通账号须由超管在「菜单权限 → 平台取价」里单独授权
+    const canPrice = isAdmin || !!Number(user.price_enabled);
+    const denyPrice = () => sendJson(res, 403, { error: '未开启平台取价权限，请联系超级管理员' });
     const denyMarket = () => sendJson(res, 403, { error: '未开启交易市场权限，请联系超级管理员' });
     const denyBilling = () => sendJson(res, 403, { error: '未开启账单权限，请联系超级管理员' });
 
@@ -3787,6 +3795,7 @@ const server = http.createServer(async (req, res) => {
     }
     // 账号密码登录：直接换回 x-token / x-user 写进当前账号，不用再去浏览器里手工拷贝
     if (method === 'POST' && p === '/api/qht/login') {
+      if (!canPrice) return denyPrice();
       writeGuard();
       const b = await readBody(req);
       try {
@@ -3805,6 +3814,7 @@ const server = http.createServer(async (req, res) => {
     // 退出：先在齐货通那侧解除绑定（token 作废），再清掉库里登录态
     //      远端解绑失败也继续清本地——否则「登录态已过期」时用户永远退不出来
     if (method === 'POST' && p === '/api/qht/logout') {
+      if (!canPrice) return denyPrice();
       writeGuard();
       let unb = { ok: false, error: '' };
       try {
@@ -3835,6 +3845,8 @@ const server = http.createServer(async (req, res) => {
       const bo = brandOf(req, url, user);
       const brandId = bo.brandId || (Number(user.brand_id) || 1);
       const mode = String(url.searchParams.get('mode') || 'refresh').toLowerCase() === 'cache' ? 'cache' : 'refresh';
+      // 只读缓存随商品列表权限；强制刷新平台要走「平台取价」权限
+      if (mode === 'refresh' && !canPrice) return denyPrice();
       try {
         return sendJson(res, 200, await qht.pricesByGoodsIds(tenantId, ids, { brandId, mode }));
       } catch (e) {
@@ -3845,6 +3857,7 @@ const server = http.createServer(async (req, res) => {
     }
     // 加入购物车：会在用户自己的齐货通账号里真实加一件，只在用户点确认后调用一次
     if (method === 'POST' && p === '/api/qht/cart') {
+      if (!canPrice) return denyPrice();
       writeGuard();
       const b = await readBody(req);
       try {
@@ -3861,6 +3874,7 @@ const server = http.createServer(async (req, res) => {
     }
     // 配置 Token（用户粘贴城配速达 authorization + 门店/小程序参数，过期需重贴）
     if (method === 'POST' && p === '/api/afa/token') {
+      if (!canPrice) return denyPrice();
       writeGuard();
       const b = await readBody(req);
       try {
@@ -3876,6 +3890,7 @@ const server = http.createServer(async (req, res) => {
       }
     }
     if (method === 'POST' && p === '/api/afa/clear') {
+      if (!canPrice) return denyPrice();
       writeGuard();
       const r = await afa.clearSession(tenantId);
       return sendJson(res, 200, r);
@@ -3900,6 +3915,8 @@ const server = http.createServer(async (req, res) => {
       const bo = brandOf(req, url, user);
       const brandId = bo.brandId || (Number(user.brand_id) || 1);
       const mode = String(url.searchParams.get('mode') || 'refresh').toLowerCase() === 'cache' ? 'cache' : 'refresh';
+      // 只读缓存随商品列表权限；强制刷新平台要走「平台取价」权限
+      if (mode === 'refresh' && !canPrice) return denyPrice();
       try {
         return sendJson(res, 200, await afa.pricesByGoodsIds(tenantId, ids, { brandId, mode }));
       } catch (e) {
@@ -3910,6 +3927,7 @@ const server = http.createServer(async (req, res) => {
     }
     // 加入购物车：会在用户自己的城配速达账号里真实加一件，只在用户点确认后调用一次
     if (method === 'POST' && p === '/api/afa/cart') {
+      if (!canPrice) return denyPrice();
       writeGuard();
       const b = await readBody(req);
       try {
@@ -3972,6 +3990,7 @@ const server = http.createServer(async (req, res) => {
     // 入参 { q?, status?, batch?, brand?, apply? }：apply=true 直接写库；false 只给建议。
     if (method === 'POST' && p === '/api/products/auto-match') {
       if (!canProduct) return denyProduct();
+      if (!canPrice) return denyPrice();
       const b = await readBody(req).catch(() => ({}));
       const batch = String(b.batch || '').trim();
       const q = String(b.q || '').trim();
@@ -5555,6 +5574,7 @@ const server = http.createServer(async (req, res) => {
           market: { col: 'market_enabled', label: '交易市场', field: 'marketEnabled' },
           billing: { col: 'billing_enabled', label: '账单', field: 'billingEnabled' },
           replenish: { col: 'replenish_enabled', label: '补货', field: 'replenishEnabled' },
+          price: { col: 'price_enabled', label: '平台取价', field: 'priceEnabled' },
         };
         const m = MENU[menu];
         if (!m) return sendJson(res, 400, { error: '未知的菜单：' + menu });
