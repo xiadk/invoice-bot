@@ -1,22 +1,25 @@
 'use strict';
 /**
- * lib/afa-capture.js — 城配速达（阿发）Token 一键抓取
+ * tools/afa-token/capture.js — 城配速达（阿发）Token 抓取内核
+ *
+ * 这个文件原本是项目里的 lib/afa-capture.js（v0.2.88）。v0.2.89 起项目只保留「配置 Token」，
+ * 抓包整段搬到这里成为独立小工具：不连数据库、不落库，抓到就把 Token 交给调用方打印。
  *
  * 为什么需要它：阿发的 Token 是小程序登录后由微信自动下发的（带一次性 code），
  * 人工只能靠抓包工具复制，过期（约 1 天）就得重来一次。这里把整套「装证书 → 设系统代理
- * → 中间人解密 → 抓 /miniapp/login/login 响应 → 落库 → 还原并清理」自动化。
+ * → 中间人解密 → 抓 /miniapp/login/login 响应 → 打印 → 还原并清理」自动化。
  *
  * 流程（一次会话）：
- *   1. prepare()  生成 CA（首次）+ 装进「当前用户」根证书存储 + 记下系统代理原值
- *   2. createProxyServer() 由 server.js listen（架构守卫 R2：listen 只允许出现在 server.js）
+ *   1. prepare()  生成 CA（首次）+ 装进根证书存储 + 记下系统代理原值
+ *   2. createProxyServer() 由 index.js listen（只绑 127.0.0.1，局域网访问不到）
  *   3. activate() 把系统代理指向本机代理端口，开始等
- *   4. 抓到 login 响应里的 token → 落库 → 立即 cleanup()：还原代理 / 停服务 / 删 CA 与私钥
+ *   4. 抓到 login 响应里的 token → onToken 回调（打印）→ 立即 cleanup()：还原代理 / 停服务 / 删 CA
  *
  * 安全边界：
  *   · 只解密 *.zhoupudata.com 的 TLS，其它域名一律纯 TCP 隧道直通（不碰内容、不影响其证书校验）
- *   · 不记录任何 Authorization / token 明文，只记域名 + 路径 + 命中与否
- *   · CA 私钥只存在 data/afa-capture/（已被 .gitignore 排除），会话结束即删除
- *   · 任何异常路径都走同一个 cleanup()，并且进程重启时会自动还原残留的代理设置
+ *   · Token 明文只走内存与终端输出，不写文件、不写日志；data/ 下只存系统代理原值用于强杀兜底
+ *   · CA 私钥只存在 tools/afa-token/data/（已被 .gitignore 排除），会话结束即删除
+ *   · 任何异常路径都走同一个 cleanup()，并且启动时会自动还原上次残留的代理设置
  */
 const fs = require('fs');
 const path = require('path');
@@ -30,10 +33,12 @@ const forge = require('node-forge');
 // 装/删根证书（certutil）与读写 WinINET 代理注册表（reg.exe）都是系统级操作，Node 无原生替代
 const { execFile } = require('child_process'); // arch-allow: child_process（certutil 装/删根证书、reg 改系统代理开关）
 
-const afa = require('./afa');
-
-const DIR = path.join(__dirname, '..', 'data', 'afa-capture');
-const CA_CN = 'invoice-bot AFA Capture CA';
+const DIR = path.join(__dirname, 'data');
+const CA_CN = 'invoice-bot AFA Token Tool CA';
+/** v0.2.88 留在系统里的旧证书名，启动兜底时一并清掉（那时抓包还在项目服务里） */
+const LEGACY_CA_CN = 'invoice-bot AFA Capture CA';
+const DEFAULT_STORE_ID = '148';
+const DEFAULT_APP_ID = 'wxc050ff76c31c4371';
 /** 注册表位置：JS/reg 语法与 PowerShell 路径两种写法 */
 const REG_KEY = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings';
 const REG_KEY_PS = 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings';
@@ -343,24 +348,25 @@ function hostMatches(host) {
 // ── 会话状态 ──────────────────────────────────────────────
 const state = {
   active: false,
-  status: 'idle', // idle | starting | waiting | captured | saved | timeout | error | cancelled
-  userId: null,
+  status: 'idle', // idle | starting | waiting | captured | timeout | error | cancelled
   port: null,
   startedAt: null,
   deadline: null,
   timeoutMs: DEFAULT_TIMEOUT_MS,
   message: '',
   error: '',
-  tokenMasked: '',
-  mid: null,
   storeId: '',
+  appId: '',
+  mid: null,
+  token: '',     // 只放内存，cleanup 时清空
   needElevate: false,
   hits: 0,
   seen: [],      // 最近抓到的请求（只记 host + path，不记请求头与 body）
-  steps: [],     // 进度步骤，前端直接展示
+  steps: [],     // 进度步骤，CLI 直接打印
 };
 
-let runtime = null; // { server, ca, files, savedProxy, timer, closing }
+let runtime = null; // { ca, files, savedProxy, timer, proxy, closing }
+let onToken = null; // 抓到 Token 时的回调（由 index.js 注入：打印 + 复制剪贴板）
 
 function pushStep(text, level) {
   state.steps.push({ at: Date.now(), text: String(text).slice(0, 200), level: level || 'info' });
@@ -376,7 +382,7 @@ function persistSession() {
     ensureDir();
     if (!runtime || !runtime.savedProxy) return;
     fs.writeFileSync(sessionFile(), JSON.stringify({
-      savedProxy: runtime.savedProxy, port: state.port, startedAt: state.startedAt, userId: state.userId,
+      savedProxy: runtime.savedProxy, port: state.port, startedAt: state.startedAt,
     }), 'utf8');
   } catch (e) { /* ignore */ }
 }
@@ -395,17 +401,25 @@ async function cleanupOnBoot() {
     const j = JSON.parse(fs.readFileSync(sessionFile(), 'utf8') || '{}');
     if (j && j.savedProxy) {
       await restoreProxy(j.savedProxy);
-      console.log('[afa-capture] 已还原上次残留的系统代理设置');
+      console.log('[afa-token] 已还原上次残留的系统代理设置');
     }
     clearSessionFile();
-    const leftovers = await run('certutil', ['-user', '-store', 'Root'], { timeout: 15000 });
-    if (leftovers.stdout.indexOf(CA_CN) >= 0) {
-      await removeCa(path.join(DIR, 'ca.der'), 'user');
-      console.log('[afa-capture] 已清理上次残留的临时根证书');
-    }
-    const machineLeft = await run('certutil', ['-store', 'Root'], { timeout: 20000 });
-    if (machineLeft.stdout.indexOf(CA_CN) >= 0) {
-      console.warn('[afa-capture] 上次的临时根证书留在了本机存储，请手动清理：certutil -delstore Root "' + CA_CN + '"');
+    // 顺带清掉上次残留的临时根证书：当前用户存储可直接删，本机存储需要管理员
+    const stores = [
+      { name: 'user', list: ['-user', '-store', 'Root'], del: ['-user', '-delstore', 'Root'] },
+      { name: 'machine', list: ['-store', 'Root'], del: ['-delstore', 'Root'] },
+    ];
+    for (const st of stores) {
+      const out = await run('certutil', st.list, { timeout: 20000 });
+      for (const cn of [CA_CN, LEGACY_CA_CN]) {
+        if (out.stdout.indexOf(cn) < 0) continue;
+        if (st.name === 'user') {
+          await run('certutil', st.del.concat([cn]), { timeout: 30000 });
+          console.log('[afa-token] 已清理残留的临时根证书（' + cn + '）');
+        } else {
+          console.warn('[afa-token] 本机存储仍有残留证书，请用管理员执行：certutil -delstore Root "' + cn + '"');
+        }
+      }
     }
     rmQuiet(path.join(DIR, 'ca.pem'));
     rmQuiet(path.join(DIR, 'ca.key'));
@@ -571,7 +585,7 @@ function createProxyServer() {
   };
 }
 
-/** 响应里若含 token，落库并收工 */
+/** 响应里若含 token，交给回调打印并收工 */
 function handleMaybeToken(host, pathPart, headers, bodyBuf) {
   if (!state.active || state.status !== 'waiting') return;
   let json = null;
@@ -585,51 +599,76 @@ function handleMaybeToken(host, pathPart, headers, bodyBuf) {
     const m = ref.match(/servicewechat\.com\/(wx[0-9a-f]+)/i);
     if (m) appId = m[1];
   }
-  state.status = 'captured';
-  pushStep('已抓到 Token（' + host + pathPart + '），正在写入数据库');
-  finishWithToken(hit.token, hit.storeId, appId).catch((e) => {
-    state.status = 'error';
-    state.error = '写入数据库失败：' + String((e && e.message) || e).slice(0, 200);
-    pushStep(state.error, 'error');
-    cleanup('error');
-  });
+  finishWithToken(hit.token, hit.storeId, appId, host + pathPart);
 }
 
-async function finishWithToken(token, storeId, appId) {
-  const before = await afa.sessionStatus(state.userId).catch(() => ({}));
-  const sid = storeId || (before && before.storeId) || '148';
-  const aid = appId || (before && before.appId) || 'wxc050ff76c31c4371';
-  const r = await afa.saveSession(state.userId, { token, storeId: sid, appId: aid });
-  state.status = 'saved';
-  state.tokenMasked = (r && r.tokenMasked) || '';
-  state.mid = (r && r.mid) || null;
+/** 抓到 Token：记状态 → 回调打印（不落库）→ 立即收尾 */
+function finishWithToken(token, storeId, appId, from) {
+  const sid = String(storeId || state.storeId || DEFAULT_STORE_ID).trim() || DEFAULT_STORE_ID;
+  const aid = String(appId || state.appId || DEFAULT_APP_ID).trim() || DEFAULT_APP_ID;
+  const info = { token, storeId: sid, appId: aid, mid: jwtMid(token), exp: jwtExp(token), from: String(from || '') };
+
+  state.status = 'captured';
+  state.token = token;
   state.storeId = sid;
-  state.message = 'Token 已更新';
-  pushStep('Token 已写入数据库（mid=' + (state.mid || '?') + '，门店=' + sid + '）', 'success');
+  state.appId = aid;
+  state.mid = info.mid;
+  state.message = '已抓到 Token';
+  pushStep('已抓到 Token（' + (from || 'login 响应') + '）', 'success');
+
+  if (typeof onToken === 'function') {
+    try { onToken(info); } catch (e) { /* 打印失败不影响收尾 */ }
+  }
   // 抓到了就立刻收工：还原代理 → 停代理 → 删证书，避免影响全机联网
-  setTimeout(() => { cleanup('saved').catch(() => {}); }, 800);
+  setTimeout(() => { cleanup('saved').catch(() => {}); }, 400);
+}
+
+/** 解码 JWT payload（只取 mid / exp，不校验签名） */
+function jwtPayload(token) {
+  try {
+    const b64 = String(token || '').replace(/^Bearer\s+/i, '').split('.')[1];
+    if (!b64) return null;
+    return JSON.parse(Buffer.from(b64.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8'));
+  } catch (e) { return null; }
+}
+
+function jwtMid(token) {
+  const p = jwtPayload(token);
+  const mid = p && Number(p.mid);
+  return mid || null;
+}
+
+function jwtExp(token) {
+  const p = jwtPayload(token);
+  const exp = p && Number(p.exp);
+  return exp ? exp * 1000 : null;
+}
+
+/** 注入回调：抓到 token 时调用（index.js 用来打印） */
+function setOnToken(fn) {
+  onToken = typeof fn === 'function' ? fn : null;
 }
 
 // ── 生命周期 ──────────────────────────────────────────────
 /**
- * 第一步：准备证书（生成 + 装进当前用户根存储）并记录系统代理原值。
+ * 第一步：准备证书（生成 + 装进根证书存储）并记录系统代理原值。
  * @returns {{ok:boolean, error?:string, needConfirm?:boolean}}
  */
-async function prepare(userId) {
-  if (!isWin()) return { ok: false, error: '该功能只支持 Windows' };
+async function prepare() {
+  if (!isWin()) return { ok: false, error: '该工具只支持 Windows' };
   if (state.active) return { ok: false, error: '已有一次抓包在进行中，请先等待或取消' };
 
   state.active = true;
   state.status = 'starting';
-  state.userId = userId;
   state.startedAt = Date.now();
   state.message = '';
   state.error = '';
   state.hits = 0;
   state.seen = [];
   state.steps = [];
-  state.tokenMasked = '';
+  state.token = '';
   state.mid = null;
+  state.appId = '';
 
   pushStep('生成临时根证书');
 
@@ -712,12 +751,13 @@ async function cleanup(reason) {
     pushStep('临时根证书与私钥已删除');
   }
 
-  if (state.status !== 'saved' && state.status !== 'error' && state.status !== 'timeout') {
-    state.status = reason === 'cancel' ? 'cancelled' : (state.status === 'captured' ? 'saved' : (reason || finalStatus));
+  if (state.status !== 'error' && state.status !== 'timeout') {
+    state.status = reason === 'cancel' ? 'cancelled' : (state.status === 'captured' ? 'captured' : (reason || finalStatus));
   }
   state.active = false;
   state.port = null;
   state.deadline = null;
+  state.token = ''; // Token 只在抓到时短暂存在内存，收尾即清
   runtime = null;
   return { ok: true };
 }
@@ -729,9 +769,9 @@ function status() {
     port: state.port,
     remainSec: state.deadline ? Math.max(0, Math.round((state.deadline - Date.now()) / 1000)) : 0,
     timeoutSec: Math.round(state.timeoutMs / 1000),
-    tokenMasked: state.tokenMasked,
     mid: state.mid,
     storeId: state.storeId,
+    appId: state.appId,
     message: state.message,
     error: state.error,
     hits: state.hits,
@@ -741,7 +781,10 @@ function status() {
 }
 
 module.exports = {
-  prepare, activate, cleanup, status, createProxyServer, cleanupOnBoot,
-  installCa, removeCa, readProxy, restoreProxy,
-  _internals: { scanJson, decodeBody, looksJwt, genCa, genLeaf, ensureCaFiles, hostMatches, DIR, CA_CN },
+  prepare, activate, cleanup, status, createProxyServer, cleanupOnBoot, setOnToken,
+  installCa, removeCa, readProxy, restoreProxy, isAdmin,
+  _internals: {
+    scanJson, decodeBody, looksJwt, genCa, genLeaf, ensureCaFiles, hostMatches,
+    jwtPayload, jwtMid, jwtExp, DIR, CA_CN, LEGACY_CA_CN, DEFAULT_STORE_ID, DEFAULT_APP_ID,
+  },
 };
