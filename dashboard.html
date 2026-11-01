@@ -1819,6 +1819,18 @@
               </template>
             </el-table-column>
             <el-table-column label="状态" width="80"><template slot-scope="p"><el-tag size="mini" :type="p.row.status === 'active' ? 'success' : 'danger'">{{ p.row.status === 'active' ? '正常' : '已禁用' }}</el-tag></template></el-table-column>
+            <!-- 使用期限（v0.2.97）：到期后禁止登录且任何接口都拒绝访问；剩 7 天内标橙、已过期标红 -->
+            <el-table-column label="使用期限" width="150">
+              <template slot-scope="p">
+                <el-tag v-if="p.row.role === 'admin' || !p.row.expiresAt" size="mini" type="success">永久</el-tag>
+                <template v-else>
+                  <div style="font-size:12px;line-height:16px">{{ p.row.expiresAt }}</div>
+                  <div :style="{ fontSize: '11px', lineHeight: '14px', color: p.row.daysLeft < 0 ? '#f56c6c' : (p.row.daysLeft <= 7 ? '#e6a23c' : '#909399') }">
+                    {{ p.row.daysLeft < 0 ? ('已过期 ' + (-p.row.daysLeft) + ' 天') : ('剩 ' + p.row.daysLeft + ' 天') }}
+                  </div>
+                </template>
+              </template>
+            </el-table-column>
             <el-table-column label="公司名称 / 抬头" min-width="170"><template slot-scope="p">{{ p.row.companyName || '—' }}<div v-if="p.row.note" class="loginid">{{ p.row.note }}</div></template></el-table-column>
             <el-table-column label="税号" width="170"><template slot-scope="p"><span class="loginid">{{ p.row.taxNo || '—' }}</span></template></el-table-column>
             <el-table-column label="收票邮箱" width="170"><template slot-scope="p"><span class="loginid">{{ p.row.email || '—' }}</span></template></el-table-column>
@@ -1845,6 +1857,7 @@
                 <div style="display:flex;gap:6px;flex-wrap:wrap">
                   <el-button v-if="p.row.role !== 'admin'" size="mini" type="primary" plain @click="openMenuPermit(p.row)">菜单权限</el-button>
                   <el-button v-if="p.row.role !== 'admin'" size="mini" @click="viewUserData(p.row)">查看数据</el-button>
+                  <el-button v-if="p.row.role !== 'admin' && p.row.expiresAt" size="mini" type="warning" plain @click="extendUser(p.row)">续期</el-button>
                   <el-button v-if="p.row.role !== 'admin'" size="mini" @click="openUserEdit(p.row)">编辑</el-button>
                   <el-button size="mini" @click="resetPwd(p.row)">重置密码</el-button>
                   <el-button v-if="p.row.username !== 'admin' && p.row.status === 'active'" size="mini" type="danger" plain @click="toggleStatus(p.row, 'disabled')">禁用</el-button>
@@ -1870,12 +1883,27 @@
                   <el-option v-for="b in brands" :key="b.id" :label="b.name" :value="b.id"></el-option>
                 </el-select>
               </el-form-item></el-col>
+              <el-col :xs="24" :md="8"><el-form-item label="使用期限">
+                <el-select v-model="newUser.expiryMode" style="width:100%">
+                  <el-option label="1 个月（默认）" value="1m"></el-option>
+                  <el-option label="3 个月" value="3m"></el-option>
+                  <el-option label="6 个月" value="6m"></el-option>
+                  <el-option label="1 年" value="1y"></el-option>
+                  <el-option label="永久" value="permanent"></el-option>
+                  <el-option label="自定义到期日" value="custom"></el-option>
+                </el-select>
+              </el-form-item></el-col>
+              <el-col :xs="24" :md="8" v-if="newUser.expiryMode === 'custom'"><el-form-item label="到期日">
+                <el-date-picker v-model="newUser.expiresAt" type="date" value-format="yyyy-MM-dd"
+                                placeholder="选择到期日" style="width:100%"></el-date-picker>
+              </el-form-item></el-col>
               <el-col :xs="24" :md="8"><el-form-item label="纳税人识别号"><el-input v-model="newUser.taxNo"></el-input></el-form-item></el-col>
               <el-col :xs="24" :md="8"><el-form-item label="收票邮箱"><el-input v-model="newUser.email"></el-input></el-form-item></el-col>
               <el-col :xs="24"><el-form-item label="备注"><el-input v-model="newUser.note" placeholder="可选"></el-input></el-form-item></el-col>
             </el-row>
           </el-form>
-          <div class="form-tip">账号 = 公司全称（业务账号才需要抬头）。若「角色」选<b>超级管理员</b>，只需填「公司全称」与初始密码，税号 / 邮箱会被忽略。</div>
+          <div class="form-tip">账号 = 公司全称（业务账号才需要抬头）。若「角色」选<b>超级管理员</b>，只需填「公司全称」与初始密码，税号 / 邮箱会被忽略。
+            <br>使用期限到期后该账号<b>无法登录</b>，已登录的会话调用任何接口都会被拒绝；需要继续使用请到列表点「续期」。</div>
           <span slot="footer">
             <el-tag v-if="createOk" type="success" size="small" style="margin-right:10px">✓ 已创建</el-tag>
             <el-button size="small" @click="newUserDlg = false">取消</el-button>
@@ -2986,6 +3014,20 @@
           <el-option v-for="b in brands" :key="b.id" :label="b.name + (b.status === 'disabled' ? '（已停用）' : '')" :value="b.id"></el-option>
         </el-select>
       </el-form-item>
+      <el-form-item label="使用期限">
+        <el-select v-model="userEdit.expiryMode" style="width:100%">
+          <el-option label="1 个月" value="1m"></el-option>
+          <el-option label="3 个月" value="3m"></el-option>
+          <el-option label="6 个月" value="6m"></el-option>
+          <el-option label="1 年" value="1y"></el-option>
+          <el-option label="永久" value="permanent"></el-option>
+          <el-option label="自定义到期日" value="custom"></el-option>
+        </el-select>
+      </el-form-item>
+      <el-form-item label="到期日" v-if="userEdit.expiryMode === 'custom'">
+        <el-date-picker v-model="userEdit.expiresAt" type="date" value-format="yyyy-MM-dd"
+                        placeholder="选择到期日" style="width:100%"></el-date-picker>
+      </el-form-item>
       <el-form-item label="备注"><el-input v-model="userEdit.note" placeholder="可选"></el-input></el-form-item>
     </el-form>
     <div class="form-tip" v-html="userEdit.hint"></div>
@@ -3470,7 +3512,7 @@ const vm = new Vue({
       defaultPddChat: '你好，麻烦尽快开一下发票，在平台都已经申请！！！如需线下开票，我的抬头：{companyName}，'
         + '税号：{taxNo}，邮箱：{email}，非常感谢，已经在平台申请！！！',
       previewText: '', saveOk: false,
-      users: [], newUser: { company: '', password: '', role: 'user', taxNo: '', email: '', note: '', brandId: 1 },
+      users: [], newUser: { company: '', password: '', role: 'user', taxNo: '', email: '', note: '', brandId: 1, expiryMode: '1m', expiresAt: '' },
       // 品牌方（商品数据按品牌方共享）：列表 + 管理弹框
       brands: [],
       brandDlg: { visible: false, loading: false, saving: false, newName: '', newNote: '', rows: [] },
@@ -3479,7 +3521,7 @@ const vm = new Vue({
       build: { running: false, ok: null, error: '', version: '', installer: null, installers: [], platform: '', log: [] },
       uploading: false, uploadProgress: 0, uploadMsg: '',
       creatingUser: false, createOk: false,
-      userEdit: { visible: false, id: null, title: '', company: '', taxNo: '', email: '', note: '', brandId: 1, hint: '', lockCompany: false, saving: false },
+      userEdit: { visible: false, id: null, title: '', company: '', taxNo: '', email: '', note: '', brandId: 1, hint: '', lockCompany: false, saving: false, expiryMode: 'permanent', expiresAt: '' },
       // 菜单权限弹窗（退单列表 / 实时毛利监控）
       menuPermit: { visible: false, id: null, username: '', refund: false, profit: false, product: false, market: false, billing: false, replenish: false, price: false, saving: false,
                     origin: { refund: false, profit: false, product: false, market: false, billing: false, replenish: false, price: false } },
@@ -4127,7 +4169,19 @@ const vm = new Vue({
         const txt = (await r.text().catch(() => '')).trim().slice(0, 120);
         throw new Error('服务响应异常 (HTTP ' + r.status + (txt ? '): ' + txt : ('): ' + (r.statusText || '非 JSON 响应'))));
       }
-      return r.json();
+      const data = await r.json();
+      // 账号到期（v0.2.97）：服务端统一回 403 + code=ACCOUNT_EXPIRED。
+      // 这里集中拦一次、只弹一个框并回登录页；否则到期后每张卡片各报一句「加载失败」，看不出是期限问题。
+      if (r.status === 403 && data && data.code === 'ACCOUNT_EXPIRED') {
+        if (!this._expiredNotified) {
+          this._expiredNotified = true;
+          this.$alert(data.error || '账号已到期，请联系超级管理员续期', '账号已到期', {
+            type: 'warning', confirmButtonText: '知道了',
+          }).then(() => { location.href = '/login'; }).catch(() => { location.href = '/login'; });
+        }
+        throw new Error(data.error || '账号已到期');
+      }
+      return data;
     },
     /**
      * 牵牛花接口专用请求：带上「以哪个账号的身份」。
@@ -4149,6 +4203,15 @@ const vm = new Vue({
       if (!d || !d.user) { this.goLogin(); return; }
       this.me = d.user;
       this.copyright = d.copyright || '';
+      // 账号已到期（v0.2.97）：/api/auth/me 特意不拦到期（否则前端拿不到原因），在这里给明确提示并回登录页
+      if (d.user.expired) {
+        this._expiredNotified = true;
+        this.$alert(d.user.expiresAt
+          ? `账号已到期（有效期至 ${d.user.expiresAt}），请联系超级管理员续期`
+          : '账号已到期，请联系超级管理员续期', '账号已到期', { type: 'warning', confirmButtonText: '知道了' })
+          .then(() => { location.href = '/login'; }).catch(() => { location.href = '/login'; });
+        return;
+      }
       await this.loadData();
       this.renderTrend();
       this.pollTask();
@@ -6557,12 +6620,18 @@ const vm = new Vue({
         taxNo: (this.newUser.taxNo || '').trim(), email: (this.newUser.email || '').trim(), note: (this.newUser.note || '').trim(),
         brandId: Number(this.newUser.brandId) || 1,   // 所属品牌方（默认优购哆）
       };
+      // 使用期限（v0.2.97）：普通用户才带；超级管理员由服务端强制永久
+      if (this.newUser.role !== 'admin') {
+        if (this.newUser.expiryMode === 'custom' && !this.newUser.expiresAt) { this.$message.warning('请选择到期日'); return; }
+        const exp = this.expiryParam(this.newUser.expiryMode, this.newUser.expiresAt);
+        if (exp !== undefined) payload.expiresAt = exp;
+      }
       if (!payload.username || !payload.password) { this.$message.warning('请填写「公司全称（= 登录账号）」与初始密码'); return; }
       this.creatingUser = true;
       try {
         const d = await this.api('/api/admin/users/create', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) });
         if (d.error) { this.$message.error('创建失败: ' + d.error); this.creatingUser = false; return; }
-        this.newUser = { company: '', password: '', role: 'user', taxNo: '', email: '', note: '', brandId: (this.brands[0] && this.brands[0].id) || 1 };
+        this.newUser = { company: '', password: '', role: 'user', taxNo: '', email: '', note: '', brandId: (this.brands[0] && this.brands[0].id) || 1, expiryMode: '1m', expiresAt: '' };
         this.createOk = true; setTimeout(() => { this.createOk = false; }, 2500);
         this.newUserDlg = false;       // 创建成功即关弹框，列表在下方已刷新
         await this.loadUsers();
@@ -6570,8 +6639,44 @@ const vm = new Vue({
       this.creatingUser = false;
     },
     /** 打开「新增用户」弹框：每次都是干净的空表单（品牌方默认优购哆 / 第一个可用品牌） */
+    /**
+     * 使用期限下拉 → 服务端参数（v0.2.97）
+     *   '1m' → undefined（不传，由服务端写 DATE_ADD(NOW(), INTERVAL 1 MONTH)）
+     *   '3m'/'6m'/'1y' → 今天 +对应月数（月末自动裁剪，避免 1/31 +1 月变成 3/3）
+     *   'permanent' → 'permanent'；'custom' → 所选日期
+     */
+    expiryParam(mode, dateStr) {
+      if (mode === 'permanent') return 'permanent';
+      if (mode === '1m') return undefined;
+      if (mode === 'custom') return String(dateStr || '').trim();
+      const months = { '3m': 3, '6m': 6, '1y': 12 }[mode];
+      return this.addMonthsStr(months || 1);
+    },
+    /** 今天 + n 个月的 YYYY-MM-DD（月末裁剪：1/31 + 1 月 = 2/28 而非 3/3） */
+    addMonthsStr(n) {
+      const d = new Date();
+      const day = d.getDate();
+      d.setDate(1);
+      d.setMonth(d.getMonth() + Number(n || 0));
+      const last = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
+      d.setDate(Math.min(day, last));
+      const p = (x) => String(x).padStart(2, '0');
+      return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+    },
+    /** 续期（v0.2.97）：在当前到期日（已过期则从今天）基础上 +N 个月 */
+    async extendUser(u) {
+      try {
+        await this.$confirm(`给「${u.username}」续期 1 个月？\n当前有效期至：${u.expiresAt || '—'}`, '续期', { type: 'warning' });
+      } catch (e) { return; }
+      const d = await this.api('/api/admin/users/extend', {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: u.id, months: 1 }),
+      });
+      if (d.error) { this.$message.error('续期失败: ' + d.error); return; }
+      this.$message.success(d.message || ('已续期至 ' + (d.expiresAt || '')));
+      await this.loadUsers();
+    },
     openUserCreate() {
-      this.newUser = { company: '', password: '', role: 'user', taxNo: '', email: '', note: '', brandId: (this.brands[0] && this.brands[0].id) || 1 };
+      this.newUser = { company: '', password: '', role: 'user', taxNo: '', email: '', note: '', brandId: (this.brands[0] && this.brands[0].id) || 1, expiryMode: '1m', expiresAt: '' };
       this.createOk = false;
       this.newUserDlg = true;
       if (!this.brands.length) this.loadBrands();
@@ -6582,6 +6687,9 @@ const vm = new Vue({
         visible: true, id: u.id, title: `编辑用户 #${u.id}（${u.username}）`,
         company: u.companyName || u.username || '', taxNo: u.taxNo || '', email: u.email || '', note: u.note || '',
         brandId: Number(u.brandId) || 1,
+        // 使用期限（v0.2.97）：有到期日 → 自定义并回填日期；无 → 永久
+        expiryMode: u.expiresAt ? 'custom' : 'permanent',
+        expiresAt: u.expiresAt ? String(u.expiresAt).slice(0, 10) : '',
         lockCompany: u.username === 'admin',
         hint: u.username === 'admin'
           ? '内置超级管理员 <b>admin</b> 的登录账号名固定，这里只改它的开票抬头。'
@@ -6600,6 +6708,12 @@ const vm = new Vue({
         note: (ue.note || '').trim(), role: u.role, brandId: Number(ue.brandId) || 1,
       };
       if (u.username !== 'admin') payload.username = company;
+      // 使用期限（v0.2.97）：不传 = 保持原值；permanent = 改永久；日期 = 当天 23:59:59
+      if (u.role !== 'admin') {
+        if (ue.expiryMode === 'custom' && !ue.expiresAt) { this.$message.warning('请选择到期日'); return; }
+        const exp = this.expiryParam(ue.expiryMode, ue.expiresAt);
+        if (exp !== undefined) payload.expiresAt = exp;
+      }
       ue.saving = true;
       try {
         const d = await this.api('/api/admin/users/update', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) });

@@ -295,13 +295,60 @@ function startAgentBuild() {
 // ─────────────────────────────────────────────────────────────────────────
 // 认证 / 权限
 // ─────────────────────────────────────────────────────────────────────────
+// ── 使用期限（v0.2.97）────────────────────────────────────────────────────
+//   app_user.expires_at：NULL = 永久有效；有值则到期后禁止登录，任何接口都拒绝。
+//   判断一律交给 MySQL：NOW() 与列值在同一会话、同一时区、同一精度下比较，
+//   绝不用 JS 把 Date 与字符串拼起来比 —— 机器/容器时区一变就会误判。
+//   EXPIRY_COLS 里的别名依赖 FROM 中的 app_user 别名为 u（各处查询均已如此）。
+const EXPIRY_COLS =
+  '       (u.expires_at IS NOT NULL AND u.expires_at <= NOW())   AS expired_flag,' +
+  '       DATEDIFF(u.expires_at, NOW())                          AS days_left,' +
+  "       DATE_FORMAT(u.expires_at, '%Y-%m-%d %H:%i')             AS expires_at_text";
+
+/** 是否已到期（超级管理员是系统账号，不受使用期限限制） */
+function isExpiredUser(u) {
+  return !!(u && u.role !== 'admin' && Number(u.expired_flag) === 1);
+}
+
+/** 到期统一提示（带上具体到期日，方便用户找管理员报时间） */
+function expiredMessage(u) {
+  const at = u && u.expires_at_text;
+  return at ? `账号已到期（有效期至 ${at}），请联系超级管理员续期` : '账号已到期，请联系超级管理员续期';
+}
+
+/**
+ * 解析页面传来的使用期限（v0.2.97）
+ *   undefined  → 由调用方决定（新建默认 1 个月）
+ *   ''/'permanent'/null → 永久（写 NULL）
+ *   'YYYY-MM-DD' → 当天 23:59:59；'YYYY-MM-DD HH:mm[:ss]' → 指定时刻
+ * 返回 { ok:true, value: string|null|undefined } 或 { ok:false, error }
+ */
+function parseExpiry(v) {
+  if (v === undefined) return { ok: true, value: undefined };
+  const raw = String(v == null ? '' : v).trim();
+  if (!raw || raw.toLowerCase() === 'permanent') return { ok: true, value: null };
+  const m = raw.match(/^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?$/);
+  if (!m) return { ok: false, error: '使用期限格式不正确（应为 YYYY-MM-DD 或 permanent）' };
+  const y = Number(m[1]), mo = Number(m[2]), d = Number(m[3]);
+  const hh = m[4] === undefined ? 23 : Number(m[4]);
+  const mi = m[5] === undefined ? 59 : Number(m[5]);
+  const ss = m[6] === undefined ? 59 : Number(m[6]);
+  const probe = new Date(y, mo - 1, d, hh, mi, ss);
+  if (probe.getFullYear() !== y || probe.getMonth() !== mo - 1 || probe.getDate() !== d
+      || probe.getHours() !== hh || probe.getMinutes() !== mi) {
+    return { ok: false, error: '使用期限的日期或时间不存在' };
+  }
+  const p = (n) => String(n).padStart(2, '0');
+  return { ok: true, value: `${y}-${p(mo)}-${p(d)} ${p(hh)}:${p(mi)}:${p(ss)}` };
+}
+
 /** 取当前登录用户（校验会话签名 + token_version + 账号状态） */
 async function currentUser(req) {
   const sess = auth.sessionFromRequest(req);
   if (!sess) return null;
   // 带上品牌方名称：前端要展示当前账号所属品牌（商品数据按品牌共享）
   const rows = await db.query(
-    `SELECT u.*, b.name AS brand_name
+    `SELECT u.*, b.name AS brand_name, ${EXPIRY_COLS}
        FROM app_user u LEFT JOIN brand b ON b.id = u.brand_id
       WHERE u.id = ?`, [sess.u]
   );
@@ -346,6 +393,10 @@ function publicUser(u) {
     // 所属品牌方（商品数据按品牌方共享：同品牌下所有用户看到同一套商品）
     brandId: Number(u.brand_id) || 1,
     brandName: u.brand_name || '',
+    // 使用期限（v0.2.97）：expiresAt=null 表示永久；expired=true 时前端提示并回登录页
+    expiresAt: u.role === 'admin' ? null : (u.expires_at_text || null),
+    expired: u.role === 'admin' ? false : Number(u.expired_flag) === 1,
+    daysLeft: (u.role === 'admin' || u.days_left == null) ? null : Number(u.days_left),
     lastLoginAt: u.last_login_at,
     createdAt: u.created_at,
   };
@@ -1084,8 +1135,11 @@ async function resolveDeviceToken(token) {
   const t = String(token || '').trim();
   if (!/^[0-9a-f]{64}$/.test(t)) return null;
   const rows = await db.query(
+    // 使用期限（v0.2.97）：到期账号的设备令牌一并失效 —— 小助手 WebSocket、/api/agent/*、
+    //   书签工具都从这里解析用户，卡在这一处即可全覆盖。超级管理员不受限。
     'SELECT d.id, d.user_id FROM agent_device d JOIN app_user u ON u.id = d.user_id ' +
-    'WHERE d.token_hash = ? AND d.revoked_at IS NULL AND u.status = ?',
+    'WHERE d.token_hash = ? AND d.revoked_at IS NULL AND u.status = ? ' +
+    "  AND (u.role = 'admin' OR u.expires_at IS NULL OR u.expires_at > NOW())",
     [sha256(t), 'active']
   );
   if (!rows[0]) return null;
@@ -2529,7 +2583,7 @@ async function listUsers() {
     SELECT u.id, u.username, u.role, u.status, u.company_name, u.tax_no, u.email, u.display_name, u.note,
            u.must_change_password, u.last_login_at, u.created_at, u.updated_at,
            u.qnh_refund_enabled, u.qnh_profit_enabled, u.product_enabled, u.market_enabled, u.billing_enabled,
-           u.replenish_enabled, u.price_enabled, u.brand_id, b.name AS brand_name,
+           u.replenish_enabled, u.price_enabled, u.brand_id, b.name AS brand_name, ${EXPIRY_COLS},
            (SELECT COUNT(*) FROM invoice_order o WHERE o.user_id = u.id)              AS order_count,
            (SELECT COUNT(DISTINCT o.seller_company) FROM invoice_order o WHERE o.user_id = u.id) AS company_count,
            (SELECT COUNT(*) FROM issued_invoice i WHERE i.user_id = u.id)             AS invoice_rows,
@@ -2556,6 +2610,10 @@ async function listUsers() {
     // 所属品牌方（商品数据按品牌方共享）
     brandId: Number(u.brand_id) || 1,
     brandName: u.brand_name || '',
+    // 使用期限（v0.2.97）：expiresAt=null 永久；expired=已到期；daysLeft=剩余天数（可为负）
+    expiresAt: u.role === 'admin' ? null : (u.expires_at_text || null),
+    expired: u.role === 'admin' ? false : Number(u.expired_flag) === 1,
+    daysLeft: (u.role === 'admin' || u.days_left == null) ? null : Number(u.days_left),
     lastLoginAt: u.last_login_at, createdAt: u.created_at, updatedAt: u.updated_at,
     orderCount: Number(u.order_count) || 0,
     companyCount: Number(u.company_count) || 0,
@@ -2585,7 +2643,7 @@ async function assertBrand(brandId) {
   return id;
 }
 
-async function createUser({ username, password, companyName, taxNo, email, role, displayName, note, brandId }, byUser) {
+async function createUser({ username, password, companyName, taxNo, email, role, displayName, note, brandId, expiresAt }, byUser) {
   // 账号 = 公司全称：前端只填一个「公司全称」字段，这里做兜底（未传 username 时直接取 companyName）
   const uname = String(username || companyName || '').trim();
   const cname = String(companyName || uname || '').trim();
@@ -2597,20 +2655,35 @@ async function createUser({ username, password, companyName, taxNo, email, role,
   const bid = await assertBrand(brandId);
   // 超级管理员是纯系统账号，不承载业务数据 → 不落开票抬头
   const isAdminRole = role === 'admin';
+  // 使用期限（v0.2.97）：不传 = 默认 1 个月；'permanent'/空 = 永久；'YYYY-MM-DD' = 当天 23:59:59
+  //   超级管理员是系统账号，一律永久，不接受外部传入。默认值交给 MySQL 的 DATE_ADD，
+  //   免得 1 月 31 日 + 1 个月在 JS 里溢出成 3 月 3 日（MySQL 会正确裁剪到 2 月末）。
+  const exp = parseExpiry(isAdminRole ? 'permanent' : expiresAt);
+  if (!exp.ok) throw new Error(exp.error);
+  const expSql = exp.value === undefined ? 'DATE_ADD(NOW(), INTERVAL 1 MONTH)' : '?';
+  const expArgs = exp.value === undefined ? [] : [exp.value];
   const r = await db.exec(
-    `INSERT INTO app_user (username, password_hash, role, status, company_name, tax_no, email, display_name, note, created_by, brand_id)
-     VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO app_user (username, password_hash, role, status, company_name, tax_no, email, display_name, note, created_by, brand_id, expires_at)
+     VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ${expSql})`,
     [uname, auth.hashPassword(password), isAdminRole ? 'admin' : 'user',
       isAdminRole ? null : (cname || null),
       isAdminRole ? null : (taxNo || null),
       isAdminRole ? null : (email || null),
-      displayName || null, note || null, byUser.id, bid]
+      displayName || null, note || null, byUser.id, bid, ...expArgs]
   );
   tenancy.ensureUserDirs(r.insertId);
-  return { ok: true, id: r.insertId, username: uname, brandId: bid };
+  const fresh = (await db.query(
+    `SELECT u.expires_at, ${EXPIRY_COLS} FROM app_user u WHERE u.id = ?`, [r.insertId]
+  ))[0] || {};
+  return {
+    ok: true, id: r.insertId, username: uname, brandId: bid,
+    expiresAt: isAdminRole ? null : (fresh.expires_at_text || null),
+    expired: false,
+    daysLeft: (isAdminRole || fresh.days_left == null) ? null : Number(fresh.days_left),
+  };
 }
 
-async function updateUser({ id, username, companyName, taxNo, email, role, displayName, note, brandId }) {
+async function updateUser({ id, username, companyName, taxNo, email, role, displayName, note, brandId, expiresAt }) {
   const rows = await db.query('SELECT * FROM app_user WHERE id = ?', [id]);
   if (!rows.length) throw new Error('用户不存在');
   const u = rows[0];
@@ -2639,17 +2712,25 @@ async function updateUser({ id, username, companyName, taxNo, email, role, displ
   const isAdminAccount = nextRole === 'admin';
   // 所属品牌方：传了就按传的改（校验存在），没传保持原值
   const nextBrand = brandId === undefined ? (Number(u.brand_id) || 1) : await assertBrand(brandId);
+  // 使用期限（v0.2.97）：undefined = 不改动；'permanent'/空 = 改永久；日期 = 当天 23:59:59
+  //   超级管理员恒为永久（避免把系统账号锁死）；改期后无需 token_version+1，
+  //   因为到期判断是每次请求实时查库，不是写进会话的。
+  const exp = parseExpiry(isAdminAccount ? 'permanent' : expiresAt);
+  if (!exp.ok) throw new Error(exp.error);
+  const nextExpires = exp.value === undefined ? (u.expires_at || null) : exp.value;
   await db.exec(
-    `UPDATE app_user SET username = ?, company_name = ?, tax_no = ?, email = ?, display_name = ?, note = ?, role = ?, brand_id = ? WHERE id = ?`,
+    `UPDATE app_user SET username = ?, company_name = ?, tax_no = ?, email = ?, display_name = ?, note = ?, role = ?, brand_id = ?, expires_at = ? WHERE id = ?`,
     [nextUsername,
       isAdminAccount ? null : (nextCompany || null),
       isAdminAccount ? null : (taxNo === undefined ? u.tax_no : (String(taxNo).trim() || null)),
       isAdminAccount ? null : (email === undefined ? u.email : (String(email).trim() || null)),
       displayName === undefined ? u.display_name : (String(displayName).trim() || null),
       note === undefined ? u.note : (String(note).trim() || null),
-      nextRole, nextBrand, id]
+      nextRole, nextBrand, nextExpires, id]
   );
-  return { ok: true, username: nextUsername, companyName: isAdminAccount ? '' : nextCompany, brandId: nextBrand };
+  return {
+    ok: true, username: nextUsername, companyName: isAdminAccount ? '' : nextCompany, brandId: nextBrand,
+  };
 }
 
 async function resetUserPassword({ id, password }) {
@@ -2742,13 +2823,22 @@ const server = http.createServer(async (req, res) => {
     if (method === 'POST' && p === '/api/auth/login') {
       const { username, password } = await readBody(req);
       if (!username || !password) return sendJson(res, 400, { error: '请输入账号与密码' });
-      const rows = await db.query('SELECT * FROM app_user WHERE username = ?', [String(username).trim()]);
+      const rows = await db.query(
+        `SELECT u.*, ${EXPIRY_COLS} FROM app_user u WHERE u.username = ?`,
+        [String(username).trim()]
+      );
       const u = rows[0];
       // 统一错误提示，避免暴露账号是否存在
       if (!u || !auth.verifyPassword(password, u.password_hash)) {
         return sendJson(res, 401, { error: '账号或密码错误' });
       }
       if (u.status !== 'active') return sendJson(res, 403, { error: '账号已被禁用，请联系管理员' });
+      // 使用期限（v0.2.97）：到期账号直接拒绝登录，不签发会话
+      if (isExpiredUser(u)) {
+        return sendJson(res, 403, {
+          error: expiredMessage(u), code: 'ACCOUNT_EXPIRED', expiresAt: u.expires_at_text || null,
+        });
+      }
       auth.setSessionCookie(res, auth.createSessionToken(u), req);
       await db.exec('UPDATE app_user SET last_login_at = NOW() WHERE id = ?', [u.id]);
       return sendJson(res, 200, { user: publicUser(u) });
@@ -2945,6 +3035,16 @@ const server = http.createServer(async (req, res) => {
     // ── 以下接口都需要登录 ──
     const user = await currentUser(req);
     if (!user) return sendJson(res, 401, { error: '登录已失效，请重新登录' });
+    // ── 使用期限（v0.2.97）：到期账号一律拒绝，且把到期日明说，避免用户以为系统坏了 ──
+    //    注意位置：这里在 /api/auth/{login,logout,me,password} 之后，
+    //    所以到期账号仍能正常拿到 me（看得到到期原因）并正常退出登录。
+    if (isExpiredUser(user)) {
+      return sendJson(res, 403, {
+        error: expiredMessage(user),
+        code: 'ACCOUNT_EXPIRED',
+        expiresAt: user.expires_at_text || null,
+      });
+    }
     const tenantId = tenantOf(req, url, user);
     const isAdmin = user.role === 'admin';
     const writeGuard = () => assertWritable(user, tenantId);
@@ -5556,6 +5656,36 @@ const server = http.createServer(async (req, res) => {
       }
       if (method === 'POST' && p === '/api/admin/users/status') {
         return sendJson(res, 200, await setUserStatus(await readBody(req), user));
+      }
+      // 使用期限续期（v0.2.97）：从「原到期日」与「现在」里较晚的那个往后续 N 个月，
+      //   避免客户提前付款后被吃掉剩余天数；永久账号无需续期，原样返回。
+      if (method === 'POST' && p === '/api/admin/users/extend') {
+        const b = await readBody(req);
+        const id = Number(b.id);
+        const months = Number(b.months) || 1;
+        if (!id) return sendJson(res, 400, { error: '缺少用户ID' });
+        if (months < 1 || months > 120) return sendJson(res, 400, { error: '续期月数需在 1~120 之间' });
+        const rows = await db.query('SELECT id, username, role, expires_at FROM app_user WHERE id = ?', [id]);
+        if (!rows.length) return sendJson(res, 404, { error: '用户不存在' });
+        if (rows[0].role === 'admin') {
+          return sendJson(res, 400, { error: '超级管理员永久有效，无需续期' });
+        }
+        if (!rows[0].expires_at) {
+          return sendJson(res, 200, { ok: true, id, permanent: true, message: '该账号为永久有效，无需续期' });
+        }
+        await db.exec(
+          'UPDATE app_user SET expires_at = DATE_ADD(GREATEST(expires_at, NOW()), INTERVAL ? MONTH) WHERE id = ?',
+          [months, id]
+        );
+        const fresh = (await db.query(
+          `SELECT ${EXPIRY_COLS} FROM app_user u WHERE u.id = ?`, [id]
+        ))[0] || {};
+        await logOp(user, 'user.extend', { username: rows[0].username, months, expiresAt: fresh.expires_at_text });
+        return sendJson(res, 200, {
+          ok: true, id, months,
+          expiresAt: fresh.expires_at_text || null,
+          daysLeft: fresh.days_left == null ? null : Number(fresh.days_left),
+        });
       }
       if (method === 'POST' && p === '/api/admin/users/delete') {
         return sendJson(res, 200, await deleteUser(await readBody(req), user));
