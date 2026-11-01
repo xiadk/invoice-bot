@@ -988,13 +988,34 @@
       <div v-show="page === 'replenish'" id="page-replenish">
         <div class="page-bar">
           <span class="pb-info">
-            补货参考 · 按导入批次展示商品；齐货通价 / 阿发价实时取自对应平台
+            <template v-if="rp.batchId">补货参考 · 只显示本次导入文件里的商品</template>
+            <template v-else>品牌方商品 · 默认展示当前品牌方全部商品（可按 SKU / 名称 / 采购状态筛选）</template>
           </span>
           <span class="pb-actions">
+            <el-button v-if="rp.batchId" size="small" @click="showAllProducts">查看品牌方全部商品</el-button>
             <el-button size="small" type="primary" :disabled="readonly"
                        title="上传「前置仓补货参考批量导出」Excel（重复商品按本次文件内容更新）"
                        @click="openUpload('products')">导入补货参考文件</el-button>
           </span>
+        </div>
+        <!-- 筛选条：商品SKU/名称 + 采购状态（+ 超管品牌方）；下面的「自动匹配 / 重新取价」都只作用于这里筛出来的结果 -->
+        <div class="filter-bar">
+          <el-select v-if="isAdmin && !rp.batchId" v-model="rp.brand" size="small" style="width:170px" @change="searchRp">
+            <el-option label="全部品牌方" value=""></el-option>
+            <el-option v-for="s in rp.brandStats" :key="s.brand_id"
+                       :label="(s.brand_name || ('品牌#' + s.brand_id)) + '（' + s.n + '）'" :value="String(s.brand_id)"></el-option>
+          </el-select>
+          <el-input v-model="rp.draftQ" size="small" clearable placeholder="搜商品SKU / 商品名称" style="width:230px"
+                    @keyup.enter.native="searchRp" @clear="searchRp"></el-input>
+          <el-select v-model="rp.status" size="small" style="width:140px" @change="searchRp">
+            <el-option label="全部采购状态" value=""></el-option>
+            <el-option label="正常采购" value="正常采购"></el-option>
+            <el-option label="停止采购" value="停止采购"></el-option>
+          </el-select>
+          <el-button size="small" type="primary" plain :loading="rp.loading" @click="searchRp">查询</el-button>
+          <el-button size="small" @click="resetRpFilter">重置</el-button>
+          <span class="fb-spacer"></span>
+          <span class="loginid">共 {{ rp.total }} 个商品 · 当前筛选货值 {{ yuan(rp.filteredValue) }}</span>
         </div>
           <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px">
             <el-alert type="info" :closable="false" show-icon style="flex:1;min-width:340px"
@@ -1005,23 +1026,27 @@
             </el-tag>
             <el-button size="small" :type="rp.session.configured ? 'danger' : 'primary'"
                        @click="onQhtBtn">{{ rp.session.configured ? '退出齐货通' : '登录齐货通' }}</el-button>
-            <el-button size="small" :loading="rp.pricing" @click="loadQhtPrices">重新取价</el-button>
+            <el-button size="small" :loading="rp.pricing" @click="refreshRpPrices('qht')"
+                       title="对当前筛选出来的全部商品重新取价（不是全量）">重新取价</el-button>
             <el-tag size="small" :type="rp.afaSession.configured ? 'success' : 'info'">
               阿发Token：{{ rp.afaSession.configured ? ('已配置 ' + rp.afaSession.tokenMasked) : '未配置（取价/加购用不了）' }}
             </el-tag>
             <el-button size="small" :type="rp.afaSession.configured ? 'danger' : 'primary'"
                        @click="onAfaBtn">{{ rp.afaSession.configured ? '清除阿发Token' : '配置阿发Token' }}</el-button>
             <el-button size="small" type="warning" plain :loading="rpMatch.loading" @click="openAutoMatch"
-                       title="用商品名称原样搜索城配速达，直接取搜索结果第一条关联；关联错了可修改或解除">自动匹配阿发</el-button>
-            <el-button size="small" :loading="rp.afaPricing" @click="loadAfaPrices">阿发重新取价</el-button>
+                       title="用商品名称原样搜索城配速达，直接取搜索结果第一条关联；只对当前筛选出来的商品生效">自动匹配阿发</el-button>
+            <el-button size="small" :loading="rp.afaPricing" @click="refreshRpPrices('afa')"
+                       title="对当前筛选出来的全部商品重新取阿发价（不是全量）">阿发重新取价</el-button>
             <span class="loginid">共 {{ rp.total }} 个商品</span>
             <span v-if="rp.expect && rp.total < rp.expect" style="font-size:12px;color:#e6a23c">
               本次导入 {{ rp.expect }} 个，当前筛出 {{ rp.total }} 个（同名 SKU 已合并）
-              <el-button type="text" size="mini" @click="showAllProducts">查看全部商品</el-button>
             </span>
           </div>
           <el-table :data="rp.rows" size="small" border :max-height="tblH.rp" class="rp-table" style="width:100%" v-loading="rp.loading"
-                    empty-text="本次导入没有商品">
+                    empty-text="暂无商品（品牌方商品需超级管理员点「商品同步」拉取；导入文件后只显示文件里的商品）">
+            <el-table-column v-if="isAdmin && !rp.batchId" label="品牌方" width="110">
+              <template slot-scope="p"><span class="loginid">{{ p.row.brand_name || ('#' + p.row.brand_id) }}</span></template>
+            </el-table-column>
             <el-table-column label="商品图片" width="64">
               <template slot-scope="p">
                 <img v-if="p.row.image_url" :src="p.row.image_url" :alt="p.row.goods_name"
@@ -1035,6 +1060,13 @@
             </el-table-column>
             <el-table-column label="商品SKU" width="150">
               <template slot-scope="p"><span class="loginid" style="font-family:Consolas,monospace">{{ p.row.sku }}</span></template>
+            </el-table-column>
+            <el-table-column label="采购状态" width="100">
+              <template slot-scope="p">
+                <el-tag v-if="p.row.purchase_status" size="mini"
+                        :type="p.row.purchase_status === '正常采购' ? 'success' : 'info'">{{ p.row.purchase_status }}</el-tag>
+                <span v-else class="loginid">—</span>
+              </template>
             </el-table-column>
             <el-table-column label="采购价" width="80">
               <template slot-scope="p"><span class="amount">{{ yuan(p.row.purchase_price) }}</span></template>
@@ -1105,7 +1137,7 @@
             </el-table-column>
             <el-table-column prop="available_stock" label="可用库存" width="80"></el-table-column>
             <el-table-column prop="transit_stock" label="在途库存" width="80"></el-table-column>
-            <el-table-column prop="suggest_qty" label="建议量" width="80"></el-table-column>
+            <el-table-column v-if="rp.batchId" prop="suggest_qty" label="建议量" width="80"></el-table-column>
           </el-table>
           <div class="pager-wrap">
             <el-pagination background layout="total, sizes, prev, pager, next" :total="rp.total" :page-size="rp.size"
@@ -3404,7 +3436,10 @@ const vm = new Vue({
       },
       // 补货界面（导入完成后进入）+ 关联的齐货通弹窗
       // 补货默认 20 条/页（页码可翻）；页大小可切 20/50/100/全部(2000)
-      rp: { visible: false, loading: false, pricing: false, afaPricing: false, batchId: null, rows: [], prices: {}, afaPrices: {}, total: 0, page: 1, size: 20, expect: 0, session: { configured: false, tokenMasked: '', xUser: '' }, afaSession: { configured: false, tokenMasked: '', storeId: '', appId: '' } },
+      rp: { visible: false, loading: false, pricing: false, afaPricing: false, batchId: null, rows: [], prices: {}, afaPrices: {}, total: 0, page: 1, size: 20, expect: 0, filteredValue: 0,
+            // 筛选（v0.2.92）：默认展示当前品牌方全部商品；draftQ 是输入框，q 是「已生效」的关键词
+            draftQ: '', q: '', status: '', brand: '', brandStats: [],
+            session: { configured: false, tokenMasked: '', xUser: '' }, afaSession: { configured: false, tokenMasked: '', storeId: '', appId: '' } },
       // 弹窗表格高度按视口动态算（写死 vh 在小屏笔记本上会把弹窗撑出屏幕）
       tblH: { rp: 500, link: 320 },
       rpLink: { visible: false, sku: '', keyword: '', rows: [], loading: false, error: '', picked: null, total: 0, page: 1, size: 20 },
@@ -4068,6 +4103,12 @@ const vm = new Vue({
       if (p === 'refund') this.$nextTick(() => this.renderRefundTrend());
       if (p === 'profit') this.$nextTick(() => this.renderProfitTrend());
       if (p === 'product') { this.loadProducts(); }
+      if (p === 'replenish') {
+        // v0.2.92：从菜单进入补货页也要主动加载（之前这里没有分支，首次进来是空表）。
+        // openReplenish() 自己会拉数据，用标记跳过这一次，避免重复请求。
+        if (this._rpSkipWatch) this._rpSkipWatch = false;
+        else this.searchRp();
+      }
       if (p === 'market') this.loadMarket();
       if (p === 'billing') this.loadBilling();
       if (p === 'sdc') { this.clearSdcPicked(); this.loadSdcStatus(); this.loadSdcOrders(); }
@@ -6933,8 +6974,9 @@ const vm = new Vue({
       } catch (e) { this.$message.error('发布失败：' + e.message); }
       finally { p.saving = false; }
     },
-    // ══════ 补货界面（导入完成后进入，现为独立菜单页）══════
+    // ══════ 补货界面（独立菜单页：默认品牌方商品，导入后只看文件商品）══════
     async openReplenish(batchId, expectTotal) {
+      this._rpSkipWatch = true;   // 下面自己加载，别让 watch.page 再拉一次
       this.page = 'replenish';
       this.rp.batchId = batchId || null;
       this.rp.rows = [];
@@ -6944,19 +6986,58 @@ const vm = new Vue({
       this.rp.page = 1;
       this.rp.size = 20; // 默认 20 条/页，页码可翻；要一次看全在分页器里选「2000」
       this.rp.expect = Number(expectTotal) || 0;
+      // 换了数据集（新导入文件 / 从菜单进入）就把筛选清掉，否则会莫名其妙筛不到东西
+      this.rp.q = '';
+      this.rp.draftQ = '';
+      this.rp.status = '';
       await Promise.all([this.loadReplenish(), this.loadQhtSession(), this.loadAfaSession()]);
       await this.loadQhtPrices();
       await this.loadAfaPrices();
+      this._rpSkipWatch = false;
     },
-    /** 本次导入的商品（按 batch 精确取；没有 batchId 时取最近更新的）— 服务端分页，避免一次拉不全 */
+    /** 「自动匹配 / 重新取价」的筛选条件：与列表用同一份，保证只作用于当前筛出来的商品 */
+    rpFilterParams(withPage) {
+      const p = new URLSearchParams();
+      if (this.rp.q) p.set('q', this.rp.q);
+      if (this.rp.status) p.set('status', this.rp.status);
+      if (this.rp.batchId) p.set('batch', this.rp.batchId);
+      // 品牌方只有超管能选；普通用户服务端固定按自己品牌过滤
+      if (this.isAdmin && this.rp.brand) p.set('brand', this.rp.brand);
+      if (withPage) { p.set('page', String(this.rp.page)); p.set('size', String(this.rp.size)); }
+      return p;
+    },
+    /** 把输入框里的关键词生效（并顺手重拉列表），让「自动匹配 / 取价」和列表永远同一范围 */
+    async syncRpKeyword() {
+      const typed = String(this.rp.draftQ || '').trim();
+      if (typed === this.rp.q) return;
+      this.rp.q = typed;
+      this.rp.page = 1;
+      await this.loadReplenish();
+    },
+    /** 点查询/回车/切状态：把输入框的关键词生效，回到第 1 页重拉 */
+    async searchRp() {
+      this.rp.q = String(this.rp.draftQ || '').trim();
+      this.rp.page = 1;
+      await this.loadReplenish();
+      await this.loadQhtPrices();
+      await this.loadAfaPrices();
+    },
+    async resetRpFilter() {
+      this.rp.draftQ = ''; this.rp.q = ''; this.rp.status = ''; this.rp.brand = '';
+      this.rp.page = 1;
+      await this.loadReplenish();
+      await this.loadQhtPrices();
+      await this.loadAfaPrices();
+    },
+    /** 当前列表数据（品牌方商品 / 本次导入文件里的商品）— 服务端分页，筛选条件与按钮共用 */
     async loadReplenish() {
       this.rp.loading = true;
       try {
-        const q = new URLSearchParams({ page: String(this.rp.page), size: String(this.rp.size) });
-        if (this.rp.batchId) q.set('batch', this.rp.batchId);
-        const d = await this.api('/api/products?' + q.toString());
+        const d = await this.api('/api/products?' + this.rpFilterParams(true).toString());
         this.rp.rows = d.rows || [];
         this.rp.total = Number(d.total) || 0;
+        this.rp.filteredValue = Number(d.filteredValue) || 0;
+        if (d.brandStats) this.rp.brandStats = d.brandStats;
         // 页码越界（改大每页条数、或数据变少）时回正重拉
         const maxPage = Math.max(1, Math.ceil(this.rp.total / this.rp.size));
         if (this.rp.page > maxPage) { this.rp.page = maxPage; await this.loadReplenish(); }
@@ -6965,32 +7046,74 @@ const vm = new Vue({
     },
     async onRpSize(v) { this.rp.size = v; this.rp.page = 1; await this.loadReplenish(); await this.loadQhtPrices(); await this.loadAfaPrices(); },
     async onRpPage(v) { this.rp.page = v; await this.loadReplenish(); await this.loadQhtPrices(); await this.loadAfaPrices(); },
-    /** 批次筛出的数量少于本次导入时：去掉批次条件，看全部商品 */
+    /** 去掉批次条件，看品牌方全部商品 */
     async showAllProducts() {
       this.rp.batchId = null; this.rp.expect = 0; this.rp.page = 1;
       await this.loadReplenish();
       await this.loadQhtPrices();
       await this.loadAfaPrices();
     },
+    /**
+     * 重新取价（v0.2.92）：作用于**当前筛选出来的全部商品**（跨页），不是全量、也不是只有当前页。
+     * 先向 /api/products/targets 要 id 列表（与列表共用同一份 WHERE），再批量取价。
+     */
+    async refreshRpPrices(kind) {
+      const isAfa = kind === 'afa';
+      const btn = isAfa ? 'afaPricing' : 'pricing';
+      const label = isAfa ? '阿发' : '齐货通';
+      if (this.rp[btn]) return;
+      // 取价前先把输入框里的关键词生效并刷新列表，避免「搜了没点查询」导致范围对不上
+      await this.syncRpKeyword();
+      let d;
+      try {
+        d = await this.api('/api/products/targets?' + this.rpFilterParams(false).toString());
+      } catch (e) { this.$message.error('取价范围查询失败: ' + e.message); return; }
+      if (!d || d.error) { this.$message.error((d && d.error) || '取价范围查询失败'); return; }
+      const ids = (isAfa ? d.afaIds : d.qhtIds) || [];
+      if (!ids.length) {
+        this.$message.info(`当前筛选的 ${d.total || 0} 个商品里，没有已关联${label}的商品`);
+        return;
+      }
+      if (d.truncated) this.$message.warning(`当前筛选结果超过 ${d.cap} 个，本次只取前 ${d.cap} 个商品的价格`);
+      if (ids.length > 60) {
+        try {
+          await this.$confirm(
+            `将对当前筛选出来的 <b>${ids.length}</b> 个已关联${label}的商品重新取价（约 ${Math.ceil(ids.length / 5) * 1}~${Math.ceil(ids.length / 5) * 3} 秒）。<br>`
+            + '只处理当前筛选结果，不会动其它商品。',
+            `${label}重新取价`, { dangerouslyUseHTMLString: true, confirmButtonText: '开始取价', cancelButtonText: '取消', type: 'warning' }
+          );
+        } catch (e) { return; }
+      }
+      const pseudo = ids.map((id) => (isAfa ? { afa_goods_id: id } : { qht_goods_id: id }));
+      if (isAfa) await this.loadAfaPrices(pseudo); else await this.loadQhtPrices(pseudo);
+    },
     async loadQhtSession() {
       try { this.rp.session = await this.api('/api/qht/session'); } catch (e) { /* 静默：状态提示而已 */ }
     },
-    /** 批量实时取齐货通价（只查列表里已关联的商品）；rows 传入时按该批行取（商品列表页用） */
+    /** 批量实时收取齐货通价（只查列表里已关联的商品）；rows 传入时按该批行取（商品列表页/按筛选取价） */
     async loadQhtPrices(rows) {
       const src = Array.isArray(rows) ? rows : (this.rp.rows || []);
       const ids = [...new Set(src.map((r) => r.qht_goods_id).filter(Boolean))];
       if (!ids.length) { if (!Array.isArray(rows)) this.rp.prices = {}; return; }
       this.rp.pricing = true;
       try {
-        const d = await this.api('/api/qht/prices?ids=' + encodeURIComponent(ids.join(',')));
-        if (d.error) {
+        // 按 200 个一批请求：一次筛选可能上千个商品，全塞进 URL 会超长被拒
+        const acc = {};
+        let err = null;
+        for (let i = 0; i < ids.length; i += 200) {
+          const part = ids.slice(i, i + 200);
+          const d = await this.api('/api/qht/prices?ids=' + encodeURIComponent(part.join(',')));
+          if (d.error) { err = d; break; }
+          Object.assign(acc, d.prices || {});
+        }
+        if (err) {
           if (!Array.isArray(rows)) this.rp.prices = {};
-          this.$message.warning('取价失败：' + d.error
-            + ((d.code === 'no_session' || d.code === 'auth') ? '（点右上角「登录态设置」重新粘贴）' : ''));
+          this.$message.warning('取价失败：' + err.error
+            + ((err.code === 'no_session' || err.code === 'auth') ? '（点右上角「登录态设置」重新粘贴）' : ''));
           return;
         }
         // 合并而不是替换：补货页和商品列表共用一份「goodsId → 价格」缓存
-        this.rp.prices = Object.assign({}, this.rp.prices, d.prices || {});
+        this.rp.prices = Object.assign({}, this.rp.prices, acc);
       } catch (e) { this.$message.error('取价请求失败: ' + e.message); }
       finally { this.rp.pricing = false; }
     },
@@ -7076,21 +7199,29 @@ const vm = new Vue({
     async loadAfaSession() {
       try { this.rp.afaSession = await this.api('/api/afa/session'); } catch (e) { /* 静默：状态提示而已 */ }
     },
-    /** 批量实时取城配速达价（只查列表里已关联的商品）；rows 传入时按该批行取（商品列表页用） */
+    /** 批量实时取城配速达价（只查列表里已关联的商品）；rows 传入时按该批行取（商品列表页/按筛选取价） */
     async loadAfaPrices(rows) {
       const src = Array.isArray(rows) ? rows : (this.rp.rows || []);
       const ids = [...new Set(src.map((r) => r.afa_goods_id).filter(Boolean))];
       if (!ids.length) { if (!Array.isArray(rows)) this.rp.afaPrices = {}; return; }
       this.rp.afaPricing = true;
       try {
-        const d = await this.api('/api/afa/prices?ids=' + encodeURIComponent(ids.join(',')));
-        if (d.error) {
+        // 按 200 个一批请求：一次筛选可能上千个商品，全塞进 URL 会超长被拒
+        const acc = {};
+        let err = null;
+        for (let i = 0; i < ids.length; i += 200) {
+          const part = ids.slice(i, i + 200);
+          const d = await this.api('/api/afa/prices?ids=' + encodeURIComponent(part.join(',')));
+          if (d.error) { err = d; break; }
+          Object.assign(acc, d.prices || {});
+        }
+        if (err) {
           if (!Array.isArray(rows)) this.rp.afaPrices = {};
-          this.$message.warning('阿发取价失败：' + d.error
-            + ((d.code === 'no_session' || d.code === 'auth') ? '（点「配置阿发Token」重新粘贴）' : ''));
+          this.$message.warning('阿发取价失败：' + err.error
+            + ((err.code === 'no_session' || err.code === 'auth') ? '（点「配置阿发Token」重新粘贴）' : ''));
           return;
         }
-        this.rp.afaPrices = Object.assign({}, this.rp.afaPrices, d.prices || {});
+        this.rp.afaPrices = Object.assign({}, this.rp.afaPrices, acc);
       } catch (e) { this.$message.error('阿发取价请求失败: ' + e.message); }
       finally { this.rp.afaPricing = false; }
     },
@@ -7155,13 +7286,20 @@ const vm = new Vue({
     // ══════ 自动匹配（按商品名称搜索 → 取第一条直接关联）══════
     /** 入口：先讲清规则并确认，再按名称搜索 + 关联第一条 */
     async openAutoMatch() {
+      // 先把输入框里的关键词生效并刷新列表，保证「弹框说的范围」和「列表显示的范围」一致
+      await this.syncRpKeyword();
       try {
         await this.$confirm(
           '<div style="line-height:1.9;font-size:13px">'
-          + '会把补货表里<b>还没关联阿发</b>的商品，用<b>商品名称原样</b>去城配速达搜索，'
-          + '<b>直接取搜索结果的第一条建立关联</b>。<br><br>'
-          + '不做任何筛选或打分：名称搜不到就留空（记「没找到」），需要手工点「修改」去关联。<br>'
-          + '已关联的商品不会被覆盖。关联错了可以在结果里点<b>「修改」</b>换一个，或<b>「删除关联」</b>清空重来。'
+          + '只处理<b>当前筛选出来的商品</b>（'
+          + (this.rp.batchId ? '本次导入文件的商品' : '当前品牌方商品')
+          + (this.rp.q ? '，关键词「' + this.esc(this.rp.q) + '」' : '')
+          + (this.rp.status ? '，采购状态「' + this.rp.status + '」' : '')
+          + (this.isAdmin && this.rp.brand ? '，品牌方已限定' : '')
+          + '），共 <b>' + (this.rp.total || 0) + '</b> 个；<b>不会动筛选范围之外的商品</b>。<br><br>'
+          + '其中<b>还没关联阿发</b>的商品会用<b>商品名称原样</b>去城配速达搜索，'
+          + '<b>直接取搜索结果第一条建立关联</b>；搜不到就留空，需要手工点「修改」去关联。<br>'
+          + '已关联的商品不会被覆盖。关联错了可以点<b>「修改」</b>换一个，或<b>「删除关联」</b>清空重来。'
           + '</div>',
           '自动匹配阿发商品',
           { dangerouslyUseHTMLString: true, confirmButtonText: '开始匹配并关联', cancelButtonText: '取消', type: 'warning' }
@@ -7170,17 +7308,23 @@ const vm = new Vue({
       this.rpMatch.visible = true;
       await this.runAutoMatch(true);
     },
-    /** 执行匹配；apply=true 直接把第一条写库 */
+    /** 执行匹配；apply=true 直接把第一条写库。范围 = 当前筛选（q/status/batch/brand） */
     async runAutoMatch(apply) {
       this.rpMatch.loading = true;
       this.rpMatch.items = [];
-      this.rpMatch.message = '正在用商品名称搜索城配速达并关联第一条（每个商品搜一次）…';
+      this.rpMatch.message = '正在对当前筛选出来的商品搜索城配速达并关联第一条（每个商品搜一次）…';
       try {
         const d = await this.api('/api/products/auto-match', {
           method: 'POST', headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ batch: this.rp.batchId || undefined, apply: apply !== false }),
+          body: JSON.stringify({
+            q: this.rp.q || undefined,
+            status: this.rp.status || undefined,
+            batch: this.rp.batchId || undefined,
+            brand: (this.isAdmin && this.rp.brand) ? this.rp.brand : undefined,
+            apply: apply !== false,
+          }),
         });
-        if (d.error) { this.rpMatch.message = '匹配失败：' + d.error; return; }
+        if (!d || d.error) { this.rpMatch.message = '匹配失败：' + ((d && d.error) || '未知错误'); return; }
         this.rpMatch.items = d.items || [];
         this.rpMatch.message = d.message || '';
         if (apply !== false) {

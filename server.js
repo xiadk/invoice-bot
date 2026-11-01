@@ -387,6 +387,77 @@ async function brandIdOfUser(userId) {
   return Number(rows[0] && rows[0].brand_id) || 1;
 }
 
+/** 品牌范围：POST 接口没有 URL 参数，用 body.brand 走与 brandOf 相同的规则 */
+function brandFromBody(user, body) {
+  const own = Number(user.brand_id) || 1;
+  if (user.role !== 'admin') return { brandId: own, all: false };
+  const raw = body && body.brand;
+  if (raw === undefined || raw === null || String(raw).trim() === '') return { brandId: 0, all: true };
+  const n = Number(raw);
+  return Number.isInteger(n) && n > 0 ? { brandId: n, all: false } : { brandId: 0, all: true };
+}
+
+/**
+ * 商品查询范围（v0.2.92）：「补货页」「商品列表」「自动匹配阿发」「取价目标」必须共用这一份 WHERE。
+ * 起因：v0.2.91 的自动匹配只按 user_id/batch 取数，页面筛选了却照样动全量，
+ * 和账单那次「统计与明细口径不一致」是同一类坑，所以把范围表达式收在一处。
+ *
+ * 两种数据集：
+ *   · 带 batch（补货页——只看某次导入文件里的商品）：行主表 product_item（文件行，个人隔离），
+ *     LEFT JOIN 品牌商品补齐价格/库存/状态/图/关联；文件里有、品牌库还没同步到的 SKU 也会显示。
+ *   · 不带 batch（补货页默认 / 商品列表）：行主表 brand_product（同品牌共享）。
+ * @param {{tenantId:number, brandId:number, all:boolean, q?:string, status?:string, batch?:string}} o
+ */
+function productScope(o) {
+  const file = !!(o.batch && String(o.batch).trim());
+  const q = String(o.q || '').trim();
+  const status = String(o.status || '').trim();
+  const args = [];
+  if (file) {
+    const statusExpr = "COALESCE(NULLIF(bp.purchase_status, ''), pi.purchase_status)";
+    let where = 'WHERE pi.user_id = ? AND pi.batch_id = ? ';
+    args.push(o.tenantId, String(o.batch).trim());
+    if (q) { where += 'AND (pi.sku LIKE ? OR pi.goods_name LIKE ?) '; args.push(`%${q}%`, `%${q}%`); }
+    if (status) { where += `AND ${statusExpr} = ? `; args.push(status); }
+    return {
+      file: true, where, args,
+      from: 'product_item pi LEFT JOIN brand_product bp ON bp.brand_id = pi.brand_id AND bp.sku = pi.sku',
+      order: 'pi.id DESC',
+      idExpr: 'pi.id', skuExpr: 'pi.sku', nameExpr: 'pi.goods_name', brandExpr: 'pi.brand_id',
+      priceExpr: 'COALESCE(bp.purchase_price, pi.purchase_price)',
+      availExpr: 'COALESCE(bp.available_stock, pi.available_stock)',
+      transitExpr: 'COALESCE(bp.transit_stock, pi.transit_stock)',
+      salesExpr: 'COALESCE(bp.sales_30d, pi.sales_30d)',
+      statusExpr, statusCodeExpr: 'bp.purchase_status_code',
+      imageExpr: "COALESCE(NULLIF(pi.image_url, ''), bp.image_url)",
+      qhtExpr: 'COALESCE(pi.qht_goods_id, bp.qht_goods_id)',
+      afaExpr: 'COALESCE(pi.afa_goods_id, bp.afa_goods_id)',
+      localExpr: 'COALESCE(pi.local_price, bp.local_price)',
+      bpIdExpr: 'bp.id', suggestExpr: 'pi.suggest_qty', fileExpr: 'pi.source_file', batchExpr: 'pi.batch_id',
+    };
+  }
+  let where = 'WHERE 1=1 ';
+  if (!o.all) { where += 'AND bp.brand_id = ? '; args.push(o.brandId); }
+  if (q) { where += 'AND (bp.sku LIKE ? OR bp.goods_name LIKE ?) '; args.push(`%${q}%`, `%${q}%`); }
+  if (status) { where += 'AND bp.purchase_status = ? '; args.push(status); }
+  return {
+    file: false, where, args,
+    from: 'brand_product bp LEFT JOIN brand b ON b.id = bp.brand_id',
+    order: 'bp.updated_at DESC, bp.id DESC',
+    idExpr: 'bp.id', skuExpr: 'bp.sku', nameExpr: 'bp.goods_name', brandExpr: 'bp.brand_id',
+    priceExpr: 'bp.purchase_price',
+    availExpr: 'bp.available_stock',
+    transitExpr: 'bp.transit_stock',
+    salesExpr: 'bp.sales_30d',
+    statusExpr: 'bp.purchase_status', statusCodeExpr: 'bp.purchase_status_code',
+    imageExpr: 'bp.image_url',
+    qhtExpr: 'bp.qht_goods_id',
+    afaExpr: 'bp.afa_goods_id',
+    localExpr: 'bp.local_price',
+    bpIdExpr: 'bp.id', suggestExpr: 'NULL', fileExpr: 'NULL', batchExpr: 'NULL',
+  };
+}
+
 /**
  * 写入商品关联（齐货通/阿发/本地价）。
  * v0.2.87 起统一以「品牌商品」为主：商品列表读的是 brand_product，写 product_item 永远读不出来。
@@ -414,6 +485,9 @@ function linkBrandId(user, body) {
 }
 
 const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** 自动匹配阿发单次上限：每个商品要真搜一次（限速 250ms），再大就会把对方接口打挂 */
+const MATCH_MAX_PER_RUN = 500;
 
 /** 写操作只允许作用于自己的数据（管理员查看他人为只读） */
 function assertWritable(user, tenantId) {
@@ -3561,10 +3635,11 @@ const server = http.createServer(async (req, res) => {
       writeGuard(); return sendJson(res, 200, await ignoreMapping(user.id, body));
     }
 
-    // ── 商品列表 ── 所有登录用户可用（菜单不做逐用户授权）
-    //   两种数据源：
-    //     · 带 batch：补货页 / 个人导入的 product_item（个人隔离），主图按「品牌+SKU」从品牌商品补
-    //     · 不带 batch：商品列表页 / 品牌商品 brand_product（同品牌全员共享；超管默认看全部品牌）
+    // ── 商品 / 补货列表 ── 所有登录用户可用（菜单不做逐用户授权）
+    //   两种数据集（范围统一由 productScope 给出，自动匹配阿发 / 取价目标也用同一份 WHERE）：
+    //     · 不带 batch：品牌商品 brand_product —— 补货页默认就是「当前用户品牌方的全部商品」，商品列表页同源
+    //     · 带 batch：本次导入文件里的商品 —— product_item 作行主表，LEFT JOIN 品牌商品补价格/库存/状态/图
+    //   q = 商品SKU/名称关键词，status = 采购状态（正常采购/停止采购），brand = 品牌方（仅超管，空=全部）
     if (method === 'GET' && p === '/api/products') {
       if (!canProduct) return denyProduct();
       const page = Math.max(1, Number(url.searchParams.get('page')) || 1);
@@ -3572,96 +3647,58 @@ const server = http.createServer(async (req, res) => {
       const size = Math.min(2000, Math.max(1, Number(url.searchParams.get('size')) || 20));
       const q = (url.searchParams.get('q') || '').trim();
       const status = (url.searchParams.get('status') || '').trim();
-      const sort = (url.searchParams.get('sort') || '') === 'price_asc' ? 'price_asc'
-        : (url.searchParams.get('sort') || '') === 'price_desc' ? 'price_desc' : '';
-      const batch = (url.searchParams.get('batch') || '').trim(); // 补货界面：只取某次导入的商品
-      const order = sort === 'price_asc' ? 'purchase_price ASC, id ASC'
-        : sort === 'price_desc' ? 'purchase_price DESC, id DESC'
-        : 'updated_at DESC, id DESC';
+      const sortRaw = url.searchParams.get('sort') || '';
+      const batch = (url.searchParams.get('batch') || '').trim(); // 补货页：只看某次导入文件里的商品
+      const bo = brandOf(req, url, user);
+      const sc = productScope({ tenantId, brandId: bo.brandId, all: bo.all, q, status, batch });
+      const orderSql = sortRaw === 'price_asc' ? `${sc.priceExpr} ASC, ${sc.idExpr} ASC`
+        : sortRaw === 'price_desc' ? `${sc.priceExpr} DESC, ${sc.idExpr} DESC`
+          : sc.order;
       const latest = await db.query(
         'SELECT id, source_file, item_count, total_value, imported_at FROM product_import_batch WHERE user_id = ? ORDER BY imported_at DESC, id DESC LIMIT 1', [tenantId]
       );
-
-      // ① 补货页：个人导入的补货参考（按 batch 过滤）。主图优先用自己那一行，没有则按品牌商品补同 SKU 的图。
-      if (batch) {
-        const w = (q ? 'AND (pi.sku LIKE ? OR pi.goods_name LIKE ?) ' : '')
-          + (status ? 'AND pi.purchase_status = ? ' : '')
-          + 'AND pi.batch_id = ? ';
-        const args = [];
-        if (q) args.push(`%${q}%`, `%${q}%`);
-        if (status) args.push(status);
-        args.push(batch);
-        // 品牌商品 JOIN 一律用「导入时记的品牌」，不再按超管当前筛选拼条件：
-        // 超管看全部品牌时不带品牌条件会把同 SKU 的多品牌行 JOIN 成重复行。
-        const brandJoin = 'LEFT JOIN brand_product bp ON bp.brand_id = pi.brand_id AND bp.sku = pi.sku';
-        const totalR = await db.query(`SELECT COUNT(*) AS n FROM product_item pi WHERE pi.user_id = ? ${w}`, [tenantId, ...args]);
-        const rows = await db.query(`
-          SELECT pi.id, pi.sku, pi.brand_id, pi.goods_name, pi.purchase_price, pi.available_stock, pi.transit_stock,
-                 pi.purchase_status, pi.sales_30d, pi.suggest_qty, pi.source_file, pi.updated_at,
-                 COALESCE(pi.qht_goods_id, bp.qht_goods_id) AS qht_goods_id,
-                 COALESCE(pi.afa_goods_id, bp.afa_goods_id) AS afa_goods_id,
-                 COALESCE(pi.local_price, bp.local_price) AS local_price,
-                 COALESCE(NULLIF(pi.image_url, ''), bp.image_url) AS image_url
-          FROM product_item pi ${brandJoin}
-          WHERE pi.user_id = ? ${w}
-          ORDER BY ${order.replace(/\bid\b/g, 'pi.id').replace(/\bpurchase_price\b/g, 'pi.purchase_price').replace(/\bupdated_at\b/g, 'pi.updated_at')}
-          LIMIT ${size} OFFSET ${(page - 1) * size}
-        `, [tenantId, ...args]);
-        const valueR = await db.query(`
-          SELECT ROUND(SUM((available_stock + transit_stock) * purchase_price), 2) AS v,
-                 SUM(purchase_price IS NOT NULL AND purchase_price > 0) AS priced
-          FROM product_item WHERE user_id = ? ${w.replace(/\bpi\./g, '')}`, [tenantId, ...args]);
-        return sendJson(res, 200, {
-          total: totalR[0] ? totalR[0].n : 0, page, size, rows, source: 'import',
-          filteredValue: valueR[0] ? (valueR[0].v || 0) : 0,
-          latestBatch: latest[0] || null,
-        });
-      }
-
-      // ② 商品列表：品牌商品（同品牌全员共享；超管可切品牌 / 看全部）
-      const bo = brandOf(req, url, user);
-      const w = (q ? 'AND (sku LIKE ? OR goods_name LIKE ?) ' : '')
-        + (status ? 'AND purchase_status = ? ' : '');
-      const args = [];
-      if (q) args.push(`%${q}%`, `%${q}%`);
-      if (status) args.push(status);
-      const bWhere = bo.all ? '' : 'AND brand_id = ? ';
-      const bArgs = bo.all ? [] : [bo.brandId];
-      const totalR = await db.query(
-        `SELECT COUNT(*) AS n FROM brand_product WHERE 1=1 ${bWhere}${w}`, [...bArgs, ...args]
-      );
+      const totalR = await db.query(`SELECT COUNT(*) AS n FROM ${sc.from} ${sc.where}`, sc.args);
       const rows = await db.query(`
-        SELECT bp.id, bp.brand_id, b.name AS brand_name, bp.sku, bp.goods_name, bp.purchase_price,
-               bp.available_stock, bp.transit_stock, bp.purchase_status, bp.sales_30d,
-               bp.image_url, bp.synced_at, bp.updated_at,
-               bp.qht_goods_id, bp.afa_goods_id, bp.local_price, bp.afa_match_score,
-               0 AS suggest_qty, NULL AS source_file
-        FROM brand_product bp LEFT JOIN brand b ON b.id = bp.brand_id
-        WHERE 1=1 ${bWhere.replace(/\bbrand_id\b/g, 'bp.brand_id')}${w.replace(/\bsku\b/g, 'bp.sku').replace(/\bgoods_name\b/g, 'bp.goods_name').replace(/\bpurchase_status\b/g, 'bp.purchase_status')}
-        ORDER BY ${order.replace(/\bid\b/g, 'bp.id').replace(/\bpurchase_price\b/g, 'bp.purchase_price').replace(/\bupdated_at\b/g, 'bp.updated_at')}
+        SELECT ${sc.idExpr} AS id, ${sc.skuExpr} AS sku, ${sc.brandExpr} AS brand_id,
+               ${sc.nameExpr} AS goods_name, ${sc.priceExpr} AS purchase_price,
+               ${sc.availExpr} AS available_stock, ${sc.transitExpr} AS transit_stock,
+               ${sc.statusExpr} AS purchase_status, ${sc.statusCodeExpr} AS purchase_status_code,
+               ${sc.salesExpr} AS sales_30d, ${sc.suggestExpr} AS suggest_qty,
+               ${sc.fileExpr} AS source_file, ${sc.imageExpr} AS image_url,
+               ${sc.qhtExpr} AS qht_goods_id, ${sc.afaExpr} AS afa_goods_id, ${sc.localExpr} AS local_price,
+               ${sc.file ? 'NULL' : 'b.name'} AS brand_name,
+               ${sc.file ? 'pi.updated_at' : 'bp.updated_at'} AS updated_at,
+               ${sc.file ? 'NULL' : 'bp.synced_at'} AS synced_at,
+               ${sc.bpIdExpr} AS bp_id
+        FROM ${sc.from} ${sc.where}
+        ORDER BY ${orderSql}
         LIMIT ${size} OFFSET ${(page - 1) * size}
-      `, [...bArgs, ...args]);
+      `, sc.args);
       const valueR = await db.query(`
-        SELECT ROUND(SUM((available_stock + transit_stock) * purchase_price), 2) AS v,
-               SUM(purchase_price IS NOT NULL AND purchase_price > 0) AS priced
-        FROM brand_product WHERE 1=1 ${bWhere}${w}`, [...bArgs, ...args]);
-      // 在途货值（v0.2.85）：Σ 在途库存 × 采购价，口径跟当前筛选一致（与「当前筛选总货值」对齐）
-      const transitR = await db.query(`
-        SELECT ROUND(COALESCE(SUM(transit_stock * purchase_price), 0), 2) AS v,
-               COALESCE(SUM(transit_stock), 0) AS qty
-        FROM brand_product WHERE 1=1 ${bWhere}${w}`, [...bArgs, ...args]).catch(() => []);
-      const transitValue = transitR[0] ? Number(transitR[0].v) || 0 : 0;
-      const transitQty = transitR[0] ? Number(transitR[0].qty) || 0 : 0;
-      // 停采商品货值（v0.2.84）：同步会单独拉一轮「已停采」商品并落 purchase_status_code=2。
-      // 这张卡是「存量」口径，只跟品牌方筛选走，不跟关键词/状态筛选跳动。
-      const stoppedR = await db.query(`
-        SELECT COUNT(*) AS n,
-               ROUND(COALESCE(SUM((available_stock + transit_stock) * purchase_price), 0), 2) AS v
-        FROM brand_product WHERE 1=1 ${bWhere} AND purchase_status_code = 2`, [...bArgs]).catch(() => []);
-      const stoppedCount = stoppedR[0] ? Number(stoppedR[0].n) || 0 : 0;
-      const stoppedValue = stoppedR[0] ? Number(stoppedR[0].v) || 0 : 0;
-      // 超管：各品牌商品数，供前端品牌筛选下拉展示
+        SELECT ROUND(SUM((${sc.availExpr} + ${sc.transitExpr}) * ${sc.priceExpr}), 2) AS v
+        FROM ${sc.from} ${sc.where}`, sc.args);
+      // 在途货值 / 停采货值两张卡只服务商品列表页（品牌口径），补货页不展示 → 文件视图给 0
+      let transitValue = 0;
+      let transitQty = 0;
+      let stoppedValue = 0;
+      let stoppedCount = 0;
       let brandStats = null;
+      if (!sc.file) {
+        const transitR = await db.query(`
+          SELECT ROUND(COALESCE(SUM(${sc.transitExpr} * ${sc.priceExpr}), 0), 2) AS v,
+                 COALESCE(SUM(${sc.transitExpr}), 0) AS qty
+          FROM ${sc.from} ${sc.where}`, sc.args).catch(() => []);
+        transitValue = transitR[0] ? Number(transitR[0].v) || 0 : 0;
+        transitQty = transitR[0] ? Number(transitR[0].qty) || 0 : 0;
+        // 停采货值：存量口径，只跟品牌方筛选走，不跟关键词/状态筛选跳动
+        const stoppedR = await db.query(`
+          SELECT COUNT(*) AS n,
+                 ROUND(COALESCE(SUM((${sc.availExpr} + ${sc.transitExpr}) * ${sc.priceExpr}), 0), 2) AS v
+          FROM ${sc.from} ${sc.where} AND ${sc.statusCodeExpr} = 2`, sc.args).catch(() => []);
+        stoppedCount = stoppedR[0] ? Number(stoppedR[0].n) || 0 : 0;
+        stoppedValue = stoppedR[0] ? Number(stoppedR[0].v) || 0 : 0;
+      }
+      // 品牌方下拉的数据（超管）：文件视图也给，切回全部商品时下拉不会是空的
       if (isAdmin) {
         brandStats = await db.query(`
           SELECT bp.brand_id, b.name AS brand_name, COUNT(*) AS n
@@ -3670,13 +3707,46 @@ const server = http.createServer(async (req, res) => {
         `);
       }
       return sendJson(res, 200, {
-        total: totalR[0] ? totalR[0].n : 0, page, size, rows, source: 'brand',
+        total: totalR[0] ? totalR[0].n : 0, page, size, rows,
+        source: sc.file ? 'import' : 'brand',
+        batch: batch || null,
         filteredValue: valueR[0] ? (valueR[0].v || 0) : 0,
         stoppedValue, stoppedCount,
         transitValue, transitQty,
         latestBatch: latest[0] || null,
         brandFilter: { brandId: bo.brandId, all: bo.all },
         brandStats,
+      });
+    }
+
+    // ── 取价目标（v0.2.92）── 「阿发重新取价 / 齐货通重新取价」按**当前筛选结果**取 id（跨页），
+    //   不拉整行数据。与 /api/products 共用 productScope，保证「列表看到的」和「取价的」是同一批。
+    if (method === 'GET' && p === '/api/products/targets') {
+      if (!canProduct) return denyProduct();
+      const q = (url.searchParams.get('q') || '').trim();
+      const status = (url.searchParams.get('status') || '').trim();
+      const batch = (url.searchParams.get('batch') || '').trim();
+      const bo = brandOf(req, url, user);
+      const sc = productScope({ tenantId, brandId: bo.brandId, all: bo.all, q, status, batch });
+      const CAP = 2000; // 一次最多取 2000 个商品的价，防止误点全量把两边接口打挂
+      let rows;
+      try {
+        rows = await db.query(`
+          SELECT ${sc.qhtExpr} AS qht, ${sc.afaExpr} AS afa
+          FROM ${sc.from} ${sc.where}
+          ORDER BY ${sc.order} LIMIT ${CAP + 1}`, sc.args);
+      } catch (e) {
+        return sendJson(res, 500, { error: '取价目标查询失败：' + e.message });
+      }
+      const truncated = rows.length > CAP;
+      const use = truncated ? rows.slice(0, CAP) : rows;
+      const uniq = (key) => [...new Set(use.map((r) => r[key]).filter(Boolean).map(String))];
+      const qhtIds = uniq('qht');
+      const afaIds = uniq('afa');
+      return sendJson(res, 200, {
+        ok: true, total: use.length, truncated, cap: CAP,
+        qhtIds, afaIds, qhtCount: qhtIds.length, afaCount: afaIds.length,
+        batch: batch || null,
       });
     }
 
@@ -3859,36 +3929,43 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { ok: true, sku, localPrice: v, scope: w.scope });
     }
 
-    // ── 自动匹配阿发商品（v0.2.91）────────────────────────────────────────
-    // 思路：拿补货商品的「商品名称」原样去阿发搜，**直接取搜索结果的第一条建立关联**。
-    // 不做任何筛选与打分（不降级搜索词、不按容量筛、不比图片、不算相似度）——
-    // 误关联由页面上的「修改 / 删除关联」兜回来；已关联的每次重跑都跳过，不覆盖手工调整。
+    // ── 自动匹配阿发商品（v0.2.92）────────────────────────────────────────
+    // 思路：拿「商品名称」原样去阿发搜，**直接取搜索结果的第一条建立关联**，不做筛选与打分。
+    // v0.2.92 起只处理「当前筛选出来的商品」（q / status / batch / brand 与列表共用 productScope），
+    // 不再是全量；误关联由页面上的「修改 / 删除关联」兜回来，已关联的跳过不覆盖。
     // 落库走 writeProductLink：品牌商品表有该 SKU 写品牌（同品牌共享），否则写个人补货行。
-    // 入参 { batch?, apply? }：apply=true 直接写库；false 只给建议（预览，不写库）。
+    // 入参 { q?, status?, batch?, brand?, apply? }：apply=true 直接写库；false 只给建议。
     if (method === 'POST' && p === '/api/products/auto-match') {
       if (!canProduct) return denyProduct();
       const b = await readBody(req).catch(() => ({}));
       const batch = String(b.batch || '').trim();
+      const q = String(b.q || '').trim();
+      const status = String(b.status || '').trim();
       const apply = !!b.apply;
-      const args = [tenantId];
-      let w = '';
-      if (batch) { w = 'AND pi.batch_id = ? '; args.push(batch); }
+      const bo = brandFromBody(user, b);
+      const sc = productScope({ tenantId, brandId: bo.brandId, all: bo.all, q, status, batch });
       let items;
       try {
         items = await db.query(`
-          SELECT pi.sku, pi.goods_name, pi.brand_id,
-                 COALESCE(NULLIF(pi.image_url, ''), bp.image_url) AS image_url,
-                 COALESCE(pi.afa_goods_id, bp.afa_goods_id) AS afa_goods_id,
-                 bp.id AS bp_id
-            FROM product_item pi
-            LEFT JOIN brand_product bp ON bp.brand_id = pi.brand_id AND bp.sku = pi.sku
-           WHERE pi.user_id = ? ${w}
-           ORDER BY pi.id ASC`, args);
+          SELECT ${sc.skuExpr} AS sku, ${sc.nameExpr} AS goods_name, ${sc.brandExpr} AS brand_id,
+                 ${sc.imageExpr} AS image_url, ${sc.afaExpr} AS afa_goods_id,
+                 ${sc.bpIdExpr} AS bp_id
+            FROM ${sc.from} ${sc.where}
+           ORDER BY ${sc.idExpr} ASC`, sc.args);
       } catch (e) {
         return sendJson(res, 500, { error: '查询待匹配商品失败：' + e.message });
       }
       if (!items.length) {
-        return sendJson(res, 200, { ok: true, total: 0, todo: 0, linked: 0, picked: 0, items: [], message: '补货表里还没有商品' });
+        return sendJson(res, 200, { ok: true, total: 0, todo: 0, linked: 0, picked: 0, items: [], message: '当前筛选下没有商品' });
+      }
+      // 逐个商品都要真搜一次阿发（限速 250ms），全量跑几千条会把对方接口打挂，先要求收窄筛选
+      const pendingCount = items.filter((it) => !it.afa_goods_id).length;
+      if (pendingCount > MATCH_MAX_PER_RUN) {
+        return sendJson(res, 200, {
+          ok: false, tooMany: true, pending: pendingCount, cap: MATCH_MAX_PER_RUN,
+          error: `当前筛选下还有 ${pendingCount} 个商品未关联阿发，一次匹配最多 ${MATCH_MAX_PER_RUN} 个。`
+            + '请先用「商品SKU/名称」或「采购状态」把范围缩小，或导入补货参考文件后按文件匹配。',
+        });
       }
 
       const poolCache = new Map();
