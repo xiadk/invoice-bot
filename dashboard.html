@@ -1012,7 +1012,7 @@
             <el-button size="small" :type="rp.afaSession.configured ? 'danger' : 'primary'"
                        @click="onAfaBtn">{{ rp.afaSession.configured ? '清除阿发Token' : '配置阿发Token' }}</el-button>
             <el-button size="small" type="warning" plain :loading="rpMatch.loading" @click="openAutoMatch"
-                       title="按商品名称搜索城配速达，候选排序后默认取第一条直接关联；关联错了可修改或解除">自动匹配阿发</el-button>
+                       title="用商品名称原样搜索城配速达，直接取搜索结果第一条关联；关联错了可修改或解除">自动匹配阿发</el-button>
             <el-button size="small" :loading="rp.afaPricing" @click="loadAfaPrices">阿发重新取价</el-button>
             <span class="loginid">共 {{ rp.total }} 个商品</span>
             <span v-if="rp.expect && rp.total < rp.expect" style="font-size:12px;color:#e6a23c">
@@ -1229,8 +1229,8 @@
           </div>
         </el-dialog>
 
-        <!-- 自动匹配阿发商品：按商品名称搜索（逐级降级）→ 默认取第一条直接关联 → 逐条可改可删 -->
-        <el-dialog title="自动匹配阿发商品" :visible.sync="rpMatch.visible" width="1080px" top="4vh" append-to-body>
+        <!-- 自动匹配阿发商品：拿商品名称原样搜索 → 直接取第一条关联 → 逐条可改可删 -->
+        <el-dialog title="自动匹配阿发商品" :visible.sync="rpMatch.visible" width="1040px" top="4vh" append-to-body>
           <div style="display:flex;gap:10px;align-items:center;margin-bottom:10px;flex-wrap:wrap">
             <span class="loginid">{{ rpMatch.message }}</span>
             <span style="flex:1"></span>
@@ -1239,21 +1239,19 @@
           </div>
           <el-table :data="rpMatch.items" size="small" border :max-height="tblH.link" style="width:100%" v-loading="rpMatch.loading"
                     empty-text="补货表里还没有商品">
-            <el-table-column label="系统商品" min-width="230">
+            <el-table-column label="商品名称（搜索词）" min-width="250">
               <template slot-scope="p">
                 <div style="display:flex;gap:8px;align-items:center">
                   <img v-if="p.row.image_url" :src="p.row.image_url" :alt="p.row.goods_name"
                        style="width:40px;height:40px;object-fit:cover;border-radius:4px;flex:0 0 auto" />
                   <div style="min-width:0">
                     <div :title="p.row.goods_name" style="font-size:12px;line-height:16px">{{ p.row.goods_name }}</div>
-                    <div class="loginid" style="font-size:11px">
-                      {{ p.row.sku }}<span v-if="p.row.keyword"> · 搜索词「{{ p.row.keyword }}」{{ tierText(p.row.tier) }}</span>
-                    </div>
+                    <div class="loginid" style="font-size:11px">{{ p.row.sku }}</div>
                   </div>
                 </div>
               </template>
             </el-table-column>
-            <el-table-column label="阿发商品（默认取第一条）" min-width="410">
+            <el-table-column label="阿发搜索结果第一条" min-width="380">
               <template slot-scope="p">
                 <div v-if="p.row.candidate" style="display:flex;gap:8px;align-items:center">
                   <img v-if="p.row.candidate.picture" :src="p.row.candidate.picture" :alt="p.row.candidate.goodsName"
@@ -1265,12 +1263,10 @@
                       <span style="margin-left:8px">件价 ¥{{ p.row.candidate.salePrice }}</span>
                       <span style="margin-left:8px">{{ p.row.candidate.factorName }}</span>
                     </div>
-                    <div class="loginid" style="font-size:11px;line-height:15px;color:#909399">{{ p.row.note }}</div>
                   </div>
-                  <el-tag size="mini" :type="p.row.candidate.score >= 60 ? 'success' : 'warning'">{{ p.row.candidate.score }} 分</el-tag>
                 </div>
                 <div v-else-if="p.row.picked" class="loginid">已关联，阿发商品 ID {{ p.row.picked }}</div>
-                <div v-else class="loginid">—</div>
+                <div v-else class="loginid">{{ p.row.note || '—' }}</div>
               </template>
             </el-table-column>
             <el-table-column label="状态" width="100">
@@ -1287,7 +1283,7 @@
           </el-table>
           <div slot="footer">
             <span class="loginid" style="float:left;line-height:32px;max-width:700px;text-align:left">
-              搜索词按「商品全名 → 品牌+容量 → 品牌词」逐级降级；候选按容量、名称相似度、商品图片相似度排序，默认取第一条。
+              搜索词就是商品名称；结果里第一条即关联对象，不做筛选也不打分。
               关联错了直接点「修改」换个商品，或「删除关联」清空后重新匹配。
             </span>
             <el-button size="small" @click="rpMatch.visible = false">关闭</el-button>
@@ -3417,7 +3413,7 @@ const vm = new Vue({
       // 城配速达（阿发）：关联弹窗 / 选购弹窗 / Token 配置弹窗
       rpAfaLink: { visible: false, sku: '', keyword: '', rows: [], loading: false, error: '', picked: null, total: 0, page: 1, size: 20 },
       rpAfaBuy: { visible: false, sku: '', goodsId: null, goodsName: '', qty: 1, saving: false },
-      // 自动匹配阿发（v0.2.90）：按商品名称搜索（全名→品牌+容量→品牌词）→ 默认取第一条直接关联
+      // 自动匹配阿发（v0.2.91）：用商品名称原样搜 → 直接取搜索结果第一条 → 可改可删
       rpMatch: { visible: false, loading: false, items: [], message: '', batchId: null },
       afaDlg: { visible: false, token: '', storeId: '', appId: 'wxc050ff76c31c4371', saving: false },
       // 发布到交易市场（单个/批量共用弹窗）
@@ -7145,9 +7141,11 @@ const vm = new Vue({
         if (mi) {
           mi.picked = String(pick.goodsId);
           mi.state = 'linked';
-          mi.candidate = null;
-          mi.candidates = [];
-          mi.note = '已关联：' + pick.goodsName + '（手工修改）';
+          mi.candidate = {
+            goodsId: String(pick.goodsId), goodsName: pick.goodsName || '', picture: pick.picture || '',
+            salePrice: pick.salePrice, unitPrice: pick.unitPrice, factorName: pick.factorName || '',
+          };
+          mi.note = '';
         }
         this.rpAfaLink.visible = false;
         this.$message.success('已关联城配速达：' + pick.goodsName);
@@ -7160,11 +7158,10 @@ const vm = new Vue({
       try {
         await this.$confirm(
           '<div style="line-height:1.9;font-size:13px">'
-          + '会把补货表里<b>还没关联阿发</b>的商品，用<b>商品名称</b>去城配速达搜索：'
-          + '全名搜不到就降级成「品牌+容量」，再不行用品牌词；'
-          + '候选按容量、名称相似度、商品图片相似度排序，<b>默认取第一条直接建立关联</b>。<br><br>'
-          + '已关联的商品不会被覆盖。关联错了可以在结果里点<b>「修改」</b>换一个，或<b>「删除关联」</b>清空重来。<br><br>'
-          + '商品多的时候要逐个搜索并比对图片，可能要几分钟。'
+          + '会把补货表里<b>还没关联阿发</b>的商品，用<b>商品名称原样</b>去城配速达搜索，'
+          + '<b>直接取搜索结果的第一条建立关联</b>。<br><br>'
+          + '不做任何筛选或打分：名称搜不到就留空（记「没找到」），需要手工点「修改」去关联。<br>'
+          + '已关联的商品不会被覆盖。关联错了可以在结果里点<b>「修改」</b>换一个，或<b>「删除关联」</b>清空重来。'
           + '</div>',
           '自动匹配阿发商品',
           { dangerouslyUseHTMLString: true, confirmButtonText: '开始匹配并关联', cancelButtonText: '取消', type: 'warning' }
@@ -7177,7 +7174,7 @@ const vm = new Vue({
     async runAutoMatch(apply) {
       this.rpMatch.loading = true;
       this.rpMatch.items = [];
-      this.rpMatch.message = '正在按商品名称搜索城配速达并关联第一条，商品多时要几分钟…';
+      this.rpMatch.message = '正在用商品名称搜索城配速达并关联第一条（每个商品搜一次）…';
       try {
         const d = await this.api('/api/products/auto-match', {
           method: 'POST', headers: { 'content-type': 'application/json' },
@@ -7196,19 +7193,10 @@ const vm = new Vue({
       } catch (e) { this.rpMatch.message = '匹配失败：' + e.message; }
       finally { this.rpMatch.loading = false; }
     },
-    /** 搜索词降级层级的中文说明 */
-    tierText(tier) {
-      if (tier === 'brandVol') return '（降级：品牌+容量）';
-      if (tier === 'brand') return '（降级：品牌词）';
-      return '';
-    },
-    /** 状态标签：已关联 / 低置信 / 容量不符 / 没找到 */
+    /** 状态标签：已关联 / 没找到 / 写入失败 */
     matchTag(row) {
-      if (!row || row.state === 'none' || !row.picked) return { text: '没找到', type: 'info' };
-      if (!row.candidate) return { text: '已关联', type: 'success' };
-      if (row.candidate.writeError) return { text: '写入失败', type: 'danger' };
-      if (row.candidate.hard) return { text: '容量不符', type: 'danger' };
-      if (row.candidate.score < 60) return { text: '低置信', type: 'warning' };
+      if (!row || !row.picked) return { text: '没找到', type: 'info' };
+      if (row.candidate && row.candidate.writeError) return { text: '写入失败', type: 'danger' };
       return { text: '已关联', type: 'success' };
     },
     /** 修改关联：复用「关联城配速达商品」弹窗（默认搜索词就是商品名） */
@@ -7235,7 +7223,6 @@ const vm = new Vue({
         row.picked = '';
         row.state = 'none';
         row.candidate = null;
-        row.candidates = [];
         row.note = '已解除关联';
         const live = (this.rp.rows || []).find((r) => r.sku === row.sku);
         if (live) live.afa_goods_id = '';

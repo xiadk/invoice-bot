@@ -61,7 +61,6 @@ const tenancy = require('./lib/tenancy');
 const { runImport, importOrderUpload, importInvoiceUpload } = require('./import-to-db');
 const qht = require('./lib/qht');
 const afa = require('./lib/afa');
-const match = require('./lib/match');
 const products = require('./lib/products');
 const billing = require('./lib/billing');
 const { loadConfig } = require('./lib/config');
@@ -3860,9 +3859,9 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { ok: true, sku, localPrice: v, scope: w.scope });
     }
 
-    // ── 自动匹配阿发商品（v0.2.90）────────────────────────────────────────
-    // 思路：拿「商品名称」去阿发搜索（全名 → 品牌+容量 → 品牌词，逐级降级），候选按
-    // 「容量硬筛 + 名称相似度 + 图片 dHash」排序，**默认取第一条直接关联**，不再卡 85 分门槛。
+    // ── 自动匹配阿发商品（v0.2.91）────────────────────────────────────────
+    // 思路：拿补货商品的「商品名称」原样去阿发搜，**直接取搜索结果的第一条建立关联**。
+    // 不做任何筛选与打分（不降级搜索词、不按容量筛、不比图片、不算相似度）——
     // 误关联由页面上的「修改 / 删除关联」兜回来；已关联的每次重跑都跳过，不覆盖手工调整。
     // 落库走 writeProductLink：品牌商品表有该 SKU 写品牌（同品牌共享），否则写个人补货行。
     // 入参 { batch?, apply? }：apply=true 直接写库；false 只给建议（预览，不写库）。
@@ -3897,7 +3896,6 @@ const server = http.createServer(async (req, res) => {
       const out = [];
       let linked = 0;
       let picked = 0;
-      let low = 0;
       let none = 0;
       let queried = 0;
       let lastErr = '';
@@ -3908,81 +3906,61 @@ const server = http.createServer(async (req, res) => {
           brand_id: Number(it.brand_id) || brandFallback, inBrand: !!it.bp_id,
         };
 
-        // ① 已关联的直接回显，不再搜（重跑不会覆盖手工调整，且省掉一次搜索）
+        // ① 已关联的直接回显，不再搜（重跑不会覆盖手工调整）
         if (it.afa_goods_id) {
           linked += 1;
           out.push(Object.assign(base, {
-            keyword: '', tier: '', state: 'linked', picked: String(it.afa_goods_id),
-            candidate: null, candidates: [], note: '已关联（ID ' + it.afa_goods_id + '）',
+            keyword: '', state: 'linked', picked: String(it.afa_goods_id),
+            candidate: null, note: '已关联（ID ' + it.afa_goods_id + '）',
           }));
           continue;
         }
 
-        // ② 按名称搜：全名 → 品牌+容量 → 品牌词，取第一个搜出候选的层级（长名称在阿发常常 0 结果）
-        const layers = match.keywordLayers(it.goods_name);
-        let pool = [];
-        let kw = '';
-        let tier = '';
-        for (const L of layers) {
-          if (!poolCache.has(L.kw)) {
-            try {
-              const r = await afa.searchPool(tenantId, L.kw, { pages: 1, size: 50 });
-              poolCache.set(L.kw, r.rows || []);
-              queried += 1;
-              await sleepMs(250);   // 限速：别把对方接口打挂
-            } catch (e) {
-              poolCache.set(L.kw, []);
-              lastErr = String((e && e.message) || e).slice(0, 160);
-            }
-          }
-          const got = poolCache.get(L.kw);
-          if (got && got.length) { pool = got; kw = L.kw; tier = L.tier; break; }
+        // ② 拿商品名称原样去搜（不降级、不筛、不打分）
+        const kw = String(it.goods_name || '').trim();
+        if (!kw) {
+          none += 1;
+          out.push(Object.assign(base, { keyword: '', state: 'none', picked: '', candidate: null, note: '商品名称为空，无法搜索' }));
+          continue;
         }
+        if (!poolCache.has(kw)) {
+          try {
+            const r = await afa.searchPool(tenantId, kw, { pages: 1, size: 50 });
+            poolCache.set(kw, r.rows || []);
+            queried += 1;
+            await sleepMs(250);   // 限速：别把对方接口打挂
+          } catch (e) {
+            poolCache.set(kw, []);
+            lastErr = String((e && e.message) || e).slice(0, 160);
+          }
+        }
+        const pool = poolCache.get(kw);
         if (!pool.length) {
           none += 1;
           out.push(Object.assign(base, {
-            keyword: (layers[0] && layers[0].kw) || '', tier: '',
-            state: 'none', picked: '', candidate: null, candidates: [],
-            note: lastErr ? '阿发接口报错：' + lastErr : '阿发搜不到同名商品，请手工关联',
+            keyword: kw, state: 'none', picked: '', candidate: null,
+            note: lastErr ? '阿发接口报错：' + lastErr : '阿发搜不到该商品名，请手工关联',
           }));
           continue;
         }
 
-        // ③ 排序取第一条：名称相似度粗排 → 前 5 张图并算 dHash 精排
-        const sysSpec = match.parseSpec(it.goods_name);
-        const sysHash = await match.imageHashOf(it.image_url);
-        const pre = pool.map((c) => {
-          const cs = match.parseSpec(c.goodsName);
-          const volOk = !(sysSpec.volNum && cs.volNum && sysSpec.volNum !== cs.volNum);
-          return { c, s: match.textSim(sysSpec.norm, cs.norm), volOk };
-        });
-        const okPre = pre.filter((x) => x.volOk).sort((x, y) => y.s - x.s);
-        // 容量硬筛把候选筛空时，退用未筛池子的第一条（保证每行都有得选，分数按 0 算并提示）
-        const volFallback = !okPre.length;
-        const usePre = (volFallback ? pre.slice().sort((x, y) => y.s - x.s) : okPre).slice(0, 5);
-        const hashes = await Promise.all(usePre.map((x) => match.imageHashOf(x.c.picture)));
-        const cands = usePre.map((x, i) => {
-          const r = match.scoreCandidate(it.goods_name, x.c, { sysHash, candHash: hashes[i] });
-          return {
-            goodsId: String(x.c.goodsId), goodsName: x.c.goodsName, picture: x.c.picture,
-            salePrice: x.c.salePrice, unitPrice: x.c.unitPrice, factorName: x.c.factorName,
-            score: (volFallback || r.hard) ? 0 : r.score,
-            reasons: r.reasons, imageScore: r.imageScore,
-            hard: r.hard || (volFallback ? '容量对不上（系统 ' + (sysSpec.volNum || '?') + '）' : ''),
-          };
-        });
-        cands.sort((x, y) => y.score - x.score);
-        const best = cands[0];
+        // ③ 直接取搜索结果的第一条，不做任何筛选与打分
+        const first = pool[0];
+        const best = {
+          goodsId: String(first.goodsId), goodsName: first.goodsName || '',
+          picture: first.picture || '', salePrice: first.salePrice,
+          unitPrice: first.unitPrice, factorName: first.factorName || '',
+        };
 
         // ④ 写库：品牌商品表有该 SKU 就写品牌（同品牌共享），否则写个人补货行
-        if (best && apply) {
+        if (apply) {
           try {
             const wr = await writeProductLink('afa_goods_id', best.goodsId, { brandId: base.brand_id, userId: tenantId, sku: it.sku });
             best.scope = wr.scope;
             if (wr.scope === 'brand') {
               await db.exec(
-                'UPDATE brand_product SET afa_match_score = ?, afa_match_at = NOW() WHERE brand_id = ? AND sku = ?',
-                [best.score, base.brand_id, it.sku]
+                'UPDATE brand_product SET afa_match_score = NULL, afa_match_at = NOW() WHERE brand_id = ? AND sku = ?',
+                [base.brand_id, it.sku]
               );
             }
           } catch (e) {
@@ -3991,23 +3969,20 @@ const server = http.createServer(async (req, res) => {
           }
         }
         picked += 1;
-        if (best.score < 60) low += 1;
         out.push(Object.assign(base, {
-          keyword: kw, tier,
+          keyword: kw,
           state: apply ? 'linked' : 'suggest',
-          picked: best.goodsId, candidate: best, candidates: cands.slice(0, 3),
-          note: best.writeError
-            ? '写入失败：' + best.writeError
-            : (best.hard || (best.score < 60 ? '低置信：' + (best.reasons[0] || '相似度偏低') : (best.reasons || []).join(' + '))),
+          picked: best.goodsId, candidate: best,
+          note: best.writeError ? '写入失败：' + best.writeError : '',
         }));
       }
 
       const tip = lastErr && !picked ? `（阿发接口报错：${lastErr}，请检查是否已配置有效 Token）` : '';
       const act = apply ? '已关联' : '建议关联';
       return sendJson(res, 200, {
-        ok: true, total: items.length, todo: items.length - linked, linked, picked, low, none,
+        ok: true, total: items.length, todo: items.length - linked, linked, picked, none,
         queriedKeywords: queried, applied: apply, items: out,
-        message: `共 ${items.length} 个商品（原有 ${linked} 个已关联）：本次${act} ${picked} 个（其中低置信 ${low} 个）、没找到 ${none} 个${tip}`,
+        message: `共 ${items.length} 个商品（原有 ${linked} 个已关联）：本次${act} ${picked} 个、没找到 ${none} 个${tip}`,
       });
     }
 
