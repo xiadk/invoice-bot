@@ -1012,7 +1012,7 @@
             <el-button size="small" :type="rp.afaSession.configured ? 'danger' : 'primary'"
                        @click="onAfaBtn">{{ rp.afaSession.configured ? '清除阿发Token' : '配置阿发Token' }}</el-button>
             <el-button size="small" type="warning" plain :loading="rpMatch.loading" @click="openAutoMatch"
-                       title="按「品牌 + 容量」分桶，用商品图片相似度 + 名称相似度找阿发对应商品">自动匹配阿发</el-button>
+                       title="按商品名称搜索城配速达，候选排序后默认取第一条直接关联；关联错了可修改或解除">自动匹配阿发</el-button>
             <el-button size="small" :loading="rp.afaPricing" @click="loadAfaPrices">阿发重新取价</el-button>
             <span class="loginid">共 {{ rp.total }} 个商品</span>
             <span v-if="rp.expect && rp.total < rp.expect" style="font-size:12px;color:#e6a23c">
@@ -1085,7 +1085,11 @@
                         <span class="loginid">规格</span><span class="loginid">{{ rp.afaPrices[p.row.afa_goods_id].factorName }}</span>
                       </div>
                     </div>
-                    <el-button size="mini" type="primary" plain style="margin-top:4px" @click="openAfaBuy(p.row)">选购</el-button>
+                    <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:4px">
+                      <el-button size="mini" type="primary" plain @click="openAfaBuy(p.row)">选购</el-button>
+                      <el-button size="mini" type="primary" plain @click="openAfaLinkDlg(p.row)">修改</el-button>
+                      <el-button size="mini" type="danger" plain title="解除后可重新自动匹配" @click="unlinkAfaRow(p.row)">解除</el-button>
+                    </div>
                   </template>
                   <span v-else-if="rp.afaPrices[p.row.afa_goods_id]" class="loginid" style="color:#f56c6c">取价失败</span>
                   <span v-else class="loginid">取价中…</span>
@@ -1225,18 +1229,16 @@
           </div>
         </el-dialog>
 
-        <!-- 自动匹配阿发商品：按「品牌 + 容量」分桶 → 图片相似度 + 名称相似度打分 → 逐条确认 -->
-        <el-dialog title="自动匹配阿发商品" :visible.sync="rpMatch.visible" width="1020px" top="4vh" append-to-body>
+        <!-- 自动匹配阿发商品：按商品名称搜索（逐级降级）→ 默认取第一条直接关联 → 逐条可改可删 -->
+        <el-dialog title="自动匹配阿发商品" :visible.sync="rpMatch.visible" width="1080px" top="4vh" append-to-body>
           <div style="display:flex;gap:10px;align-items:center;margin-bottom:10px;flex-wrap:wrap">
             <span class="loginid">{{ rpMatch.message }}</span>
             <span style="flex:1"></span>
-            <el-button size="small" type="success" :disabled="!rpMatch.autoCount || rpMatch.applying"
-                       :loading="rpMatch.applying" @click="applyAutoMatches">
-              采用全部 ≥85 分（{{ rpMatch.autoCount }}）
-            </el-button>
+            <el-button size="small" type="primary" plain icon="el-icon-refresh" :loading="rpMatch.loading"
+                       @click="runAutoMatch(true)">重新匹配未关联</el-button>
           </div>
           <el-table :data="rpMatch.items" size="small" border :max-height="tblH.link" style="width:100%" v-loading="rpMatch.loading"
-                    empty-text="没有待匹配的商品（都关联过了）">
+                    empty-text="补货表里还没有商品">
             <el-table-column label="系统商品" min-width="230">
               <template slot-scope="p">
                 <div style="display:flex;gap:8px;align-items:center">
@@ -1244,47 +1246,49 @@
                        style="width:40px;height:40px;object-fit:cover;border-radius:4px;flex:0 0 auto" />
                   <div style="min-width:0">
                     <div :title="p.row.goods_name" style="font-size:12px;line-height:16px">{{ p.row.goods_name }}</div>
-                    <div class="loginid" style="font-size:11px">{{ p.row.sku }} · 搜索词「{{ p.row.keyword }}」</div>
+                    <div class="loginid" style="font-size:11px">
+                      {{ p.row.sku }}<span v-if="p.row.keyword"> · 搜索词「{{ p.row.keyword }}」{{ tierText(p.row.tier) }}</span>
+                    </div>
                   </div>
                 </div>
               </template>
             </el-table-column>
-            <el-table-column label="阿发候选（点一行采用）" min-width="430">
+            <el-table-column label="阿发商品（默认取第一条）" min-width="410">
               <template slot-scope="p">
-                <div v-if="!p.row.candidates.length" class="loginid">阿发搜不到同规格商品，请手工关联</div>
-                <div v-for="c in p.row.candidates" :key="c.goodsId"
-                     style="display:flex;gap:8px;align-items:center;padding:4px 2px;border-radius:4px"
-                     :style="{ background: p.row.picked === c.goodsId ? 'rgba(64,158,255,.12)' : 'transparent' }">
-                  <img v-if="c.picture" :src="c.picture" :alt="c.goodsName"
-                       style="width:34px;height:34px;object-fit:cover;border-radius:4px;flex:0 0 auto" />
+                <div v-if="p.row.candidate" style="display:flex;gap:8px;align-items:center">
+                  <img v-if="p.row.candidate.picture" :src="p.row.candidate.picture" :alt="p.row.candidate.goodsName"
+                       style="width:36px;height:36px;object-fit:cover;border-radius:4px;flex:0 0 auto" />
                   <div style="flex:1;min-width:0">
-                    <div :title="c.goodsName" style="font-size:12px;line-height:16px">{{ c.goodsName }}</div>
+                    <div :title="p.row.candidate.goodsName" style="font-size:12px;line-height:16px">{{ p.row.candidate.goodsName }}</div>
                     <div class="loginid" style="font-size:11px;line-height:15px">
-                      <span v-if="c.unitPrice != null">单价 ¥{{ c.unitPrice }}</span>
-                      <span style="margin-left:8px">件价 ¥{{ c.salePrice }}</span>
-                      <span style="margin-left:8px">{{ c.factorName }}</span>
-                      <span style="margin-left:8px;color:#909399">{{ (c.reasons || []).join(' + ') }}</span>
+                      <span v-if="p.row.candidate.unitPrice != null">单价 ¥{{ p.row.candidate.unitPrice }}</span>
+                      <span style="margin-left:8px">件价 ¥{{ p.row.candidate.salePrice }}</span>
+                      <span style="margin-left:8px">{{ p.row.candidate.factorName }}</span>
                     </div>
+                    <div class="loginid" style="font-size:11px;line-height:15px;color:#909399">{{ p.row.note }}</div>
                   </div>
-                  <el-tag size="mini" :type="c.score >= 85 ? 'success' : (c.score >= 60 ? 'warning' : 'info')">{{ c.score }} 分</el-tag>
-                  <el-button size="mini" :type="p.row.picked === c.goodsId ? 'success' : 'primary'" plain
-                             @click="pickAfaCandidate(p.row, c)">
-                    {{ p.row.picked === c.goodsId ? '已采用' : '采用' }}
-                  </el-button>
+                  <el-tag size="mini" :type="p.row.candidate.score >= 60 ? 'success' : 'warning'">{{ p.row.candidate.score }} 分</el-tag>
                 </div>
+                <div v-else-if="p.row.picked" class="loginid">已关联，阿发商品 ID {{ p.row.picked }}</div>
+                <div v-else class="loginid">—</div>
               </template>
             </el-table-column>
             <el-table-column label="状态" width="100">
               <template slot-scope="p">
-                <el-tag size="mini" :type="p.row.state === 'applied' ? 'success' : (p.row.state === 'auto' ? 'warning' : 'info')">
-                  {{ p.row.state === 'applied' ? '已关联' : (p.row.state === 'auto' ? '可自动采用' : (p.row.state === 'pending' ? '待确认' : '没找到')) }}
-                </el-tag>
+                <el-tag size="mini" :type="matchTag(p.row).type">{{ matchTag(p.row).text }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" width="150">
+              <template slot-scope="p">
+                <el-button size="mini" plain @click="editAfaMatch(p.row)">修改</el-button>
+                <el-button size="mini" type="danger" plain :disabled="!p.row.picked" @click="unlinkAfaMatch(p.row)">删除关联</el-button>
               </template>
             </el-table-column>
           </el-table>
           <div slot="footer">
-            <span class="loginid" style="float:left;line-height:32px;max-width:640px;text-align:left">
-              匹配靠「品牌 + 容量数字」分桶，桶内用商品图片相似度兜底 —— 所以「矮罐 / 竖罐装 / 摩登罐」这类叫法不同也能认出来。
+            <span class="loginid" style="float:left;line-height:32px;max-width:700px;text-align:left">
+              搜索词按「商品全名 → 品牌+容量 → 品牌词」逐级降级；候选按容量、名称相似度、商品图片相似度排序，默认取第一条。
+              关联错了直接点「修改」换个商品，或「删除关联」清空后重新匹配。
             </span>
             <el-button size="small" @click="rpMatch.visible = false">关闭</el-button>
           </div>
@@ -3413,8 +3417,8 @@ const vm = new Vue({
       // 城配速达（阿发）：关联弹窗 / 选购弹窗 / Token 配置弹窗
       rpAfaLink: { visible: false, sku: '', keyword: '', rows: [], loading: false, error: '', picked: null, total: 0, page: 1, size: 20 },
       rpAfaBuy: { visible: false, sku: '', goodsId: null, goodsName: '', qty: 1, saving: false },
-      // 自动匹配阿发（v0.2.87）：按「品牌 + 容量」分桶 → 图片 dHash + 名称相似度打分
-      rpMatch: { visible: false, loading: false, applying: false, items: [], message: '', batchId: null, autoCount: 0 },
+      // 自动匹配阿发（v0.2.90）：按商品名称搜索（全名→品牌+容量→品牌词）→ 默认取第一条直接关联
+      rpMatch: { visible: false, loading: false, items: [], message: '', batchId: null },
       afaDlg: { visible: false, token: '', storeId: '', appId: 'wxc050ff76c31c4371', saving: false },
       // 发布到交易市场（单个/批量共用弹窗）
       publish: { visible: false, title: '', discount: 100, items: [], saving: false },
@@ -7136,76 +7140,107 @@ const vm = new Vue({
         if (d.error) { this.$message.error('关联失败: ' + d.error); return; }
         const row = this.rowsOf(this.rpAfaLink.src).find((r) => r.sku === this.rpAfaLink.sku);
         if (row) row.afa_goods_id = String(pick.goodsId);
+        // 从「自动匹配」弹窗点「修改」进来的，同步刷新那一行的显示
+        const mi = (this.rpMatch.items || []).find((x) => x.sku === this.rpAfaLink.sku);
+        if (mi) {
+          mi.picked = String(pick.goodsId);
+          mi.state = 'linked';
+          mi.candidate = null;
+          mi.candidates = [];
+          mi.note = '已关联：' + pick.goodsName + '（手工修改）';
+        }
         this.rpAfaLink.visible = false;
         this.$message.success('已关联城配速达：' + pick.goodsName);
         await this.loadAfaPrices(this.rowsOf(this.rpAfaLink.src));
       } catch (e) { this.$message.error('关联失败: ' + e.message); }
     },
-    // ══════ 自动匹配（品牌+容量分桶 → 图片相似度 + 名称相似度）══════
-    /** 预览：找出每个待关联商品的 top3 候选（不写库） */
+    // ══════ 自动匹配（按商品名称搜索 → 取第一条直接关联）══════
+    /** 入口：先讲清规则并确认，再按名称搜索 + 关联第一条 */
     async openAutoMatch() {
-      this.rpMatch.loading = true;
+      try {
+        await this.$confirm(
+          '<div style="line-height:1.9;font-size:13px">'
+          + '会把补货表里<b>还没关联阿发</b>的商品，用<b>商品名称</b>去城配速达搜索：'
+          + '全名搜不到就降级成「品牌+容量」，再不行用品牌词；'
+          + '候选按容量、名称相似度、商品图片相似度排序，<b>默认取第一条直接建立关联</b>。<br><br>'
+          + '已关联的商品不会被覆盖。关联错了可以在结果里点<b>「修改」</b>换一个，或<b>「删除关联」</b>清空重来。<br><br>'
+          + '商品多的时候要逐个搜索并比对图片，可能要几分钟。'
+          + '</div>',
+          '自动匹配阿发商品',
+          { dangerouslyUseHTMLString: true, confirmButtonText: '开始匹配并关联', cancelButtonText: '取消', type: 'warning' }
+        );
+      } catch (e) { return; }
       this.rpMatch.visible = true;
+      await this.runAutoMatch(true);
+    },
+    /** 执行匹配；apply=true 直接把第一条写库 */
+    async runAutoMatch(apply) {
+      this.rpMatch.loading = true;
       this.rpMatch.items = [];
-      this.rpMatch.autoCount = 0;
-      this.rpMatch.message = '正在按「品牌 + 容量」分桶匹配，需要逐个比对商品图片，几十秒到几分钟…';
+      this.rpMatch.message = '正在按商品名称搜索城配速达并关联第一条，商品多时要几分钟…';
       try {
         const d = await this.api('/api/products/auto-match', {
           method: 'POST', headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ batch: this.rp.batchId || undefined, apply: false }),
+          body: JSON.stringify({ batch: this.rp.batchId || undefined, apply: apply !== false }),
         });
         if (d.error) { this.rpMatch.message = '匹配失败：' + d.error; return; }
         this.rpMatch.items = d.items || [];
         this.rpMatch.message = d.message || '';
-        this.rpMatch.autoCount = this.rpMatch.items.filter((x) => x.state === 'auto').length;
+        if (apply !== false) {
+          // 把新关联回填到补货表当前页，阿发价列立刻从「关联」变成取价
+          const map = {};
+          this.rpMatch.items.forEach((x) => { if (x.picked) map[x.sku] = x.picked; });
+          (this.rp.rows || []).forEach((r) => { if (map[r.sku]) r.afa_goods_id = map[r.sku]; });
+          await this.loadAfaPrices();
+        }
       } catch (e) { this.rpMatch.message = '匹配失败：' + e.message; }
       finally { this.rpMatch.loading = false; }
     },
-    /** 采用某条候选：写品牌商品的 afa_goods_id */
-    async pickAfaCandidate(row, c) {
+    /** 搜索词降级层级的中文说明 */
+    tierText(tier) {
+      if (tier === 'brandVol') return '（降级：品牌+容量）';
+      if (tier === 'brand') return '（降级：品牌词）';
+      return '';
+    },
+    /** 状态标签：已关联 / 低置信 / 容量不符 / 没找到 */
+    matchTag(row) {
+      if (!row || row.state === 'none' || !row.picked) return { text: '没找到', type: 'info' };
+      if (!row.candidate) return { text: '已关联', type: 'success' };
+      if (row.candidate.writeError) return { text: '写入失败', type: 'danger' };
+      if (row.candidate.hard) return { text: '容量不符', type: 'danger' };
+      if (row.candidate.score < 60) return { text: '低置信', type: 'warning' };
+      return { text: '已关联', type: 'success' };
+    },
+    /** 修改关联：复用「关联城配速达商品」弹窗（默认搜索词就是商品名） */
+    editAfaMatch(row) {
+      this.openAfaLinkDlg(row);
+    },
+    /** 补货表里直接解除阿发关联（等价于匹配弹窗里的「删除关联」） */
+    unlinkAfaRow(row) {
+      this.unlinkAfaMatch({ sku: row.sku, goods_name: row.goods_name, brand_id: row.brand_id, picked: row.afa_goods_id });
+    },
+    /** 删除关联：写空值 → 该行回到「未关联」，可重新匹配 */
+    async unlinkAfaMatch(row) {
+      if (!row || !row.picked) return;
+      try {
+        await this.$confirm('解除「' + (row.goods_name || row.sku) + '」与阿发商品的关联？解除后可以重新自动匹配。', '删除关联',
+          { confirmButtonText: '解除关联', cancelButtonText: '取消', type: 'warning' });
+      } catch (e) { return; }
       try {
         const d = await this.api('/api/products/link-afa', {
           method: 'POST', headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ sku: row.sku, goodsId: c.goodsId, brandId: row.brand_id || null }),
+          body: JSON.stringify({ sku: row.sku, goodsId: '', brandId: row.brand_id || null }),
         });
-        if (d.error) { this.$message.error('关联失败: ' + d.error); return; }
-        const i = this.rpMatch.items.findIndex((x) => x.sku === row.sku);
-        if (i >= 0) this.rpMatch.items.splice(i, 1, Object.assign({}, row, { picked: String(c.goodsId), state: 'applied' }));
-        this.rpMatch.autoCount = this.rpMatch.items.filter((x) => x.state === 'auto').length;
+        if (d.error) { this.$message.error('解除失败: ' + d.error); return; }
+        row.picked = '';
+        row.state = 'none';
+        row.candidate = null;
+        row.candidates = [];
+        row.note = '已解除关联';
         const live = (this.rp.rows || []).find((r) => r.sku === row.sku);
-        if (live) live.afa_goods_id = String(c.goodsId);
-        this.$message.success('已关联：' + c.goodsName);
-        this.loadAfaPrices();
-      } catch (e) { this.$message.error('关联失败: ' + e.message); }
-    },
-    /** 一键采用所有 ≥85 分候选 */
-    async applyAutoMatches() {
-      const targets = this.rpMatch.items.filter((x) => x.state === 'auto' && (x.candidates || []).length);
-      if (!targets.length) return;
-      this.rpMatch.applying = true;
-      let done = 0;
-      try {
-        for (const row of targets) {
-          const c = row.candidates[0];
-          try {
-            const d = await this.api('/api/products/link-afa', {
-              method: 'POST', headers: { 'content-type': 'application/json' },
-              body: JSON.stringify({ sku: row.sku, goodsId: c.goodsId, brandId: row.brand_id || null }),
-            });
-            if (d.error) continue;
-            const i = this.rpMatch.items.findIndex((x) => x.sku === row.sku);
-            if (i >= 0) this.rpMatch.items.splice(i, 1, Object.assign({}, row, { picked: String(c.goodsId), state: 'applied' }));
-            const live = (this.rp.rows || []).find((r) => r.sku === row.sku);
-            if (live) live.afa_goods_id = String(c.goodsId);
-            done += 1;
-          } catch (e) { /* 单条失败不阻断其余 */ }
-        }
-      } finally {
-        this.rpMatch.applying = false;
-        this.rpMatch.autoCount = this.rpMatch.items.filter((x) => x.state === 'auto').length;
-      }
-      this.$message.success('已关联 ' + done + ' 个商品');
-      this.loadAfaPrices();
+        if (live) live.afa_goods_id = '';
+        this.$message.success('已解除关联');
+      } catch (e) { this.$message.error('解除失败: ' + e.message); }
     },
     openAfaBuy(row) {
       this.rpAfaBuy = { visible: true, sku: row.sku, goodsId: row.afa_goods_id, goodsName: row.goods_name, qty: Number(row.suggest_qty) > 0 ? Number(row.suggest_qty) : 1, saving: false };

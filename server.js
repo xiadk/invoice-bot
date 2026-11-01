@@ -3860,10 +3860,12 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { ok: true, sku, localPrice: v, scope: w.scope });
     }
 
-    // ── 自动匹配阿发商品（v0.2.87）────────────────────────────────────────
-    // 思路：阿发没有全量商品接口 → 用「品牌词」搜索当候选池 → 按容量粗筛 → 桶内用
-    // 图片 dHash + 名称相似度 + 款式词打分，给出 top3；达到门槛（≥85 且图片或款式词对上）才算可自动采用。
-    // 入参 { batch?, apply? }：默认只预览、不写库；apply=true 时把达标项直接写进品牌商品的 afa_goods_id。
+    // ── 自动匹配阿发商品（v0.2.90）────────────────────────────────────────
+    // 思路：拿「商品名称」去阿发搜索（全名 → 品牌+容量 → 品牌词，逐级降级），候选按
+    // 「容量硬筛 + 名称相似度 + 图片 dHash」排序，**默认取第一条直接关联**，不再卡 85 分门槛。
+    // 误关联由页面上的「修改 / 删除关联」兜回来；已关联的每次重跑都跳过，不覆盖手工调整。
+    // 落库走 writeProductLink：品牌商品表有该 SKU 写品牌（同品牌共享），否则写个人补货行。
+    // 入参 { batch?, apply? }：apply=true 直接写库；false 只给建议（预览，不写库）。
     if (method === 'POST' && p === '/api/products/auto-match') {
       if (!canProduct) return denyProduct();
       const b = await readBody(req).catch(() => ({}));
@@ -3886,85 +3888,126 @@ const server = http.createServer(async (req, res) => {
       } catch (e) {
         return sendJson(res, 500, { error: '查询待匹配商品失败：' + e.message });
       }
-      const todo = items.filter((it) => !it.afa_goods_id);
-      if (!todo.length) {
-        return sendJson(res, 200, { ok: true, total: items.length, todo: 0, items: [], message: '没有待匹配的商品（都关联过了）' });
+      if (!items.length) {
+        return sendJson(res, 200, { ok: true, total: 0, todo: 0, linked: 0, picked: 0, items: [], message: '补货表里还没有商品' });
       }
 
       const poolCache = new Map();
+      const brandFallback = await brandIdOfUser(tenantId).catch(() => 1);
       const out = [];
-      let auto = 0;
-      let pending = 0;
+      let linked = 0;
+      let picked = 0;
+      let low = 0;
       let none = 0;
       let queried = 0;
       let lastErr = '';
 
-      for (const it of todo) {
-        const kw = match.guessKeyword(it.goods_name);
-        let pool = poolCache.get(kw);
-        if (!pool) {
-          try {
-            pool = (await afa.searchPool(tenantId, kw, { pages: 2, size: 50 })).rows;
-            queried += 1;
-          } catch (e) {
-            pool = [];
-            lastErr = String((e && e.message) || e).slice(0, 160);
-          }
-          poolCache.set(kw, pool);
-          await sleepMs(300);   // 限速：别把对方接口打挂
+      for (const it of items) {
+        const base = {
+          sku: it.sku, goods_name: it.goods_name, image_url: it.image_url,
+          brand_id: Number(it.brand_id) || brandFallback, inBrand: !!it.bp_id,
+        };
+
+        // ① 已关联的直接回显，不再搜（重跑不会覆盖手工调整，且省掉一次搜索）
+        if (it.afa_goods_id) {
+          linked += 1;
+          out.push(Object.assign(base, {
+            keyword: '', tier: '', state: 'linked', picked: String(it.afa_goods_id),
+            candidate: null, candidates: [], note: '已关联（ID ' + it.afa_goods_id + '）',
+          }));
+          continue;
         }
+
+        // ② 按名称搜：全名 → 品牌+容量 → 品牌词，取第一个搜出候选的层级（长名称在阿发常常 0 结果）
+        const layers = match.keywordLayers(it.goods_name);
+        let pool = [];
+        let kw = '';
+        let tier = '';
+        for (const L of layers) {
+          if (!poolCache.has(L.kw)) {
+            try {
+              const r = await afa.searchPool(tenantId, L.kw, { pages: 1, size: 50 });
+              poolCache.set(L.kw, r.rows || []);
+              queried += 1;
+              await sleepMs(250);   // 限速：别把对方接口打挂
+            } catch (e) {
+              poolCache.set(L.kw, []);
+              lastErr = String((e && e.message) || e).slice(0, 160);
+            }
+          }
+          const got = poolCache.get(L.kw);
+          if (got && got.length) { pool = got; kw = L.kw; tier = L.tier; break; }
+        }
+        if (!pool.length) {
+          none += 1;
+          out.push(Object.assign(base, {
+            keyword: (layers[0] && layers[0].kw) || '', tier: '',
+            state: 'none', picked: '', candidate: null, candidates: [],
+            note: lastErr ? '阿发接口报错：' + lastErr : '阿发搜不到同名商品，请手工关联',
+          }));
+          continue;
+        }
+
+        // ③ 排序取第一条：名称相似度粗排 → 前 5 张图并算 dHash 精排
         const sysSpec = match.parseSpec(it.goods_name);
         const sysHash = await match.imageHashOf(it.image_url);
-
-        // 容量粗筛（两边都有容量且不等 → 直接不是同一个规格），再按名称相似度取前 10 个去比图
-        const pre = [];
-        for (const c of pool) {
+        const pre = pool.map((c) => {
           const cs = match.parseSpec(c.goodsName);
-          if (sysSpec.volNum && cs.volNum && sysSpec.volNum !== cs.volNum) continue;
-          pre.push({ c, s: match.textSim(sysSpec.norm, cs.norm) });
-        }
-        pre.sort((x, y) => y.s - x.s);
-        const cands = [];
-        for (const { c } of pre.slice(0, 10)) {
-          const ch = await match.imageHashOf(c.picture);
-          const r = match.scoreCandidate(it.goods_name, c, { sysHash, candHash: ch });
-          if (r.hard) continue;
-          cands.push({
-            goodsId: String(c.goodsId), goodsName: c.goodsName, picture: c.picture,
-            salePrice: c.salePrice, unitPrice: c.unitPrice, factorName: c.factorName,
-            score: r.score, reasons: r.reasons, imageScore: r.imageScore,
-          });
-        }
-        cands.sort((x, y) => y.score - x.score);
-        const top = cands.slice(0, 3);
-        const best = top[0];
-        const canAuto = !!best && best.score >= 85 && (best.imageScore > 0 || best.reasons.some((x) => x.indexOf('款式词一致') === 0));
-
-        let state = 'none';
-        if (best) state = canAuto ? 'auto' : 'pending';
-        if (canAuto && apply && it.bp_id) {
-          await db.exec(
-            `UPDATE brand_product SET afa_goods_id = ?, afa_match_score = ?, afa_match_at = NOW()
-              WHERE id = ? AND (afa_goods_id IS NULL OR afa_goods_id = '')`,
-            [best.goodsId, best.score, it.bp_id]
-          );
-          state = 'applied';
-        }
-        if (!best) none += 1;
-        else if (canAuto) auto += 1;
-        else pending += 1;
-        out.push({
-          sku: it.sku, goods_name: it.goods_name, image_url: it.image_url, brand_id: it.brand_id,
-          keyword: kw, state, picked: canAuto ? best.goodsId : '', candidates: top,
-          inBrand: !!it.bp_id,
+          const volOk = !(sysSpec.volNum && cs.volNum && sysSpec.volNum !== cs.volNum);
+          return { c, s: match.textSim(sysSpec.norm, cs.norm), volOk };
         });
+        const okPre = pre.filter((x) => x.volOk).sort((x, y) => y.s - x.s);
+        // 容量硬筛把候选筛空时，退用未筛池子的第一条（保证每行都有得选，分数按 0 算并提示）
+        const volFallback = !okPre.length;
+        const usePre = (volFallback ? pre.slice().sort((x, y) => y.s - x.s) : okPre).slice(0, 5);
+        const hashes = await Promise.all(usePre.map((x) => match.imageHashOf(x.c.picture)));
+        const cands = usePre.map((x, i) => {
+          const r = match.scoreCandidate(it.goods_name, x.c, { sysHash, candHash: hashes[i] });
+          return {
+            goodsId: String(x.c.goodsId), goodsName: x.c.goodsName, picture: x.c.picture,
+            salePrice: x.c.salePrice, unitPrice: x.c.unitPrice, factorName: x.c.factorName,
+            score: (volFallback || r.hard) ? 0 : r.score,
+            reasons: r.reasons, imageScore: r.imageScore,
+            hard: r.hard || (volFallback ? '容量对不上（系统 ' + (sysSpec.volNum || '?') + '）' : ''),
+          };
+        });
+        cands.sort((x, y) => y.score - x.score);
+        const best = cands[0];
+
+        // ④ 写库：品牌商品表有该 SKU 就写品牌（同品牌共享），否则写个人补货行
+        if (best && apply) {
+          try {
+            const wr = await writeProductLink('afa_goods_id', best.goodsId, { brandId: base.brand_id, userId: tenantId, sku: it.sku });
+            best.scope = wr.scope;
+            if (wr.scope === 'brand') {
+              await db.exec(
+                'UPDATE brand_product SET afa_match_score = ?, afa_match_at = NOW() WHERE brand_id = ? AND sku = ?',
+                [best.score, base.brand_id, it.sku]
+              );
+            }
+          } catch (e) {
+            best.writeError = String((e && e.message) || e).slice(0, 160);
+            lastErr = best.writeError;
+          }
+        }
+        picked += 1;
+        if (best.score < 60) low += 1;
+        out.push(Object.assign(base, {
+          keyword: kw, tier,
+          state: apply ? 'linked' : 'suggest',
+          picked: best.goodsId, candidate: best, candidates: cands.slice(0, 3),
+          note: best.writeError
+            ? '写入失败：' + best.writeError
+            : (best.hard || (best.score < 60 ? '低置信：' + (best.reasons[0] || '相似度偏低') : (best.reasons || []).join(' + '))),
+        }));
       }
 
-      const tip = lastErr ? `（阿发接口报错：${lastErr}，请检查是否已配置有效 Token）` : '';
+      const tip = lastErr && !picked ? `（阿发接口报错：${lastErr}，请检查是否已配置有效 Token）` : '';
+      const act = apply ? '已关联' : '建议关联';
       return sendJson(res, 200, {
-        ok: true, total: items.length, todo: todo.length, queriedKeywords: queried,
-        auto, pending, none, applied: apply, items: out,
-        message: `扫描 ${todo.length} 个待匹配商品：可自动采用 ${auto} 个、待确认 ${pending} 个、没找到 ${none} 个${tip}`,
+        ok: true, total: items.length, todo: items.length - linked, linked, picked, low, none,
+        queriedKeywords: queried, applied: apply, items: out,
+        message: `共 ${items.length} 个商品（原有 ${linked} 个已关联）：本次${act} ${picked} 个（其中低置信 ${low} 个）、没找到 ${none} 个${tip}`,
       });
     }
 
