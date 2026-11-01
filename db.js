@@ -660,6 +660,14 @@ async function migrate(conn, dbName) {
       "COMMENT '是否允许平台取价操作（齐货通登录/重新取价、阿发Token/自动匹配/取价、选购加购；1=开启，超级管理员始终可见）'"
     );
   }
+  // ── 使用期限（v0.2.97）：新建用户默认 1 个月，到期后禁止登录、任何接口都不放行
+  //    NULL = 永久有效。存量账号升级时一律为 NULL（永久），避免上线瞬间把现有客户踢下线。
+  if (!(await colExists('app_user', 'expires_at'))) {
+    await q(
+      "ALTER TABLE `app_user` ADD COLUMN `expires_at` DATETIME NULL DEFAULT NULL " +
+      "COMMENT '使用到期时间（NULL=永久有效；超过后禁止登录与所有接口）' AFTER `status`"
+    );
+  }
   // ── 账单新增支出项「中心仓」（v0.2.43）：排在「人工」之后，手工录入，计入支出合计
   if (await tableExists('billing_month') && !(await colExists('billing_month', 'exp_warehouse'))) {
     await q(
