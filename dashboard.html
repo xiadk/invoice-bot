@@ -1011,6 +1011,9 @@
             </el-tag>
             <el-button size="small" :type="rp.afaSession.configured ? 'danger' : 'primary'"
                        @click="onAfaBtn">{{ rp.afaSession.configured ? '清除阿发Token' : '配置阿发Token' }}</el-button>
+            <el-button size="small" type="success" plain icon="el-icon-refresh" :loading="afaCap.running"
+                       title="自动抓取城配速达小程序的登录 Token（需重启微信打开小程序）"
+                       @click="openAfaCapture">刷新阿发Token</el-button>
             <el-button size="small" type="warning" plain :loading="rpMatch.loading" @click="openAutoMatch"
                        title="按「品牌 + 容量」分桶，用商品图片相似度 + 名称相似度找阿发对应商品">自动匹配阿发</el-button>
             <el-button size="small" :loading="rp.afaPricing" @click="loadAfaPrices">阿发重新取价</el-button>
@@ -1287,6 +1290,60 @@
               匹配靠「品牌 + 容量数字」分桶，桶内用商品图片相似度兜底 —— 所以「矮罐 / 竖罐装 / 摩登罐」这类叫法不同也能认出来。
             </span>
             <el-button size="small" @click="rpMatch.visible = false">关闭</el-button>
+          </div>
+        </el-dialog>
+
+        <!-- 刷新阿发Token：本机抓包进度。抓到即落库，随后自动还原系统代理并删除临时根证书 -->
+        <el-dialog :visible.sync="afaCap.visible" title="刷新阿发Token（自动抓包）" width="660px" append-to-body
+                   :close-on-click-modal="false" :show-close="!afaCap.running" @close="onAfaCapClose">
+          <div v-if="afaCap.status === 'starting' || afaCap.status === 'waiting'">
+            <el-alert type="warning" :closable="false" show-icon style="margin-bottom:12px"
+                      title="现在请彻底退出微信（托盘图标右键退出，确保没有残留进程），重新打开微信并进入「永源顺城配速达」小程序。">
+            </el-alert>
+            <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px">
+              <el-progress :percentage="capPercent" :stroke-width="10" style="flex:1"></el-progress>
+              <span class="loginid" style="white-space:nowrap">
+                {{ afaCap.status === 'starting' ? '准备中…' : ('剩余 ' + afaCap.remainSec + ' 秒') }}
+              </span>
+            </div>
+            <div class="loginid" style="margin-bottom:8px">
+              已转发 {{ afaCap.hits }} 个请求（只有城配速达的域名会被解密，其余程序照常联网）。
+              抓到登录响应后立即写入数据库，并自动还原系统代理、删除临时证书。
+            </div>
+            <div v-if="afaCap.seen && afaCap.seen.length"
+                 style="max-height:110px;overflow:auto;background:#fafafa;border-radius:4px;padding:6px 8px;font-size:12px;color:#909399">
+              <div v-for="(s, i) in afaCap.seen" :key="i">{{ s.host }}{{ s.path }}</div>
+            </div>
+          </div>
+
+          <el-alert v-if="afaCap.status === 'saved'" type="success" :closable="false" show-icon
+                    :title="'Token 已更新：' + afaCap.tokenMasked + '（mid ' + (afaCap.mid || '?') + '，门店 ' + (afaCap.storeId || '—') + '）'"
+                    description="系统代理已还原、临时证书已删除，全机联网恢复正常。微信若提示网络异常，重启微信即可。">
+          </el-alert>
+          <el-alert v-if="afaCap.status === 'timeout'" type="warning" :closable="false" show-icon
+                    :title="'等待超时：' + (afaCap.error || '没有抓到登录请求')"
+                    description="常见原因：① 微信没彻底退出重开（托盘右键退出再打开）；② 没进「永源顺城配速达」小程序；③ 小程序走 QUIC 或做了证书固定。可点「重试」，仍不行请用手动粘贴 Token。">
+          </el-alert>
+          <el-alert v-if="afaCap.status === 'error'" type="error" :closable="false" show-icon
+                    :title="afaCap.error || '抓取失败'"></el-alert>
+          <el-alert v-if="afaCap.status === 'cancelled'" type="info" :closable="false" show-icon
+                    title="已取消：系统代理已还原、临时证书已删除"></el-alert>
+
+          <div v-if="afaCap.steps && afaCap.steps.length" style="margin-top:12px;max-height:150px;overflow:auto">
+            <div v-for="(s, i) in afaCap.steps" :key="i" style="font-size:12px;line-height:20px"
+                 :style="{ color: s.level === 'error' ? '#f56c6c' : (s.level === 'success' ? '#67c23a' : s.level === 'warn' ? '#e6a23c' : '#606266') }">
+              · {{ s.text }}
+            </div>
+          </div>
+
+          <div slot="footer">
+            <span class="loginid" style="float:left;line-height:32px;text-align:left;max-width:420px">
+              仅解密 zhoupudata.com 域名，其余流量纯转发；会话结束即删除 CA 与私钥。
+            </span>
+            <el-button v-if="afaCap.running" size="small" type="danger" plain @click="stopAfaCapture">取消并还原</el-button>
+            <el-button v-if="!afaCap.running && (afaCap.status === 'timeout' || afaCap.status === 'error')"
+                       size="small" type="primary" @click="startAfaCapture">重试</el-button>
+            <el-button size="small" @click="afaCap.visible = false">关闭</el-button>
           </div>
         </el-dialog>
 
@@ -3416,6 +3473,8 @@ const vm = new Vue({
       // 自动匹配阿发（v0.2.87）：按「品牌 + 容量」分桶 → 图片 dHash + 名称相似度打分
       rpMatch: { visible: false, loading: false, applying: false, items: [], message: '', batchId: null, autoCount: 0 },
       afaDlg: { visible: false, token: '', storeId: '', appId: 'wxc050ff76c31c4371', saving: false },
+      // 刷新阿发Token（v0.2.88）：本机抓包 → 抓到即落库并自动还原系统代理、删临时证书
+      afaCap: { visible: false, running: false, status: '', remainSec: 0, timeoutSec: 180, steps: [], seen: [], error: '', tokenMasked: '', mid: null, hits: 0, timer: null },
       // 发布到交易市场（单个/批量共用弹窗）
       publish: { visible: false, title: '', discount: 100, items: [], saving: false },
       // 交易市场
@@ -3628,6 +3687,13 @@ const vm = new Vue({
         { key: 'expense', num: this.yuan(t.expense), label: '本月总支出', sub: '含平台采购 ' + this.yuan(plat) },
         { key: 'rate', num: (Number(t.rate) || 0) + '%', label: '本月净利率', sub: '净利润 ÷ 总收入' },
       ];
+    },
+    /** 阿发 Token 抓包进度：按剩余秒数折算，抓到即满格 */
+    capPercent() {
+      if (this.afaCap.status === 'saved') return 100;
+      const total = Math.max(1, this.afaCap.timeoutSec || 180);
+      const used = total - (this.afaCap.remainSec || 0);
+      return Math.max(0, Math.min(99, Math.round((used / total) * 100)));
     },
     /** 商品列表统计卡（4 卡）：全部取自现有接口字段，未新增接口 */
     productStatCards() {
@@ -7238,6 +7304,114 @@ const vm = new Vue({
       }
       this.afaDlg = { visible: true, token: '', storeId: this.rp.afaSession.storeId || '148', appId: this.rp.afaSession.appId || 'wxc050ff76c31c4371', saving: false };
     },
+    /** 刷新阿发Token：先讲清步骤并确认，再启动本机抓包（抓到即落库，随后自动还原代理、删证书） */
+    async openAfaCapture() {
+      // 页面刷新过而服务端会话还挂着时，直接接回进度，不要重复开一次
+      try {
+        const d = await this.api('/api/afa/capture/status');
+        if (d && d.active) {
+          this.afaCap.visible = true;
+          this.afaCap.running = true;
+          this.afaCap.status = d.status || 'waiting';
+          this.startAfaPoll();
+          return;
+        }
+      } catch (e) { /* 查询失败就当没有 */ }
+
+      try {
+        await this.$confirm(
+          '<div style="line-height:1.9;font-size:13px">'
+          + '点「开始抓取」后，本机会依次做这些事：<br>'
+          + '① 安装一张临时根证书（Windows 会弹 <b>安全警告 / 管理员授权，请点「是」</b>，否则抓不到）<br>'
+          + '② 把系统代理指向本机中间人 —— 只解密城配速达的域名，其它程序照常联网<br>'
+          + '③ 等微信小程序发出登录请求，抓到 Token 后立即写库，并<b>自动还原系统代理、删除证书</b><br><br>'
+          + '请现在<b>彻底退出微信</b>（托盘图标右键「退出」，确保没有残留），'
+          + '抓取开始后再重新打开微信，进入「永源顺城配速达」小程序。'
+          + '</div>',
+          '刷新阿发Token',
+          { dangerouslyUseHTMLString: true, confirmButtonText: '开始抓取', cancelButtonText: '取消', type: 'warning' }
+        );
+      } catch (e) { return; }
+
+      this.afaCap.visible = true;
+      await this.startAfaCapture();
+    },
+    async startAfaCapture() {
+      if (this.afaCap.running && this.afaCap.status !== 'error' && this.afaCap.status !== 'timeout') return;
+      this.afaCap.running = true;
+      this.afaCap.status = 'starting';
+      this.afaCap.error = '';
+      this.afaCap.steps = [];
+      this.afaCap.seen = [];
+      this.afaCap.hits = 0;
+      this.afaCap.tokenMasked = '';
+      this.afaCap.mid = null;
+      try {
+        const d = await this.api('/api/afa/capture/start', {
+          method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+        });
+        if (!d.ok) {
+          this.afaCap.status = 'error';
+          this.afaCap.error = d.error || '启动失败';
+          this.afaCap.running = false;
+          this.$message.error(this.afaCap.error);
+          return;
+        }
+        this.afaCap.timeoutSec = d.timeoutSec || 180;
+        this.afaCap.remainSec = d.timeoutSec || 180;
+        this.startAfaPoll();
+      } catch (e) {
+        this.afaCap.status = 'error';
+        this.afaCap.error = '启动请求失败：' + e.message;
+        this.afaCap.running = false;
+      }
+    },
+    startAfaPoll() {
+      this.stopAfaPoll();
+      this.afaCap.timer = setInterval(() => { this.pollAfaCap(); }, 1000);
+      this.pollAfaCap();
+    },
+    stopAfaPoll() {
+      if (this.afaCap.timer) { clearInterval(this.afaCap.timer); this.afaCap.timer = null; }
+    },
+    async pollAfaCap() {
+      try {
+        const d = await this.api('/api/afa/capture/status');
+        if (!d) return;
+        this.afaCap.status = d.status || 'idle';
+        this.afaCap.remainSec = d.remainSec || 0;
+        this.afaCap.steps = d.steps || [];
+        this.afaCap.seen = d.seen || [];
+        this.afaCap.hits = d.hits || 0;
+        this.afaCap.error = d.error || '';
+        this.afaCap.tokenMasked = d.tokenMasked || '';
+        this.afaCap.mid = d.mid || null;
+        this.afaCap.storeId = d.storeId || '';
+        const done = ['saved', 'timeout', 'error', 'cancelled', 'idle'].indexOf(this.afaCap.status) >= 0;
+        if (!done) { this.afaCap.running = true; return; }
+        this.afaCap.running = false;
+        this.stopAfaPoll();
+        if (this.afaCap.status === 'saved') {
+          this.$message.success('阿发 Token 已更新，系统代理已还原');
+          await this.loadAfaSession();
+          await this.loadAfaPrices();
+        }
+      } catch (e) { /* 轮询失败忽略，下一轮再试 */ }
+    },
+    async stopAfaCapture() {
+      this.afaCap.running = false;
+      this.stopAfaPoll();
+      try {
+        await this.api('/api/afa/capture/stop', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+      } catch (e) { /* ignore */ }
+      this.afaCap.status = 'cancelled';
+      this.$message.info('已取消：系统代理已还原、临时证书已删除');
+    },
+    onAfaCapClose() {
+      // 弹窗关掉但会话还在跑 → 代理会一直挂在本机，必须一并取消
+      if (this.afaCap.running) this.stopAfaCapture();
+    },
+
     /** 保存城配速达 Token（用户粘贴 authorization + 门店/小程序参数） */
     async submitAfaToken() {
       const token = String(this.afaDlg.token || '').trim();

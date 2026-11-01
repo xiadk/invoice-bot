@@ -61,6 +61,7 @@ const tenancy = require('./lib/tenancy');
 const { runImport, importOrderUpload, importInvoiceUpload } = require('./import-to-db');
 const qht = require('./lib/qht');
 const afa = require('./lib/afa');
+const afaCapture = require('./lib/afa-capture');
 const match = require('./lib/match');
 const products = require('./lib/products');
 const billing = require('./lib/billing');
@@ -3815,6 +3816,39 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
+    // ── 阿发 Token 一键刷新（本机抓包）──
+    // 只在用户点按钮时开：装临时 CA → 系统代理指向本机中间人 → 等微信小程序登录 → 落库 → 立即还原并删 CA。
+    if (method === 'POST' && p === '/api/afa/capture/start') {
+      writeGuard();
+      const prep = await afaCapture.prepare(tenantId);
+      if (!prep.ok) return sendJson(res, 200, { ok: false, error: prep.error });
+      try {
+        const proxy = afaCapture.createProxyServer();
+        await new Promise((resolve, reject) => {
+          proxy.server.once('error', reject);
+          proxy.server.listen(0, '127.0.0.1', resolve);
+        });
+        const port = proxy.server.address().port;
+        const act = await afaCapture.activate(port, proxy);
+        if (!act.ok) {
+          await afaCapture.cleanup('error');
+          return sendJson(res, 200, { ok: false, error: act.error || '启动抓包代理失败' });
+        }
+        return sendJson(res, 200, { ok: true, port, timeoutSec: Math.round(act.timeoutMs / 1000) });
+      } catch (e) {
+        await afaCapture.cleanup('error');
+        return sendJson(res, 200, { ok: false, error: '启动抓包代理失败：' + String((e && e.message) || e).slice(0, 200) });
+      }
+    }
+    if (method === 'GET' && p === '/api/afa/capture/status') {
+      return sendJson(res, 200, afaCapture.status());
+    }
+    if (method === 'POST' && p === '/api/afa/capture/stop') {
+      writeGuard();
+      await afaCapture.cleanup('cancel');
+      return sendJson(res, 200, Object.assign({ ok: true }, afaCapture.status()));
+    }
+
     // 关联城配速达商品（写品牌商品，缺失则回退个人补货行）/ 保存本地价
     if (method === 'POST' && p === '/api/products/link-afa') {
       if (!canProduct) return denyProduct();
@@ -5597,6 +5631,12 @@ server.on('upgrade', async (req, socket, head) => {
 server.listen(PORT, async () => {
   console.log(`发票催收控制台已启动: http://localhost:${PORT}`);
   console.log(`  登录页: http://localhost:${PORT}/login   （超级管理员 admin / admin，首次登录请改密）`);
+  // 上次若在「刷新阿发Token」抓包中途被强杀，系统代理会残留指向已消失的端口（表现为全机断网）
+  // 进程一起来就把代理还原、把残留的临时根证书删掉
+  try {
+    const cleanupResult = await afaCapture.cleanupOnBoot();
+    if (cleanupResult && cleanupResult.restored) console.log('  ✓ 已还原上次残留的抓包代理设置与临时证书');
+  } catch (e) { /* 兜底失败不影响启动 */ }
   try {
     await db.ensureSchema();
     const admin = (await db.query("SELECT id FROM app_user WHERE username = 'admin'"))[0];
