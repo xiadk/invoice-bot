@@ -995,7 +995,10 @@
               本次导入 {{ rp.expect }} 个，当前筛出 {{ rp.total }} 个（同名 SKU 已合并）
             </span>
           </div>
-          <el-table :data="rp.rows" size="small" border :max-height="tblH.rp" class="rp-table" style="width:100%" v-loading="rp.loading"
+          <!-- :key 随「视图维度」变化强制重建：品牌方列（!batchId）与建议量列（batchId）都是 v-if 动态列，
+               两列同时一删一增会让 el-table 的内部 columns 数组插入位置算错 → 表头与数据列顺序错位，必须整表重建 -->
+          <el-table ref="rpTable" :key="'rp-' + (rp.batchId ? 'batch' : 'all') + (isAdmin ? '-a' : '-u')"
+                    :data="rp.rows" size="small" border :max-height="tblH.rp" class="rp-table" style="width:100%" v-loading="rp.loading"
                     empty-text="暂无商品（品牌方商品需超级管理员点「商品同步」拉取；导入文件后只显示文件里的商品）">
             <el-table-column v-if="isAdmin && !rp.batchId" label="品牌方" width="110">
               <template slot-scope="p"><span class="loginid">{{ p.row.brand_name || ('#' + p.row.brand_id) }}</span></template>
@@ -7122,6 +7125,8 @@ const vm = new Vue({
       // 列表一出来就把库里已缓存的价格带出来（mode=cache 只读本地库，绝不去平台取价）
       await this.loadQhtPrices(this.rp.rows, { mode: 'cache' });
       await this.loadAfaPrices(this.rp.rows, { mode: 'cache' });
+      // 重排一次列宽：页面用 v-show 常驻 DOM，在隐藏状态下渲染过的表格列宽会算错，进页面/切视图后必须 doLayout
+      this.$nextTick(() => { const t = this.$refs.rpTable; if (t && t.doLayout) t.doLayout(); });
     },
     async onRpSize(v) { this.rp.size = v; this.rp.page = 1; await this.loadReplenish(); },
     async onRpPage(v) { this.rp.page = v; await this.loadReplenish(); },
