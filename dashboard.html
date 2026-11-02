@@ -179,6 +179,54 @@
                 padding: 8px 12px; border: 1px solid var(--line); border-radius: 6px; margin-bottom: 10px; }
   .menu-perm-row { display: flex; align-items: center; justify-content: space-between;
                    padding: 10px 12px; border: 1px solid #ebeef5; border-radius: 6px; margin-bottom: 10px; }
+  /* 新增售后弹窗：字段较多，矮屏（笔记本 768）时让弹窗内部滚动，别把「备注」顶到屏幕外 */
+  .af-new-dlg .el-dialog__body { max-height: calc(88vh - 150px); overflow-y: auto; }
+  /* 处理售后弹窗（v0.2.108）：只做「上传凭证 + 备注」，矮屏时同样内部滚动 */
+  .af-up-dlg .el-dialog__body { max-height: calc(90vh - 160px); overflow-y: auto; }
+  .af-up-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+  /* 上传区：点击 / 拖拽 / 粘贴三合一，虚线框；拖拽悬停与校验失败各有状态色 */
+  .af-up-drop { display: flex; flex-direction: column; align-items: center; justify-content: center;
+                gap: 6px; text-align: center; padding: 18px 14px; border: 1px dashed #dcdfe6;
+                border-radius: 8px; background: #fafbfc; cursor: pointer; transition: .15s;
+                font-size: 13px; color: var(--text-2); min-height: 132px; }
+  .af-up-drop:hover { border-color: #409eff; background: #f2f8ff; }
+  .af-up-drop.is-drag { border-color: #409eff; background: #ecf5ff; }
+  .af-up-drop.is-error { border-color: #f56c6c; background: #fef0f0; }
+  .af-up-thumb { max-width: 100%; max-height: 260px; border-radius: 6px; display: block; }
+  .af-up-ops { display: flex; align-items: center; justify-content: space-between; margin-top: 6px; }
+  .af-up-err { color: #f56c6c; font-size: 12px; margin-top: 6px; }
+  /* 凭证查看：一条一条列，图片可点开大图 */
+  .af-att-row { padding: 10px 0; border-bottom: 1px solid #f0f0f0; }
+  .af-att-row:last-child { border-bottom: 0; }
+  .af-att-meta { font-size: 12px; margin-bottom: 8px; }
+  .af-att-img { width: 132px; height: 132px; object-fit: cover; border-radius: 6px;
+                border: 1px solid #ebeef5; cursor: zoom-in; }
+  /* 货单图片（v0.3.0）：新建弹窗里的缩略图网格 + 手机上传二维码 */
+  .wb-sec-title { font-size: 13px; font-weight: 600; margin: 4px 0 8px; }
+  .wb-img-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(84px, 1fr)); gap: 8px; }
+  .wb-img { position: relative; padding-top: 100%; border-radius: 6px; overflow: hidden;
+            border: 1px solid #ebeef5; background: #f5f7fa; }
+  .wb-img img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; cursor: zoom-in; }
+  .wb-img .el-icon-close { position: absolute; right: 3px; top: 3px; width: 18px; height: 18px;
+                           line-height: 18px; text-align: center; border-radius: 50%;
+                           background: rgba(0, 0, 0, .5); color: #fff; font-size: 11px; cursor: pointer; }
+  .wb-img-add { display: flex; flex-direction: column; align-items: center; justify-content: center;
+                min-height: 84px; border: 1px dashed #dcdfe6; border-radius: 6px; color: var(--text-2);
+                font-size: 13px; cursor: pointer; background: #fafbfc; transition: .15s; }
+  .wb-img-add:hover { border-color: #409eff; background: #f2f8ff; }
+  .wb-img-add.is-busy { cursor: progress; color: #909399; }
+  .wb-err { color: #f56c6c; font-size: 12px; margin-top: 6px; }
+  .wb-phone { display: flex; gap: 16px; align-items: flex-start; margin-top: 14px;
+              padding: 12px 14px; border: 1px solid #ebeef5; border-radius: 8px; background: #fafbfc; }
+  .wb-phone-l { flex: 1; min-width: 0; }
+  .wb-qr { width: 132px; height: 132px; flex: 0 0 132px; background: #fff; padding: 6px;
+           border-radius: 6px; border: 1px solid #ebeef5; }
+  .wb-qr svg { display: block; width: 100%; height: 100%; }
+  .wb-left { font-size: 12px; color: var(--text-2); margin-left: 8px; }
+  .wb-left.is-warn { color: #e6a23c; }
+  /* 员工新增弹窗里的菜单开关：两列网格，省高度 */
+  .staff-menu-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 10px; width: 100%; }
+  .staff-menu-grid .menu-perm-row { margin-bottom: 8px; padding: 8px 10px; }
   .amount { font-weight: 600; color: #e53935; }
   .amount.ok { color: #2e7d32; }
   .amount.zero { color: var(--sub); font-weight: 400; }
@@ -416,6 +464,12 @@
       </div>
 
       <el-main>
+      <!-- 员工账号一个菜单都没被授权时的兜底提示（否则右侧会整片空白） -->
+      <div v-if="isStaff && !staffHome" class="section-card" style="padding:36px 20px;text-align:center">
+        <div style="font-size:15px;font-weight:600;margin-bottom:8px">当前账号还没有开通任何菜单</div>
+        <div class="loginid">请联系你的管理员，在「员工管理」里给这个账号勾选要开放的菜单。</div>
+      </div>
+
       <!-- ══════════ 1688发票 ══════════ -->
       <div v-show="page === 'board'" id="page-board">
         <!-- 统计卡 -->
@@ -429,6 +483,29 @@
             </el-card>
           </el-col>
         </el-row>
+
+        <!-- 顶部状态条：登录 / 同步（与「拼多多发票」页同一套 qnh-login-bar 组件与排布，
+             位置在统计卡下方、趋势图上方；登录态按账号隔离，换账号要看自己的登录状态） -->
+        <el-card class="section-card" shadow="never" :body-style="{ padding: '12px 14px' }">
+          <qnh-login-bar service="1688" :cookie="aliCookieBar" action-text="同步1688订单"
+                         :action-loading="aliSync.running" :can-logout="true" hide-meta
+                         @login="onAliLoginBtn" @logout="logoutAli" @action="syncAliOrders">
+            <template slot="actions">
+              <el-tag v-if="aliSync.running || aliSync.text" size="small"
+                      :type="aliSync.running ? 'warning' : 'info'">{{ aliSync.running ? '同步中' : '上次同步已结束' }}</el-tag>
+            </template>
+          </qnh-login-bar>
+          <!-- 订单同步进度：只在同步中/刚结束时出现，不占用常驻版面 -->
+          <div v-if="aliSync.running || aliSync.text" class="ali-sync-bar">
+            <span class="ali-sync-dot" :class="{ on: aliSync.running }"></span>
+            <span class="ali-sync-text">{{ aliSync.text }}</span>
+            <span class="ali-sync-meta" v-if="aliSync.fetched">
+              已拉 {{ aliSync.fetched }} 单 · 入库 {{ aliSync.saved }} · 新增 {{ aliSync.newCount }}
+            </span>
+            <span class="spacer" style="flex:1"></span>
+            <el-button v-if="aliSync.running" size="mini" type="text" @click="stopAliSync">停止</el-button>
+          </div>
+        </el-card>
 
         <!-- 趋势图（Element UI 卡片 + ECharts；点某一天可查看当天明细） -->
         <el-row :gutter="12" class="section-card">
@@ -474,28 +551,11 @@
             <el-input v-model="draftKeyword" size="small" style="width:190px" placeholder="搜索卖家公司名 / 登录ID"
                       clearable @keyup.enter.native="applyFilters"></el-input>
             <el-button size="small" type="primary" plain :loading="boardLoading" @click="applyFilters" title="按当前筛选条件重新请求数据">查询</el-button>
-            <el-button size="small" :loading="boardLoading || aliSync.running" @click="syncAliOrders"
-                       :title="aliSync.running ? '正在从 1688 拉取订单…' : '从 1688 拉取订单：下单时间起点 ' + (aliSync.startDateTime || '库中最近下单时间（自动回退 1 天重叠）') + '，逐页拉到没有下一页为止；拉完再按开票时间增量刷新「已开票」状态'">刷新</el-button>
-            <!-- 1688 登录态：未登录时显示「登录1688」（唤起助手弹窗），已登录时显示「退出1688」（双清联动） -->
-            <el-button size="small" :type="(aliSession && aliSession.configured) ? 'default' : 'success'"
-                       :loading="aliLogin.loading"
-                       @click="(aliSession && aliSession.configured) ? logoutAli() : onAliLoginBtn()"
-                       :title="(aliSession && aliSession.configured) ? '退出 1688：同时清除服务器登录态与本机助手登录态（双清联动）' : '在本机助手里弹出 1688 登录窗口，登录后 Cookie 自动回传服务器，不用再手工粘贴'">{{ (aliSession && aliSession.configured) ? '退出1688' : '登录1688' }}</el-button>
             <span class="spacer"></span>
             <el-button size="small" @click="openUpload('orders')" title="导入1688订单数据：上传从 1688 导出的订单 Excel 并导入（重复订单按最新数据更新）">导入订单</el-button>
             <el-button size="small" @click="openUpload('invoices')" title="导入税务局发票数据：上传从电子税务局导出的发票 Excel 并导入（重复发票按最新数据更新）">导入发票</el-button>
             <el-button size="small" type="primary" :disabled="readonly" @click="batchSend"
                        title="发送话术里的抬头/税号/邮箱取本账号默认抬头（系统管理 → 用户管理 维护）">发送催收消息 ({{ selectedCount }})</el-button>
-          </div>
-          <!-- 订单同步进度：只在同步中/刚结束时出现，不占用常驻版面 -->
-          <div v-if="aliSync.running || aliSync.text" class="ali-sync-bar">
-            <span class="ali-sync-dot" :class="{ on: aliSync.running }"></span>
-            <span class="ali-sync-text">{{ aliSync.text }}</span>
-            <span class="ali-sync-meta" v-if="aliSync.fetched">
-              已拉 {{ aliSync.fetched }} 单 · 入库 {{ aliSync.saved }} · 新增 {{ aliSync.newCount }}
-            </span>
-            <span class="spacer" style="flex:1"></span>
-            <el-button v-if="aliSync.running" size="mini" type="text" @click="stopAliSync">停止</el-button>
           </div>
         </el-card>
 
@@ -912,9 +972,10 @@
             </el-table-column>
             <el-table-column label="商品图片" width="72">
               <template slot-scope="p">
-                <img v-if="p.row.image_url" :src="p.row.image_url" :alt="p.row.goods_name"
+                <img v-if="p.row.image_url" :src="imgThumb(p.row.image_url, 96)" :alt="p.row.goods_name"
+                     width="48" height="48" loading="lazy" decoding="async"
                      style="width:48px;height:48px;object-fit:cover;border-radius:4px;display:block"
-                     @error="e => { e.target.style.display='none'; }" />
+                     @error="imgError($event, p.row.image_url)" />
                 <span v-else class="loginid">—</span>
               </template>
             </el-table-column>
@@ -990,21 +1051,30 @@
                        title="用商品名称原样搜索城配速达，直接取搜索结果第一条关联；只对当前筛选出来的商品生效">自动匹配阿发</el-button>
             <el-button v-if="canPrice" size="small" :loading="rp.afaPricing" @click="refreshRpPrices('afa')"
                        title="对当前筛选出来的全部商品重新取阿发价（不是全量）">阿发重新取价</el-button>
+            <el-button v-if="canPrice" size="small" :type="rp.jdSession.configured ? 'danger' : 'primary'"
+                       title="京东只放行真实浏览器：点这里会在这台电脑上弹出万商登录窗口"
+                       @click="openJdLoginDlg">{{ rp.jdSession.configured ? '万商已登录' : '万商登录' }}</el-button>
+            <el-button v-if="canPrice" size="small" :loading="rp.jdPricing" @click="refreshRpPrices('jd')"
+                       title="对当前筛选出来的已关联商品取京东万商价（由本机助手在万商页面里逐个取，约 0.5~1 秒/个）">京东取价</el-button>
             <span class="loginid">共 {{ rp.total }} 个商品</span>
             <span v-if="rp.expect && rp.total < rp.expect" style="font-size:12px;color:#e6a23c">
               本次导入 {{ rp.expect }} 个，当前筛出 {{ rp.total }} 个（同名 SKU 已合并）
             </span>
           </div>
-          <el-table :data="rp.rows" size="small" border :max-height="tblH.rp" class="rp-table" style="width:100%" v-loading="rp.loading"
+          <!-- :key 随「视图维度」变化强制重建：品牌方列（!batchId）与建议量列（batchId）都是 v-if 动态列，
+               两列同时一删一增会让 el-table 的内部 columns 数组插入位置算错 → 表头与数据列顺序错位，必须整表重建 -->
+          <el-table ref="rpTable" :key="'rp-' + (rp.batchId ? 'batch' : 'all') + (isAdmin ? '-a' : '-u')"
+                    :data="rp.rows" size="small" border :max-height="tblH.rp" class="rp-table" style="width:100%" v-loading="rp.loading"
                     empty-text="暂无商品（品牌方商品需超级管理员点「商品同步」拉取；导入文件后只显示文件里的商品）">
             <el-table-column v-if="isAdmin && !rp.batchId" label="品牌方" width="110">
               <template slot-scope="p"><span class="loginid">{{ p.row.brand_name || ('#' + p.row.brand_id) }}</span></template>
             </el-table-column>
             <el-table-column label="商品图片" width="64">
               <template slot-scope="p">
-                <img v-if="p.row.image_url" :src="p.row.image_url" :alt="p.row.goods_name"
+                <img v-if="p.row.image_url" :src="imgThumb(p.row.image_url, 96)" :alt="p.row.goods_name"
+                     width="46" height="46" loading="lazy" decoding="async"
                      style="width:46px;height:46px;object-fit:cover;border-radius:4px;display:block"
-                     @error="e => { e.target.style.display='none'; }" />
+                     @error="imgError($event, p.row.image_url)" />
                 <span v-else class="loginid">—</span>
               </template>
             </el-table-column>
@@ -1030,9 +1100,10 @@
                   <template v-if="rp.prices[pkey(p.row, 'qht')] && rp.prices[pkey(p.row, 'qht')].ok">
                     <div style="display:flex;flex-direction:column;gap:2px;min-width:120px">
                       <img v-if="rp.prices[pkey(p.row, 'qht')].picture || p.row.image_url"
-                           :src="rp.prices[pkey(p.row, 'qht')].picture || p.row.image_url" :alt="p.row.goods_name"
+                           :src="imgThumb(rp.prices[pkey(p.row, 'qht')].picture || p.row.image_url, 80)" :alt="p.row.goods_name"
+                           width="40" height="40" loading="lazy" decoding="async"
                            style="width:40px;height:40px;object-fit:cover;border-radius:4px;display:block"
-                           @error="e => { e.target.style.display='none'; }" />
+                           @error="imgError($event, rp.prices[pkey(p.row, 'qht')].picture || p.row.image_url)" />
                       <div style="display:flex;justify-content:space-between;gap:8px;font-size:12px;line-height:18px">
                         <span class="loginid">单价</span><b class="amount ok">¥{{ rp.prices[pkey(p.row, 'qht')].unitPrice }}</b>
                       </div>
@@ -1061,9 +1132,10 @@
                   <template v-if="rp.afaPrices[pkey(p.row, 'afa')] && rp.afaPrices[pkey(p.row, 'afa')].ok">
                     <div style="display:flex;flex-direction:column;gap:2px;min-width:120px">
                       <img v-if="rp.afaPrices[pkey(p.row, 'afa')].picture || p.row.image_url"
-                           :src="rp.afaPrices[pkey(p.row, 'afa')].picture || p.row.image_url" :alt="p.row.goods_name"
+                           :src="imgThumb(rp.afaPrices[pkey(p.row, 'afa')].picture || p.row.image_url, 80)" :alt="p.row.goods_name"
+                           width="40" height="40" loading="lazy" decoding="async"
                            style="width:40px;height:40px;object-fit:cover;border-radius:4px;display:block"
-                           @error="e => { e.target.style.display='none'; }" />
+                           @error="imgError($event, rp.afaPrices[pkey(p.row, 'afa')].picture || p.row.image_url)" />
                       <div style="display:flex;justify-content:space-between;gap:8px;font-size:12px;line-height:18px">
                         <span class="loginid">单价</span><b class="amount ok">¥{{ rp.afaPrices[pkey(p.row, 'afa')].unitPrice }}</b>
                       </div>
@@ -1090,6 +1162,50 @@
                 <el-button v-else size="mini" type="warning" plain @click="openAfaLinkDlg(p.row)">关联</el-button>
               </template>
             </el-table-column>
+            <el-table-column label="京东万商价" min-width="215" class-name="col-price">
+              <template slot-scope="p">
+                <template v-if="p.row.jd_sku_id">
+                  <template v-if="rp.jdPrices[pkey(p.row, 'jd')] && rp.jdPrices[pkey(p.row, 'jd')].ok">
+                    <div style="display:flex;flex-direction:column;gap:2px;min-width:120px">
+                      <img v-if="rp.jdPrices[pkey(p.row, 'jd')].picture || p.row.image_url"
+                           :src="imgThumb(rp.jdPrices[pkey(p.row, 'jd')].picture || p.row.image_url, 80)" :alt="p.row.goods_name"
+                           width="40" height="40" loading="lazy" decoding="async"
+                           style="width:40px;height:40px;object-fit:cover;border-radius:4px;display:block"
+                           @error="imgError($event, rp.jdPrices[pkey(p.row, 'jd')].picture || p.row.image_url)" />
+                      <div style="display:flex;justify-content:space-between;gap:8px;font-size:12px;line-height:18px">
+                        <span class="loginid">整件价</span><b class="amount ok">¥{{ rp.jdPrices[pkey(p.row, 'jd')].packPrice }}</b>
+                      </div>
+                      <div style="display:flex;justify-content:space-between;gap:8px;font-size:12px;line-height:18px">
+                        <span class="loginid">折合单价</span>
+                        <b v-if="rp.jdPrices[pkey(p.row, 'jd')].unitPrice != null">¥{{ rp.jdPrices[pkey(p.row, 'jd')].unitPrice }}</b>
+                        <span v-else class="loginid" title="商品标题里没解析出装箱量，无法折算单价">—</span>
+                      </div>
+                      <div style="display:flex;justify-content:space-between;gap:8px;font-size:12px;line-height:18px">
+                        <span class="loginid">规格</span><span class="loginid">{{ rp.jdPrices[pkey(p.row, 'jd')].spec || '—' }}</span>
+                      </div>
+                      <div v-if="rp.jdPrices[pkey(p.row, 'jd')].fetchedAt"
+                           style="font-size:11px;line-height:14px;color:#909399">
+                        缓存于 {{ rp.jdPrices[pkey(p.row, 'jd')].fetchedAt }}
+                      </div>
+                    </div>
+                    <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:4px">
+                      <el-button size="mini" type="primary" plain @click="openJdLinkDlg(p.row)">修改</el-button>
+                      <el-button size="mini" type="danger" plain @click="unlinkJdRow(p.row)">解除</el-button>
+                    </div>
+                  </template>
+                  <span v-else-if="rp.jdPrices[pkey(p.row, 'jd')]" class="loginid" style="color:#f56c6c"
+                        :title="rp.jdPrices[pkey(p.row, 'jd')].error || '取价失败'">取价失败</span>
+                  <template v-else>
+                    <span class="loginid">未取价</span>
+                    <div style="margin-top:4px">
+                      <el-button size="mini" type="primary" plain @click="openJdLinkDlg(p.row)">修改</el-button>
+                      <el-button size="mini" type="danger" plain @click="unlinkJdRow(p.row)">解除</el-button>
+                    </div>
+                  </template>
+                </template>
+                <el-button v-else size="mini" type="warning" plain @click="openJdLinkDlg(p.row)">关联</el-button>
+              </template>
+            </el-table-column>
             <el-table-column label="本地价" width="118">
               <template slot-scope="p">
                 <el-input v-model="p.row.local_price" size="mini" placeholder="可手工填写"
@@ -1102,7 +1218,7 @@
           </el-table>
           <div class="pager-wrap">
             <el-pagination background layout="total, sizes, prev, pager, next" :total="rp.total" :page-size="rp.size"
-                           :current-page="rp.page" :page-sizes="[20, 50, 100, 2000]"
+                           :current-page="rp.page" :page-sizes="[20, 50, 100]"
                            @size-change="onRpSize" @current-change="onRpPage"></el-pagination>
           </div>
       </div>
@@ -1219,6 +1335,83 @@
             </span>
             <el-button size="small" @click="rpAfaLink.visible = false">取消</el-button>
             <el-button size="small" type="primary" :disabled="!rpAfaLink.picked" @click="confirmAfaLink">确认关联</el-button>
+          </div>
+        </el-dialog>
+
+        <!-- 关联京东万商商品：粘贴商品链接/skuId → 预览 → 确认（京东搜索接口要 h5st 签名，
+             服务端算不出来，所以没做关键字搜索，只能粘贴链接） -->
+        <el-dialog title="关联京东万商商品" :visible.sync="rpJdLink.visible" width="660px" top="6vh" append-to-body>
+          <div class="loginid" style="font-size:12px;line-height:18px;margin-bottom:10px">
+            补货商品：<b>{{ rpJdLink.goodsName || rpJdLink.sku }}</b><br>
+            到 <b>b.jd.com</b> 找到对应商品 → 复制商品页链接（形如
+            <span style="font-family:Consolas,monospace">https://b.jd.com/product/10235591362865.html</span>）→ 粘到下面。
+            直接粘 skuId 数字也可以。京东搜索接口需要动态签名（服务器算不出来），所以这里不做关键字搜索。<br>
+            <span style="color:#909399">预览由这台电脑的助手在万商页面里取，需助手在线且已登录京东万商。</span>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px">
+            <el-input v-model="rpJdLink.input" size="small" placeholder="粘贴万商商品链接 或 skuId（如 10235591362865）"
+                      style="flex:1" clearable @keyup.enter.native="previewJdLink"></el-input>
+            <el-button size="small" type="primary" :loading="rpJdLink.loading" @click="previewJdLink">预览</el-button>
+          </div>
+          <el-alert v-if="rpJdLink.error" type="error" :closable="false" show-icon :title="rpJdLink.error" style="margin-bottom:10px"></el-alert>
+          <el-card v-if="rpJdLink.picked" shadow="never" :body-style="{ padding: '12px' }">
+            <div style="display:flex;gap:12px">
+              <img v-if="rpJdLink.picked.picture" :src="rpJdLink.picked.picture"
+                   style="width:88px;height:88px;object-fit:cover;border-radius:6px;flex:none"
+                   @error="e => { e.target.style.display='none'; }" />
+              <div style="flex:1;min-width:0">
+                <div style="font-weight:600;line-height:20px">{{ rpJdLink.picked.goodsName }}</div>
+                <div class="loginid" style="font-size:12px;line-height:20px;margin-top:4px">
+                  万商价 <b class="amount ok">¥{{ rpJdLink.picked.packPrice }}</b>
+                  <span v-if="rpJdLink.picked.packQty">／ {{ rpJdLink.picked.packQty }} 件装，
+                    折合 <b>¥{{ rpJdLink.picked.unitPrice }}</b></span>
+                  <span v-if="rpJdLink.picked.originalPrice">（原价 ¥{{ rpJdLink.picked.originalPrice }}）</span>
+                </div>
+                <div class="loginid" style="font-size:12px;line-height:18px">
+                  规格 {{ rpJdLink.picked.spec || '—' }}
+                  <span v-if="rpJdLink.picked.brand"> · 品牌 {{ rpJdLink.picked.brand }}</span>
+                  <span v-if="rpJdLink.picked.shelfLife"> · 保质期 {{ rpJdLink.picked.shelfLife }}</span>
+                </div>
+                <div class="loginid" style="font-size:12px;line-height:18px;color:#909399">
+                  skuId {{ rpJdLink.picked.skuId }}<span v-if="rpJdLink.picked.stock"> · {{ rpJdLink.picked.stock }}</span>
+                </div>
+              </div>
+            </div>
+          </el-card>
+          <div slot="footer">
+            <el-button size="small" @click="rpJdLink.visible = false">取消</el-button>
+            <el-button size="small" type="primary" :disabled="!rpJdLink.picked" :loading="rpJdLink.saving"
+                       @click="confirmJdLink">确认关联</el-button>
+          </div>
+        </el-dialog>
+
+        <!-- 京东万商登录：在助手窗口里登录（京东只放行真实浏览器，服务器直连必 403） -->
+        <el-dialog title="京东万商登录" :visible.sync="rpJdLogin.visible" width="660px" top="8vh" append-to-body>
+          <el-alert v-if="rp.jdSession.configured" type="success" :closable="false" show-icon
+                    :title="'当前账号已登录：' + (rp.jdSession.shop || '（未取到店铺名）') + (rp.jdSession.savedAt ? '，登录于 ' + String(rp.jdSession.savedAt).slice(0, 19).replace('T', ' ') : '')"
+                    style="margin-bottom:10px"></el-alert>
+          <el-alert v-if="rp.jdSession.agent && !rp.jdSession.agent.online" type="warning" :closable="false" show-icon
+                    title="本机助手未连接：请先在这台电脑上启动「催收小助手」并点页面右上角「绑定本机助手」"
+                    style="margin-bottom:10px"></el-alert>
+          <el-alert v-else-if="rp.jdSession.agent && !rp.jdSession.agent.capable" type="warning" :closable="false" show-icon
+                    :title="'这台电脑上的助手版本过旧（' + (rp.jdSession.agent.version || '未知') + '），需要 v' + (rp.jdSession.agent.minVersion || '') + ' 及以上，请点右上角「下载本机助手」更新'"
+                    style="margin-bottom:10px"></el-alert>
+          <div class="loginid" style="font-size:12px;line-height:20px;margin-bottom:8px">
+            京东只允许在真实浏览器里取价，服务器直连会被网关拦（403），所以登录与取价都在这台电脑上完成。<br>
+            ① 点下面 <b>开始登录</b>，这台电脑会弹出 <b>京东万商（b.jd.com）</b> 窗口；<br>
+            ② 在窗口里登录（账号密码只在你的电脑上输入，助手不读取、不保存）；<br>
+            ③ 登录成功后自动回传，页面会刷新登录状态，最多等 5 分钟。<br>
+            <span style="color:#909399">服务器只保存设备指纹与收货地址（用于组取价参数），不保存账号密码。</span>
+          </div>
+          <el-alert v-if="rpJdLogin.message" type="info" :closable="false" show-icon :title="rpJdLogin.message" style="margin-bottom:8px"></el-alert>
+          <el-alert v-if="rpJdLogin.error" type="error" :closable="false" show-icon :title="rpJdLogin.error"></el-alert>
+          <div slot="footer">
+            <el-button v-if="rp.jdSession.configured" size="small" type="danger" plain :loading="rpJdLogin.checking"
+                       @click="clearJdSession">退出（清除本账号登录态）</el-button>
+            <el-button size="small" @click="rpJdLogin.visible = false">关闭</el-button>
+            <el-button size="small" type="primary" :loading="rpJdLogin.starting"
+                       :disabled="rp.jdSession.agent && !rp.jdSession.agent.capable"
+                       @click="startJdLogin">开始登录</el-button>
           </div>
         </el-dialog>
 
@@ -1750,7 +1943,7 @@
         <el-card shadow="never" class="section-card">
           <div slot="header">
             <b>拼多多 · 翻页上限</b>
-            <span class="loginid">（「刷新发票状态」与「获取订单数据」共用）</span>
+            <span class="loginid">（「同步订单与发票」的两段共用：拉订单 → 刷发票状态）</span>
           </div>
           <el-form label-position="top" size="small">
             <el-row :gutter="12">
@@ -1762,7 +1955,7 @@
               </el-col>
             </el-row>
             <div class="form-tip">
-              默认 <b>300</b> 页。发票刷新一页 20 条（约 6000 单）、「获取订单数据」一页 50 条（约 15000 单），
+              默认 <b>300</b> 页。发票刷新一页 20 条（约 6000 单）、拉订单一页 50 条（约 15000 单），
               两者都是<b>翻到空页才停</b>，这个上限只用于防止接口异常时无限翻页。<br>
               撞到上限时页面会明确提示「已到翻页上限」，不会静默少拉；若确认还有更早的订单没拉到，把这里调大即可。<br>
               保存后<b>立即生效</b>（下一次同步就读新值），不需要重启服务。
@@ -1811,7 +2004,10 @@
             <el-table-column label="账号" width="150">
               <template slot-scope="p"><b>{{ p.row.username }}</b><div v-if="p.row.mustChangePassword" class="loginid">需改密</div></template>
             </el-table-column>
-            <el-table-column label="角色" width="110"><template slot-scope="p"><el-tag size="mini" :type="p.row.role === 'admin' ? 'warning' : 'info'">{{ p.row.role === 'admin' ? '超级管理员' : '普通用户' }}</el-tag></template></el-table-column>
+            <el-table-column label="角色" width="130"><template slot-scope="p">
+              <el-tag size="mini" :type="p.row.role === 'admin' ? 'warning' : 'info'">{{ p.row.role === 'admin' ? '超级管理员' : '普通用户' }}</el-tag>
+              <el-tag v-if="p.row.ownerId" size="mini" type="success" style="margin-left:4px">员工</el-tag>
+            </template></el-table-column>
             <el-table-column label="品牌方" width="120">
               <template slot-scope="p">
                 <el-tag v-if="p.row.brandName" size="mini" type="success">{{ p.row.brandName }}</el-tag>
@@ -1848,7 +2044,9 @@
                           style="margin-right:4px">商品</el-tag>
                   <el-tag size="mini" :type="p.row.marketEnabled ? 'success' : 'info'"
                           style="margin-right:4px">市场</el-tag>
-                  <el-tag size="mini" :type="p.row.billingEnabled ? 'success' : 'info'">账单</el-tag>
+                  <el-tag size="mini" :type="p.row.billingEnabled ? 'success' : 'info'"
+                          style="margin-right:4px">账单</el-tag>
+                  <el-tag size="mini" :type="p.row.afterSaleEnabled ? 'success' : 'info'">售后</el-tag>
                 </template>
               </template>
             </el-table-column>
@@ -1912,7 +2110,109 @@
         </el-dialog>
       </div>
 
-      <!-- ══════════ 操作日志（仅超级管理员可见） ══════════ -->
+      <!-- ══════════ 员工管理（v0.2.104，仅主体账号可见） ══════════ -->
+      <div v-show="page === 'staff'" id="page-staff">
+        <div class="page-bar">
+          <span class="pb-info">
+            员工账号是<b>菜单受限的操作员</b>：登录后看到的退单 / 商品 / 补货等数据与<b>你完全同一套</b>，
+            区别只在能看到哪些菜单。员工<b>不能再建员工</b>，也看不到本页。
+          </span>
+          <span class="pb-actions">
+            <el-button size="small" @click="loadStaff">刷新</el-button>
+            <el-button size="small" type="primary" @click="openStaffCreate">+ 新增员工</el-button>
+          </span>
+        </div>
+
+        <el-alert type="info" :closable="false" show-icon style="margin-bottom:12px"
+                  :title="'所属主体账号：' + ((staffOwner && staffOwner.username) || '—') + (staffOwner && staffOwner.brandName ? '（品牌方：' + staffOwner.brandName + '）' : '')"
+                  description="员工的有效期跟随你的账号：你的账号到期或被停用后，所有员工账号会同时无法登录。"></el-alert>
+
+        <el-card shadow="never" class="section-card">
+          <div slot="header">
+            <b>员工列表</b> <span class="loginid">（{{ staff.rows.length }} 个账号）</span>
+          </div>
+          <el-table :data="staff.rows" size="small" border style="width:100%" empty-text="还没有员工账号，点右上角「+ 新增员工」"
+                    v-loading="staff.loading">
+            <el-table-column label="登录账号" width="170">
+              <template slot-scope="p"><b>{{ p.row.username }}</b></template>
+            </el-table-column>
+            <el-table-column label="姓名 / 备注" min-width="180">
+              <template slot-scope="p">
+                <div>{{ p.row.displayName || '—' }}</div>
+                <div v-if="p.row.note" class="loginid">{{ p.row.note }}</div>
+              </template>
+            </el-table-column>
+            <el-table-column label="状态" width="90">
+              <template slot-scope="p">
+                <el-tag size="mini" :type="p.row.status === 'active' ? 'success' : 'danger'">
+                  {{ p.row.status === 'active' ? '正常' : '已禁用' }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="菜单权限" min-width="300">
+              <template slot-scope="p">
+                <el-tag v-for="t in staffMenuTags(p.row)" :key="t.key" size="mini"
+                        :type="t.on ? 'success' : 'info'" style="margin:0 4px 4px 0">{{ t.label }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="最近登录" width="150">
+              <template slot-scope="p"><span class="loginid">{{ fmtMinute(p.row.lastLoginAt) || '从未登录' }}</span></template>
+            </el-table-column>
+            <el-table-column label="操作" width="300">
+              <template slot-scope="p">
+                <div style="display:flex;gap:6px;flex-wrap:wrap">
+                  <el-button size="mini" type="primary" plain @click="openStaffPermit(p.row)">菜单权限</el-button>
+                  <el-button size="mini" @click="openStaffEdit(p.row)">编辑</el-button>
+                  <el-button size="mini" @click="resetStaffPwd(p.row)">重置密码</el-button>
+                  <el-button v-if="p.row.status === 'active'" size="mini" type="danger" plain
+                             @click="toggleStaffStatus(p.row, 'disabled')">禁用</el-button>
+                  <el-button v-else size="mini" @click="toggleStaffStatus(p.row, 'active')">启用</el-button>
+                  <el-button size="mini" type="danger" plain @click="deleteStaff(p.row)">删除</el-button>
+                </div>
+              </template>
+            </el-table-column>
+          </el-table>
+        </el-card>
+
+        <!-- 新增 / 编辑员工 -->
+        <el-dialog :title="staffDlg.id ? '编辑员工' : '新增员工'" :visible.sync="staffDlg.visible"
+                   width="620px" top="8vh" append-to-body>
+          <el-form label-position="top" size="small">
+            <el-row :gutter="12">
+              <el-col :xs="24" :md="12"><el-form-item label="登录账号 *">
+                <el-input v-model="staffDlg.username" placeholder="如：xiaowang（中文/字母/数字均可）"></el-input>
+              </el-form-item></el-col>
+              <el-col :xs="24" :md="12" v-if="!staffDlg.id"><el-form-item label="初始密码 *">
+                <el-input v-model="staffDlg.password" placeholder="至少 4 位"></el-input>
+              </el-form-item></el-col>
+              <el-col :xs="24" :md="12"><el-form-item label="姓名 / 显示名">
+                <el-input v-model="staffDlg.displayName" placeholder="如：王小明"></el-input>
+              </el-form-item></el-col>
+              <el-col :xs="24" :md="12"><el-form-item label="备注">
+                <el-input v-model="staffDlg.note" placeholder="可选，如：售后专员"></el-input>
+              </el-form-item></el-col>
+            </el-row>
+            <el-form-item label="菜单权限（创建后可随时改）">
+              <div class="staff-menu-grid">
+                <div class="menu-perm-row" v-for="m in staffMenus" :key="m.key">
+                  <div><b>{{ m.label }}</b></div>
+                  <el-switch v-model="staffDlg.menus[m.key]"></el-switch>
+                </div>
+              </div>
+            </el-form-item>
+          </el-form>
+          <div class="form-tip">
+            员工与你共用同一套数据，所以<b>退单、商品这些菜单只是「能看哪块」</b>，不是数据隔离。
+            默认全部关闭，按岗位勾选即可（例如售后专员只勾「售后管理」）。
+          </div>
+          <span slot="footer">
+            <el-button size="small" @click="staffDlg.visible = false">取消</el-button>
+            <el-button size="small" type="primary" :loading="staffDlg.saving" @click="saveStaff">保存</el-button>
+          </span>
+        </el-dialog>
+      </div>
+
+
       <div v-show="page === 'audit'" id="page-audit">
         <div class="page-bar">
           <span class="pb-info">
@@ -2108,6 +2408,15 @@
                 {{ p.row.refundType || '—' }}
               </template>
             </el-table-column>
+            <el-table-column label="退款原因" min-width="190">
+              <template slot-scope="p">
+                <div style="display:flex;align-items:flex-start;gap:6px">
+                  <span style="flex:1" :title="p.row.reasonText || ''">{{ p.row.reasonText || '—' }}</span>
+                  <el-button type="text" size="mini" @click="openReason(p.row, 'refund')">编辑</el-button>
+                </div>
+                <div v-if="p.row.refundReason" class="loginid">（人工填写，同步不覆盖）</div>
+              </template>
+            </el-table-column>
             <el-table-column label="退单金额" width="100" align="right">
               <template slot-scope="p"><span class="amount">{{ p.row.refundAmount == null ? '—' : yuan(p.row.refundAmount) }}</span></template>
             </el-table-column>
@@ -2154,6 +2463,479 @@
         <!-- 退单提醒设置 → 独立页「退单提醒配置」（switchPage('refundalert')），字段与接口未变 -->
         <!-- 定时同步设置 → 独立页「牵牛花配置」（switchPage('qnhcfg')），仅超级管理员可见 -->
 
+      </div>
+
+      <!-- ══════════ 售后管理（v0.2.104，独立菜单权限） ══════════ -->
+      <div v-show="page === 'after'" id="page-after">
+        <qnh-tenant-picker v-if="isAdmin" :users="qnhUsers" :value="qnhTenant"
+                           :sessions="qnhSessions" :self-id="me && me.id"
+                           @change="onQnhTenantChange"></qnh-tenant-picker>
+
+        <el-alert v-if="rq.cookie && !rq.cookie.logined" type="warning" :closable="false" show-icon
+                  style="margin-bottom:12px" title="当前账号还没有可用的牵牛花登录态"
+                  description="平台退单的数据来自退单同步，没有登录态就只能看手工新增的售后记录。需要平台数据请到「退单列表」登录牵牛花并同步一次。">
+          <el-button v-if="canRefund" size="mini" style="margin-top:6px" @click="switchPage('refund')">去退单列表</el-button>
+        </el-alert>
+
+        <!-- 处理状态统计（点卡片即按该状态筛选，再点一次取消） -->
+        <div class="stat-row">
+          <el-card v-for="s in afStatCards" :key="s.key" shadow="never" class="stat-card"
+                   :body-style="{ padding: '14px 16px' }"
+                   :style="{ flex: 1, minWidth: '128px', cursor: 'pointer', borderColor: af.status === s.key ? '#409eff' : '' }"
+                   @click.native="toggleAfStatus(s.key)">
+            <div class="num">{{ s.num }}</div>
+            <div class="label">{{ s.label }}</div>
+          </el-card>
+        </div>
+
+        <el-card shadow="never" class="section-card">
+          <div class="filter-bar">
+            <span class="fb-label">筛选</span>
+            <el-select v-model="af.status" size="small" style="width:130px" @change="onAfFilter">
+              <el-option label="全部状态" value=""></el-option>
+              <el-option v-for="s in af.statuses" :key="s.value" :label="s.label" :value="String(s.value)"></el-option>
+            </el-select>
+            <el-input v-model="af.keyword" size="small" style="width:280px" clearable
+                      placeholder="商品名 / SKU / 售后原因（平台单也可按退单号、订单号搜）"
+                      @keyup.enter.native="onAfFilter" @clear="onAfFilter"></el-input>
+            <el-button size="small" type="primary" plain @click="onAfFilter">查询</el-button>
+            <el-button size="small" type="primary" icon="el-icon-plus" @click="openAfCreate">新增售后</el-button>
+            <span class="fb-spacer"></span>
+            <span class="loginid">共 {{ af.total }} 条</span>
+          </div>
+
+          <el-table :data="af.rows" size="small" border style="width:100%" v-loading="af.loading"
+                    empty-text="没有符合条件的售后记录">
+            <el-table-column label="商品名称" min-width="260">
+              <template slot-scope="p">
+                <span :title="p.row.nameText">{{ afGoodsText(p.row) }}</span>
+                <el-tag v-if="p.row.src === 'manual'" size="mini" type="warning"
+                        style="margin-left:6px">手工</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="商品SKU" width="190">
+              <template slot-scope="p">
+                <span class="loginid" :title="p.row.skuText">{{ p.row.skuText || '—' }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="数量" width="80" align="right">
+              <template slot-scope="p">{{ p.row.refundQty == null ? '—' : p.row.refundQty }}</template>
+            </el-table-column>
+            <el-table-column label="售后原因" min-width="200">
+              <template slot-scope="p">
+                <span :title="p.row.reasonText">{{ p.row.reasonText || '—' }}</span>
+                <div v-if="p.row.src !== 'manual' && p.row.refundReason" class="loginid">（人工填写）</div>
+              </template>
+            </el-table-column>
+            <el-table-column label="处理状态" width="130">
+              <template slot-scope="p">
+                <el-tag size="mini" :type="afStatusTag(p.row.status)">{{ p.row.statusLabel }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="申请时间" width="145">
+              <template slot-scope="p"><span class="loginid">{{ p.row.applyTime || '—' }}</span></template>
+            </el-table-column>
+            <el-table-column label="操作" width="245">
+              <template slot-scope="p">
+                <el-button type="text" size="mini" :disabled="readonly || afNextStatus(p.row) === null"
+                           :title="afNextStatus(p.row) === null ? '已退款，流程结束' : ('推进到「' + afStatusLabel(afNextStatus(p.row)) + '」，需要上传一张凭证截图')"
+                           @click="openAfStatus(p.row)">
+                  {{ afNextStatus(p.row) === null ? '已完成' : '→ ' + afStatusLabel(afNextStatus(p.row)) }}
+                </el-button>
+                <el-button v-if="(p.row.attaches || []).length" type="text" size="mini"
+                           @click="openAfAttach(p.row)">凭证({{ p.row.attaches.length }})</el-button>
+                <el-button type="text" size="mini" @click="openAfReason(p.row)">改原因</el-button>
+                <el-button v-if="p.row.src === 'manual'" type="text" size="mini"
+                           style="color:#f56c6c" @click="deleteAfManual(p.row)">删除</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+
+          <div class="pager-wrap">
+            <el-pagination background layout="total, sizes, prev, pager, next"
+                           :current-page="af.page" :page-size="af.size"
+                           :page-sizes="[20, 50, 100]" :total="af.total"
+                           @current-change="onAfPage" @size-change="onAfSize"></el-pagination>
+            <span class="total">共 {{ af.total }} 条</span>
+          </div>
+        </el-card>
+
+        <!-- 处理售后（v0.2.108）：一键推进下一档，必须上传一张凭证截图；弹框里不再选状态 -->
+        <el-dialog title="上传售后凭证" :visible.sync="afDlg.visible" width="560px" top="6vh" append-to-body
+                   custom-class="af-up-dlg" @closed="onAfDlgClosed">
+          <div class="af-up-head">
+            <span class="fb-label">将标记为</span>
+            <el-tag size="small" type="warning">{{ afDlg.nextLabel }}</el-tag>
+            <span class="loginid">当前「{{ afDlg.fromLabel }}」，确定后立即变更</span>
+          </div>
+
+          <div class="af-up-drop" :class="{ 'is-drag': afDlg.dragging, 'is-error': !!afDlg.imgError }"
+               @click="pickAfImage"
+               @dragover.prevent="afDlg.dragging = true"
+               @dragleave.prevent="afDlg.dragging = false"
+               @drop.prevent="onAfDrop">
+            <template v-if="!afDlg.imgPreview">
+              <i class="el-icon-picture-outline" style="font-size:30px;color:#c0c4cc"></i>
+              <div>点击选择图片，或直接 <b>Ctrl+V 粘贴</b> 截图，也可以把图片拖进来</div>
+              <div class="loginid">必填 · 支持 png / jpg / webp / gif · 单张 ≤5MB（过大的图会自动压缩）</div>
+            </template>
+            <img v-else :src="afDlg.imgPreview" class="af-up-thumb" alt="凭证预览">
+          </div>
+          <input ref="afFile" type="file" accept="image/png,image/jpeg,image/webp,image/gif"
+                 style="display:none" @change="onAfFile">
+
+          <div v-if="afDlg.imgPreview" class="af-up-ops">
+            <span class="loginid">{{ afDlg.imgName || '已选择图片' }}</span>
+            <el-button type="text" size="mini" @click.stop="clearAfImage">重新选择</el-button>
+          </div>
+          <div v-if="afDlg.imgError" class="af-up-err">{{ afDlg.imgError }}</div>
+
+          <el-form label-position="top" size="small" style="margin-top:12px">
+            <el-form-item label="备注（选填，记录处理过程）">
+              <el-input type="textarea" :rows="3" v-model="afDlg.note" maxlength="255" show-word-limit
+                        placeholder="如：已联系顾客，等快递上门取件"></el-input>
+            </el-form-item>
+          </el-form>
+          <span slot="footer">
+            <el-button size="small" @click="afDlg.visible = false">取消</el-button>
+            <el-button size="small" type="primary" :loading="afDlg.saving" @click="saveAfStatus">确定变更</el-button>
+          </span>
+        </el-dialog>
+
+        <!-- 凭证查看：一次状态变更一张，最新在前 -->
+        <el-dialog :title="afAttach.title" :visible.sync="afAttach.visible" width="620px" top="6vh" append-to-body>
+          <div v-if="!afAttach.rows.length" class="loginid">这条记录还没有凭证图片（v0.2.108 之前处理的不补图）</div>
+          <div v-for="(a, i) in afAttach.rows" :key="i" class="af-att-row">
+            <div class="af-att-meta">
+              <el-tag size="mini" :type="afStatusTag(a.status)">{{ a.statusLabel }}</el-tag>
+              <span class="loginid" style="margin-left:8px">{{ a.at }} · {{ a.by || '—' }}</span>
+              <div v-if="a.note" style="margin-top:4px">{{ a.note }}</div>
+            </div>
+            <img v-if="a.url" :src="a.url" class="af-att-img" alt="凭证" @click="openAfImage(a.url)">
+            <span v-else class="loginid">（图片链接不可用：存储未配置，或链接已过期 —— 链接随列表加载签发，刷新列表后重新打开即可）</span>
+          </div>
+        </el-dialog>
+
+        <!-- 新增售后：按商品名称 / SKU 模糊搜索本地商品 → 选中 → 填数量与原因 -->
+        <el-dialog title="新增售后" :visible.sync="afNew.visible" width="620px" top="6vh" append-to-body
+                   custom-class="af-new-dlg">
+          <el-form label-position="top" size="small">
+            <el-form-item label="搜索商品（按商品名称或 SKU 模糊搜索）">
+              <el-select v-model="afNew.pickKey" filterable remote clearable
+                         :remote-method="searchAfGoods" :loading="afNew.searching"
+                         placeholder="输入商品名称关键字或 SKU，如「可乐」「1023559」"
+                         style="width:100%" @change="onAfGoodsPick">
+                <el-option v-for="o in afNew.options" :key="o.sku || ('name:' + o.goodsName)"
+                           :label="o.goodsName + (o.sku ? '（' + o.sku + '）' : '')"
+                           :value="o.sku || ('name:' + o.goodsName)">
+                  <span style="float:left;max-width:400px;overflow:hidden;text-overflow:ellipsis">{{ o.goodsName }}</span>
+                  <span class="loginid" style="float:right">{{ o.sku }}</span>
+                </el-option>
+              </el-select>
+              <div class="loginid" style="margin-top:4px">
+                搜不到也能直接在下面填商品名称（SKU 可留空）。
+              </div>
+            </el-form-item>
+            <el-row :gutter="12">
+              <el-col :span="16">
+                <el-form-item label="商品名称 *">
+                  <el-input v-model="afNew.goodsName" maxlength="512" placeholder="选中后自动带出，可修改"></el-input>
+                </el-form-item>
+              </el-col>
+              <el-col :span="8">
+                <el-form-item label="商品SKU">
+                  <el-input v-model="afNew.sku" maxlength="64" placeholder="可留空"></el-input>
+                </el-form-item>
+              </el-col>
+            </el-row>
+            <el-form-item label="数量 *">
+              <el-input-number v-model="afNew.qty" :min="1" :max="99999" size="small" style="width:160px"></el-input-number>
+            </el-form-item>
+            <el-form-item label="售后原因 *">
+              <el-input type="textarea" :rows="2" v-model="afNew.reason" maxlength="512" show-word-limit
+                        placeholder="如：顾客反映口味不对，已退款"></el-input>
+            </el-form-item>
+            <el-form-item label="备注（选填）">
+              <el-input v-model="afNew.note" maxlength="255" placeholder="内部备注，如处理人、单据号"></el-input>
+            </el-form-item>
+          </el-form>
+          <el-alert v-if="afNew.error" type="error" :closable="false" show-icon :title="afNew.error"></el-alert>
+          <span slot="footer">
+            <el-button size="small" @click="afNew.visible = false">取消</el-button>
+            <el-button size="small" type="primary" :loading="afNew.saving" @click="saveAfCreate">保存</el-button>
+          </span>
+        </el-dialog>
+
+        <!-- 改售后原因（与退单列表共用同一个弹窗） -->
+        <el-dialog :title="reasonDlg.manual ? '售后原因' : ('退款原因 · ' + (reasonDlg.refundNo || ''))"
+                   :visible.sync="reasonDlg.visible" width="560px" append-to-body>
+          <div class="form-tip" style="margin-bottom:10px">
+            <template v-if="reasonDlg.manual">
+              这条是手工新增的售后记录，原因改完直接保存。
+            </template>
+            <template v-else>
+              平台原始原因（只读）：{{ reasonDlg.raw || '—' }}<br>
+              下面这一栏是本系统自己记的原因，<b>每天同步不会覆盖</b>；清空后页面回落到平台原值。
+            </template>
+          </div>
+          <el-input type="textarea" :rows="3" v-model="reasonDlg.value" maxlength="512" show-word-limit
+                    placeholder="如：顾客嫌日期不新鲜，已退款"></el-input>
+          <span slot="footer">
+            <el-button size="small" @click="reasonDlg.visible = false">取消</el-button>
+            <el-button size="small" type="primary" :loading="reasonDlg.saving" @click="saveReason">保存</el-button>
+          </span>
+        </el-dialog>
+      </div>
+
+      <!-- ══════════ 供应商管理（v0.3.0，按「菜单权限」开放） ══════════ -->
+      <div v-show="page === 'supplier'" id="page-supplier">
+        <el-card shadow="never" class="section-card">
+          <div class="filter-bar">
+            <span class="fb-label">筛选</span>
+            <el-input v-model="sp.keyword" size="small" style="width:240px" clearable
+                      placeholder="供应商名称 / 备注"
+                      @keyup.enter.native="onSpFilter" @clear="onSpFilter"></el-input>
+            <el-button size="small" type="primary" plain @click="onSpFilter">查询</el-button>
+            <el-button size="small" type="primary" icon="el-icon-plus" @click="openSpCreate">新增供应商</el-button>
+            <span class="fb-spacer"></span>
+            <span class="loginid">共 {{ sp.total }} 家</span>
+          </div>
+
+          <el-table :data="sp.rows" size="small" border style="width:100%" v-loading="sp.loading"
+                    empty-text="还没有供应商，点「新增供应商」先建一个">
+            <el-table-column label="供应商名称" min-width="220">
+              <template slot-scope="p"><span :title="p.row.name">{{ p.row.name }}</span></template>
+            </el-table-column>
+            <el-table-column label="货单数" width="90" align="right">
+              <template slot-scope="p">
+                <el-button v-if="p.row.waybillCount && canWaybill" type="text" size="mini"
+                           title="查看这个供应商的货单" @click="goWaybillOf(p.row.name)">{{ p.row.waybillCount }}</el-button>
+                <span v-else class="loginid">{{ p.row.waybillCount || 0 }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="备注" min-width="200">
+              <template slot-scope="p"><span class="loginid" :title="p.row.note">{{ p.row.note || '—' }}</span></template>
+            </el-table-column>
+            <el-table-column label="新建日期" width="145">
+              <template slot-scope="p"><span class="loginid">{{ p.row.createdAt || '—' }}</span></template>
+            </el-table-column>
+            <el-table-column label="操作人" width="110">
+              <template slot-scope="p"><span class="loginid">{{ p.row.createdBy || '—' }}</span></template>
+            </el-table-column>
+            <el-table-column label="操作" width="120">
+              <template slot-scope="p">
+                <el-button type="text" size="mini" @click="openSpEdit(p.row)">改名</el-button>
+                <el-button type="text" size="mini" style="color:#f56c6c" @click="deleteSp(p.row)">删除</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+
+          <div class="pager-wrap">
+            <el-pagination background layout="total, sizes, prev, pager, next"
+                           :current-page="sp.page" :page-size="sp.size"
+                           :page-sizes="[20, 50, 100]" :total="sp.total"
+                           @current-change="onSpPage" @size-change="onSpSize"></el-pagination>
+            <span class="total">共 {{ sp.total }} 条</span>
+          </div>
+        </el-card>
+
+        <el-dialog :title="spDlg.mode === 'create' ? '新增供应商' : '修改供应商'"
+                   :visible.sync="spDlg.visible" width="460px" top="8vh" append-to-body>
+          <el-form label-position="top" size="small">
+            <el-form-item label="供应商名称（必填，同账号下不能重名）">
+              <el-input v-model="spDlg.name" maxlength="64" show-word-limit
+                        placeholder="如：广州粤丰食品有限公司"
+                        @keyup.enter.native="saveSp"></el-input>
+            </el-form-item>
+            <el-form-item label="备注（选填）">
+              <el-input type="textarea" :rows="3" v-model="spDlg.note" maxlength="255" show-word-limit
+                        placeholder="联系人、电话、结算方式等"></el-input>
+            </el-form-item>
+          </el-form>
+          <div v-if="spDlg.error" style="color:#f56c6c;font-size:12px">{{ spDlg.error }}</div>
+          <span slot="footer">
+            <el-button size="small" @click="spDlg.visible = false">取消</el-button>
+            <el-button size="small" type="primary" :loading="spDlg.saving" @click="saveSp">保存</el-button>
+          </span>
+        </el-dialog>
+      </div>
+
+      <!-- ══════════ 货单管理（v0.3.0，按「菜单权限」开放） ══════════ -->
+      <div v-show="page === 'waybill'" id="page-waybill">
+        <el-card shadow="never" class="section-card">
+          <div class="filter-bar">
+            <span class="fb-label">筛选</span>
+            <el-input v-model="wb.supplier" size="small" style="width:190px" clearable
+                      placeholder="供应商名称"
+                      @keyup.enter.native="onWbFilter" @clear="onWbFilter"></el-input>
+            <el-date-picker v-model="wb.range" type="daterange" size="small" style="width:250px"
+                            value-format="yyyy-MM-dd" range-separator="至"
+                            start-placeholder="货单开始日期" end-placeholder="结束日期"
+                            @change="onWbFilter"></el-date-picker>
+            <el-button size="small" type="primary" plain @click="onWbFilter">查询</el-button>
+            <el-button size="small" type="primary" icon="el-icon-plus" @click="openWbNew">新建货单</el-button>
+            <span class="fb-spacer"></span>
+            <span class="loginid">共 {{ wb.total }} 张 · 合计 <b style="color:#f56c6c">{{ wbMoney(wb.sumAmount) }}</b></span>
+          </div>
+
+          <el-table :data="wb.rows" size="small" border style="width:100%" v-loading="wb.loading"
+                    empty-text="没有符合条件的货单">
+            <el-table-column label="供应商名称" min-width="200">
+              <template slot-scope="p"><span :title="p.row.supplierName">{{ p.row.supplierName || '—' }}</span></template>
+            </el-table-column>
+            <el-table-column label="货单金额" width="130" align="right">
+              <template slot-scope="p"><span class="amount">{{ wbMoney(p.row.amount) }}</span></template>
+            </el-table-column>
+            <el-table-column label="货单日期" width="120">
+              <template slot-scope="p"><span class="loginid">{{ p.row.billDate || '—' }}</span></template>
+            </el-table-column>
+            <el-table-column label="图片" width="80" align="center">
+              <template slot-scope="p">
+                <span class="loginid">{{ p.row.imageCount ? p.row.imageCount + ' 张' : '—' }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="备注" min-width="160">
+              <template slot-scope="p"><span class="loginid" :title="p.row.note">{{ p.row.note || '—' }}</span></template>
+            </el-table-column>
+            <el-table-column label="新建日期" width="145">
+              <template slot-scope="p"><span class="loginid">{{ p.row.createdAt || '—' }}</span></template>
+            </el-table-column>
+            <el-table-column label="操作人" width="100">
+              <template slot-scope="p"><span class="loginid">{{ p.row.createdBy || '—' }}</span></template>
+            </el-table-column>
+            <el-table-column label="操作" width="120">
+              <template slot-scope="p">
+                <el-button type="text" size="mini" @click="openWbView(p.row)">详情</el-button>
+                <el-button type="text" size="mini" style="color:#f56c6c" @click="deleteWb(p.row)">删除</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+
+          <div class="pager-wrap">
+            <el-pagination background layout="total, sizes, prev, pager, next"
+                           :current-page="wb.page" :page-size="wb.size"
+                           :page-sizes="[20, 50, 100]" :total="wb.total"
+                           @current-change="onWbPage" @size-change="onWbSize"></el-pagination>
+            <span class="total">共 {{ wb.total }} 条</span>
+          </div>
+        </el-card>
+
+        <!-- 新建货单：图片可以本机选，也可以生成 5 分钟链接让手机扫码拍 -->
+        <el-dialog title="新建货单" :visible.sync="wbNew.visible" width="720px" top="5vh" append-to-body
+                   @closed="onWbNewClosed">
+          <el-form label-position="top" size="small" :inline="false">
+            <el-row :gutter="12">
+              <el-col :xs="24" :sm="12">
+                <el-form-item label="供应商（必填）">
+                  <el-select v-model="wbNew.supplierId" filterable clearable style="width:100%"
+                             placeholder="搜索并选择供应商" :loading="wbNew.loadingSupplier">
+                    <el-option v-for="s in wbNew.suppliers" :key="s.id" :label="s.name" :value="s.id"></el-option>
+                  </el-select>
+                  <div v-if="canSupplier" class="loginid" style="margin-top:4px">
+                    没有？先到 <a href="javascript:void(0)" @click="jumpSupplier">供应商管理</a> 里新增
+                  </div>
+                </el-form-item>
+              </el-col>
+              <el-col :xs="12" :sm="6">
+                <el-form-item label="货单金额（元）">
+                  <el-input v-model="wbNew.amount" placeholder="0.00" clearable
+                            @input="onWbAmountInput"></el-input>
+                </el-form-item>
+              </el-col>
+              <el-col :xs="12" :sm="6">
+                <el-form-item label="货单日期">
+                  <el-date-picker v-model="wbNew.billDate" type="date" value-format="yyyy-MM-dd"
+                                  placeholder="选择日期" style="width:100%"></el-date-picker>
+                </el-form-item>
+              </el-col>
+            </el-row>
+            <el-form-item label="备注（选填）">
+              <el-input v-model="wbNew.note" maxlength="255" show-word-limit placeholder="如：10月第二批到货"></el-input>
+            </el-form-item>
+          </el-form>
+
+          <div class="wb-sec-title">
+            货单图片
+            <span class="loginid">（{{ wbNew.images.length }} / {{ wbImgMax }} 张，可本机选也可手机扫码拍）</span>
+          </div>
+
+          <div class="wb-img-grid">
+            <div class="wb-img" v-for="im in wbNew.images" :key="im.id">
+              <img :src="im.url" alt="货单图片" @click="previewWbImg(im.url)">
+              <i class="el-icon-close" title="删掉这张" @click="removeWbImg(im)"></i>
+            </div>
+            <div class="wb-img-add" v-if="wbNew.images.length < wbImgMax"
+                 :class="{ 'is-busy': wbNew.uploading }" @click="pickWbImage">
+              <i class="el-icon-plus" v-if="!wbNew.uploading"></i>
+              <template v-else>上传中…</template>
+              <div class="loginid" style="margin-top:2px">{{ wbNew.uploading ? '' : '本机选图' }}</div>
+            </div>
+          </div>
+          <input ref="wbFile" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple
+                 style="display:none" @change="onWbFile">
+          <div v-if="wbNew.imgError" class="wb-err">{{ wbNew.imgError }}</div>
+
+          <!-- 手机扫码上传：5 分钟临时链接，手机打开直接传，传完这里自动出现缩略图 -->
+          <div class="wb-phone">
+            <div class="wb-phone-l">
+              <div class="wb-sec-title" style="margin:0 0 6px">手机扫码拍</div>
+              <div class="loginid" style="line-height:1.8">
+                仓库/司机手机拍的货单，不用先倒到电脑上：<br>
+                点下面按钮生成链接 → 手机扫二维码 → 直接拍照上传。<br>
+                链接 <b>5 分钟</b>有效，只能用这一次。
+              </div>
+              <el-button size="small" type="primary" plain icon="el-icon-mobile-phone"
+                         style="margin-top:10px" :loading="wbNew.qrLoading"
+                         :disabled="wbNew.images.length >= wbImgMax"
+                         @click="makeUploadLink">{{ wbNew.link ? '重新生成链接' : '生成手机上传链接' }}</el-button>
+              <div v-if="wbNew.link" style="margin-top:10px">
+                <div class="loginid" style="word-break:break-all;line-height:1.6">{{ wbNew.link }}</div>
+                <div style="margin-top:6px">
+                  <el-button size="mini" @click="copyUploadLink">复制链接</el-button>
+                  <span class="wb-left" :class="{ 'is-warn': wbNew.leftSec <= 60 }">
+                    {{ wbNew.leftSec > 0 ? '剩余 ' + wbFmtLeft(wbNew.leftSec) : '链接已过期' }}
+                  </span>
+                </div>
+              </div>
+            </div>
+            <div class="wb-qr" v-if="wbNew.qr" v-html="wbNew.qr"></div>
+          </div>
+
+          <div v-if="wbNew.error" class="wb-err" style="margin-top:10px">{{ wbNew.error }}</div>
+          <span slot="footer">
+            <el-button size="small" @click="wbNew.visible = false">取消</el-button>
+            <el-button size="small" type="primary" :loading="wbNew.saving" @click="saveWb">保存货单</el-button>
+          </span>
+        </el-dialog>
+
+        <!-- 货单详情：只看，不改（要改就删了重建，采购单据以图为准） -->
+        <el-dialog title="货单详情" :visible.sync="wbView.visible" width="760px" top="5vh" append-to-body>
+          <div v-loading="wbView.loading">
+            <el-descriptions :column="2" size="small" border v-if="wbView.waybill.id">
+              <el-descriptions-item label="供应商">{{ wbView.waybill.supplierName || '—' }}</el-descriptions-item>
+              <el-descriptions-item label="货单金额">
+                <b style="color:#f56c6c">{{ wbMoney(wbView.waybill.amount) }}</b>
+              </el-descriptions-item>
+              <el-descriptions-item label="货单日期">{{ wbView.waybill.billDate || '—' }}</el-descriptions-item>
+              <el-descriptions-item label="新建日期">{{ wbView.waybill.createdAt || '—' }}</el-descriptions-item>
+              <el-descriptions-item label="操作人">{{ wbView.waybill.createdBy || '—' }}</el-descriptions-item>
+              <el-descriptions-item label="备注">{{ wbView.waybill.note || '—' }}</el-descriptions-item>
+            </el-descriptions>
+            <div class="wb-sec-title" style="margin-top:14px">
+              货单图片 <span class="loginid">（{{ wbView.images.length }} 张，点击看大图）</span>
+            </div>
+            <div class="wb-img-grid" v-if="wbView.images.length">
+              <div class="wb-img" v-for="im in wbView.images" :key="im.id">
+                <img :src="im.url" alt="货单图片" @click="previewWbImg(im.url)">
+              </div>
+            </div>
+            <div v-else class="loginid" style="padding:10px 0">这张货单没有图片</div>
+            <div v-if="wbView.error" class="wb-err">{{ wbView.error }}</div>
+          </div>
+          <span slot="footer">
+            <el-button size="small" @click="wbView.visible = false">关闭</el-button>
+          </span>
+        </el-dialog>
       </div>
 
       <!-- ══════════ 实时毛利监控（按「菜单权限」开放） ══════════ -->
@@ -2477,21 +3259,16 @@
                            :sessions="pddSessions" :self-id="me && me.id"
                            @change="onQnhTenantChange"></qnh-tenant-picker>
 
-        <!-- 顶部状态条：登录 / 刷新（与退单列表、毛利监控共用同一组件，只换服务名） -->
+        <!-- 顶部状态条：登录 / 同步（0.2.99 起「刷新发票状态」与「获取订单数据」合并成一个按钮：
+             点一次先在后台拉订单增量，拉完自动接着刷发票状态，两段进度都在下方进度卡里） -->
         <el-card class="section-card" shadow="never" :body-style="{ padding: '12px 14px' }">
           <qnh-login-bar service="拼多多" :cookie="pd.cookie" :last-run="pd.lastRun"
-                         :who-label="qnhWhoLabel" action-text="刷新发票状态" hide-meta
-                         :action-loading="pd.syncing" :can-logout="true"
-                         @login="onPddLoginBtn" @logout="logoutPdd" @action="doPddSync">
+                         :who-label="qnhWhoLabel" action-text="同步订单与发票" hide-meta
+                         :action-loading="pd.orderSyncing" :can-logout="true"
+                         @login="onPddLoginBtn" @logout="logoutPdd" @action="syncPddOrders">
             <template slot="actions">
-              <el-button size="small" type="success" plain :loading="pd.orderSyncing"
-                         @click="syncPddOrders"
-                         :title="pd.orderSync && pd.orderSync.synced
-                           ? '从最新订单往前增量拉取，追平即停'
-                           : '首次同步：不限时间范围，一直往前翻到空页为止'">
-                {{ pd.orderSync && pd.orderSync.synced ? '获取订单数据' : '获取订单数据（首次全量）' }}
-              </el-button>
-              <el-tag v-if="pd.orderSync && pd.orderSync.lastAt" size="small" type="info">
+              <el-tag v-if="pd.orderSync && pd.orderSync.lastAt" size="small" type="info"
+                      title="最近一次订单同步时间（取数来自拼多多「我的订单」）">
                 订单同步 {{ String(pd.orderSync.lastAt).slice(0, 16) }}
               </el-tag>
             </template>
@@ -2528,7 +3305,7 @@
                     :closable="false" show-icon style="margin-top:10px"
                     :title="'任务失败：' + (pd.applyDialog.message || '未知原因')"
                     :description="pd.applyDialog.kind === 'orders'
-                      ? '拉取订单失败。常见原因：拼多多登录态过期（重新登录后再试）、接口风控限流（过几分钟再试）。已入库的部分不受影响。'
+                      ? '拉取订单失败，发票状态也未刷新。常见原因：拼多多登录态过期（重新登录后再试）、接口风控限流（过几分钟再试）。已入库的部分不受影响。'
                       : (pd.applyDialog.kind === 'send'
                         ? '未发出任何催收消息。可按提示处理后重试（等待上一个任务结束 / 重新登录拼多多 / 升级助手）；已发出去的部分不受影响。'
                         : '未提交开票申请。可按提示处理后重试（等待上一个任务结束 / 重新登录拼多多 / 升级助手）；已提交成功的部分不受影响。')"></el-alert>
@@ -2537,7 +3314,7 @@
                     :title="pd.applyDialog.message"></el-alert>
           <el-alert v-else-if="!pd.applyDialog.running && pd.applyDialog.status === 'done'" type="success"
                     :closable="false" show-icon style="margin-top:10px"
-                    :title="pd.applyDialog.message || (pd.applyDialog.kind === 'orders' ? '订单同步完成' : '申请提交完成')"></el-alert>
+                    :title="pd.applyDialog.message || (pd.applyDialog.kind === 'orders' ? '同步完成' : '申请提交完成')"></el-alert>
         </el-card>
 
         <!-- 筛选 + 列表 -->
@@ -3076,7 +3853,7 @@
   <el-dialog :title="'菜单权限 · ' + (menuPermit.username || '')" :visible.sync="menuPermit.visible"
              width="460px" append-to-body>
     <div class="form-tip" style="margin-bottom:12px">
-      勾选后该用户登录即可看到对应菜单；超级管理员默认拥有全部菜单，无需设置。
+      勾选后该账号登录即可看到对应菜单；超管默认拥有全部菜单，无需设置。
     </div>
     <div class="menu-perm-row">
       <div>
@@ -3126,6 +3903,27 @@
         <div class="loginid">登录齐货通、重新取价、配置阿发Token、自动匹配阿发、阿发取价、选购加购（默认关闭）</div>
       </div>
       <el-switch v-model="menuPermit.price"></el-switch>
+    </div>
+    <div class="menu-perm-row">
+      <div>
+        <b>售后管理</b>
+        <div class="loginid">退单商品的售后台账：处理状态（待处理 / 已申请 / 已退货 / 已退款）与售后原因（默认关闭）</div>
+      </div>
+      <el-switch v-model="menuPermit.after"></el-switch>
+    </div>
+    <div class="menu-perm-row">
+      <div>
+        <b>供应商管理</b>
+        <div class="loginid">维护供应商字典（名称 / 备注），货单里的供应商从这里选（默认关闭）</div>
+      </div>
+      <el-switch v-model="menuPermit.supplier"></el-switch>
+    </div>
+    <div class="menu-perm-row">
+      <div>
+        <b>货单管理</b>
+        <div class="loginid">新增/查看/删除采购货单，手机扫码上传货单图片（默认关闭）</div>
+      </div>
+      <el-switch v-model="menuPermit.waybill"></el-switch>
     </div>
     <div slot="footer">
       <el-button @click="menuPermit.visible = false">取消</el-button>
@@ -3182,6 +3980,7 @@
 <script src="/vendor/vue.min.js"></script>
 <script src="/vendor/element-ui/index.js"></script>
 <script src="/vendor/echarts.min.js"></script>
+<script src="/vendor/qrcode.min.js"></script>
 <script>
 // ══════════════ 通用格式化 ══════════════
 const yuan = v => '¥' + Number(v || 0).toFixed(2);
@@ -3391,10 +4190,10 @@ const vm = new Vue({
       pd: {
         loading: false, rows: [], total: 0, page: 1, size: 20,
         filter: { status: '', keyword: '', sort: 'time_desc' },
-        summary: null, lastRun: null, syncing: false,
+        summary: null, lastRun: null,
         cookie: { logined: false, loading: false, message: '', accountName: '', pdduid: '', writtenAt: null },
-        // 「获取订单数据」（订单列表接口）：首次全量、之后增量；orderSync 来自 /api/pdd/status
-        // maxPages = 翻页上限（与发票刷新共用，系统管理可配，默认 300）
+        // 「同步订单与发票」：一次点击 = 后台拉订单（首次全量、之后增量）+ 拉完接着刷发票状态
+        // orderSync 来自 /api/pdd/status；maxPages = 翻页上限（两段共用，系统管理可配，默认 300）
         orderSyncing: false, orderTaskId: '', orderSync: null, maxPages: 300,
         // 批量申请发票
         // selected = 跨页累计的已勾选行（翻页不清空）；picked 是它的 {orderSn: row} 索引，
@@ -3442,16 +4241,22 @@ const vm = new Vue({
         syncDlg: { visible: false, brandIds: [], brandsQnh: [], saving: false },
       },
       // 补货界面（导入完成后进入）+ 关联的齐货通弹窗
-      // 补货默认 20 条/页（页码可翻）；页大小可切 20/50/100/全部(2000)
-      rp: { visible: false, loading: false, pricing: false, afaPricing: false, batchId: null, rows: [], prices: {}, afaPrices: {}, total: 0, page: 1, size: 20, expect: 0, filteredValue: 0,
+      // 补货默认 20 条/页（页码可翻）；页大小最多 100 条
+      // 上限 100 是硬约束：el-table（Element UI 2.x）无虚拟滚动，一次渲染上千行会把主线程卡死十几秒
+      rp: { visible: false, loading: false, pricing: false, afaPricing: false, jdPricing: false, batchId: null, rows: [], prices: {}, afaPrices: {}, jdPrices: {}, total: 0, page: 1, size: 20, expect: 0, filteredValue: 0,
             // 筛选（v0.2.92）：默认展示当前品牌方全部商品；draftQ 是输入框，q 是「已生效」的关键词
             draftQ: '', q: '', status: '', brand: '', brandStats: [],
-            session: { configured: false, tokenMasked: '', xUser: '' }, afaSession: { configured: false, tokenMasked: '', storeId: '', appId: '' } },
+            session: { configured: false, tokenMasked: '', xUser: '' }, afaSession: { configured: false, tokenMasked: '', storeId: '', appId: '' },
+            // 京东万商：登录态按账号隔离（在助手窗口里登录，服务器只存 eid/uuid/收货地址）
+            jdSession: { configured: false, shop: '', savedAt: null, agent: { online: false, capable: false, version: '', minVersion: '' } } },
       // 弹窗表格高度按视口动态算（写死 vh 在小屏笔记本上会把弹窗撑出屏幕）
       tblH: { rp: 500, link: 320 },
       rpLink: { visible: false, sku: '', keyword: '', rows: [], loading: false, error: '', picked: null, total: 0, page: 1, size: 20 },
       rpBuy: { visible: false, sku: '', goodsId: null, goodsName: '', qty: 1, saving: false },
       qhtDlg: { visible: false, account: '', password: '', saving: false },
+      // 京东万商：关联弹窗（粘贴链接/skuId → 预览确认）/ 登录弹窗（本机助手窗口登录）
+      rpJdLink: { visible: false, sku: '', goodsName: '', input: '', loading: false, error: '', picked: null },
+      rpJdLogin: { visible: false, starting: false, error: '', message: '', checking: false },
       // 城配速达（阿发）：关联弹窗 / 选购弹窗 / Token 配置弹窗
       rpAfaLink: { visible: false, sku: '', keyword: '', rows: [], loading: false, error: '', picked: null, total: 0, page: 1, size: 20 },
       rpAfaBuy: { visible: false, sku: '', goodsId: null, goodsName: '', qty: 1, saving: false },
@@ -3523,8 +4328,65 @@ const vm = new Vue({
       creatingUser: false, createOk: false,
       userEdit: { visible: false, id: null, title: '', company: '', taxNo: '', email: '', note: '', brandId: 1, hint: '', lockCompany: false, saving: false, expiryMode: 'permanent', expiresAt: '' },
       // 菜单权限弹窗（退单列表 / 实时毛利监控）
-      menuPermit: { visible: false, id: null, username: '', refund: false, profit: false, product: false, market: false, billing: false, replenish: false, price: false, saving: false,
-                    origin: { refund: false, profit: false, product: false, market: false, billing: false, replenish: false, price: false } },
+      menuPermit: { visible: false, id: null, username: '', scope: 'admin', refund: false, profit: false, product: false, market: false, billing: false, replenish: false, price: false, after: false, supplier: false, waybill: false, saving: false,
+                    origin: { refund: false, profit: false, product: false, market: false, billing: false, replenish: false, price: false, after: false, supplier: false, waybill: false } },
+      // ── 员工管理（v0.2.104，仅主体账号）──
+      staff: { rows: [], loading: false },
+      staffOwner: null,
+      staffMenus: [
+        { key: 'refund', label: '退单列表', field: 'qnhRefundEnabled' },
+        { key: 'after', label: '售后管理', field: 'afterSaleEnabled' },
+        { key: 'profit', label: '实时毛利监控', field: 'qnhProfitEnabled' },
+        { key: 'product', label: '商品列表', field: 'productEnabled' },
+        { key: 'replenish', label: '补货', field: 'replenishEnabled' },
+        { key: 'market', label: '交易市场', field: 'marketEnabled' },
+        { key: 'billing', label: '账单', field: 'billingEnabled' },
+        { key: 'price', label: '平台取价', field: 'priceEnabled' },
+        { key: 'supplier', label: '供应商管理', field: 'supplierEnabled' },
+        { key: 'waybill', label: '货单管理', field: 'waybillEnabled' },
+      ],
+      staffDlg: { visible: false, id: null, username: '', password: '', displayName: '', note: '', saving: false, menus: {} },
+      // ── 售后管理（v0.2.104）──
+      af: {
+        loading: false, rows: [], total: 0, page: 1, size: 20,
+        status: '', keyword: '', counts: { all: 0, 0: 0, 1: 0, 2: 0, 3: 0 },
+        statuses: [
+          { value: 0, label: '待处理', tag: 'info' }, { value: 1, label: '已申请', tag: 'warning' },
+          { value: 2, label: '已退货', tag: '' }, { value: 3, label: '已退款', tag: 'success' },
+        ],
+      },
+      // 处理售后（v0.2.108）：一键推进下一档，弹框只收「凭证图 + 备注」，不再选状态
+      afDlg: {
+        visible: false, key: '', src: 'refund', refundNo: '', status: 0,
+        fromLabel: '', nextLabel: '', note: '', saving: false,
+        img: '', imgPreview: '', imgName: '', imgError: '', dragging: false,
+      },
+      // ── 供应商管理（v0.3.0）──
+      sp: { loading: false, rows: [], total: 0, page: 1, size: 20, keyword: '' },
+      spDlg: { visible: false, mode: 'create', id: 0, name: '', note: '', saving: false, error: '' },
+      // ── 货单管理（v0.3.0）──
+      wb: {
+        loading: false, rows: [], total: 0, sumAmount: 0, page: 1, size: 20,
+        supplier: '', range: [],   // range = [开始日期, 结束日期]，空 = 不限
+      },
+      // 新建货单：供应商下拉（远程搜）+ 金额 + 货单日期 + 备注 + 图片（电脑端本地上传 / 手机扫码传）
+      wbNew: {
+        visible: false, suppliers: [], supplierId: '', amount: '', billDate: '',
+        note: '', saving: false, error: '', loadingSupplier: false,
+        token: '', link: '', qr: '', leftSec: 0, images: [], uploading: false,
+        imgError: '', polling: null, qrLoading: false,
+      },
+      // 货单详情：基本信息 + 图片（点开看大图）
+      wbView: { visible: false, loading: false, waybill: {}, images: [], error: '' },
+      // 凭证查看：点「凭证(n)」打开，列出这条售后每次变更的截图
+      afAttach: { visible: false, title: '售后凭证', rows: [] },
+      // 新增售后（手工登记）：先按名称/SKU 搜商品，选中后填数量与原因
+      afNew: {
+        visible: false, kw: '', searching: false, options: [], pickKey: '',
+        sku: '', goodsName: '', imageUrl: '', qty: 1, reason: '', note: '', saving: false, error: '',
+      },
+      // 退款原因编辑（退单列表与售后管理共用）
+      reasonDlg: { visible: false, refundNo: '', value: '', raw: '', from: 'refund', saving: false },
       // 操作日志（仅超级管理员）
       opLog: { draftUsername: '', username: '', page: 1, size: 20, total: 0, rows: [], loading: false, summary: {} },
       // 退单列表（牵牛花）
@@ -3557,12 +4419,21 @@ const vm = new Vue({
   },
   computed: {
     isAdmin() { return !!(this.me && this.me.role === 'admin'); },
+    /** 员工账号（app_user.owner_id 有值）：只能看主体授权给他的业务菜单，发票那一组一律不给 */
+    isStaff() { return !!(this.me && this.me.isStaff); },
+    /** 员工可进的第一个菜单（navGroups 已按权限过滤过），没有权限时返回空串 */
+    staffHome() {
+      for (const g of this.navGroups) if (g.items.length) return g.items[0].key;
+      return '';
+    },
     /** 服务端版本号（后端 publicUser 下发，侧边栏品牌区展示） */
     serverVersion() { return (this.me && this.me.serverVersion) || ''; },
     /** 侧边栏导航：设计稿 4 组，条目按账号权限过滤，与旧 el-menu 各项的 v-if 等价 */
     navGroups() {
       const groups = [
-        { title: '发票', items: [
+        // 发票这一组是主体账号自己的生意（1688 / 拼多多 / 闪电帮帮 / 税名核对），
+        // 员工只是被授权来做退单、售后、补货这些操作的，一律不开放（v0.2.106）
+        { title: '发票', items: this.isStaff ? [] : [
           { key: 'board', label: '1688发票', icon: 'el-icon-document' },
           { key: 'pdd', label: '拼多多发票', icon: 'el-icon-s-order' },
           { key: 'sdc', label: '闪电帮帮发票', icon: 'el-icon-truck' },
@@ -3574,11 +4445,17 @@ const vm = new Vue({
           this.canMarket ? { key: 'market', label: '交易市场', icon: 'el-icon-s-marketing' } : null,
           this.canBilling ? { key: 'billing', label: '账单', icon: 'el-icon-wallet' } : null,
         ].filter(Boolean) },
+        { title: '采购', items: [
+          this.canSupplier ? { key: 'supplier', label: '供应商管理', icon: 'el-icon-office-building' } : null,
+          this.canWaybill ? { key: 'waybill', label: '货单管理', icon: 'el-icon-tickets' } : null,
+        ].filter(Boolean) },
         { title: '牵牛花监控', items: [
           this.canRefund ? { key: 'refund', label: '退单列表', icon: 'el-icon-s-claim' } : null,
+          this.canAfter ? { key: 'after', label: '售后管理', icon: 'el-icon-refresh-left' } : null,
           this.canProfit ? { key: 'profit', label: '实时毛利监控', icon: 'el-icon-s-data' } : null,
         ].filter(Boolean) },
         { title: '系统', items: [
+          this.canStaff ? { key: 'staff', label: '员工管理', icon: 'el-icon-user-solid' } : null,
           this.isAdmin ? { key: 'admin', label: '系统管理', icon: 'el-icon-setting' } : null,
           this.isAdmin ? { key: 'users', label: '用户管理', icon: 'el-icon-user' } : null,
           this.isAdmin ? { key: 'audit', label: '操作日志', icon: 'el-icon-tickets' } : null,
@@ -3589,6 +4466,7 @@ const vm = new Vue({
     },
     /** 顶栏主标题：与左侧菜单同名（菜单改名时标题自动跟着变，不再另写一套文案） */
     pageTitle() {
+      if (this.page === '__none') return '菜单未开通';
       const noMenu = { mapping: '税名核对', qnhcfg: '牵牛花配置', refundalert: '退单提醒' };
       if (noMenu[this.page]) return noMenu[this.page];
       for (const g of this.navGroups) {
@@ -3639,6 +4517,27 @@ const vm = new Vue({
     // 平台取价权限（v0.2.95）：登录齐货通 / 重新取价 / 配置阿发Token / 自动匹配阿发 / 阿发重新取价 / 选购加购
     //   这些操作要动平台真实账号，默认只给超级管理员，普通账号由超管在「菜单权限 → 平台取价」里授权
     canPrice() { return !!(this.me && (this.me.role === 'admin' || this.me.priceEnabled)); },
+    // 售后管理权限（v0.2.104）：独立菜单，默认关闭，可与退单列表分开授权
+    canAfter() { return !!(this.me && (this.me.role === 'admin' || this.me.afterSaleEnabled)); },
+    // 供应商管理 / 货单管理（v0.3.0）：两个独立菜单开关，超管始终可见
+    canSupplier() { return !!(this.me && (this.me.role === 'admin' || this.me.supplierEnabled)); },
+    canWaybill() { return !!(this.me && (this.me.role === 'admin' || this.me.waybillEnabled)); },
+    /** 一张货单最多传几张图（与 lib/waybill.js 的 MAX_IMAGES 保持一致） */
+    wbImgMax() { return 9; },
+    // 员工管理（v0.2.104）：只有「主体账号」能用（员工账号 owner_id 非空，看不到该菜单）
+    canStaff() { return !!(this.me && this.me.canStaff); },
+    /** 售后状态统计卡（点卡片按该状态筛选，再点一次取消） */
+    afStatCards() {
+      const c = this.af.counts || {};
+      const n = (k) => Number(c[k] || 0);
+      return [
+        { key: '', label: '全部记录', num: n('all') },
+        { key: '0', label: '待处理', num: n(0) },
+        { key: '1', label: '已申请', num: n(1) },
+        { key: '2', label: '已退货', num: n(2) },
+        { key: '3', label: '已退款', num: n(3) },
+      ];
+    },
     /** 账单：收入组二级列（美团/淘宝/京东，均可手工编辑） */
     billIncomeItems() { return (this.bill.items || []).filter((i) => i.group === 'income'); },
     /** 账单：支出组二级列（前两项系统统计只读，其余手工编辑） */
@@ -3703,6 +4602,16 @@ const vm = new Vue({
     gapTooSmall() { return Number(this.cfg.gapMin) < 15 || Number(this.cfg.gapMax) < 15; },
     // 管理员必须先选定一个账号，才能看该账号的牵牛花数据
     qnhNeedPick() { return this.isAdmin && this.qnhTenant == null; },
+    // 1688 登录条：把 /api/ali/orders-session 的结果映射成 qnh-login-bar 认识的 cookie 结构
+    // （登录态按账号隔离，所以换账号后必须重新拉一次，不能沿用上一张卡的状态）
+    aliCookieBar() {
+      const s = this.aliSession || {};
+      return {
+        logined: !!s.configured,
+        loading: !!this.aliLogin.loading,
+        message: '',
+      };
+    },
     // 拼多多催收话术预览：用当前查看账号的抬头填充（「1688发票」页里各账号抬头不同）
     pddMsgPreview() {
       const tpl = String(this.cfg.pddChat || '');
@@ -3742,17 +4651,24 @@ const vm = new Vue({
       const p = ad.progress;
       const isSend = ad.kind === 'send';
       const isOrders = ad.kind === 'orders';
-      const name = isOrders ? '获取订单数据' : (isSend ? '批量催商家开票' : '批量申请发票');
+      const name = isOrders ? '同步订单与发票' : (isSend ? '批量催商家开票' : '批量申请发票');
       const done = p ? (Number(p.index) || 0) : 0;
       const total = p ? (Number(p.total) || 0) : 0;
       let s;
       if (isOrders) {
-        s = (ad.running ? name + '：' : name + '（已结束）：')
-          + '第 ' + (Number(p && p.page) || 0) + ' 页 · 已拉 ' + (Number(p && p.fetched) || 0) + ' 单'
+        const orderPart = '已拉 ' + (Number(p && p.fetched) || 0) + ' 单'
           + ' · 入库 ' + (Number(p && p.saved) || 0) + ' 条（新增 ' + (Number(p && p.newCount) || 0) + '）';
-        // 全量不再限时间：进度标题上写清翻页上限，撞上限时用户能看到原因
-        if (ad.full) s += ' · 全量（翻到空页为止，上限 ' + (this.pd.maxPages || 300) + ' 页）';
-        else if (ad.running) s += ' · 增量（追平即停）';
+        if (ad.phase === 'invoice') {
+          // 第二段：订单已拉完，正在刷发票状态（接口不给进度，只能报阶段）
+          s = name + '：① 订单完成（' + orderPart + '）· ② '
+            + (ad.running ? '正在刷新发票状态…' : '发票状态已刷新');
+        } else {
+          s = (ad.running ? name + '：① 拉取订单 ' : name + '（已结束）：① 拉取订单 ')
+            + '第 ' + (Number(p && p.page) || 0) + ' 页 · ' + orderPart;
+          // 全量不再限时间：进度标题上写清翻页上限，撞上限时用户能看到原因
+          if (ad.full) s += ' · 全量（翻到空页为止，上限 ' + (this.pd.maxPages || 300) + ' 页）';
+          else if (ad.running) s += ' · 增量（追平即停）';
+        }
       } else {
         s = (ad.running ? name + '：' : name + '（已结束）：') + done + '/' + total;
         if (ad.running && p && p.current) s += ' · 当前: ' + p.current;
@@ -4212,6 +5128,15 @@ const vm = new Vue({
           .then(() => { location.href = '/login'; }).catch(() => { location.href = '/login'; });
         return;
       }
+      // 员工账号（v0.2.106）：没有发票权限，别去拉 1688 发票数据，直接进他第一个被授权的菜单
+      if (this.isStaff) {
+        this.refreshAgent();
+        this._agentTimer = setInterval(this.refreshAgent, 5000);
+        const home = this.staffHome;
+        this.page = home || '__none';
+        if (home) this.switchPage(home);
+        return;
+      }
       await this.loadData();
       this.renderTrend();
       this.pollTask();
@@ -4254,16 +5179,32 @@ const vm = new Vue({
       if (p === 'refundalert' && !this.canRefund) p = 'board';
       if (p === 'qnhcfg' && !(this.canProfit || this.canRefund)) p = 'board';
       if (p === 'profit' && !this.canProfit) p = 'board';
+      if (p === 'after' && !this.canAfter) p = 'board';
+      if (p === 'staff' && !this.canStaff) p = 'board';
       if (p === 'product' && !this.canProduct) p = 'board';
       if (p === 'replenish' && !this.canReplenish) p = 'product';
       if (p === 'market' && !this.canMarket) p = 'board';
       if (p === 'billing' && !this.canBilling) p = 'board';
+      if (p === 'supplier' && !this.canSupplier) p = 'board';
+      if (p === 'waybill' && !this.canWaybill) p = 'board';
+      // 员工账号兜底：上面各条回落到 'board'（1688发票）的规则对员工不适用，
+      // 员工只允许导航里出现的页面（外加从毛利/退单页进来的「告警配置」「退单提醒」）
+      if (this.isStaff) {
+        const allowed = new Set();
+        for (const g of this.navGroups) for (const it of g.items) allowed.add(it.key);
+        allowed.add('qnhcfg');
+        allowed.add('refundalert');
+        if (!allowed.has(p)) p = this.staffHome || '__none';
+      }
       this.page = p;
       if (p === 'admin') { this.loadConfigUI(); this.loadUsers(); this.loadBuildStatus(); this.loadAgentVersions(); }
       if (p === 'users') { this.loadUsers(); }
+      if (p === 'staff') { this.loadStaff(); }
       if (p === 'mapping') this.loadMapping();
+      if (p === 'supplier') this.loadSuppliers();
+      if (p === 'waybill') this.loadWaybills();
       if (p === 'audit') this.loadOpLog();
-      if (p === 'profit' || p === 'refund' || p === 'pdd' || p === 'qnhcfg' || p === 'refundalert') {
+      if (p === 'profit' || p === 'refund' || p === 'after' || p === 'pdd' || p === 'qnhcfg' || p === 'refundalert') {
         if (p === 'refund') this.reportOp('qnh.view');
         this.enterQnhPage(p);
       }
@@ -4918,6 +5859,7 @@ const vm = new Vue({
       if (this.page === 'sdc') { this.loadSdcStatus(); this.loadSdcOrders(); return; }
       this.loadRefundStatus();
       if (this.page === 'refund') { this.loadRefunds(); this.loadRefundTrend(); }
+      if (this.page === 'after') { this.loadAfterSales(); }
       if (this.page === 'profit') { this.loadProfit(); }
     },
     async loadRefundStatus() {
@@ -4982,6 +5924,346 @@ const vm = new Vue({
     onRefundPage(p) { this.rq.page = p; this.loadRefunds(); },
     onRefundSize(s) { this.rq.size = s; this.rq.page = 1; this.loadRefunds(); },
     refundRowClass({ row }) { return row && row.picked ? 'row-picked' : ''; },
+
+    // ── 售后原因（退单列表写 refund_reason；售后管理按行来源分流，见 /api/qnh/after-sales/reason）──
+    /** 打开编辑框：value 取现有原因，raw 展示平台原值（手工记录没有平台原值） */
+    openReason(row, from) {
+      if (this.readonly) { this.$message.warning('只读模式下不能修改'); return; }
+      const isAfter = from === 'after';
+      const manual = !!(isAfter && row.src === 'manual');
+      this.reasonDlg = {
+        visible: true,
+        refundNo: row.refundNo || '',
+        key: isAfter ? (row.key || '') : '',
+        from: from || 'refund',
+        manual,
+        value: manual ? (row.applyReason || '') : (row.refundReason || ''),
+        raw: manual ? '' : (row.applyReason || ''),
+        saving: false,
+      };
+    },
+    /** 售后管理的「改原因」：平台退单与手工记录共用同一个弹窗 */
+    openAfReason(row) { this.openReason(row, 'after'); },
+    async saveReason() {
+      const d0 = this.reasonDlg;
+      if (d0.saving) return;
+      if (d0.from !== 'after' && !d0.refundNo) return;
+      if (d0.from === 'after' && !d0.key) return;
+      d0.saving = true;
+      try {
+        const isAfter = d0.from === 'after';
+        const d = await this.qnhApi(isAfter ? '/api/qnh/after-sales/reason' : '/api/qnh/refunds/reason', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(isAfter ? { key: d0.key, reason: d0.value } : { refundNo: d0.refundNo, reason: d0.value }),
+        });
+        if (!d || d.error) { this.$message.error((d && d.error) || '保存失败'); return; }
+        if (isAfter) {
+          const row = (this.af.rows || []).find((r) => r.key === d0.key);
+          if (row) {
+            if (row.src === 'manual') {
+              row.applyReason = d.reason || '';
+              row.reasonText = row.applyReason;
+            } else {
+              row.refundReason = d.reason || '';
+              row.reasonText = row.refundReason || row.applyReason || '';
+            }
+          }
+        } else {
+          // 本地同步：两个列表都可能持有这条退单
+          const patch = (row) => {
+            if (!row) return;
+            row.refundReason = d.refundReason || '';
+            row.reasonText = row.refundReason || row.applyReason || '';
+          };
+          patch((this.rq.rows || []).find((r) => r.refundNo === d0.refundNo));
+          patch((this.af.rows || []).find((r) => r.refundNo === d0.refundNo));
+        }
+        this.$message.success('退款原因已保存');
+        d0.visible = false;
+      } catch (e) {
+        this.$message.error('保存失败：' + e.message);
+      } finally {
+        d0.saving = false;
+      }
+    },
+
+    // ── 售后管理（v0.2.104）──
+    /** 列表「商品名称」列：多商品时显示「首个 等 N 种」，完整内容在 title 里 */
+    afGoodsText(row) {
+      const items = (row && row.items) || [];
+      if (!items.length) return '（明细未同步）';
+      const first = items[0].skuName || items[0].sku || '—';
+      return items.length > 1 ? first + ' 等 ' + items.length + ' 种' : first;
+    },
+    afStatusTag(s) {
+      const hit = (this.af.statuses || []).find((x) => Number(x.value) === Number(s));
+      return hit ? hit.tag : 'info';
+    },
+    afStatusLabel(s) {
+      const hit = (this.af.statuses || []).find((x) => Number(x.value) === Number(s));
+      return hit ? hit.label : '';
+    },
+    /** 下一档：待处理→已申请→已退货→已退款，到顶返回 null（按钮显示「已完成」并禁用） */
+    afNextStatus(row) {
+      const s = Number(row && row.status) || 0;
+      return s >= 3 ? null : s + 1;
+    },
+    toggleAfStatus(key) {
+      this.af.status = this.af.status === key ? '' : key;
+      this.af.page = 1;
+      this.loadAfterSales();
+    },
+    onAfFilter() { this.af.page = 1; this.loadAfterSales(); },
+    onAfPage(p) { this.af.page = p; this.loadAfterSales(); },
+    onAfSize(s) { this.af.size = s; this.af.page = 1; this.loadAfterSales(); },
+    async loadAfterSales() {
+      if (this.qnhNeedPick) return;   // 超管还没选定账号，等 picker 选完再拉
+      this.af.loading = true;
+      try {
+        const q = new URLSearchParams();
+        if (this.af.status !== '') q.set('status', this.af.status);
+        if (this.af.keyword) q.set('keyword', this.af.keyword);
+        q.set('page', this.af.page);
+        q.set('size', this.af.size);
+        const d = await this.qnhApi('/api/qnh/after-sales?' + q.toString());
+        if (d.error) { this.$message.error(d.error); return; }
+        this.af.rows = d.rows || [];
+        this.af.total = d.total || 0;
+        this.af.counts = d.counts || { all: 0, 0: 0, 1: 0, 2: 0, 3: 0 };
+        if (Array.isArray(d.statuses) && d.statuses.length) this.af.statuses = d.statuses;
+      } catch (e) {
+        this.$message.error('加载售后列表失败：' + e.message);
+      } finally {
+        this.af.loading = false;
+      }
+    },
+    openAfStatus(row) {
+      if (this.readonly) { this.$message.warning('只读模式下不能修改'); return; }
+      const cur = Number(row.status) || 0;
+      const next = this.afNextStatus(row);
+      if (next === null) { this.$message.info('这条售后已到「已退款」，流程结束'); return; }
+      this.afDlg = {
+        visible: true, key: row.key || '', src: row.src || 'refund',
+        refundNo: row.refundNo || '', status: next,
+        fromLabel: this.afStatusLabel(cur), nextLabel: this.afStatusLabel(next),
+        note: row.note || '', saving: false,
+        img: '', imgPreview: '', imgName: '', imgError: '', dragging: false,
+      };
+      // 粘贴截图：只在弹框打开期间挂，关掉就摘
+      this._afPasteHandler = (e) => this.onAfPaste(e);
+      document.addEventListener('paste', this._afPasteHandler);
+      this.$nextTick(() => { if (this.$refs.afFile) this.$refs.afFile.value = ''; });
+    },
+    onAfDlgClosed() {
+      if (this._afPasteHandler) {
+        document.removeEventListener('paste', this._afPasteHandler);
+        this._afPasteHandler = null;
+      }
+      this.afDlg.img = '';
+      this.afDlg.imgPreview = '';
+    },
+    /** Ctrl+V：从剪贴板取第一张图（截图工具复制出来的一般是 image/png） */
+    onAfPaste(e) {
+      if (!this.afDlg.visible) return;
+      const items = (e.clipboardData && e.clipboardData.items) || [];
+      for (const it of items) {
+        if (it.kind === 'file' && /^image\//.test(it.type)) {
+          const f = it.getAsFile();
+          if (f) {
+            e.preventDefault();
+            this.setAfImage(f, '粘贴的截图');
+            return;
+          }
+        }
+      }
+    },
+    pickAfImage() { if (this.$refs.afFile) this.$refs.afFile.click(); },
+    onAfFile(e) {
+      const f = (e.target.files || [])[0];
+      if (f) this.setAfImage(f, f.name);
+    },
+    onAfDrop(e) {
+      this.afDlg.dragging = false;
+      const f = (e.dataTransfer && e.dataTransfer.files || [])[0];
+      if (f) this.setAfImage(f, f.name);
+    },
+    clearAfImage() {
+      this.afDlg.img = '';
+      this.afDlg.imgPreview = '';
+      this.afDlg.imgName = '';
+      this.afDlg.imgError = '';
+      if (this.$refs.afFile) this.$refs.afFile.value = '';
+    },
+    /** 收下图片文件：先校验类型/大小，再压到最长边 1600 的 jpeg（手机截图 3MB 压完约 200KB） */
+    async setAfImage(file, name) {
+      const okType = /^image\/(png|jpeg|jpg|webp|gif)$/i.test(file.type || '');
+      if (!okType) { this.afDlg.imgError = '只支持 png / jpg / webp / gif 图片'; return; }
+      if (file.size > 5 * 1024 * 1024) {
+        this.afDlg.imgError = '图片超过 5MB（' + (file.size / 1048576).toFixed(1) + 'MB），请压缩后再传';
+        return;
+      }
+      this.afDlg.imgError = '';
+      try {
+        const dataUrl = await this.compressAfImage(file);
+        this.afDlg.img = dataUrl;
+        this.afDlg.imgPreview = dataUrl;
+        this.afDlg.imgName = name || '图片';
+      } catch (e) {
+        this.afDlg.imgError = '读取图片失败：' + (e.message || e);
+      }
+    },
+    compressAfImage(file) {
+      return new Promise((resolve, reject) => {
+        // gif 可能是动图，压缩就没动画了，原样读
+        if (/^image\/gif$/i.test(file.type || '')) {
+          const fr = new FileReader();
+          fr.onload = () => resolve(fr.result);
+          fr.onerror = () => reject(new Error('读取失败'));
+          fr.readAsDataURL(file);
+          return;
+        }
+        const url = URL.createObjectURL(file);
+        const img = new Image();
+        img.onload = () => {
+          try {
+            const MAX = 1600;
+            let { width: w, height: h } = img;
+            const scale = Math.min(1, MAX / Math.max(w, h));
+            w = Math.round(w * scale);
+            h = Math.round(h * scale);
+            const cv = document.createElement('canvas');
+            cv.width = w; cv.height = h;
+            const ctx = cv.getContext('2d');
+            ctx.fillStyle = '#fff';           // png 透明底转 jpeg 会变黑，先铺白
+            ctx.fillRect(0, 0, w, h);
+            ctx.drawImage(img, 0, 0, w, h);
+            resolve(cv.toDataURL('image/jpeg', 0.85));
+          } catch (e) {
+            reject(e);
+          } finally {
+            URL.revokeObjectURL(url);
+          }
+        };
+        img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('图片格式无法解析')); };
+        img.src = url;
+      });
+    },
+    async saveAfStatus() {
+      const d0 = this.afDlg;
+      if ((!d0.key && !d0.refundNo) || d0.saving) return;
+      if (!d0.img) { d0.imgError = '请先上传售后凭证图片（每次变更都要留一张）'; return; }
+      d0.saving = true;
+      try {
+        const d = await this.qnhApi('/api/qnh/after-sales/status', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ key: d0.key, refundNo: d0.refundNo, status: d0.status, note: d0.note, image: d0.img }),
+        });
+        if (!d || d.error) { this.$message.error((d && d.error) || '保存失败'); return; }
+        const row = (this.af.rows || []).find((r) => (d0.key ? r.key === d0.key : r.refundNo === d0.refundNo));
+        if (row) {
+          row.status = Number(d0.status);
+          row.statusLabel = d.statusLabel || '';
+          row.note = d0.note || '';
+          row.handledBy = (this.me && this.me.username) || '';
+        }
+        this.$message.success('已标记为「' + (d.statusLabel || '') + '」');
+        d0.visible = false;
+        // 统计卡与凭证数都要跟着变，整页重拉
+        this.loadAfterSales();
+      } catch (e) {
+        this.$message.error('保存失败：' + e.message);
+      } finally {
+        d0.saving = false;
+      }
+    },
+    /** 凭证查看：列表里已带签名链接（1 小时有效），直接展示 */
+    openAfAttach(row) {
+      this.afAttach = {
+        visible: true,
+        title: '售后凭证 · ' + (this.afGoodsText(row) || ''),
+        rows: (row.attaches || []).slice(),
+      };
+    },
+    openAfImage(url) {
+      if (url) window.open(url, '_blank');
+    },
+
+    // ── 新增售后（手工登记，v0.2.106）──
+    openAfCreate() {
+      if (this.readonly) { this.$message.warning('只读模式下不能修改'); return; }
+      this.afNew = {
+        visible: true, kw: '', searching: false, options: [], pickKey: '',
+        sku: '', goodsName: '', imageUrl: '', qty: 1, reason: '', note: '', saving: false, error: '',
+      };
+    },
+    /** 远程搜索商品：只查本地商品表（品牌商品 + 自己导入的补货商品），不连平台 */
+    async searchAfGoods(kw) {
+      const q = String(kw || '').trim();
+      this.afNew.kw = q;
+      if (!q) { this.afNew.options = []; return; }
+      this.afNew.searching = true;
+      try {
+        const d = await this.qnhApi('/api/qnh/after-sales/goods?kw=' + encodeURIComponent(q));
+        this.afNew.options = (d && d.rows) || [];
+      } catch (e) {
+        this.afNew.options = [];
+      } finally {
+        this.afNew.searching = false;
+      }
+    },
+    /** 选中某个商品：把名称/SKU/图带到表单里（名称仍可手改，兼容搜不到的商品） */
+    onAfGoodsPick(key) {
+      const hit = (this.afNew.options || []).find((o) => (o.sku || ('name:' + o.goodsName)) === key);
+      if (!hit) return;
+      this.afNew.sku = hit.sku || '';
+      this.afNew.goodsName = hit.goodsName || '';
+      this.afNew.imageUrl = hit.imageUrl || '';
+    },
+    async saveAfCreate() {
+      const d0 = this.afNew;
+      if (d0.saving) return;
+      d0.error = '';
+      if (!d0.goodsName && !d0.sku) { d0.error = '请先搜索并选中商品，或直接填写商品名称'; return; }
+      if (!(Number(d0.qty) > 0)) { d0.error = '数量要填大于 0 的数字'; return; }
+      if (!String(d0.reason || '').trim()) { d0.error = '请填写售后原因'; return; }
+      d0.saving = true;
+      try {
+        const d = await this.qnhApi('/api/qnh/after-sales/manual', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            sku: d0.sku, goodsName: d0.goodsName, imageUrl: d0.imageUrl,
+            qty: d0.qty, reason: d0.reason, note: d0.note,
+          }),
+        });
+        if (!d || d.error) { d0.error = (d && d.error) || '保存失败'; return; }
+        this.$message.success('已新增一条售后记录');
+        d0.visible = false;
+        this.af.page = 1;
+        this.loadAfterSales();
+      } catch (e) {
+        d0.error = '保存失败：' + e.message;
+      } finally {
+        d0.saving = false;
+      }
+    },
+    async deleteAfManual(row) {
+      if (this.readonly) { this.$message.warning('只读模式下不能修改'); return; }
+      try {
+        await this.$confirm(`确定删除这条手工售后记录？<br><b>${this.esc(this.afGoodsText(row))}</b> · 数量 ${row.refundQty || '—'}`,
+          '删除售后记录', { dangerouslyUseHTMLString: true, confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' });
+      } catch (e) { return; }
+      try {
+        const d = await this.qnhApi('/api/qnh/after-sales/manual/delete', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ id: String(row.key || '').replace(/^man:/, '') }),
+        });
+        if (!d || d.error) { this.$message.error((d && d.error) || '删除失败'); return; }
+        this.$message.success('已删除');
+        this.loadAfterSales();
+      } catch (e) {
+        this.$message.error('删除失败：' + e.message);
+      }
+    },
 
     async loadRefundTrend() {
       try {
@@ -5217,7 +6499,7 @@ const vm = new Vue({
         : '你当前登录的';
       try {
         await this.$confirm(
-          `退出后服务器会清除${who}${accTxt}的登录态，之后刷新发票状态、获取订单数据都需要重新登录。`
+          `退出后服务器会清除${who}${accTxt}的登录态，之后「同步订单与发票」需要重新登录。`
           + '\n本机助手里的拼多多登录态会一并清除；助手不在线时，请到助手面板「本机登录态」里手动清除。'
           + '\n已同步的订单与发票数据不受影响，不会被删除。',
           '退出拼多多账号',
@@ -5348,34 +6630,10 @@ const vm = new Vue({
     },
     onPddPage(p) { this.pd.page = p; this.loadPddOrders(); },
     onPddSize(s) { this.pd.size = s; this.pd.page = 1; this.loadPddOrders(); },
-    async doPddSync() {
-      if (this.pd.syncing) return;
-      if (this.qnhNeedPick) { this.$message.warning('请先选择要以哪个账号的身份同步'); return; }
-      this.pd.syncing = true;
-      try {
-        this.$message.info('已开始拉取，完成后会自动刷新列表');
-        const d = await this.pddApi('/api/pdd/sync', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
-        if (d.loginish || (d.error && /登录/.test(d.error))) {
-          this.$message.warning(d.message || d.error || '登录态已失效，请重新登录拼多多');
-          await this.loadPddStatus();
-          return;
-        }
-        if (d.error || !d.ok) {
-          this.$message.error(d.message || d.error || '拉取失败');
-          return;
-        }
-        this.$message.success(d.message || '拉取完成');
-        this.pd.lastRun = { status: 'success', finishedAt: new Date().toLocaleString('zh-CN', { hour12: false }), message: d.message || '' };
-        await this.loadPddStatus();
-        this.loadPddOrders();
-      } catch (e) {
-        this.$message.error('拉取失败：' + e.message);
-      } finally {
-        this.pd.syncing = false;
-      }
-    },
 
-    // ── 「获取订单数据」：拉「我的订单」全部订单（首次全量、之后增量）──
+    // ── 「同步订单与发票」：一次点击跑两段（0.2.99 合并）──
+    //   ① 拉「我的订单」订单（首次全量、之后增量追平）
+    //   ② 拉完自动刷新发票状态（服务端接着跑，页面关掉也会跑完）
     //   后端是后台任务（全量要翻几十页），这里只负责发起 + 轮询进度，进度卡复用批量申请发票那张
     async syncPddOrders() {
       if (this.pd.orderSyncing) { this.$message.info('正在同步中，请看下方进度'); return; }
@@ -5387,7 +6645,7 @@ const vm = new Vue({
           await this.$confirm(
             `首次同步为全量拉取：不限时间范围，会一直往前翻到空页为止，账号历史订单越多耗时越长。`
             + `\n\n翻页上限 ${this.pd.maxPages} 页（发票一页 20 条 / 订单一页 50 条），撞上限时会明确提示。`
-            + `\n\n之后再点「获取订单数据」为增量拉取（只补新订单，追平即停）。`,
+            + `\n\n拉完会自动接着刷新发票状态（两段都在下方进度卡里）；之后再点本按钮为增量拉取（只补新订单，追平即停）。`,
             '首次同步 · 全量拉取',
             { confirmButtonText: '开始拉取', cancelButtonText: '取消', type: 'info' }
           );
@@ -5406,11 +6664,11 @@ const vm = new Vue({
         this.pd.orderTaskId = d.taskId || '';
         this.pd.applyDialog = {
           visible: true, running: true, kind: 'orders', status: '', message: '',
-          full: !!d.full,
-          progress: { page: 0, fetched: 0, rows: 0, saved: 0, newCount: 0 }, log: [],
+          full: !!d.full, phase: 'orders',
+          progress: { page: 0, fetched: 0, rows: 0, saved: 0, newCount: 0, current: '' }, log: [],
           startedAt: Date.now(),
         };
-        this.$message.info(d.message || '已开始拉取订单，进度见下方');
+        this.$message.info(d.message || '已开始同步订单，进度见下方');
         this.$nextTick(() => {
           const el = this.$refs.applyCard && this.$refs.applyCard.$el;
           if (el && el.scrollIntoView) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -5429,7 +6687,7 @@ const vm = new Vue({
         if (Date.now() - started > 20 * 60 * 1000) {
           this.pd.applyDialog.running = false;
           this.pd.applyDialog.status = 'timeout';
-          this.pd.applyDialog.message = '等待超时（20 分钟）。同步可能仍在后台进行，稍后点「刷新发票状态」或重新打开本页查看结果。';
+          this.pd.applyDialog.message = '等待超时（20 分钟）。同步可能仍在后台进行，稍后重新打开本页查看结果。';
           this.pd.orderSyncing = false;
           return;
         }
@@ -5441,6 +6699,8 @@ const vm = new Vue({
         }
         if (d && !d.error) {
           if (d.full !== undefined) this.pd.applyDialog.full = !!d.full;
+          if (d.phase) this.pd.applyDialog.phase = d.phase;
+          if (d.invoice) this.pd.applyDialog.invoice = d.invoice;
           if (d.progress) this.pd.applyDialog.progress = d.progress;
           if (Array.isArray(d.progressLog)) this.pd.applyDialog.log = d.progressLog;
           if (d.status !== 'pending') {
@@ -5453,8 +6713,15 @@ const vm = new Vue({
               newCount: (d.progress && d.progress.newCount) || 0,
             });
             this.pd.orderSyncing = false;
-            if (d.ok) this.$message.success(d.message || '订单同步完成');
-            else this.$message.error(d.message || '订单同步失败');
+            // 顶部「最近同步」标签：合并后只有这一条链路，成功/失败都记在一次上
+            this.pd.lastRun = {
+              status: d.ok ? 'success' : 'failed',
+              finishedAt: new Date().toLocaleString('zh-CN', { hour12: false }),
+              message: d.message || '',
+            };
+            // 两段都跑完才落到这里；发票那段失败时后端仍给 done（订单已入库），文案里已写清失败原因
+            if (d.ok) this.$message.success(d.message || '同步完成');
+            else this.$message.error(d.message || '同步失败');
             await this.loadPddStatus();
             this.loadPddOrders();
             return;
@@ -6564,20 +7831,23 @@ const vm = new Vue({
       } catch (e) { this.$message.error('加载失败: ' + e.message); }
     },
     // 开关某个账号的「退单列表」权限
-    /** 打开「菜单权限」弹窗（逐用户开放退单列表 / 实时毛利监控 / 商品列表 / 交易市场；拼多多发票全量开放不需要配） */
-    openMenuPermit(row) {
+    /** 打开「菜单权限」弹窗（超管给主体账号配；主体账号给员工配 —— scope 决定提交到哪个接口） */
+    openMenuPermit(row, scope) {
+      const sc = scope === 'staff' ? 'staff' : 'admin';
       this.menuPermit = {
-        visible: true, id: row.id, username: row.username,
+        visible: true, id: row.id, username: row.username, scope: sc,
         refund: !!row.qnhRefundEnabled, profit: !!row.qnhProfitEnabled,
         product: !!row.productEnabled, market: !!row.marketEnabled,
         billing: !!row.billingEnabled, replenish: !!row.replenishEnabled,
-        price: !!row.priceEnabled,
+        price: !!row.priceEnabled, after: !!row.afterSaleEnabled,
+        supplier: !!row.supplierEnabled, waybill: !!row.waybillEnabled,
         saving: false,
         origin: {
           refund: !!row.qnhRefundEnabled, profit: !!row.qnhProfitEnabled,
           product: !!row.productEnabled, market: !!row.marketEnabled,
           billing: !!row.billingEnabled, replenish: !!row.replenishEnabled,
-          price: !!row.priceEnabled,
+          price: !!row.priceEnabled, after: !!row.afterSaleEnabled,
+          supplier: !!row.supplierEnabled, waybill: !!row.waybillEnabled,
         },
       };
     },
@@ -6593,12 +7863,17 @@ const vm = new Vue({
       if (m.billing !== m.origin.billing) changes.push({ menu: 'billing', enabled: m.billing, field: 'billingEnabled', label: '账单' });
       if (m.replenish !== m.origin.replenish) changes.push({ menu: 'replenish', enabled: m.replenish, field: 'replenishEnabled', label: '补货' });
       if (m.price !== m.origin.price) changes.push({ menu: 'price', enabled: m.price, field: 'priceEnabled', label: '平台取价' });
+      if (m.after !== m.origin.after) changes.push({ menu: 'after', enabled: m.after, field: 'afterSaleEnabled', label: '售后管理' });
+      if (m.supplier !== m.origin.supplier) changes.push({ menu: 'supplier', enabled: m.supplier, field: 'supplierEnabled', label: '供应商管理' });
+      if (m.waybill !== m.origin.waybill) changes.push({ menu: 'waybill', enabled: m.waybill, field: 'waybillEnabled', label: '货单管理' });
       if (!changes.length) { m.visible = false; return; }
       m.saving = true;
-      const row = (this.users || []).find((u) => u.id === m.id);
+      const list = m.scope === 'staff' ? this.staff.rows : this.users;
+      const row = (list || []).find((u) => u.id === m.id);
+      const url = m.scope === 'staff' ? '/api/staff/users/menu' : '/api/admin/users/qnh-refund';
       try {
         for (const c of changes) {
-          const d = await this.api('/api/admin/users/qnh-refund', {
+          const d = await this.api(url, {
             method: 'POST', headers: { 'content-type': 'application/json' },
             body: JSON.stringify({ id: m.id, menu: c.menu, enabled: c.enabled }),
           });
@@ -6612,6 +7887,106 @@ const vm = new Vue({
       } finally {
         m.saving = false;
       }
+    },
+    // ── 员工管理（v0.2.104，仅主体账号）──
+    staffMenuTags(row) {
+      return (this.staffMenus || []).map((m) => ({ key: m.key, label: m.label, on: !!row[m.field] }));
+    },
+    async loadStaff() {
+      this.staff.loading = true;
+      try {
+        const d = await this.api('/api/staff/users');
+        if (d && d.error) { this.$message.error(d.error); return; }
+        this.staff.rows = (d && d.staff) || [];
+        this.staffOwner = (d && d.owner) || null;
+      } catch (e) {
+        this.$message.error('加载员工失败：' + e.message);
+      } finally {
+        this.staff.loading = false;
+      }
+    },
+    openStaffCreate() {
+      const menus = {};
+      for (const m of (this.staffMenus || [])) menus[m.key] = false;
+      this.staffDlg = { visible: true, id: null, username: '', password: '', displayName: '', note: '', saving: false, menus };
+    },
+    openStaffEdit(row) {
+      const menus = {};
+      for (const m of (this.staffMenus || [])) menus[m.key] = !!row[m.field];
+      this.staffDlg = {
+        visible: true, id: row.id, username: row.username, password: '',
+        displayName: row.displayName || '', note: row.note || '', saving: false, menus,
+      };
+    },
+    async saveStaff() {
+      const d0 = this.staffDlg;
+      if (d0.saving) return;
+      if (!String(d0.username || '').trim()) { this.$message.warning('请填写登录账号'); return; }
+      if (!d0.id && !String(d0.password || '')) { this.$message.warning('请填写初始密码'); return; }
+      d0.saving = true;
+      try {
+        const body = { username: d0.username, displayName: d0.displayName, note: d0.note };
+        let d;
+        if (d0.id) {
+          d = await this.api('/api/staff/users/update', {
+            method: 'POST', headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(Object.assign({ id: d0.id }, body)),
+          });
+        } else {
+          d = await this.api('/api/staff/users/create', {
+            method: 'POST', headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(Object.assign({ password: d0.password, menus: d0.menus }, body)),
+          });
+        }
+        if (!d || d.error) { this.$message.error((d && d.error) || '保存失败'); return; }
+        this.$message.success(d0.id ? '员工信息已保存' : '员工账号已创建');
+        d0.visible = false;
+        await this.loadStaff();
+      } catch (e) {
+        this.$message.error('保存失败：' + e.message);
+      } finally {
+        d0.saving = false;
+      }
+    },
+    /** 员工菜单权限：复用超管那套弹窗，只把提交地址换成 /api/staff/users/menu */
+    openStaffPermit(row) { this.openMenuPermit(row, 'staff'); },
+    async resetStaffPwd(row) {
+      let pw;
+      try {
+        const r = await this.$prompt(`为员工「${row.username}」设置新密码（至少 4 位）：`, '重置员工密码',
+          { inputType: 'password', inputValidator: (v) => (v && v.length >= 4) || '至少 4 位' });
+        pw = r.value;
+      } catch (e) { return; }
+      const d = await this.api('/api/staff/users/password', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ id: row.id, password: pw }),
+      });
+      if (d && d.error) this.$message.error('重置失败：' + d.error);
+      else this.$message.success('已重置「' + row.username + '」的密码，其原有登录会话已失效');
+    },
+    async toggleStaffStatus(row, status) {
+      const tip = status === 'disabled'
+        ? `确认禁用员工「${row.username}」？禁用后无法登录，已登录的会话立即失效。`
+        : `确认启用员工「${row.username}」？`;
+      try { await this.$confirm(tip, '确认操作', { type: 'warning' }); } catch (e) { return; }
+      const d = await this.api('/api/staff/users/status', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ id: row.id, status }),
+      });
+      if (d && d.error) this.$message.error('操作失败：' + d.error);
+      else { this.$message.success(status === 'disabled' ? '已禁用' : '已启用'); this.loadStaff(); }
+    },
+    async deleteStaff(row) {
+      try {
+        await this.$confirm(`删除员工账号「${row.username}」？\n\n只删账号本身，你的业务数据不受任何影响（员工本来就没有自己的数据）。`,
+          '删除员工', { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' });
+      } catch (e) { return; }
+      const d = await this.api('/api/staff/users/delete', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ id: row.id }),
+      });
+      if (d && d.error) this.$message.error('删除失败：' + d.error);
+      else { this.$message.success('已删除「' + row.username + '」'); this.loadStaff(); }
     },
     async createUser() {
       const payload = {
@@ -6761,6 +8136,9 @@ const vm = new Vue({
       this.selected = {};
       this.expanded = {}; this.orderOpen = {}; this.detailCache = {};
       this.dashPage = 1;
+      // 1688 登录态按账号隔离：换了查看身份就得重新拉一次，否则会显示上一个账号的登录状态
+      this.aliSession = null;
+      this.loadAliSession();
       this.switchPage('board');
       this.loadData();
     },
@@ -7066,13 +8444,13 @@ const vm = new Vue({
       this.rp.afaPrices = {};
       this.rp.total = 0;
       this.rp.page = 1;
-      this.rp.size = 20; // 默认 20 条/页，页码可翻；要一次看全在分页器里选「2000」
+      this.rp.size = 20; // 默认 20 条/页，页码可翻；最多 100 条（大数据量导出 Excel 看）
       this.rp.expect = Number(expectTotal) || 0;
       // 换了数据集（新导入文件 / 从菜单进入）就把筛选清掉，否则会莫名其妙筛不到东西
       this.rp.q = '';
       this.rp.draftQ = '';
       this.rp.status = '';
-      await Promise.all([this.loadReplenish(), this.loadQhtSession(), this.loadAfaSession()]);
+      await Promise.all([this.loadReplenish(), this.loadQhtSession(), this.loadAfaSession(), this.loadJdSession()]);
       this._rpSkipWatch = false;
     },
     /** 「自动匹配 / 重新取价」的筛选条件：与列表用同一份，保证只作用于当前筛出来的商品 */
@@ -7120,8 +8498,14 @@ const vm = new Vue({
       } catch (e) { this.$message.error('补货列表加载失败: ' + e.message); }
       finally { this.rp.loading = false; }
       // 列表一出来就把库里已缓存的价格带出来（mode=cache 只读本地库，绝不去平台取价）
-      await this.loadQhtPrices(this.rp.rows, { mode: 'cache' });
-      await this.loadAfaPrices(this.rp.rows, { mode: 'cache' });
+      // 三个接口互不依赖（各写各的 prices/afaPrices/jdPrices），并发跑：串行时 200 条要多等 100ms 以上
+      await Promise.all([
+        this.loadQhtPrices(this.rp.rows, { mode: 'cache' }),
+        this.loadAfaPrices(this.rp.rows, { mode: 'cache' }),
+        this.loadJdPrices(this.rp.rows, { mode: 'cache' }),
+      ]);
+      // 重排一次列宽：页面用 v-show 常驻 DOM，在隐藏状态下渲染过的表格列宽会算错，进页面/切视图后必须 doLayout
+      this.$nextTick(() => { const t = this.$refs.rpTable; if (t && t.doLayout) t.doLayout(); });
     },
     async onRpSize(v) { this.rp.size = v; this.rp.page = 1; await this.loadReplenish(); },
     async onRpPage(v) { this.rp.page = v; await this.loadReplenish(); },
@@ -7136,6 +8520,8 @@ const vm = new Vue({
      * 再按品牌分组强制去平台刷新，取到的价格写入 goods_price_cache；以后打开列表直接读库。
      */
     async refreshRpPrices(kind) {
+      // 京东万商：取价范围直接从当前行数据算（jd_sku_id 已在行里），不需要再查 targets
+      if (kind === 'jd') return this.refreshJdPrices();
       const isAfa = kind === 'afa';
       const btn = isAfa ? 'afaPricing' : 'pricing';
       const label = isAfa ? '阿发' : '齐货通';
@@ -7179,13 +8565,644 @@ const vm = new Vue({
         : await this.loadQhtPrices(pseudo, { mode: 'refresh' });
       if (r && r.fetched) this.$message.success(`已刷新并缓存 ${r.fetched} 个${label}商品的价格`);
     },
+    // ── 京东万商（b.jd.com）────────────────────────────────────────────────
+    //   取价：本机助手在万商页面里发（服务器直连必 403）；关联：粘贴链接（搜索接口要 h5st，算不出来）
+    async loadJdSession() {
+      try { this.rp.jdSession = await this.api('/api/jd/session'); } catch (e) { /* 状态提示而已 */ }
+    },
+    /** 从当前行数据里挑出已关联的万商商品，按品牌分组（jd_sku_id 已随行下发，不用另查） */
+    jdGroupsOf(rows) {
+      const groups = new Map();
+      for (const r of (rows || this.rp.rows || [])) {
+        const id = String(r.jd_sku_id || '').trim();
+        if (!id) continue;
+        const b = Number(r.brand_id) || Number(this.me && this.me.brandId) || 1;
+        if (!groups.has(b)) groups.set(b, new Set());
+        groups.get(b).add(id);
+      }
+      return groups;
+    },
+    /** 取价（或只读缓存）。mode=cache 不打京东，页面加载走这条 */
+    async loadJdPrices(rows, opts) {
+      const src = Array.isArray(rows) ? rows : (this.rp.rows || []);
+      const mode = (opts && opts.mode) === 'refresh' ? 'refresh' : 'cache';
+      const groups = this.jdGroupsOf(src);
+      if (!groups.size) return { cached: 0, fetched: 0 };
+      const acc = {};
+      let cached = 0; let fetched = 0; let err = null;
+      if (mode === 'refresh') this.rp.jdPricing = true;
+      try {
+        for (const [brandId, ids] of groups) {
+          const arr = [...ids];
+          // 一次最多 50 个：服务端是串行取，批量太大浏览器要等太久，也不好观察进度
+          for (let i = 0; i < arr.length; i += 50) {
+            const part = arr.slice(i, i + 50);
+            const d = await this.api('/api/jd/prices?mode=' + mode + '&brand=' + brandId
+              + '&ids=' + encodeURIComponent(part.join(',')));
+            if (d.error) { err = d; break; }
+            const pref = brandId + ':';
+            for (const [gid, v] of Object.entries(d.prices || {})) acc[pref + gid] = v;
+            cached += Number(d.cached) || 0;
+            fetched += Number(d.fetched) || 0;
+          }
+          if (err) break;
+        }
+      } catch (e) { this.$message.error('京东取价请求失败: ' + e.message); }
+      finally { if (mode === 'refresh') this.rp.jdPricing = false; }
+      // 整体替换而不是逐个加键：Vue2 对对象新增属性不响应
+      if (Object.keys(acc).length || mode === 'refresh') this.rp.jdPrices = Object.assign({}, this.rp.jdPrices, acc);
+      if (err) {
+        this.$message.warning('京东取价失败：' + (err.error || '未知原因')
+          + ((err.code === 'no_session' || /登录态|403/.test(String(err.error || ''))) ? '（点「万商登录」重新登录）' : ''));
+      }
+      return { cached, fetched, err };
+    },
+    /** 「京东取价」按钮：对当前列表已关联商品强制重新取价 */
+    async refreshJdPrices() {
+      if (this.rp.jdPricing) return;
+      const groups = this.jdGroupsOf(this.rp.rows);
+      let count = 0;
+      for (const [, ids] of groups) count += ids.size;
+      if (!count) {
+        this.$message.info('当前列表里没有已关联京东万商的商品（先在「京东万商价」列点「关联」）');
+        return;
+      }
+      const jdSess = this.rp.jdSession || {};
+      const ag = jdSess.agent || {};
+      if (!jdSess.configured) {
+        this.$message.warning('还没有登录京东万商，点「万商登录」在这台电脑的窗口里登录一次');
+        return;
+      }
+      if (!ag.online) {
+        this.$message.warning('本机助手未连接：京东取价必须在本机浏览器里做，请先启动「催收小助手」并绑定');
+        return;
+      }
+      if (!ag.capable) {
+        this.$message.warning('这台电脑上的助手版本过旧（' + (ag.version || '未知') + '），需要 v' + (ag.minVersion || '') + ' 及以上');
+        return;
+      }
+      try {
+        await this.$confirm(
+          `将对当前列表里 <b>${count}</b> 个已关联商品取京东万商价（由本机助手在万商页面里逐个取，约 0.5~1 秒/个，共约 ${Math.ceil(count * 0.8 / 60)} 分钟）。<br>`
+          + '取价过程中这台电脑的助手会在后台跑，请不要退出助手；取到的价写入缓存，下次打开直接读库。<br>'
+          + '若出现大量「取价失败」，多半是被京东临时限流，过 10~20 分钟再试。',
+          '京东取价', { dangerouslyUseHTMLString: true, confirmButtonText: '开始取价', cancelButtonText: '取消', type: 'warning' }
+        );
+      } catch (e) { return; }
+      const r = await this.loadJdPrices(this.rp.rows, { mode: 'refresh' });
+      if (r && r.fetched) this.$message.success(`已取到 ${r.fetched} 个商品的万商价`);
+    },
+
+    // ── 万商登录（在本机助手窗口里登录，不再手抠 Cookie）──
+    openJdLoginDlg() {
+      this.rpJdLogin.error = '';
+      this.rpJdLogin.message = '';
+      this.rpJdLogin.visible = true;
+      this.loadJdSession();
+    },
+    /** 「开始登录」：下发任务 → 本机弹窗 → 轮询结果（最长 5.5 分钟） */
+    async startJdLogin() {
+      if (this.rpJdLogin.starting) return;
+      const ag = this.rp.jdSession.agent || {};
+      if (!ag.online) {
+        this.rpJdLogin.error = '本机助手未连接：请先在这台电脑上启动「催收小助手」并点右上角「绑定本机助手」';
+        return;
+      }
+      this.rpJdLogin.starting = true;
+      this.rpJdLogin.error = '';
+      this.rpJdLogin.message = '';
+      try {
+        const d = await this.api('/api/jd/login', {
+          method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+        });
+        if (!d || !d.ok || !d.taskId) {
+          this.rpJdLogin.error = (d && (d.message || d.error)) || '发起登录失败';
+          return;
+        }
+        this.rpJdLogin.message = d.message || '已打开万商窗口，请在窗口里登录…';
+        const r = await this.pollJdLogin(d.taskId);
+        if (r === 'done') {
+          await this.loadJdSession();
+          this.rpJdLogin.message = '登录成功，可以开始取价了';
+          this.$message.success('京东万商已登录' + (this.rp.jdSession.shop ? '：' + this.rp.jdSession.shop : ''));
+          this.rpJdLogin.visible = false;
+          // 顺手把已关联商品的价格取一遍，用户不用再点一次
+          if (this.jdGroupsOf(this.rp.rows).size) this.loadJdPrices(this.rp.rows, { mode: 'refresh' });
+          return;
+        }
+        if (r === 'failed') this.rpJdLogin.error = this._jdLoginMsg || '登录未完成';
+        else this.rpJdLogin.error = '等待登录超时：在助手窗口里登录后，再点一次「开始登录」';
+      } catch (e) {
+        this.rpJdLogin.error = '发起登录失败：' + e.message;
+      } finally {
+        this.rpJdLogin.starting = false;
+      }
+    },
+    /** 轮询「京东万商登录」任务 */
+    async pollJdLogin(taskId) {
+      const deadline = Date.now() + 5.5 * 60 * 1000;
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 2000));
+        let d = null;
+        try { d = await this.api('/api/jd/login-status?taskId=' + encodeURIComponent(taskId)); } catch (e) { continue; }
+        if (!d) continue;
+        this._jdLoginMsg = d.message || '';
+        if (d.message) this.rpJdLogin.message = d.message;
+        if (d.status === 'done') return 'done';
+        if (d.status === 'failed') return 'failed';
+        if (d.error) return 'gone';
+      }
+      return 'timeout';
+    },
+    /** 退出：删服务器登录态 + 清本机分区（不清分区会免登录进旧账号） */
+    async clearJdSession() {
+      try {
+        await this.$confirm(
+          '退出后当前账号就取不到万商价了，需要重新登录。\n'
+          + '服务器与这台电脑上的登录态都会清除；已取到的价格缓存不受影响。确定退出？',
+          '退出京东万商',
+          { confirmButtonText: '退出', cancelButtonText: '取消', type: 'warning' }
+        );
+      } catch (e) { return; }
+      this.rpJdLogin.checking = true;
+      try {
+        const d = await this.api('/api/jd/session/clear', {
+          method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+        });
+        await this.loadJdSession();
+        this.rpJdLogin.visible = false;
+        this.rpJdPrices = {};
+        if (d && d.ok && !d.agentCleared && !d.agentOffline) {
+          this.$alert((d.message || '已清除本账号的万商登录态') + '\n本机登录态没能清掉，请到助手面板「本机登录态」里手动清除。',
+            '已退出（本机可能还留着登录态）', { type: 'warning' });
+        } else {
+          this.$message.success((d && d.message) || '已清除本账号的万商登录态');
+        }
+      } catch (e) {
+        this.$message.error('清除失败：' + e.message);
+      } finally {
+        this.rpJdLogin.checking = false;
+      }
+    },
+
+    // ── 关联万商商品（粘贴链接 → 预览 → 确认）──
+    openJdLinkDlg(row) {
+      this.rpJdLink.sku = row.sku;
+      this.rpJdLink.goodsName = row.goods_name || '';
+      this.rpJdLink.input = row.jd_sku_id ? String(row.jd_sku_id) : '';
+      this.rpJdLink.picked = null;
+      this.rpJdLink.error = '';
+      this.rpJdLink.saving = false;
+      this.rpJdLink.visible = true;
+      // 已关联的直接把上次的价格当预览，省一次请求
+      const pv = this.rp.jdPrices[this.pkey(row, 'jd')];
+      if (row.jd_sku_id && pv && pv.ok) {
+        this.rpJdLink.picked = {
+          ok: true, skuId: row.jd_sku_id, goodsName: pv.goodsName, picture: pv.picture,
+          packPrice: pv.packPrice, unitPrice: pv.unitPrice, packQty: pv.packQty,
+          spec: pv.spec, originalPrice: null, brand: '', shelfLife: '', stock: '',
+        };
+      }
+    },
+    async previewJdLink() {
+      if (!this.rpJdLink.input || this.rpJdLink.loading) return;
+      this.rpJdLink.loading = true;
+      this.rpJdLink.error = '';
+      this.rpJdLink.picked = null;
+      try {
+        const d = await this.api('/api/jd/preview', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ input: this.rpJdLink.input }),
+        });
+        if (!d || d.error || !d.ok) {
+          this.rpJdLink.error = (d && (d.error || d.message)) || '预览失败';
+          return;
+        }
+        this.rpJdLink.picked = d;
+      } catch (e) {
+        this.rpJdLink.error = '预览失败：' + e.message;
+      } finally { this.rpJdLink.loading = false; }
+    },
+    async confirmJdLink() {
+      const picked = this.rpJdLink.picked;
+      if (!picked || !picked.skuId) return;
+      this.rpJdLink.saving = true;
+      try {
+        const d = await this.api('/api/jd/link', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ sku: this.rpJdLink.sku, jdSkuId: picked.skuId }),
+        });
+        if (!d || d.error || !d.ok) {
+          this.$message.error((d && d.error) || '关联失败');
+          return;
+        }
+        // 行数据同步更新，模板立刻从「关联」变成价格展示
+        const row = (this.rp.rows || []).find((x) => x.sku === this.rpJdLink.sku);
+        if (row) row.jd_sku_id = picked.skuId;
+        const b = row ? (Number(row.brand_id) || Number(this.me && this.me.brandId) || 1) : (Number(this.me && this.me.brandId) || 1);
+        this.rp.jdPrices = Object.assign({}, this.rp.jdPrices, { [b + ':' + picked.skuId]: picked });
+        this.rpJdLink.visible = false;
+        this.$message.success('已关联：' + (picked.goodsName || picked.skuId));
+      } catch (e) {
+        this.$message.error('关联失败：' + e.message);
+      } finally { this.rpJdLink.saving = false; }
+    },
+    async unlinkJdRow(row) {
+      try {
+        await this.$confirm(`解除与万商商品 ${row.jd_sku_id} 的关联？之后该行不再显示万商价（价格缓存保留）。`,
+          '解除关联', { confirmButtonText: '解除', cancelButtonText: '取消', type: 'warning' });
+      } catch (e) { return; }
+      try {
+        const d = await this.api('/api/jd/link', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ sku: row.sku, jdSkuId: '' }),
+        });
+        if (!d || d.error || !d.ok) { this.$message.error((d && d.error) || '解除失败'); return; }
+        row.jd_sku_id = null;
+        this.$message.success('已解除关联');
+      } catch (e) { this.$message.error('解除失败：' + e.message); }
+    },
+
     async loadQhtSession() {
       try { this.rp.session = await this.api('/api/qht/session'); } catch (e) { /* 静默：状态提示而已 */ }
     },
+    // ══════════ 供应商管理（v0.3.0）══════════
+    /** 金额统一 ¥0.00：模板里不能直接用全局的 yuan()（Vue 模板只认实例属性） */
+    wbMoney(v) { return '¥' + (Number(v) || 0).toFixed(2); },
+    /** 倒计时 mm:ss */
+    wbFmtLeft(s) {
+      const n = Math.max(0, Math.floor(Number(s) || 0));
+      return Math.floor(n / 60) + ':' + String(n % 60).padStart(2, '0');
+    },
+    onSpFilter() { this.sp.page = 1; this.loadSuppliers(); },
+    onSpPage(p) { this.sp.page = p; this.loadSuppliers(); },
+    onSpSize(s) { this.sp.size = s; this.sp.page = 1; this.loadSuppliers(); },
+    async loadSuppliers() {
+      this.sp.loading = true;
+      try {
+        const d = await this.api('/api/waybill/suppliers?keyword=' + encodeURIComponent(this.sp.keyword || '')
+          + '&page=' + this.sp.page + '&size=' + this.sp.size);
+        if (d.error) { this.$message.error(d.error); return; }
+        this.sp.rows = d.rows || [];
+        this.sp.total = d.total || 0;
+        this.sp.page = d.page || 1;
+      } catch (e) {
+        this.$message.error('加载供应商失败：' + (e.message || e));
+      } finally { this.sp.loading = false; }
+    },
+    openSpCreate() {
+      this.spDlg.visible = true;
+      this.spDlg.mode = 'create';
+      this.spDlg.id = 0; this.spDlg.name = ''; this.spDlg.note = ''; this.spDlg.error = '';
+    },
+    openSpEdit(row) {
+      this.spDlg.visible = true;
+      this.spDlg.mode = 'edit';
+      this.spDlg.id = row.id;
+      this.spDlg.name = row.name || '';
+      this.spDlg.note = row.note || '';
+      this.spDlg.error = '';
+    },
+    async saveSp() {
+      const name = String(this.spDlg.name || '').trim();
+      if (!name) { this.spDlg.error = '请填写供应商名称'; return; }
+      this.spDlg.saving = true;
+      this.spDlg.error = '';
+      try {
+        const url = this.spDlg.mode === 'create' ? '/api/waybill/suppliers/create' : '/api/waybill/suppliers/update';
+        const d = await this.api(url, {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ id: this.spDlg.id, name, note: this.spDlg.note }),
+        });
+        if (!d.ok) { this.spDlg.error = d.error || '保存失败'; return; }
+        this.$message.success(this.spDlg.mode === 'create' ? '供应商已新增' : '已保存');
+        this.spDlg.visible = false;
+        this.loadSuppliers();
+        // 新建货单弹窗开着时，把下拉同步刷新一下，省得用户再关一次重开
+        if (this.wbNew.visible) this.loadSpOptions();
+      } catch (e) {
+        this.spDlg.error = '保存失败：' + (e.message || e);
+      } finally { this.spDlg.saving = false; }
+    },
+    async deleteSp(row) {
+      try {
+        await this.$confirm('删除供应商「' + row.name + '」？'
+          + (row.waybillCount ? `\n它下面还有 ${row.waybillCount} 张货单，需要先把货单删掉。` : ''),
+        '删除供应商', { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' });
+      } catch (e) { return; }
+      try {
+        const d = await this.api('/api/waybill/suppliers/delete', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ id: row.id }),
+        });
+        if (!d.ok) return this.$message.error(d.error || '删除失败');
+        this.$message.success('已删除');
+        this.loadSuppliers();
+      } catch (e) { this.$message.error('删除失败：' + (e.message || e)); }
+    },
+    /** 供应商列表里点「货单数」→ 跳到货单页并按这家供应商筛 */
+    goWaybillOf(name) {
+      this.wb.supplier = name || '';
+      this.wb.range = [];
+      this.wb.page = 1;
+      this.switchPage('waybill');
+    },
+    jumpSupplier() {
+      this.wbNew.visible = false;
+      this.switchPage('supplier');
+    },
+
+    // ══════════ 货单管理（v0.3.0）══════════
+    onWbFilter() { this.wb.page = 1; this.loadWaybills(); },
+    onWbPage(p) { this.wb.page = p; this.loadWaybills(); },
+    onWbSize(s) { this.wb.size = s; this.wb.page = 1; this.loadWaybills(); },
+    async loadWaybills() {
+      this.wb.loading = true;
+      try {
+        const r = Array.isArray(this.wb.range) ? this.wb.range : [];
+        const qs = [
+          'supplier=' + encodeURIComponent(this.wb.supplier || ''),
+          'from=' + encodeURIComponent(r[0] || ''),
+          'to=' + encodeURIComponent(r[1] || ''),
+          'page=' + this.wb.page,
+          'size=' + this.wb.size,
+        ].join('&');
+        const d = await this.api('/api/waybill/list?' + qs);
+        if (d.error) { this.$message.error(d.error); return; }
+        this.wb.rows = d.rows || [];
+        this.wb.total = d.total || 0;
+        this.wb.sumAmount = d.sumAmount || 0;
+        this.wb.page = d.page || 1;
+      } catch (e) {
+        this.$message.error('加载货单失败：' + (e.message || e));
+      } finally { this.wb.loading = false; }
+    },
+    /** 本地日期 YYYY-MM-DD（按浏览器时区，不用 toISOString —— 那个是 UTC，晚上会差一天） */
+    todayStr() {
+      const d = new Date();
+      return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+    },
+    async openWbNew() {
+      if (!this.canSupplier && !(this.wbNew.suppliers || []).length) { /* 下拉稍后加载 */ }
+      this.wbNew.visible = true;
+      this.wbNew.supplierId = '';
+      this.wbNew.amount = '';
+      this.wbNew.billDate = this.todayStr();
+      this.wbNew.note = '';
+      this.wbNew.error = '';
+      this.wbNew.imgError = '';
+      this.wbNew.uploading = false;
+      this.resetWbUpload();
+      await this.loadSpOptions();
+      // 供应商还没建过：直接把「去建供应商」的路铺好，别让用户对着空下拉发呆
+      if (!this.wbNew.suppliers.length && this.canSupplier) {
+        this.$message.info('还没有供应商，先新增一个再建货单');
+      }
+    },
+    async loadSpOptions() {
+      this.wbNew.loadingSupplier = true;
+      try {
+        const d = await this.api('/api/waybill/suppliers/all');
+        this.wbNew.suppliers = d.rows || [];
+      } catch (e) { /* 下拉失败不阻塞：保存时服务端还会再校验一次 */ }
+      finally { this.wbNew.loadingSupplier = false; }
+    },
+    /** 金额输入：只留数字和一个小数点，小数最多两位 */
+    onWbAmountInput(v) {
+      let s = String(v == null ? '' : v).replace(/[^\d.]/g, '');
+      const i = s.indexOf('.');
+      if (i >= 0) s = s.slice(0, i + 1) + s.slice(i + 1).replace(/\./g, '').slice(0, 2);
+      if (s !== v) this.wbNew.amount = s;
+    },
+
+    // —— 货单图片：本机选图 / 手机扫码 ——
+    resetWbUpload() {
+      this.stopWbPolling();
+      this.wbNew.token = '';
+      this.wbNew.link = '';
+      this.wbNew.qr = '';
+      this.wbNew.leftSec = 0;
+      this.wbNew.images = [];
+    },
+    stopWbPolling() {
+      if (this.wbNew.polling) { clearInterval(this.wbNew.polling); this.wbNew.polling = null; }
+    },
+    onWbNewClosed() {
+      this.stopWbPolling();
+      this.resetWbUpload();
+      this.wbNew.saving = false;
+    },
+    /** 生成二维码 SVG（vendor/qrcode.min.js 暴露全局 qrcode()，纯离线，不依赖外网） */
+    qrSvg(text) {
+      try {
+        if (typeof qrcode !== 'function') return '';
+        const q = qrcode(0, 'M');
+        q.addData(String(text || ''));
+        q.make();
+        return q.createSvgTag(4, 2);
+      } catch (e) { return ''; }
+    },
+    /**
+     * 生成手机上传链接：5 分钟有效的 token，手机打开 m-upload 页直接拍照上传。
+     * 生成后开轮询刷新「已传张数 + 缩略图」，用户不用回电脑上点任何东西。
+     */
+    async makeUploadLink() {
+      this.wbNew.qrLoading = true;
+      this.wbNew.imgError = '';
+      try {
+        const d = await this.api('/api/waybill/upload-token', {
+          method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+        });
+        if (!d.ok) { this.wbNew.imgError = d.error || '生成链接失败'; return; }
+        this.wbNew.token = d.token;
+        this.wbNew.link = d.link || '';
+        this.wbNew.leftSec = Number(d.ttl) || 300;
+        this.wbNew.qr = this.qrSvg(d.link);
+        this.startWbPolling();
+      } catch (e) {
+        this.wbNew.imgError = '生成链接失败：' + (e.message || e);
+      } finally { this.wbNew.qrLoading = false; }
+    },
+    startWbPolling() {
+      this.stopWbPolling();
+      this.wbNew.polling = setInterval(() => { this.pollWbUpload(); }, 2000);
+    },
+    async pollWbUpload() {
+      if (!this.wbNew.visible || !this.wbNew.token) { this.stopWbPolling(); return; }
+      try {
+        const d = await this.api('/api/waybill/upload-token?token=' + encodeURIComponent(this.wbNew.token));
+        if (!d.ok) { this.wbNew.leftSec = 0; this.stopWbPolling(); return; }
+        this.wbNew.leftSec = Number(d.leftSec) || 0;
+        // 本地正在上传时不覆盖，免得把「刚传上去还没回显」的那张刷没
+        if (!this.wbNew.uploading) this.wbNew.images = d.images || [];
+        if (this.wbNew.leftSec <= 0) this.stopWbPolling();
+      } catch (e) { /* 轮询失败静默重试，别一直弹框 */ }
+    },
+    async refreshWbImages() {
+      if (!this.wbNew.token) return;
+      try {
+        const d = await this.api('/api/waybill/upload-token?token=' + encodeURIComponent(this.wbNew.token));
+        if (d.ok) { this.wbNew.images = d.images || []; this.wbNew.leftSec = Number(d.leftSec) || 0; }
+      } catch (e) { /* 忽略 */ }
+    },
+    pickWbImage() { if (!this.wbNew.uploading && this.$refs.wbFile) this.$refs.wbFile.click(); },
+    async onWbFile(e) {
+      const files = Array.prototype.slice.call((e.target && e.target.files) || []);
+      if (e.target) e.target.value = '';
+      if (!files.length) return;
+      // 本机选图也要挂在同一个 token 下：没生成过就先自动生成一个（二维码照常显示，手机也能接着传）
+      if (!this.wbNew.token) {
+        await this.makeUploadLink();
+        if (!this.wbNew.token) return;
+      }
+      this.wbNew.uploading = true;
+      this.wbNew.imgError = '';
+      let okN = 0; let err = '';
+      for (const f of files) {
+        if (this.wbNew.images.length + okN >= this.wbImgMax) { err = '最多 ' + this.wbImgMax + ' 张'; break; }
+        if (!/^image\//.test(f.type || '')) { err = '只支持图片文件'; continue; }
+        if (f.size > 5 * 1024 * 1024) { err = '单张不能超过 5MB'; continue; }
+        try {
+          const dataUrl = await this.compressAfImage(f);
+          const d = await this.api('/api/waybill/upload', {
+            method: 'POST', headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ token: this.wbNew.token, image: dataUrl }),
+          });
+          if (!d.ok) {
+            err = d.error || '上传失败';
+            if (/过期|无效/.test(err)) break;
+            continue;
+          }
+          okN++;
+        } catch (ex) { err = '上传失败：' + (ex.message || ex); }
+      }
+      this.wbNew.uploading = false;
+      if (err) this.wbNew.imgError = err;
+      await this.refreshWbImages();
+    },
+    async removeWbImg(im) {
+      try {
+        const d = await this.api('/api/waybill/upload/remove', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ id: im.id }),
+        });
+        if (!d.ok) return this.$message.error(d.error || '删除失败');
+        await this.refreshWbImages();
+      } catch (e) { this.$message.error('删除失败：' + (e.message || e)); }
+    },
+    copyUploadLink() {
+      const txt = this.wbNew.link || '';
+      if (!txt) return;
+      const done = () => this.$message.success('链接已复制，发到手机上打开即可');
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(txt).then(done).catch(() => this.$message.warning('复制失败，请手动长按选中链接'));
+        return;
+      }
+      const ta = document.createElement('textarea');
+      ta.value = txt;
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand('copy'); done(); } catch (e) { this.$message.warning('复制失败，请手动选中链接'); }
+      document.body.removeChild(ta);
+    },
+    previewWbImg(url) { if (url) window.open(url, '_blank'); },
+    async saveWb() {
+      if (!this.wbNew.supplierId) return this.$message.warning('请选择供应商');
+      const amt = String(this.wbNew.amount || '').trim();
+      if (!amt || !/^\d+(\.\d{1,2})?$/.test(amt)) return this.$message.warning('货单金额填个数字，最多两位小数');
+      if (!this.wbNew.billDate) return this.$message.warning('请选择货单日期');
+      const sup = (this.wbNew.suppliers || []).find((s) => Number(s.id) === Number(this.wbNew.supplierId));
+      this.wbNew.saving = true;
+      this.wbNew.error = '';
+      try {
+        const d = await this.api('/api/waybill/create', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            supplierId: this.wbNew.supplierId,
+            amount: amt,
+            billDate: this.wbNew.billDate,
+            note: this.wbNew.note,
+            token: this.wbNew.token,
+            supplierName: sup ? sup.name : '',
+          }),
+        });
+        if (!d.ok) { this.wbNew.error = d.error || '保存失败'; return; }
+        this.$message.success('货单已保存' + (d.imageCount ? '（含 ' + d.imageCount + ' 张图）' : ''));
+        this.wbNew.visible = false;
+        this.loadWaybills();
+      } catch (e) {
+        this.wbNew.error = '保存失败：' + (e.message || e);
+      } finally { this.wbNew.saving = false; }
+    },
+    async openWbView(row) {
+      this.wbView.visible = true;
+      this.wbView.loading = true;
+      this.wbView.waybill = {};
+      this.wbView.images = [];
+      this.wbView.error = '';
+      try {
+        const d = await this.api('/api/waybill/detail?id=' + encodeURIComponent(row.id));
+        if (!d.ok) { this.wbView.error = d.error || '加载失败'; return; }
+        this.wbView.waybill = d.waybill || {};
+        this.wbView.images = d.images || [];
+      } catch (e) {
+        this.wbView.error = '加载失败：' + (e.message || e);
+      } finally { this.wbView.loading = false; }
+    },
+    async deleteWb(row) {
+      try {
+        await this.$confirm('删除这张货单？\n供应商：' + (row.supplierName || '—')
+          + '\n金额：' + this.wbMoney(row.amount) + '　货单日期：' + (row.billDate || '—')
+          + '\n图片记录会一起删掉（七牛上的原图仍保留）。',
+        '删除货单', { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' });
+      } catch (e) { return; }
+      try {
+        const d = await this.api('/api/waybill/delete', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ id: row.id, supplierName: row.supplierName, billDate: row.billDate }),
+        });
+        if (!d.ok) return this.$message.error(d.error || '删除失败');
+        this.$message.success('已删除');
+        this.loadWaybills();
+      } catch (e) { this.$message.error('删除失败：' + (e.message || e)); }
+    },
+
+    /**
+     * 商品图缩略图地址（v0.2.105）：商品图都存的是原图，平均 243 KB/张（png 能到 1.3 MB），
+     * 而页面只显示 40~48px。美团图床原生支持 `@宽w_高h_1e_1c.webp` 后缀，实测
+     * 109 KB 的 jpg → 1.4 KB、1.33 MB 的 png → 910 B，体积降两个数量级。
+     * 只对 *.meituan.net 追加（其他图床规则未知，原样返回），已经是缩略图的也不重复加。
+     * @param {string} url 原图地址
+     * @param {number} w 显示边长的 2 倍（高清屏用）
+     */
+    imgThumb(url, w) {
+      const u = String(url || '').trim();
+      if (!u) return '';
+      if (!/^https?:\/\/[^/]*\.meituan\.net\//i.test(u)) return u;
+      if (/@\d+w_\d+h/.test(u)) return u;
+      const s = Number(w) > 0 ? Math.round(Number(w)) : 80;
+      return u + '@' + s + 'w_' + s + 'h_1e_1c.webp';
+    },
+    /**
+     * 图片加载失败兜底：先退回原图（缩略图后缀万一以后失效不至于整列白图），原图也失败才隐藏。
+     * 原逻辑是一失败就 display:none，换成缩略图后必须保留这条退路。
+     */
+    imgError(e, fullUrl) {
+      const el = e && e.target ? e.target : e;
+      if (!el || !el.style) return;
+      const full = String(fullUrl || '');
+      if (full && !el.dataset.retried && el.src !== full) {
+        el.dataset.retried = '1';
+        el.src = full;
+        return;
+      }
+      el.style.display = 'none';
+    },
+
     /** 价格表键 = 品牌方 + 平台商品ID：同一个 goodsId 在不同品牌方价格可能不同，只用 goodsId 会串价 */
     pkey(row, kind) {
       if (!row) return '';
-      const id = kind === 'afa' ? row.afa_goods_id : row.qht_goods_id;
+      const id = kind === 'afa' ? row.afa_goods_id : (kind === 'jd' ? row.jd_sku_id : row.qht_goods_id);
       if (!id) return '';
       const b = Number(row.brand_id) || Number(this.me && this.me.brandId) || 1;
       return b + ':' + id;

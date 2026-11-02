@@ -103,6 +103,10 @@
       <span class="k">1688</span>
       <span class="v"><span class="st off" id="st-1688">…</span> <button class="mini" data-target="1688">退出</button></span>
     </div>
+    <div class="row">
+      <span class="k">京东万商</span>
+      <span class="v"><span class="st off" id="st-jd">…</span> <button class="mini" data-target="jd">退出</button></span>
+    </div>
     <div class="msg" id="logoutMsg"></div>
   </div>
 
@@ -157,7 +161,7 @@ function render(s){
 document.getElementById('btnStop').onclick = () => window.xsh.stopTask();
 
 // ── 本机登录态：只区分「已登录 / 未登录」，并支持手动退出 ──
-const TARGET_NAME = { pdd: '拼多多', qnh: '牵牛花', '1688': '1688' };
+const TARGET_NAME = { pdd: '拼多多', qnh: '牵牛花', '1688': '1688', jd: '京东万商' };
 function renderLocal(map) {
   Object.keys(TARGET_NAME).forEach((k) => {
     const el = document.getElementById('st-' + k);

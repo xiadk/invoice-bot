@@ -24,15 +24,17 @@ const TARGETS = {
   qnh: { partition: 'persist:qnh', label: '牵牛花' },
   1688: { partition: 'persist:1688', label: '1688' },
   sdc: { partition: 'persist:sdc', label: '闪电帮帮' },
+  jd: { partition: 'persist:jd', label: '京东万商' },
 };
 
-/** 把各种写法归一成 pdd / qnh / 1688 / sdc；不认识返回 '' */
+/** 把各种写法归一成 pdd / qnh / 1688 / sdc / jd；不认识返回 '' */
 function normalizeTarget(target) {
   const k = String(target == null ? '' : target).trim().toLowerCase();
   if (k === 'pdd' || k === 'pinduoduo' || k === '拼多多') return 'pdd';
   if (k === 'qnh' || k === 'meituan' || k === '牵牛花') return 'qnh';
   if (k === '1688' || k === 'ali' || k === 'alibaba') return '1688';
   if (k === 'sdc' || k === 'shandiancang' || k === '闪电帮帮' || k === '闪电帮') return 'sdc';
+  if (k === 'jd' || k === '京东' || k === '京东万商' || k === '万商' || k === 'b.jd.com') return 'jd';
   return '';
 }
 

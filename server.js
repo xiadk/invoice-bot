@@ -61,6 +61,8 @@ const tenancy = require('./lib/tenancy');
 const { runImport, importOrderUpload, importInvoiceUpload } = require('./import-to-db');
 const qht = require('./lib/qht');
 const afa = require('./lib/afa');
+const jd = require('./lib/jd-bmall');
+const priceCache = require('./lib/price-cache');
 const products = require('./lib/products');
 const billing = require('./lib/billing');
 const { loadConfig } = require('./lib/config');
@@ -68,11 +70,15 @@ const { AgentHub } = require('./lib/agent-hub');
 const { buildMessages } = require('./lib/sender');
 const qnh = require('./lib/qnh');
 const qagent = require('./lib/qnh-agent');
+const jagent = require('./lib/jd-agent');
+const qiniu = require('./lib/qiniu');
+const waybill = require('./lib/waybill');
 const pdd = require('./lib/pdd');
 const pddOrders = require('./lib/pdd-orders');
 const aliOrders = require('./lib/ali-orders');
 const psync = require('./lib/pdd-sync');
 const sdc = require('./lib/sdc');
+// 商品匹配（自动匹配阿发）：CLIP 图文相似度 + 业务规则。依赖缺失时模块自身降级，不影响服务启动
 
 const PORT = Number(process.env.PORT) || 8787;
 const ROOT = __dirname;
@@ -155,11 +161,18 @@ function normalizeDay(v) {
   if (Number.isNaN(t.getTime())) return null;
   return s;
 }
-function readBody(req) {
+/**
+ * 读 JSON body
+ * @param {object} req
+ * @param {number} [maxLen] 字符上限，默认 2e6（2MB）。带图片 dataURL 的接口要放大，
+ *   例如售后凭证图 5MB 上限，base64 后约 6.7MB，调用方传 9e6。
+ */
+function readBody(req, maxLen) {
+  const cap = Number(maxLen) || 2e6;
   return new Promise((resolve) => {
     let body = '';
     let tooBig = false;
-    req.on('data', (c) => { body += c; if (body.length > 2e6) { tooBig = true; req.destroy(); } });
+    req.on('data', (c) => { body += c; if (body.length > cap) { tooBig = true; req.destroy(); } });
     req.on('end', () => { if (tooBig) return resolve({}); try { resolve(JSON.parse(body || '{}')); } catch (e) { resolve({}); } });
   });
 }
@@ -313,6 +326,11 @@ function isExpiredUser(u) {
 /** 到期统一提示（带上具体到期日，方便用户找管理员报时间） */
 function expiredMessage(u) {
   const at = u && u.expires_at_text;
+  if (u && Number(u.owner_expired) === 1) {
+    return at
+      ? `所属账号已到期（有效期至 ${at}），请联系主体账号持有人或超级管理员续期`
+      : '所属账号已到期，请联系主体账号持有人或超级管理员续期';
+  }
   return at ? `账号已到期（有效期至 ${at}），请联系超级管理员续期` : '账号已到期，请联系超级管理员续期';
 }
 
@@ -342,20 +360,35 @@ function parseExpiry(v) {
   return { ok: true, value: `${y}-${p(mo)}-${p(d)} ${p(hh)}:${p(mi)}:${p(ss)}` };
 }
 
-/** 取当前登录用户（校验会话签名 + token_version + 账号状态） */
+/** 取当前登录用户（校验会话签名 + token_version + 账号状态；员工号额外校验所属主体账号） */
 async function currentUser(req) {
   const sess = auth.sessionFromRequest(req);
   if (!sess) return null;
   // 带上品牌方名称：前端要展示当前账号所属品牌（商品数据按品牌共享）
+  // 员工号连带取出所属主体账号（o.*）：主体被禁用或到期时，员工一并不许登录/调用接口
   const rows = await db.query(
-    `SELECT u.*, b.name AS brand_name, ${EXPIRY_COLS}
-       FROM app_user u LEFT JOIN brand b ON b.id = u.brand_id
+    `SELECT u.*, b.name AS brand_name, ${EXPIRY_COLS},
+            o.status AS owner_status, o.username AS owner_username,
+            (o.expires_at IS NOT NULL AND o.expires_at <= NOW())   AS owner_expired_flag,
+            DATE_FORMAT(o.expires_at, '%Y-%m-%d %H:%i')            AS owner_expires_text
+       FROM app_user u
+       LEFT JOIN brand b ON b.id = u.brand_id
+       LEFT JOIN app_user o ON o.id = u.owner_id
       WHERE u.id = ?`, [sess.u]
   );
   const u = rows[0];
   if (!u) return null;
   if (u.status !== 'active') return null;
   if ((Number(u.token_version) || 1) !== Number(sess.v)) return null;
+  // 员工号：主体账号停用 → 视为未登录；主体到期 → 走统一的「已到期」分支（提示里说清是谁到期）
+  if (Number(u.owner_id) > 0) {
+    if (u.owner_status && u.owner_status !== 'active') return null;
+    if (Number(u.owner_expired_flag) === 1 && Number(u.expired_flag) !== 1) {
+      u.expired_flag = 1;
+      u.owner_expired = 1;
+      u.expires_at_text = u.owner_expires_text;
+    }
+  }
   return u;
 }
 
@@ -388,11 +421,21 @@ function publicUser(u) {
     billingEnabled: u.role === 'admin' ? true : !!Number(u.billing_enabled),
     // 补货页权限（独立菜单，默认所有用户不授权；含导入补货参考文件、齐货通/阿发取价加购）
     replenishEnabled: u.role === 'admin' ? true : !!Number(u.replenish_enabled),
+    // 售后管理页权限（v0.2.104，独立菜单，默认关闭）
+    afterSaleEnabled: u.role === 'admin' ? true : !!Number(u.after_sale_enabled),
+    // 供应商管理 / 货单管理（v0.3.0，两个独立菜单，默认关闭）
+    supplierEnabled: u.role === 'admin' ? true : !!Number(u.supplier_enabled),
+    waybillEnabled: u.role === 'admin' ? true : !!Number(u.waybill_enabled),
     // 平台取价权限（v0.2.95）：齐货通登录/重新取价、阿发Token/自动匹配/取价、选购加购
     priceEnabled: u.role === 'admin' ? true : !!Number(u.price_enabled),
     // 所属品牌方（商品数据按品牌方共享：同品牌下所有用户看到同一套商品）
     brandId: Number(u.brand_id) || 1,
     brandName: u.brand_name || '',
+    // 员工身份（v0.2.104）：ownerId 有值 = 员工号（数据归属主体账号），canStaff 决定「员工管理」菜单
+    ownerId: Number(u.owner_id) || null,
+    isStaff: Number(u.owner_id) > 0,
+    ownerUsername: u.owner_username || '',
+    canStaff: u.role !== 'admin' && !(Number(u.owner_id) > 0),
     // 使用期限（v0.2.97）：expiresAt=null 表示永久；expired=true 时前端提示并回登录页
     expiresAt: u.role === 'admin' ? null : (u.expires_at_text || null),
     expired: u.role === 'admin' ? false : Number(u.expired_flag) === 1,
@@ -404,6 +447,7 @@ function publicUser(u) {
 
 /**
  * 解析本次请求操作的目标租户：
+ *   · 员工账号（owner_id 有值）→ 永远是所属主体账号的 id（员工只是菜单受限的操作员）
  *   · 普通用户 → 只能是自己（忽略 tenant 参数）
  *   · 管理员 → 可用 ?tenant=<id> 或请求头 x-tenant-id 查看他人数据
  */
@@ -415,6 +459,8 @@ function tenantOf(req, url, user) {
       if (Number.isInteger(n) && n > 0) return n;
     }
   }
+  const ownerId = Number(user.owner_id) || 0;
+  if (ownerId > 0) return ownerId;
   return user.id;
 }
 
@@ -485,6 +531,7 @@ function productScope(o) {
       imageExpr: "COALESCE(NULLIF(pi.image_url, ''), bp.image_url)",
       qhtExpr: 'COALESCE(pi.qht_goods_id, bp.qht_goods_id)',
       afaExpr: 'COALESCE(pi.afa_goods_id, bp.afa_goods_id)',
+      jdExpr: 'COALESCE(pi.jd_sku_id, bp.jd_sku_id)',
       localExpr: 'COALESCE(pi.local_price, bp.local_price)',
       bpIdExpr: 'bp.id', suggestExpr: 'pi.suggest_qty', fileExpr: 'pi.source_file', batchExpr: 'pi.batch_id',
     };
@@ -506,6 +553,7 @@ function productScope(o) {
     imageExpr: 'bp.image_url',
     qhtExpr: 'bp.qht_goods_id',
     afaExpr: 'bp.afa_goods_id',
+    jdExpr: 'bp.jd_sku_id',
     localExpr: 'bp.local_price',
     bpIdExpr: 'bp.id', suggestExpr: 'NULL', fileExpr: 'NULL', batchExpr: 'NULL',
   };
@@ -518,7 +566,7 @@ function productScope(o) {
  * @returns {{scope:'brand'|'item', affected:number}}
  */
 async function writeProductLink(col, value, { brandId, userId, sku }) {
-  const ALLOWED = ['qht_goods_id', 'afa_goods_id', 'local_price'];
+  const ALLOWED = ['qht_goods_id', 'afa_goods_id', 'jd_sku_id', 'local_price'];
   if (!ALLOWED.includes(col)) throw new Error('不允许写入的列：' + col);
   const ex = await db.query('SELECT id FROM brand_product WHERE brand_id = ? AND sku = ? LIMIT 1', [brandId, sku]);
   if (ex.length) {
@@ -539,12 +587,57 @@ function linkBrandId(user, body) {
 
 const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
 
-/** 自动匹配阿发单次上限：每个商品要真搜一次（限速 250ms），再大就会把对方接口打挂 */
+/** 自动匹配阿发单次上限：每个商品要真搜一次阿发（限速 250ms），再大就会把对方接口打挂 */
 const MATCH_MAX_PER_RUN = 500;
 
-/** 写操作只允许作用于自己的数据（管理员查看他人为只读） */
+/**
+ * 菜单权限表（v0.2.104 收拢成一份）：'menu' 参数 → app_user 列名 + 下发字段 + 中文名。
+ * 超管在「用户管理 → 菜单权限」里给主体账号配；主体账号在「员工管理 → 菜单权限」里给员工配。
+ * 新增菜单时只改这里 + 前端弹窗，两处入口同时生效。
+ */
+const MENU_PERMS = {
+  refund: { col: 'qnh_refund_enabled', label: '退单列表', field: 'qnhRefundEnabled' },
+  profit: { col: 'qnh_profit_enabled', label: '实时毛利监控', field: 'qnhProfitEnabled' },
+  product: { col: 'product_enabled', label: '商品列表', field: 'productEnabled' },
+  market: { col: 'market_enabled', label: '交易市场', field: 'marketEnabled' },
+  billing: { col: 'billing_enabled', label: '账单', field: 'billingEnabled' },
+  replenish: { col: 'replenish_enabled', label: '补货', field: 'replenishEnabled' },
+  price: { col: 'price_enabled', label: '平台取价', field: 'priceEnabled' },
+  after: { col: 'after_sale_enabled', label: '售后管理', field: 'afterSaleEnabled' },
+  supplier: { col: 'supplier_enabled', label: '供应商管理', field: 'supplierEnabled' },
+  waybill: { col: 'waybill_enabled', label: '货单管理', field: 'waybillEnabled' },
+};
+
+/**
+ * 设置某个账号的某个菜单权限。调用方负责校验「这个账号归不归你管」。
+ * @returns {{code:number, body:object}}
+ */
+async function setMenuPermit(actor, id, menu, enabled) {
+  const m = MENU_PERMS[menu];
+  if (!m) return { code: 400, body: { error: '未知的菜单：' + menu } };
+  const rows = await db.query('SELECT id, username, role, owner_id FROM app_user WHERE id = ?', [id]);
+  if (!rows.length) return { code: 404, body: { error: '用户不存在' } };
+  if (rows[0].role === 'admin') {
+    return { code: 400, body: { error: `超级管理员默认拥有${m.label}权限，无需开启` } };
+  }
+  await db.exec(`UPDATE app_user SET ${m.col} = ? WHERE id = ?`, [enabled ? 1 : 0, id]);
+  // 「员工有的菜单，主体默认也有」（v0.3.0 用户要求）：给员工开启时连带把主体账号同名列置 1，
+  // 免得老板给员工开了权限、自己反而看不见。只加不减 —— 关掉员工的不会连带关掉主体的。
+  let ownerSynced = false;
+  if (enabled && Number(rows[0].owner_id) > 0) {
+    await db.exec(`UPDATE app_user SET ${m.col} = 1 WHERE id = ?`, [Number(rows[0].owner_id)]);
+    ownerSynced = true;
+  }
+  await logOp(actor, 'qnh.permit', { username: rows[0].username, menu, menuLabel: m.label, enabled, ownerSynced });
+  return { code: 200, body: { ok: true, id, menu, enabled, ownerSynced, [m.field]: enabled } };
+}
+
+/** 写操作只允许作用于自己的数据（管理员查看他人为只读，员工可写所属主体的数据） */
 function assertWritable(user, tenantId) {
-  if (Number(tenantId) !== Number(user.id)) {
+  const me = Number(user && user.id) || 0;
+  const ownerId = Number(user && user.owner_id) || 0;
+  const t = Number(tenantId);
+  if (t !== me && !(ownerId > 0 && t === ownerId)) {
     const err = new Error('查看他人数据为只读模式，无法修改');
     err.code = 403;
     throw err;
@@ -1008,7 +1101,14 @@ const OP_ACTIONS = {
     + (d.accountName ? `「${d.accountName}」` : '')
     + (d.agentCleared ? '（含本机登录态）' : '（本机助手未同步清除）'),
   'qnh.config': (d) => `修改了退单同步设置（${d.items}）`,
-  'qnh.permit': (d) => `${d.enabled ? '开启' : '关闭'}了账号「${d.username}」的退单列表权限`,
+  'qnh.permit': (d) => `${d.enabled ? '开启' : '关闭'}了账号「${d.username}」的${d.menuLabel || '退单列表'}权限`
+    + (d.ownerSynced ? '（同步开启了所属主体账号的同名菜单）' : ''),
+  'waybill.supplier_create': (d) => `新增供应商「${d.name || ''}」`,
+  'waybill.supplier_update': (d) => `修改供应商「${d.name || ''}」`,
+  'waybill.supplier_delete': (d) => `删除供应商「${d.name || ''}」`,
+  'waybill.create': (d) => `新增货单（供应商「${d.supplierName || ''}」，金额 ${d.amount == null ? '' : d.amount}，${d.billDate || ''}，${d.images || 0} 张图）`,
+  'waybill.delete': (d) => `删除货单（供应商「${d.supplierName || ''}」，${d.billDate || ''}）`,
+  'waybill.upload_token': (d) => `生成了货单图片的手机上传链接（5 分钟有效）`,
   'qnh.view': () => '打开了退单列表页',
   'pdd.apply.start': (d) => `发起了批量申请发票任务（${d.total || 0} 单${d.invalid ? `，跳过 ${d.invalid} 单` : ''}）`,
   'pdd.apply': (d) => d.ok === false
@@ -1313,6 +1413,11 @@ const ALI_LOGIN_TTL_MS = ALI_LOGIN_TIMEOUT_MS + 60 * 1000;
 // 支持「登录1688」的最低助手版本（0.2.72 起助手才有 ali_login 内核）
 const ALI_LOGIN_MIN_AGENT = '0.2.72';
 
+// ── 「登录京东万商」任务：同一套路（本机助手弹窗登录 → Cookie 回传，只取 eid/uuid/收货地址）──
+const JD_LOGINS = new Map();                   // taskId -> ctx
+const JD_LOGIN_TIMEOUT_MS = Number(process.env.JD_LOGIN_TIMEOUT_MS) || 5 * 60 * 1000;
+const JD_LOGIN_TTL_MS = JD_LOGIN_TIMEOUT_MS + 60 * 1000;
+
 // ── 拼多多「页内操作」任务：助手加载真实页面执行（anti-content 由页面风控 SDK 生成）──
 //    kind='apply' 申请发票（开票页点提交） / kind='send' 催商家开票（聊天页发消息）
 const PDD_TASKS = new Map();                   // taskId -> ctx
@@ -1432,8 +1537,10 @@ function logoutAgentNote(agent, name) {
  */
 function agentUidFor(user, tenantId) {
   const t = Number(tenantId);
-  if (agentHub.isOnline(t)) return t;
   const me = Number(user && user.id);
+  // 员工号优先用自己这台电脑上的助手：否则点「登录牵牛花」会弹在老板的电脑上
+  if (user && Number(user.owner_id) > 0 && me && agentHub.isOnline(me)) return me;
+  if (agentHub.isOnline(t)) return t;
   if (me && me !== t && agentHub.isOnline(me)) return me;
   return null;
 }
@@ -1455,6 +1562,7 @@ const qnhLoginSweeper = setInterval(() => {
   for (const [id, c] of PDD_TASKS) if (now > c.expiresAt && c.status !== 'pending') PDD_TASKS.delete(id);
   for (const [id, c] of SDC_LOGINS) if (now > c.expiresAt) SDC_LOGINS.delete(id);
   for (const [id, c] of SDC_TASKS) if (now > c.expiresAt && c.status !== 'pending') SDC_TASKS.delete(id);
+  for (const [id, c] of JD_LOGINS) if (now > c.expiresAt) JD_LOGINS.delete(id);
 }, 60000);
 if (qnhLoginSweeper.unref) qnhLoginSweeper.unref();
 
@@ -1481,6 +1589,28 @@ function findQnhAgent(wantUid) {
 
 qagent.setTransport({
   findAgent: findQnhAgent,
+  send: (uid, msg) => agentHub.send(uid, msg),
+});
+
+// ── 「京东万商页内取价」通道：请求由助手在 b.jd.com 页面里发 ──
+//    服务器直连 api.m.jd.com 即使 Cookie 有效也 403（京东校验出口 IP + 指纹 + Cookie 三者自洽）。
+const JD_MIN_AGENT = '0.2.101';
+
+/** 找该账号自己在线且支持京东取价的助手（万商登录态是按账号存的，必须派给本人） */
+function findJdAgent(wantUid) {
+  const target = Number(wantUid) || 0;
+  for (const [uid] of agentHub.conns) {
+    if (!agentHub.isOnline(uid)) continue;
+    if (target && Number(uid) !== target) continue;
+    const ver = agentHub.status(uid).agentVer || '';
+    if (ver && !verGte(ver, JD_MIN_AGENT)) continue;
+    return { uid, ver };
+  }
+  return null;
+}
+
+jagent.setTransport({
+  findAgent: findJdAgent,
   send: (uid, msg) => agentHub.send(uid, msg),
 });
 
@@ -1518,6 +1648,36 @@ function onQnhLoginDone(uid, msg) {
     ctx.message = '保存登录态失败：' + String((e && e.message) || e).slice(0, 200);
     logOp(Number(uid), 'qnh.login', { ok: false });
   });
+}
+
+/**
+ * 助手回报「登录京东万商」结果：Cookie 落本机文件（data/users/<uid>/jd-session.json）。
+ * 只为了从里面取 eid / uuid / 收货地址去组请求体 —— 真正的取价请求由助手页面发、Cookie 由浏览器自己带。
+ */
+function onJdLoginDone(uid, msg) {
+  const ctx = JD_LOGINS.get(String((msg && msg.taskId) || ''));
+  // 回执可能来自「数据归属用户」的助手，也可能来自「管理员本机」的助手（代入场景）
+  const from = Number(uid);
+  if (!ctx || ctx.status !== 'pending') return;
+  if (from !== Number(ctx.userId) && from !== Number(ctx.agentUid)) return;
+  if (!msg.ok) {
+    ctx.status = 'failed';
+    ctx.message = String(msg.error || '助手未采集到登录态').slice(0, 300);
+    logOp(Number(uid), 'jd.login', { ok: false });
+    return;
+  }
+  try {
+    const s = jd.saveSession(ctx.userId, { cookie: msg.cookie });
+    ctx.status = 'done';
+    ctx.writtenAt = s.savedAt || new Date().toISOString();
+    ctx.shop = s.pin || String(msg.account || '');
+    ctx.message = '万商登录态已更新' + (ctx.shop ? '：' + ctx.shop : '');
+    logOp(Number(uid), 'jd.login', { ok: true, shop: ctx.shop });
+  } catch (e) {
+    ctx.status = 'failed';
+    ctx.message = '保存万商登录态失败：' + String((e && e.message) || e).slice(0, 200);
+    logOp(Number(uid), 'jd.login', { ok: false });
+  }
 }
 
 /**
@@ -1565,12 +1725,15 @@ function onPddLoginDone(uid, msg) {
 }
 
 /**
- * 助手回报「登录1688」结果：把 Cookie 串写进 data/ali-cookie.txt（mtop 直连取数用的就是它）。
+ * 助手回报「登录1688」结果：把 Cookie 串写进**该账号自己的** data/users/<uid>/ali-cookie.txt
+ * （mtop 直连取数用的就是它）。登录态按账号隔离，不写全局文件。
  * 与拼多多不同：1688 的服务器侧登录态是文件不是数据库 —— saveCookie / clearCookie 都在 lib/ali-orders.js。
  */
 function onAliLoginDone(uid, msg) {
   const ctx = ALI_LOGINS.get(String((msg && msg.taskId) || ''));
-  if (!ctx || ctx.userId !== Number(uid) || ctx.status !== 'pending') return;
+  if (!ctx || ctx.status !== 'pending') return;
+  // 接受两种情况：助手就是该账号本人的电脑；或管理员代入该账号、登录窗口开在管理员电脑上
+  if (ctx.userId !== Number(uid) && ctx.loginBy !== Number(uid)) return;
   if (!msg.ok) {
     ctx.status = 'failed';
     ctx.message = String(msg.error || '助手未采集到登录态').slice(0, 300);
@@ -1585,7 +1748,7 @@ function onAliLoginDone(uid, msg) {
     return;
   }
   try {
-    const r = aliOrders.saveCookie(cookie);
+    const r = aliOrders.saveCookie(ctx.userId, cookie);
     ctx.status = 'done';
     ctx.cookieCount = cookie.split(';').filter((s) => s.trim()).length;
     ctx.writtenAt = new Date();
@@ -1866,6 +2029,10 @@ function handleAgentMessage(uid, msg) {
   if (msg.type === 'sdc_send_progress') { onSdcSendProgress(uid, msg); return; }
   // 「牵牛花页内签名请求」：助手回传配送日志 / 毛利明细等接口结果
   if (msg.type === 'qnh_fetch_done') { qagent.onDone(uid, msg); return; }
+  // 「京东万商页内取价」：助手在万商页面里取回的价格
+  if (msg.type === 'jd_fetch_done') { jagent.onDone(uid, msg); return; }
+  // 「登录京东万商」：助手弹窗登录后回传 Cookie
+  if (msg.type === 'jd_login_done') { onJdLoginDone(uid, msg); return; }
   // 「清除本机登录态」：助手清掉本机浏览器分区后回执
   if (msg.type === 'logout_done') { onAgentLogoutDone(uid, msg); return; }
   if (msg.type === 'login_state') { agentHub.setLoggedIn(uid, msg.loggedIn); return; }
@@ -2583,14 +2750,16 @@ async function listUsers() {
     SELECT u.id, u.username, u.role, u.status, u.company_name, u.tax_no, u.email, u.display_name, u.note,
            u.must_change_password, u.last_login_at, u.created_at, u.updated_at,
            u.qnh_refund_enabled, u.qnh_profit_enabled, u.product_enabled, u.market_enabled, u.billing_enabled,
-           u.replenish_enabled, u.price_enabled, u.brand_id, b.name AS brand_name, ${EXPIRY_COLS},
+           u.replenish_enabled, u.price_enabled, u.after_sale_enabled, u.brand_id, b.name AS brand_name,
+           u.owner_id, ow.username AS owner_username, ${EXPIRY_COLS},
            (SELECT COUNT(*) FROM invoice_order o WHERE o.user_id = u.id)              AS order_count,
            (SELECT COUNT(DISTINCT o.seller_company) FROM invoice_order o WHERE o.user_id = u.id) AS company_count,
            (SELECT COUNT(*) FROM issued_invoice i WHERE i.user_id = u.id)             AS invoice_rows,
            (SELECT COUNT(*) FROM seller_name_mapping m WHERE m.user_id = u.id)        AS mapping_count,
            (SELECT COUNT(*) FROM send_log s WHERE s.user_id = u.id AND s.result='ok') AS send_ok_count
     FROM app_user u LEFT JOIN brand b ON b.id = u.brand_id
-    ORDER BY u.role = 'admin' DESC, u.id ASC
+         LEFT JOIN app_user ow ON ow.id = u.owner_id
+    ORDER BY u.role = 'admin' DESC, u.owner_id IS NOT NULL, u.id ASC
   `);
   return users.map((u) => ({
     id: u.id, username: u.username, role: u.role, status: u.status,
@@ -2607,6 +2776,14 @@ async function listUsers() {
     replenishEnabled: u.role === 'admin' ? true : !!Number(u.replenish_enabled),
     // 平台取价权限（v0.2.95）：齐货通登录/重新取价、阿发Token/自动匹配/取价、选购加购
     priceEnabled: u.role === 'admin' ? true : !!Number(u.price_enabled),
+    // 售后管理权限（v0.2.104）
+    afterSaleEnabled: u.role === 'admin' ? true : !!Number(u.after_sale_enabled),
+    // 供应商管理 / 货单管理（v0.3.0）
+    supplierEnabled: u.role === 'admin' ? true : !!Number(u.supplier_enabled),
+    waybillEnabled: u.role === 'admin' ? true : !!Number(u.waybill_enabled),
+    // 员工号标记（v0.2.104）：ownerId 非空表示数据归属主体账号，自己名下没有业务数据
+    ownerId: Number(u.owner_id) || null,
+    ownerUsername: u.owner_username || '',
     // 所属品牌方（商品数据按品牌方共享）
     brandId: Number(u.brand_id) || 1,
     brandName: u.brand_name || '',
@@ -2806,6 +2983,27 @@ const server = http.createServer(async (req, res) => {
       return sendHtml(res, 'bookmarklet.html');
     }
     if (method === 'GET' && p === '/healthz') return sendJson(res, 200, { ok: true, ts: new Date().toISOString() });
+    // 手机扫码上传页（v0.3.0）：**不需要登录**，凭证是 URL 里的 5 分钟一次性令牌。
+    // 扫码的人多半是仓库/司机，没有账号；所以这里刻意放在鉴权之前，且只暴露上传能力。
+    if (method === 'GET' && (p === '/m-upload' || p === '/m-upload.html')) return sendHtml(res, 'm-upload.html');
+    if (p === '/api/pub/waybill-upload') {
+      if (method === 'GET') {
+        const s = await waybill.uploadSession(url.searchParams.get('t') || '');
+        if (!s.ok) return sendJson(res, 200, s);
+        // 只回状态，不回 userId（令牌被人捡到也读不到归属信息）
+        return sendJson(res, 200, { ok: true, leftSec: s.leftSec, imgCount: s.imgCount, max: s.max });
+      }
+      if (method === 'POST') {
+        const body = await readBody(req, 9e6);   // 5MB 图片 base64 后约 6.7MB
+        const out = await waybill.uploadImageToToken({
+          token: url.searchParams.get('t') || body.t,
+          dataUrl: body.image || body.imageBase64,
+          ip: String(req.headers['x-forwarded-for'] || '').split(',')[0].trim()
+            || (req.socket && req.socket.remoteAddress) || '',
+        });
+        return sendJson(res, out.ok ? 200 : 400, out);
+      }
+    }
     // 品牌图标：浏览器默认会请求 /favicon.ico，这里给真实图标而不是一条 404
     // 直接复用桌面端那套 ICO（内含 16/20/24 的简化帧，小尺寸不糊）
     if (method === 'GET' && p === '/favicon.ico') return sendAsset(req, res, 'app-icon-mascot.ico');
@@ -3163,19 +3361,20 @@ const server = http.createServer(async (req, res) => {
 
     // ── 1688 订单同步（mtop: OrderListDataLineService.buyerOrderList）──
     // 「1688发票」页的刷新按钮打这里：从库里最近的订单时间起，往后翻页拉全部订单。
-    // 登录态不进数据库，只读 data/ali-cookie.txt（或环境变量 ALI_COOKIE）。
+    // 登录态不进数据库，按账号读 data/users/<uid>/ali-cookie.txt（或环境变量 ALI_COOKIE，运维全局覆盖）。
     if (method === 'GET' && p === '/api/ali/orders-session') {
-      const st = aliOrders.sessionStatus();
+      const st = aliOrders.sessionStatus(tenantId);
       return sendJson(res, 200, Object.assign(st, {
         latestOrderTime: await aliOrders.latestOrderTime(tenantId).catch(() => null),
         pageSize: aliOrders.PAGE_SIZE,
-        cookieFileHint: 'data/ali-cookie.txt',
+        cookieFileHint: st.fileHint || ('data/users/' + tenantId + '/ali-cookie.txt'),
       }));
     }
     // ── 「登录1688」：本机助手弹桌面窗口（persist:1688 分区）→ 用户登录 → Cookie 串回传 →
-    // 写进 data/ali-cookie.txt。从此不用再手工粘贴 Cookie。
+    // 写进**该账号自己的** data/users/<uid>/ali-cookie.txt。从此不用再手工粘贴 Cookie。
     if (method === 'POST' && p === '/api/ali/login') {
-      // 管理员代入他人时，登录窗口开在「有在线助手的那台电脑」上，登录态仍写到该租户共用的文件
+      // 管理员代入他人时，登录窗口开在「有在线助手的那台电脑」上，登录态仍写到被代入账号自己的文件
+      // （loginBy 记下发起人，回传时两者任一匹配都认，避免「代登录回传被丢」）
       const aUid = agentUidFor(user, tenantId);
       const onMyPc = aUid && Number(aUid) !== Number(tenantId);
       if (!aUid) {
@@ -3197,7 +3396,7 @@ const server = http.createServer(async (req, res) => {
       }
       const taskId = 'alilogin-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
       const ctx = {
-        taskId, userId: Number(tenantId), status: 'pending', message: '',
+        taskId, userId: Number(tenantId), loginBy: Number(user.id), status: 'pending', message: '',
         cookieCount: 0, writtenAt: null, createdAt: Date.now(),
         expiresAt: Date.now() + ALI_LOGIN_TTL_MS,
       };
@@ -3240,7 +3439,7 @@ const server = http.createServer(async (req, res) => {
     // ② 下发 logout 指令让本机助手清掉 persist:1688 分区并等回执（最多 6 秒）。
     // 只清①的话，本机分区还留着旧账号，发消息窗口会免登进旧号（看起来像没退掉）。
     if (method === 'POST' && p === '/api/ali/logout') {
-      const cleared = aliOrders.clearCookie();
+      const cleared = aliOrders.clearCookie(tenantId);
       const agent = await agentLogout(agentUidFor(user, tenantId) || tenantId, '1688');
       await logOp(user, 'ali.logout', { tenantId, agentCleared: !!agent.ok, hadFile: cleared.hadFile });
       let note;
@@ -3374,7 +3573,7 @@ const server = http.createServer(async (req, res) => {
         pushLog('✗ 同步异常：' + ctx.message);
       });
 
-      const st = aliOrders.sessionStatus();
+      const st = aliOrders.sessionStatus(tenantId);
       if (!st.configured) {
         return sendJson(res, 200, {
           ok: false, pending: false, needLogin: true,
@@ -3751,8 +3950,9 @@ const server = http.createServer(async (req, res) => {
     if (method === 'GET' && p === '/api/products') {
       if (!canProduct) return denyProduct();
       const page = Math.max(1, Number(url.searchParams.get('page')) || 1);
-      // 上限 2000：补货界面要一次展示本次导入的全部商品（导入文件常见几百~上千行）
-      const size = Math.min(2000, Math.max(1, Number(url.searchParams.get('size')) || 20));
+      // 上限 200：分页器最多给到 100（v0.2.106 去掉了 2000 选项），这里留一倍余量兜底。
+      // 不能再放到 2000：el-table 无虚拟滚动，一次返回上千行会让浏览器主线程卡死十几秒
+      const size = Math.min(200, Math.max(1, Number(url.searchParams.get('size')) || 20));
       const q = (url.searchParams.get('q') || '').trim();
       const status = (url.searchParams.get('status') || '').trim();
       const sortRaw = url.searchParams.get('sort') || '';
@@ -3774,6 +3974,7 @@ const server = http.createServer(async (req, res) => {
                ${sc.salesExpr} AS sales_30d, ${sc.suggestExpr} AS suggest_qty,
                ${sc.fileExpr} AS source_file, ${sc.imageExpr} AS image_url,
                ${sc.qhtExpr} AS qht_goods_id, ${sc.afaExpr} AS afa_goods_id, ${sc.localExpr} AS local_price,
+               ${sc.jdExpr} AS jd_sku_id,
                ${sc.file ? 'NULL' : 'b.name'} AS brand_name,
                ${sc.file ? 'pi.updated_at' : 'bp.updated_at'} AS updated_at,
                ${sc.file ? 'NULL' : 'bp.synced_at'} AS synced_at,
@@ -3967,6 +4168,170 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
+    // ── 京东万商（b.jd.com）取价 ──────────────────────────────────────────────
+    //   与齐货通/阿发最大的不同（2026-11-02 实测）：
+    //     · 请求必须由本机助手在万商页面里发 —— 服务器直连即使 Cookie 有效也 403
+    //       （京东校验「出口 IP + 浏览器指纹 + Cookie」三者自洽，云端 IP 打几次就被标记）
+    //     · 详情接口 wareBusiness.style 不要 h5st 签名，只要页面环境 → 取价可走助手
+    //     · 搜索接口必须 h5st（几分钟就过期、强绑定 body）→ 关联只能「粘贴链接/skuId」
+    //   细节与取证过程见 lib/jd-bmall.js / lib/jd-agent.js / electron/agent/jd-login.js 头部注释。
+    if (p.startsWith('/api/jd/') && !canProduct) return denyProduct();
+
+    /**
+     * 京东请求派给哪台助手：优先数据归属用户自己的助手，其次当前操作者本机
+     * （管理员代入他人时，登录窗口通常开在管理员这台电脑上；与拼多多/牵牛花同一口径）。
+     */
+    const jdAgentUid = () => Number(agentUidFor(user, tenantId) || tenantId);
+
+    /** 当前账号的助手是否具备京东取价能力（页面据此决定按钮能不能点、提示写什么） */
+    const jdAgentInfo = () => {
+      const au = jdAgentUid();
+      const online = agentHub.isOnline(au);
+      const ver = online ? (agentHub.status(au).agentVer || '') : '';
+      const capable = !!(online && ver && verGte(ver, JD_MIN_AGENT));
+      return { online, version: ver, capable, minVersion: JD_MIN_AGENT };
+    };
+
+    if (method === 'GET' && p === '/api/jd/session') {
+      return sendJson(res, 200, Object.assign(jd.sessionStatus(tenantId), { agent: jdAgentInfo() }));
+    }
+    // 「万商登录」：在助手窗口里登录，登录态回传（不再让用户手抠 Cookie）
+    if (method === 'POST' && p === '/api/jd/login') {
+      if (!canPrice) return denyPrice();
+      writeGuard();
+      const info = jdAgentInfo();
+      if (!info.online) {
+        return sendJson(res, 200, {
+          ok: false, needAgent: true,
+          message: '本机助手未连接：请先在这台电脑上启动「催收小助手」并完成绑定。'
+            + '京东万商只允许在真实浏览器里取价，登录也必须在本机完成。',
+        });
+      }
+      if (!info.capable) {
+        return sendJson(res, 200, {
+          ok: false, needAgent: true, agentOutdated: true,
+          message: `这台电脑上的催收小助手是 v${info.version || '未知'}，还不支持京东万商。`
+            + `请下载安装 v${JD_MIN_AGENT} 及以上版本。`,
+        });
+      }
+      const taskId = 'jdlo-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+      const aUid = jdAgentUid();
+      const ctx = {
+        taskId, userId: Number(tenantId), agentUid: aUid, status: 'pending', message: '',
+        shop: '', writtenAt: null, createdAt: Date.now(),
+        expiresAt: Date.now() + JD_LOGIN_TTL_MS,
+      };
+      const sent = agentHub.send(aUid, {
+        type: 'jd_login', taskId, uid: Number(tenantId), timeoutMs: JD_LOGIN_TIMEOUT_MS,
+      });
+      if (!sent) {
+        return sendJson(res, 200, {
+          ok: false, needAgent: true,
+          message: '下发登录任务失败：本机助手连接已断开，请确认助手正在运行。',
+        });
+      }
+      JD_LOGINS.set(taskId, ctx);
+      await logOp(user, 'jd.login.start', { tenantId });
+      return sendJson(res, 200, {
+        ok: true, pending: true, taskId,
+        message: '已在这台电脑上打开京东万商窗口，请在其中登录（最长等 5 分钟）',
+      });
+    }
+    if (method === 'GET' && p === '/api/jd/login-status') {
+      const ctx = JD_LOGINS.get(String(url.searchParams.get('taskId') || ''));
+      if (!ctx || ctx.userId !== Number(tenantId)) return sendJson(res, 404, { error: '登录任务不存在或已结束' });
+      return sendJson(res, 200, {
+        status: ctx.status,
+        ok: ctx.status === 'done',
+        message: ctx.message || '',
+        shop: ctx.shop || '',
+        writtenAt: ctx.writtenAt,
+      });
+    }
+    // 清掉本账号的万商登录态（服务器文件 + 本机分区，换账号时用）
+    if (method === 'POST' && p === '/api/jd/session/clear') {
+      if (!canPrice) return denyPrice();
+      writeGuard();
+      const r = jd.clearSession(tenantId);
+      // 本机分区不清，下次点「万商登录」会直接免登录进旧账号，看起来像没退掉
+      const agent = await agentLogout(jdAgentUid(), 'jd');
+      await logOp(user, 'jd.session.clear', { tenantId, agentCleared: !!agent.ok });
+      return sendJson(res, 200, Object.assign({
+        ok: true,
+        agentCleared: !!agent.ok,
+        agentOffline: !!agent.offline,
+        message: '已清除本账号的万商登录态' + (agent.ok ? '（本机登录态已一并清除）' : ''),
+      }, r));
+    }
+    // 关联前预览：粘贴链接/skuId → 返回万商商品信息（不写库）
+    if (method === 'POST' && p === '/api/jd/preview') {
+      if (!canPrice) return denyPrice();
+      const b = await readBody(req);
+      const skuId = jd.parseSkuId(b.input);
+      if (!skuId) return sendJson(res, 200, { ok: false, error: '没识别出商品ID：请粘贴万商商品链接，或直接粘纯数字 skuId' });
+      const sess = jd.loadSession(tenantId);
+      if (!sess) {
+        return sendJson(res, 200, { ok: false, code: 'no_session', error: '还没有登录京东万商：点「万商登录」，在弹窗里登录一次' });
+      }
+      try {
+        const r = await jd.fetchDetail(skuId, sess, { uid: jdAgentUid() });
+        return sendJson(res, 200, Object.assign({ skuId }, r));
+      } catch (e) {
+        return sendJson(res, 200, { ok: false, skuId, error: String((e && e.message) || e) });
+      }
+    }
+    // 关联/解除：body.sku = 补货 SKU，body.jdSkuId = 万商 skuId（留空 = 解除关联）
+    if (method === 'POST' && p === '/api/jd/link') {
+      if (!canProduct) return denyProduct();
+      writeGuard();
+      const b = await readBody(req);
+      const sku = String(b.sku || '').trim();
+      if (!sku) return sendJson(res, 200, { error: '缺少 sku' });
+      const jdSkuId = String(b.jdSkuId == null ? '' : b.jdSkuId).trim() || null;
+      const bid = linkBrandId(user, b);
+      const w = await writeProductLink('jd_sku_id', jdSkuId, { brandId: bid, userId: tenantId, sku });
+      if (jdSkuId) await logOp(user, 'jd.link', { tenantId, sku, jdSkuId });
+      return sendJson(res, 200, { ok: true, sku, jdSkuId, scope: w.scope, affected: w.affected });
+    }
+    // 批量取价：ids = 万商 skuId 逗号分隔
+    //   mode=cache  ：只读价格缓存表（页面加载用，**不打京东**）；没缓存的显示「未取价」
+    //   mode=refresh：去京东取新价并写缓存（点「京东取价」用）
+    //   brand       ：参与缓存键（同品牌方共用一份价格）；普通用户强制自己品牌
+    if (method === 'GET' && p === '/api/jd/prices') {
+      const ids = String(url.searchParams.get('ids') || '').split(',').map((s) => s.trim()).filter(Boolean);
+      if (!ids.length) return sendJson(res, 200, { prices: {}, cached: 0, fetched: 0 });
+      const bo = brandOf(req, url, user);
+      const brandId = bo.brandId || (Number(user.brand_id) || 1);
+      const mode = String(url.searchParams.get('mode') || 'cache').toLowerCase() === 'refresh' ? 'refresh' : 'cache';
+      if (mode === 'cache') {
+        const prices = await priceCache.readPrices('jd', brandId, ids);
+        return sendJson(res, 200, { prices, cached: Object.keys(prices).length, fetched: 0 });
+      }
+      if (!canPrice) return denyPrice();
+      const sess = jd.loadSession(tenantId);
+      if (!sess) {
+        return sendJson(res, 200, {
+          error: '还没有登录京东万商：点「万商登录」，在弹窗里登录一次',
+          code: 'no_session', prices: {}, cached: 0, fetched: 0,
+        });
+      }
+      try {
+        const r = await jd.fetchPrices(ids, sess, { uid: jdAgentUid(), interval: 500 });
+        const okPrices = {};
+        for (const [k, v] of Object.entries(r.prices)) if (v && v.ok) okPrices[k] = v;
+        await priceCache.savePrices('jd', brandId, okPrices);
+        const prices = await priceCache.readPrices('jd', brandId, ids);
+        return sendJson(res, 200, {
+          prices, cached: Object.keys(prices).length, fetched: r.fetched, failed: r.failed, total: r.total,
+          // 中途停下的原因（没登录 / 助手掉线），页面据此给一句准确的提示
+          error: r.stopReason || undefined,
+          code: r.stopReason ? (r.failed && r.fetched === 0 ? 'stopped' : 'partial') : undefined,
+        });
+      } catch (e) {
+        return sendJson(res, 200, { error: String((e && e.message) || e), code: (e && e.code) || 'unknown', prices: {}, cached: 0, fetched: 0 });
+      }
+    }
+
     // ── 城配速达（阿发）── 随「商品列表」菜单权限一同放行；本项目只做 Token 配置，不做登录/解绑
     if (p.startsWith('/api/afa/') && !canProduct) return denyProduct();
     if (method === 'GET' && p === '/api/afa/session') {
@@ -4081,7 +4446,6 @@ const server = http.createServer(async (req, res) => {
       const w = await writeProductLink('local_price', v, { brandId: bid, userId: tenantId, sku });
       return sendJson(res, 200, { ok: true, sku, localPrice: v, scope: w.scope });
     }
-
     // ── 自动匹配阿发商品（v0.2.92）────────────────────────────────────────
     // 思路：拿「商品名称」原样去阿发搜，**直接取搜索结果的第一条建立关联**，不做筛选与打分。
     // v0.2.92 起只处理「当前筛选出来的商品」（q / status / batch / brand 与列表共用 productScope），
@@ -4559,19 +4923,170 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { started: true, channel: 'client' });
     }
 
+    // ── 供应商 / 货单管理（v0.3.0）────────────────────────────────────────────
+    //    两个菜单各一个开关（supplier / waybill）。数据归属同样走 tenantOf：
+    //    员工永远作用于所属主体账号的数据，超管可用 ?tenant= 代入（代入时只读）。
+    //    ⚠ 货单页新建时要读供应商下拉，所以「有货单权限」也允许读供应商；
+    //      但增删改供应商仍然只认供应商菜单权限。
+    if (p.startsWith('/api/waybill/')) {
+      const canSupplier = isAdmin || !!Number(user.supplier_enabled);
+      const canWaybill = isAdmin || !!Number(user.waybill_enabled);
+      const denySupplier = () => sendJson(res, 403, { error: '未开启供应商管理权限，请联系超级管理员' });
+      const denyWaybill = () => sendJson(res, 403, { error: '未开启货单管理权限，请联系超级管理员' });
+      const wbUid = tenantId;
+
+      // —— 供应商 ——
+      if (method === 'GET' && p === '/api/waybill/suppliers') {
+        if (!canSupplier && !canWaybill) return denySupplier();
+        const q = url.searchParams;
+        return sendJson(res, 200, await waybill.listSuppliers({
+          userId: wbUid, keyword: q.get('keyword') || '', page: q.get('page'), size: q.get('size'),
+        }));
+      }
+      if (method === 'GET' && p === '/api/waybill/suppliers/all') {
+        if (!canSupplier && !canWaybill) return denySupplier();
+        return sendJson(res, 200, { rows: await waybill.allSuppliers(wbUid) });
+      }
+      if (method === 'POST' && p === '/api/waybill/suppliers/create') {
+        if (!canSupplier) return denySupplier();
+        const body = await readBody(req);
+        writeGuard();
+        const out = await waybill.createSupplier({
+          userId: wbUid, name: body.name, note: body.note, operator: user.username,
+        });
+        if (out.ok) await logOp(user, 'waybill.supplier_create', { tenantId: wbUid, id: out.id, name: out.name });
+        return sendJson(res, out.ok ? 200 : 400, out);
+      }
+      if (method === 'POST' && p === '/api/waybill/suppliers/update') {
+        if (!canSupplier) return denySupplier();
+        const body = await readBody(req);
+        writeGuard();
+        const out = await waybill.updateSupplier({
+          userId: wbUid, id: body.id, name: body.name, note: body.note, operator: user.username,
+        });
+        if (out.ok) await logOp(user, 'waybill.supplier_update', { tenantId: wbUid, id: out.id, name: out.name });
+        return sendJson(res, out.ok ? 200 : 400, out);
+      }
+      if (method === 'POST' && p === '/api/waybill/suppliers/delete') {
+        if (!canSupplier) return denySupplier();
+        const body = await readBody(req);
+        writeGuard();
+        const out = await waybill.deleteSupplier({ userId: wbUid, id: body.id });
+        if (out.ok) await logOp(user, 'waybill.supplier_delete', { tenantId: wbUid, id: out.id });
+        return sendJson(res, out.ok ? 200 : 400, out);
+      }
+
+      // —— 货单 ——
+      if (method === 'GET' && p === '/api/waybill/list') {
+        if (!canWaybill) return denyWaybill();
+        const q = url.searchParams;
+        return sendJson(res, 200, await waybill.listWaybills({
+          userId: wbUid,
+          supplier: q.get('supplier') || '',
+          from: q.get('from') || '', to: q.get('to') || '',
+          page: q.get('page'), size: q.get('size'),
+        }));
+      }
+      if (method === 'GET' && p === '/api/waybill/detail') {
+        if (!canWaybill) return denyWaybill();
+        const out = await waybill.getWaybill({ userId: wbUid, id: url.searchParams.get('id') });
+        return sendJson(res, out.ok ? 200 : 404, out);
+      }
+      if (method === 'POST' && p === '/api/waybill/create') {
+        if (!canWaybill) return denyWaybill();
+        const body = await readBody(req);
+        writeGuard();
+        const out = await waybill.createWaybill({
+          userId: wbUid, supplierId: body.supplierId, amount: body.amount,
+          billDate: body.billDate, note: body.note, operator: user.username, token: body.token,
+        });
+        if (out.ok) {
+          await logOp(user, 'waybill.create', {
+            tenantId: wbUid, id: out.id, supplierName: body.supplierName,
+            amount: body.amount, billDate: body.billDate, images: out.imageCount,
+          });
+        }
+        return sendJson(res, out.ok ? 200 : 400, out);
+      }
+      if (method === 'POST' && p === '/api/waybill/delete') {
+        if (!canWaybill) return denyWaybill();
+        const body = await readBody(req);
+        writeGuard();
+        const out = await waybill.deleteWaybill({ userId: wbUid, id: body.id });
+        if (out.ok) await logOp(user, 'waybill.delete', { tenantId: wbUid, id: out.id, supplierName: body.supplierName, billDate: body.billDate });
+        return sendJson(res, out.ok ? 200 : 400, out);
+      }
+
+      // —— 建单时的图片：5 分钟临时上传链接（手机扫码传图）——
+      //    电脑端只负责「生成链接 → 显示二维码 → 轮询已传张数」，图片走手机浏览器直传，
+      //    这样仓库里拍的照不用先倒到电脑上。token 只能传图，读不到任何已有数据。
+      if (method === 'POST' && p === '/api/waybill/upload-token') {
+        if (!canWaybill) return denyWaybill();
+        writeGuard();
+        const out = await waybill.createUploadToken({ userId: wbUid, operator: user.username });
+        if (!out.ok) return sendJson(res, 400, out);
+        const link = serverUrlOf(req) + '/m-upload?t=' + out.token;
+        await logOp(user, 'waybill.upload_token', { tenantId: wbUid });
+        return sendJson(res, 200, Object.assign(out, { link }));
+      }
+      if (method === 'GET' && p === '/api/waybill/upload-token') {
+        if (!canWaybill) return denyWaybill();
+        const token = url.searchParams.get('token') || '';
+        const out = await waybill.uploadSession(token);
+        if (!out.ok) return sendJson(res, 200, out);
+        // 同一账号下的令牌才给看图（防止拿到别人的 token 串进来偷看）
+        const imgs = await waybill.tokenImages({ userId: wbUid, token });
+        return sendJson(res, 200, Object.assign(out, { images: imgs }));
+      }
+      // 电脑端也能传：复用同一个 token，和手机传的图放在一起，保存时一并绑定
+      if (method === 'POST' && p === '/api/waybill/upload') {
+        if (!canWaybill) return denyWaybill();
+        writeGuard();
+        const body = await readBody(req, 9e6);   // 5MB 图片 base64 后约 6.7MB
+        const sess = await waybill.uploadSession(body.token);
+        if (!sess.ok) return sendJson(res, 400, sess);
+        if (Number(sess.userId) !== Number(wbUid)) {
+          return sendJson(res, 403, { error: '这个上传链接不属于当前账号' });
+        }
+        const out = await waybill.uploadImageToToken({
+          token: body.token, dataUrl: body.image || body.imageBase64,
+          ip: req.headers['x-forwarded-for'] || (req.socket && req.socket.remoteAddress) || '',
+        });
+        return sendJson(res, out.ok ? 200 : 400, out);
+      }
+      if (method === 'POST' && p === '/api/waybill/upload/remove') {
+        if (!canWaybill) return denyWaybill();
+        const body = await readBody(req);
+        writeGuard();
+        const out = await waybill.removeTokenImage({ userId: wbUid, id: body.id });
+        return sendJson(res, out.ok ? 200 : 400, out);
+      }
+
+      return sendJson(res, 404, { error: '未知的货单管理接口' });
+    }
+
     // ── 牵牛花：退单列表 / 实时毛利（按「菜单权限」分别放行；超级管理员始终可用）──
     //    数据归属：tenantOf(req, url, user) —— 普通用户永远是自己的数据；
     //    超级管理员通过 ?tenant=<userId>「以某个用户的角色进入」查看/操作该用户的数据。
     if (p.startsWith('/api/qnh/')) {
       const canRefund = isAdmin || !!Number(user.qnh_refund_enabled);
       const canProfit = isAdmin || !!Number(user.qnh_profit_enabled);
+      // 售后管理（v0.2.104）：独立菜单权限，与退单列表互不覆盖
+      const canAfterSale = isAdmin || !!Number(user.after_sale_enabled);
       const qnhUid = tenantId;   // 本块所有读写的「数据归属用户」
       const profitApi = p === '/api/qnh/profit' || p === '/api/qnh/profit/pull' || p === '/api/qnh/profit/trend';
-      if (profitApi) {
+      const afterApi = p.startsWith('/api/qnh/after-sales');
+      // 退款原因两个页面都能改（退单列表 + 售后管理的「改原因」），任一菜单权限即可
+      const reasonApi = p === '/api/qnh/refunds/reason';
+      if (afterApi) {
+        if (!canAfterSale) return sendJson(res, 403, { error: '未开启售后管理权限，请联系超级管理员' });
+      } else if (reasonApi) {
+        if (!canRefund && !canAfterSale) return sendJson(res, 403, { error: '未开启退单列表或售后管理权限，请联系超级管理员' });
+      } else if (profitApi) {
         if (!canProfit) return sendJson(res, 403, { error: '未开启毛利监控权限，请联系超级管理员' });
       } else if (p === '/api/qnh/status' || p === '/api/qnh/logout') {
         // 两个面板都要用它拿配置 / 退出登录，任一权限即可
-        if (!canRefund && !canProfit) return sendJson(res, 403, { error: '未开启菜单权限，请联系超级管理员' });
+        if (!canRefund && !canProfit && !canAfterSale) return sendJson(res, 403, { error: '未开启菜单权限，请联系超级管理员' });
       } else if (!canRefund) {
         return sendJson(res, 403, { error: '未开启退单列表权限，请联系超级管理员' });
       }
@@ -4626,6 +5141,124 @@ const server = http.createServer(async (req, res) => {
 
       if (method === 'GET' && p === '/api/qnh/trend') {
         return sendJson(res, 200, { days: await qnh.refundTrend(url.searchParams.get('days') || 30, qnhUid) });
+      }
+
+      // ── 售后管理（v0.2.104；v0.2.106 起含手工登记）────────────────────────
+      //   两个来源合并成一页：牵牛花同步来的平台退单 + 「新增售后」手工录入的记录。
+      //   处理状态（0待处理 1已申请 2已退货 3已退款）与售后原因都是本系统人工维护的：
+      //   同步只更新平台字段，不会把它们冲掉。
+      if (method === 'GET' && p === '/api/qnh/after-sales') {
+        const q = url.searchParams;
+        const [list, counts] = await Promise.all([
+          qnh.listAfterSales({
+            status: q.get('status') == null ? '' : q.get('status'),
+            from: q.get('from') || '',
+            to: q.get('to') || '',
+            keyword: q.get('keyword') || '',
+            page: q.get('page'),
+            size: q.get('size'),
+            userId: qnhUid,
+          }),
+          qnh.afterSaleCounts(qnhUid),
+        ]);
+        return sendJson(res, 200, Object.assign(list, { counts, statuses: qnh.AFTER_SALE_STATUSES }));
+      }
+
+      // 「新增售后」的商品搜索：按商品名称 / SKU 模糊查本地商品（不连平台、不取价）
+      //   品牌商品（同品牌共享）+ 个人导入的补货商品，同 SKU 只留一条（优先带图的品牌行）
+      if (method === 'GET' && p === '/api/qnh/after-sales/goods') {
+        const kw = (url.searchParams.get('kw') || '').trim().slice(0, 64);
+        if (!kw) return sendJson(res, 200, { rows: [] });
+        const like = `%${kw}%`;
+        const limit = Math.min(30, Math.max(1, Number(url.searchParams.get('size')) || 20));
+        const brandId = Number(user.brand_id) || 1;
+        const bo = brandOf(req, url, user);
+        const [brandRows, mineRows] = await Promise.all([
+          (bo.all
+            ? db.query(
+              `SELECT sku, goods_name, image_url FROM brand_product
+                WHERE sku LIKE ? OR goods_name LIKE ?
+                ORDER BY (sku = ?) DESC, updated_at DESC LIMIT ${limit}`, [like, like, kw])
+            : db.query(
+              `SELECT sku, goods_name, image_url FROM brand_product
+                WHERE brand_id = ? AND (sku LIKE ? OR goods_name LIKE ?)
+                ORDER BY (sku = ?) DESC, updated_at DESC LIMIT ${limit}`, [brandId, like, like, kw])),
+          db.query(
+            `SELECT sku, goods_name, image_url FROM product_item
+              WHERE user_id = ? AND (sku LIKE ? OR goods_name LIKE ?)
+              ORDER BY (sku = ?) DESC, updated_at DESC LIMIT ${limit}`, [qnhUid, like, like, kw]),
+        ]);
+        const seen = new Set();
+        const rows = [];
+        for (const r of [...brandRows, ...mineRows]) {
+          const sku = String(r.sku || '').trim();
+          const name = String(r.goods_name || '').trim();
+          const id = sku || ('name:' + name);
+          if (!id || seen.has(id)) continue;
+          seen.add(id);
+          rows.push({ sku, goodsName: name, imageUrl: r.image_url || '' });
+          if (rows.length >= limit) break;
+        }
+        return sendJson(res, 200, { rows });
+      }
+
+      // 新增手工售后：选中商品 + 数量 + 原因 → 落 qnh_after_manual（不进退单列表、不受同步影响）
+      if (method === 'POST' && p === '/api/qnh/after-sales/manual') {
+        const body = await readBody(req);
+        writeGuard();
+        const out = await qnh.createManualAfterSale({
+          userId: qnhUid, sku: body.sku, goodsName: body.goodsName, imageUrl: body.imageUrl,
+          qty: body.qty, reason: body.reason, note: body.note, operator: user.username,
+        });
+        if (out.ok) await logOp(user, 'qnh.after_create', { tenantId: qnhUid, id: out.id, sku: out.sku, qty: out.qty });
+        return sendJson(res, out.ok ? 200 : 400, out);
+      }
+
+      // 删除手工售后（平台退单不能删，只能改状态）
+      if (method === 'POST' && p === '/api/qnh/after-sales/manual/delete') {
+        const body = await readBody(req);
+        writeGuard();
+        const out = await qnh.deleteManualAfterSale({ id: body.id, userId: qnhUid });
+        if (out.ok) await logOp(user, 'qnh.after_delete', { tenantId: qnhUid, id: out.id });
+        return sendJson(res, out.ok ? 200 : 400, out);
+      }
+
+      // 售后状态变更（v0.2.108）：必须带一张凭证图 —— 先传七牛拿 key，再连状态一起写库。
+      //   图与状态同一次请求：七牛失败就直接返回，状态不变（"凭证必填"的代价，见方案说明）。
+      if (method === 'POST' && p === '/api/qnh/after-sales/status') {
+        const body = await readBody(req, 9e6);   // 5MB 图片 base64 后约 6.7MB
+        writeGuard();
+        const img = qiniu.decodeImagePayload(body.image || body.imageBase64);
+        if (!img.ok) return sendJson(res, 400, { ok: false, error: img.error });
+        const up = await qiniu.uploadImage(img.buffer, { mime: img.mime, userId: qnhUid, prefix: 'after-sale' });
+        if (!up.ok) return sendJson(res, 400, { ok: false, error: up.error });
+        const out = await qnh.setAfterSaleStatus({
+          key: body.key, refundNo: body.refundNo, status: body.status, note: body.note,
+          imageKey: up.key, imageMime: up.mime, imageSize: up.size,
+          userId: qnhUid, operator: user.username,
+        });
+        if (out.ok) await logOp(user, 'qnh.after_status', { tenantId: qnhUid, key: out.key, status: out.status, imageKey: out.imageKey });
+        return sendJson(res, out.ok ? 200 : 400, out);
+      }
+
+      // 售后页「改原因」：平台退单写人工列 refund_reason，手工登记直接改它自己的原因
+      if (method === 'POST' && p === '/api/qnh/after-sales/reason') {
+        const body = await readBody(req);
+        writeGuard();
+        const out = await qnh.setAfterSaleReason({
+          key: body.key, refundNo: body.refundNo, reason: body.reason, userId: qnhUid,
+        });
+        if (out.ok) await logOp(user, 'qnh.after_reason', { tenantId: qnhUid, key: out.key });
+        return sendJson(res, out.ok ? 200 : 400, out);
+      }
+
+      // 退单列表的「退款原因」：人工列，写 refund_reason；传空 = 清空（页面回落到平台原值）
+      if (method === 'POST' && p === '/api/qnh/refunds/reason') {
+        const body = await readBody(req);
+        writeGuard();
+        const out = await qnh.setRefundReason({ refundNo: body.refundNo, reason: body.reason, userId: qnhUid });
+        if (out.ok) await logOp(user, 'qnh.refund_reason', { tenantId: qnhUid, refundNo: out.refundNo });
+        return sendJson(res, out.ok ? 200 : 400, out);
       }
 
       if (method === 'GET' && p === '/api/qnh/logs') {
@@ -4937,10 +5570,15 @@ const server = http.createServer(async (req, res) => {
         let full = b.full === true || b.full === 'true';
         if (!(await pddOrders.hasOrderData(pddUid))) full = true;
 
+        // 合并按钮（0.2.99）：「同步订单与发票」= 先拉订单增量，拉完紧接着刷发票状态。
+        // b.withInvoice === false 时只拉订单（排查/脚本用），默认两段都跑。
+        const withInvoice = b.withInvoice !== false;
+
         const taskId = 'pddord-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
         const ctx = {
-          taskId, kind: 'orders', full, userId: Number(pddUid), status: 'pending', message: '',
-          total: 0, results: [], okCount: 0, failCount: 0,
+          taskId, kind: 'orders', phase: 'orders', withInvoice, full,
+          userId: Number(pddUid), status: 'pending', message: '',
+          total: 0, results: [], okCount: 0, failCount: 0, invoice: null,
           progress: { page: 0, fetched: 0, rows: 0, saved: 0, newCount: 0, current: '' },
           progressLog: [], createdAt: Date.now(), expiresAt: Date.now() + 30 * 60 * 1000,
         };
@@ -4964,9 +5602,7 @@ const server = http.createServer(async (req, res) => {
             pushLog(`第 ${pr.page} 页：已拉 ${pr.fetched} 单（子单 ${pr.rows} 条），入库 ${pr.saved} 条，新增 ${pr.newCount}`);
           },
           shouldStop: () => !!ctx.stopping,
-        }).then((out) => {
-          ctx.status = out.ok ? 'done' : 'failed';
-          ctx.message = out.message || '';
+        }).then(async (out) => {
           ctx.truncated = !!out.truncated;
           ctx.maxPages = out.maxPages || null;
           ctx.progress = Object.assign({}, ctx.progress, {
@@ -4975,10 +5611,44 @@ const server = http.createServer(async (req, res) => {
             saved: out.saved || 0, newCount: out.newCount || 0, percent: 100,
           });
           ctx.total = out.fetched || ctx.total;
+          if (ctx.truncated) pushLog(`已到翻页上限（${out.maxPages} 页），更早的订单未拉取，可在系统管理调大上限`);
+          pushLog((out.ok ? '✓ ' : '✗ ') + '订单：' + (out.message || ''));
+
+          // 第二段：刷新发票状态（与原来「刷新发票状态」按钮同一套 pdd.sync 逻辑）
+          // 订单段失败就不再往下跑：登录态/接口多半同一个原因，接着跑只会再报一次同样的错。
+          if (!out.ok || !withInvoice) {
+            ctx.status = out.ok ? 'done' : 'failed';
+            ctx.message = out.message || '';
+            ctx.finishedAt = Date.now();
+            ctx.expiresAt = Date.now() + PDD_APPLY_TTL_MS;
+            return;
+          }
+
+          ctx.phase = 'invoice';
+          ctx.progress = Object.assign({}, ctx.progress, { percent: 100, current: '正在刷新发票状态…' });
+          pushLog('订单已追平，开始刷新发票状态…');
+          try {
+            const inv = await pdd.sync({ userId: Number(pddUid), trigger: 'manual' });
+            ctx.invoice = {
+              ok: !!inv.ok, loginish: !!inv.loginish,
+              total: inv.total || 0, message: inv.message || '',
+            };
+            pushLog((inv.ok ? '✓ ' : '✗ ') + '发票状态：' + (inv.message || ''));
+            // 订单成功了就按「完成」算，发票那段失败只降级成警告文案，不推翻已入库的订单
+            ctx.status = 'done';
+            ctx.message = (out.message || '订单同步完成') + '；'
+              + (inv.ok
+                ? (inv.message || '发票状态已刷新')
+                : '发票状态刷新失败：' + (inv.message || '未知原因'));
+            await logOp(user, 'pdd.sync', { ok: !!inv.ok, total: inv.total, tenantId: pddUid, chained: true });
+          } catch (e) {
+            ctx.status = 'done';
+            ctx.message = (out.message || '订单同步完成') + '；发票状态刷新异常：'
+              + ((e && e.message) || String(e));
+            pushLog('✗ 发票状态刷新异常：' + ((e && e.message) || e));
+          }
           ctx.finishedAt = Date.now();
           ctx.expiresAt = Date.now() + PDD_APPLY_TTL_MS;
-          if (ctx.truncated) pushLog(`已到翻页上限（${out.maxPages} 页），更早的订单未拉取，可在系统管理调大上限`);
-          pushLog((out.ok ? '✓ ' : '✗ ') + (out.message || ''));
         }).catch((e) => {
           ctx.status = 'failed';
           ctx.message = (e && e.message) || String(e);
@@ -4986,12 +5656,13 @@ const server = http.createServer(async (req, res) => {
           pushLog('✗ 同步异常：' + ctx.message);
         });
 
-        await logOp(user, 'pdd.orders.sync', { tenantId: pddUid, full });
+        await logOp(user, 'pdd.orders.sync', { tenantId: pddUid, full, withInvoice });
         return sendJson(res, 200, {
-          ok: true, pending: true, taskId, full,
-          message: full
-            ? '已开始全量拉取订单（不限时间范围），进度见下方…'
-            : '已开始增量拉取订单（追平即停），进度见下方…',
+          ok: true, pending: true, taskId, full, withInvoice,
+          message: (full
+            ? '已开始全量拉取订单（不限时间范围）'
+            : '已开始增量拉取订单（追平即停）')
+            + (withInvoice ? '，拉完自动刷新发票状态，进度见下方…' : '，进度见下方…'),
         });
       }
 
@@ -5264,6 +5935,10 @@ const server = http.createServer(async (req, res) => {
         if (!mine) return sendJson(res, 404, { error: '任务不存在或已结束' });
         return sendJson(res, 200, {
           kind: ctx.kind || 'apply',
+          // 合并任务（订单→发票）的当前阶段：orders / invoice；老任务没有这个字段就是 orders
+          phase: ctx.phase || 'orders',
+          withInvoice: !!ctx.withInvoice,
+          invoice: ctx.invoice || null,
           status: ctx.status,
           ok: ctx.status === 'done',
           message: ctx.message || '',
@@ -5638,6 +6313,177 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 404, { error: '未知闪电帮帮接口' });
     }
 
+    // ── 员工管理（v0.2.104）────────────────────────────────────────────────
+    //   只有「主体账号」（role=user 且 owner_id=NULL）能用；员工自己的账号 owner_id 有值，
+    //   看不到也调不了这组接口。超管走「用户管理」，不在这里给客户配员工。
+    //   员工号的数据归属由 tenantOf() 解析到主体账号，这里只管账号本身与菜单开关。
+    if (p.startsWith('/api/staff/')) {
+      const ownerId = Number(user.id);
+      const canStaff = user.role !== 'admin' && !(Number(user.owner_id) > 0);
+      if (!canStaff) {
+        return sendJson(res, 403, {
+          error: user.role === 'admin' ? '超级管理员请在「用户管理」里维护账号' : '员工账号不能再管理员工',
+        });
+      }
+      const STAFF_NAME_RULE = '员工账号需 2~64 位，可用中文、字母、数字、下划线、点、中划线、括号';
+
+      /** 取一个属于自己的员工；别人的员工一律当不存在（不暴露账号是否存在） */
+      const myStaff = async (id) => {
+        const n = Number(id) || 0;
+        if (!n) return null;
+        const rows = await db.query(
+          `SELECT id, username, status, display_name, note, last_login_at, created_at,
+                  qnh_refund_enabled, qnh_profit_enabled, product_enabled, market_enabled,
+                  billing_enabled, replenish_enabled, price_enabled, after_sale_enabled,
+                  supplier_enabled, waybill_enabled
+             FROM app_user WHERE id = ? AND owner_id = ?`, [n, ownerId]
+        );
+        return rows[0] || null;
+      };
+      const staffRow = (u) => ({
+        id: u.id, username: u.username, status: u.status,
+        displayName: u.display_name || '', note: u.note || '',
+        lastLoginAt: u.last_login_at, createdAt: u.created_at,
+        qnhRefundEnabled: !!Number(u.qnh_refund_enabled),
+        qnhProfitEnabled: !!Number(u.qnh_profit_enabled),
+        productEnabled: !!Number(u.product_enabled),
+        marketEnabled: !!Number(u.market_enabled),
+        billingEnabled: !!Number(u.billing_enabled),
+        replenishEnabled: !!Number(u.replenish_enabled),
+        priceEnabled: !!Number(u.price_enabled),
+        afterSaleEnabled: !!Number(u.after_sale_enabled),
+        supplierEnabled: !!Number(u.supplier_enabled),
+        waybillEnabled: !!Number(u.waybill_enabled),
+      });
+
+      if (method === 'GET' && p === '/api/staff/users') {
+        const rows = await db.query(
+          `SELECT id, username, status, display_name, note, last_login_at, created_at,
+                  qnh_refund_enabled, qnh_profit_enabled, product_enabled, market_enabled,
+                  billing_enabled, replenish_enabled, price_enabled, after_sale_enabled,
+                  supplier_enabled, waybill_enabled
+             FROM app_user WHERE owner_id = ? ORDER BY id ASC`, [ownerId]
+        );
+        return sendJson(res, 200, {
+          staff: rows.map(staffRow),
+          owner: {
+            id: ownerId, username: user.username,
+            brandId: Number(user.brand_id) || 1, brandName: user.brand_name || '',
+            expiresAt: user.expires_at_text || null,
+          },
+          menus: Object.keys(MENU_PERMS).map((k) => ({ key: k, label: MENU_PERMS[k].label })),
+        });
+      }
+
+      if (method === 'POST' && p === '/api/staff/users/create') {
+        const b = await readBody(req);
+        const uname = String(b.username || '').trim();
+        if (!validUsername(uname)) return sendJson(res, 400, { error: STAFF_NAME_RULE });
+        const pwd = String(b.password || '');
+        if (pwd.length < 4) return sendJson(res, 400, { error: '密码至少 4 位' });
+        const dup = await db.query('SELECT id FROM app_user WHERE username = ?', [uname]);
+        if (dup.length) return sendJson(res, 400, { error: '账号已存在: ' + uname });
+        // 员工不单独设使用期限：跟着主体账号走（currentUser 会校验主体是否到期/停用）
+        const r = await db.exec(
+          `INSERT INTO app_user (username, password_hash, role, status, company_name, display_name, note,
+                                 created_by, owner_id, brand_id)
+           VALUES (?, ?, 'user', 'active', ?, ?, ?, ?, ?, ?)`,
+          [uname, auth.hashPassword(pwd), user.company_name || null,
+            String(b.displayName || '').trim().slice(0, 64) || null,
+            String(b.note || '').trim().slice(0, 255) || null,
+            ownerId, ownerId, Number(user.brand_id) || 1]
+        );
+        const menus = (b.menus && typeof b.menus === 'object') ? b.menus : null;
+        if (menus) {
+          const on = Object.keys(MENU_PERMS).filter((k) => !!menus[k]);
+          const sets = on.map((k) => `${MENU_PERMS[k].col} = 1`);
+          if (sets.length) await db.exec(`UPDATE app_user SET ${sets.join(', ')} WHERE id = ?`, [r.insertId]);
+          // 「员工有的菜单，主体默认也有」（v0.3.0）：建员工时勾上的菜单，顺手给主体也开上，
+          // 否则老板给新员工配了菜单、自己反倒看不见。只加不减。
+          if (on.length) {
+            const ownerSets = on.map((k) => `${MENU_PERMS[k].col} = 1`);
+            await db.exec(`UPDATE app_user SET ${ownerSets.join(', ')} WHERE id = ?`, [ownerId]);
+          }
+        }
+        await logOp(user, 'staff.create', { username: uname, staffId: r.insertId });
+        const fresh = await myStaff(r.insertId);
+        return sendJson(res, 200, { ok: true, staff: fresh ? staffRow(fresh) : null });
+      }
+
+      if (method === 'POST' && p === '/api/staff/users/update') {
+        const b = await readBody(req);
+        const u = await myStaff(b.id);
+        if (!u) return sendJson(res, 404, { error: '员工不存在' });
+        const sets = [];
+        const args = [];
+        const wantName = b.username === undefined ? '' : String(b.username).trim();
+        if (wantName && wantName !== u.username) {
+          if (!validUsername(wantName)) return sendJson(res, 400, { error: STAFF_NAME_RULE });
+          const dup = await db.query('SELECT id FROM app_user WHERE username = ? AND id <> ?', [wantName, u.id]);
+          if (dup.length) return sendJson(res, 400, { error: '账号已存在: ' + wantName });
+          sets.push('username = ?'); args.push(wantName);
+        }
+        if (b.displayName !== undefined) {
+          sets.push('display_name = ?'); args.push(String(b.displayName || '').trim().slice(0, 64) || null);
+        }
+        if (b.note !== undefined) {
+          sets.push('note = ?'); args.push(String(b.note || '').trim().slice(0, 255) || null);
+        }
+        if (!sets.length) return sendJson(res, 200, { ok: true, staff: staffRow(u) });
+        await db.exec(`UPDATE app_user SET ${sets.join(', ')} WHERE id = ?`, [...args, u.id]);
+        await logOp(user, 'staff.update', { username: u.username, staffId: u.id });
+        const fresh = await myStaff(u.id);
+        return sendJson(res, 200, { ok: true, staff: fresh ? staffRow(fresh) : null });
+      }
+
+      if (method === 'POST' && p === '/api/staff/users/password') {
+        const b = await readBody(req);
+        const u = await myStaff(b.id);
+        if (!u) return sendJson(res, 404, { error: '员工不存在' });
+        const pwd = String(b.password || '');
+        if (pwd.length < 4) return sendJson(res, 400, { error: '密码至少 4 位' });
+        await db.exec(
+          'UPDATE app_user SET password_hash = ?, token_version = token_version + 1 WHERE id = ?',
+          [auth.hashPassword(pwd), u.id]
+        );
+        await logOp(user, 'staff.password', { username: u.username, staffId: u.id });
+        return sendJson(res, 200, { ok: true, message: '已重置「' + u.username + '」的密码' });
+      }
+
+      if (method === 'POST' && p === '/api/staff/users/status') {
+        const b = await readBody(req);
+        const u = await myStaff(b.id);
+        if (!u) return sendJson(res, 404, { error: '员工不存在' });
+        const st = b.status === 'disabled' ? 'disabled' : 'active';
+        await db.exec(
+          'UPDATE app_user SET status = ?, token_version = token_version + IF(status <> ?, 1, 0) WHERE id = ?',
+          [st, st, u.id]
+        );
+        await logOp(user, 'staff.status', { username: u.username, staffId: u.id, status: st });
+        return sendJson(res, 200, { ok: true, id: u.id, status: st });
+      }
+
+      if (method === 'POST' && p === '/api/staff/users/delete') {
+        const b = await readBody(req);
+        const u = await myStaff(b.id);
+        if (!u) return sendJson(res, 404, { error: '员工不存在' });
+        await db.exec('DELETE FROM app_user WHERE id = ? AND owner_id = ?', [u.id, ownerId]);
+        await logOp(user, 'staff.delete', { username: u.username, staffId: u.id });
+        return sendJson(res, 200, { ok: true, id: u.id });
+      }
+
+      // 员工菜单权限：校验归属后复用统一的 setMenuPermit
+      if (method === 'POST' && p === '/api/staff/users/menu') {
+        const b = await readBody(req);
+        const u = await myStaff(b.id);
+        if (!u) return sendJson(res, 404, { error: '员工不存在' });
+        const r = await setMenuPermit(user, u.id, String(b.menu || '').trim().toLowerCase(), !!b.enabled);
+        return sendJson(res, r.code, r.body);
+      }
+
+      return sendJson(res, 404, { error: '未知的员工管理接口' });
+    }
+
     // ── 系统管理（仅超级管理员） ──
     if (p.startsWith('/api/admin/')) {
       if (!isAdmin) return sendJson(res, 403, { error: '仅超级管理员可访问' });
@@ -5690,33 +6536,14 @@ const server = http.createServer(async (req, res) => {
       if (method === 'POST' && p === '/api/admin/users/delete') {
         return sendJson(res, 200, await deleteUser(await readBody(req), user));
       }
-      // 菜单权限：逐个账号开启/关闭（menu=refund|profit|product|market，缺省 refund 向后兼容；
-      // 拼多多发票对所有用户开放，不再走这里）
+      // 菜单权限：逐个账号开启/关闭（menu=refund|profit|product|market|billing|replenish|price|after，
+      // 缺省 refund 向后兼容；表在 MENU_PERMS）
       if (method === 'POST' && p === '/api/admin/users/qnh-refund') {
         const b = await readBody(req);
         const id = Number(b.id);
-        const enabled = !!b.enabled;
-        const menu = String(b.menu || 'refund').trim().toLowerCase();
-        const MENU = {
-          refund: { col: 'qnh_refund_enabled', label: '退单列表', field: 'qnhRefundEnabled' },
-          profit: { col: 'qnh_profit_enabled', label: '实时毛利监控', field: 'qnhProfitEnabled' },
-          product: { col: 'product_enabled', label: '商品列表', field: 'productEnabled' },
-          market: { col: 'market_enabled', label: '交易市场', field: 'marketEnabled' },
-          billing: { col: 'billing_enabled', label: '账单', field: 'billingEnabled' },
-          replenish: { col: 'replenish_enabled', label: '补货', field: 'replenishEnabled' },
-          price: { col: 'price_enabled', label: '平台取价', field: 'priceEnabled' },
-        };
-        const m = MENU[menu];
-        if (!m) return sendJson(res, 400, { error: '未知的菜单：' + menu });
         if (!id) return sendJson(res, 400, { error: '缺少用户ID' });
-        const rows = await db.query('SELECT id, username, role FROM app_user WHERE id = ?', [id]);
-        if (!rows.length) return sendJson(res, 404, { error: '用户不存在' });
-        if (rows[0].role === 'admin') {
-          return sendJson(res, 400, { error: `超级管理员默认拥有${m.label}权限，无需开启` });
-        }
-        await db.exec(`UPDATE app_user SET ${m.col} = ? WHERE id = ?`, [enabled ? 1 : 0, id]);
-        await logOp(user, 'qnh.permit', { username: rows[0].username, menu, enabled });
-        return sendJson(res, 200, { ok: true, id, menu, enabled, [m.field]: enabled });
+        const r = await setMenuPermit(user, id, String(b.menu || 'refund').trim().toLowerCase(), !!b.enabled);
+        return sendJson(res, r.code, r.body);
       }
       // 按用户名/ID 查用户概况（配合 ?tenant= 查看其看板）
       if (method === 'GET' && p === '/api/admin/user-lookup') {
@@ -5884,6 +6711,19 @@ server.listen(PORT, async () => {
     if (admin) {
       const notes = tenancy.migrateLegacyData(admin.id);
       for (const n of notes) console.log('  [迁移] ' + n);
+    }
+    // 1688 登录态自 0.2.99 起按账号隔离：旧的全局 data/ali-cookie.txt 一次性归给
+    // 「订单最多的账号」（一条订单都没有就给 admin）。原文件保留不动，只写标记，只迁一次。
+    try {
+      const rows = await db.query(
+        'SELECT user_id AS uid, COUNT(*) AS n FROM invoice_order GROUP BY user_id ORDER BY n DESC LIMIT 1');
+      const target = rows && rows[0] ? Number(rows[0].uid) : (admin ? Number(admin.id) : 0);
+      const mig = aliOrders.migrateLegacyCookieOnce(target);
+      if (mig.migrated) {
+        console.log(`  [迁移] 旧 1688 全局登录态已归给账号 #${target} → ${mig.to}（原 data/ali-cookie.txt 保留）`);
+      }
+    } catch (e) {
+      console.error('  [迁移] 1688 登录态归属迁移跳过:', e.message);
     }
     const v = await db.ping();
     console.log(`✓ 数据库连接正常 (MySQL ${v})`);
