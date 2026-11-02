@@ -1326,6 +1326,123 @@ async function migrate(conn, dbName) {
     );
   }
 
+  // ── 供应商 / 货单管理（v0.3.0）──
+  //   两个新菜单沿用 app_user 逐列开关；supplier / waybill / waybill_image / waybill_upload_token
+  //   是普通业务表。下面的 DDL 与 sql/schema.sql 必须同源（改一处就要改另一处）。
+  const NEW_MENU_COLS = ['supplier_enabled', 'waybill_enabled'];
+  for (const col of NEW_MENU_COLS) {
+    if (!(await colExists('app_user', col))) {
+      const label = col === 'supplier_enabled' ? '供应商管理页' : '货单管理页';
+      await q(`ALTER TABLE \`app_user\` ADD COLUMN \`${col}\` TINYINT(1) NOT NULL DEFAULT 0 ` +
+        `COMMENT '是否允许查看${label}（1=开启，超级管理员始终可见）'`);
+    }
+  }
+
+  if (!(await tableExists('supplier'))) {
+    await q(
+      'CREATE TABLE `supplier` (' +
+      '  `id`         INT           NOT NULL AUTO_INCREMENT,' +
+      "  `user_id`    INT           NOT NULL DEFAULT 1   COMMENT '数据归属用户（员工录入时是所属主体账号）'," +
+      "  `name`       VARCHAR(64)   NOT NULL             COMMENT '供应商名称（同账号下唯一）'," +
+      "  `note`       VARCHAR(255)  DEFAULT NULL         COMMENT '备注（联系方式、结算方式等）'," +
+      "  `created_by` VARCHAR(64)   DEFAULT NULL         COMMENT '录入人（登录账号）'," +
+      "  `created_at` DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '新建日期'," +
+      '  `updated_at` DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,' +
+      '  PRIMARY KEY (`id`),' +
+      '  UNIQUE KEY `uk_supplier_user_name` (`user_id`, `name`),' +
+      '  KEY `idx_supplier_user` (`user_id`, `id`)' +
+      ') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci' +
+      "  COMMENT='供应商字典（供应商管理页维护，货单引用）'"
+    );
+  }
+
+  if (!(await tableExists('waybill'))) {
+    await q(
+      'CREATE TABLE `waybill` (' +
+      '  `id`            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,' +
+      "  `user_id`       INT           NOT NULL DEFAULT 1   COMMENT '数据归属用户（员工录入时是所属主体账号）'," +
+      "  `supplier_id`   INT           NOT NULL DEFAULT 0   COMMENT '供应商（supplier.id）'," +
+      "  `supplier_name` VARCHAR(64)   NOT NULL DEFAULT ''  COMMENT '建单时的供应商名称快照（供应商被删时兜底展示）'," +
+      "  `amount`        DECIMAL(12,2) NOT NULL DEFAULT 0.00 COMMENT '货单金额（元）'," +
+      "  `bill_date`     DATE          NOT NULL             COMMENT '货单日期（按此列查询与排序）'," +
+      "  `note`          VARCHAR(255)  DEFAULT NULL         COMMENT '备注'," +
+      "  `created_by`    VARCHAR(64)   DEFAULT NULL         COMMENT '录入人（登录账号）'," +
+      "  `created_at`    DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '新建日期'," +
+      '  `updated_at`    DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,' +
+      '  PRIMARY KEY (`id`),' +
+      '  KEY `idx_waybill_user_date`  (`user_id`, `bill_date`),' +
+      '  KEY `idx_waybill_user_sup`   (`user_id`, `supplier_id`),' +
+      '  KEY `idx_waybill_user_ctime` (`user_id`, `created_at`)' +
+      ') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci' +
+      "  COMMENT='货单（供应商 + 金额 + 货单日期 + 图片）'"
+    );
+  }
+
+  if (!(await tableExists('waybill_image'))) {
+    await q(
+      'CREATE TABLE `waybill_image` (' +
+      '  `id`         BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,' +
+      "  `user_id`    INT           NOT NULL DEFAULT 1   COMMENT '数据归属用户（员工操作时记所属主体账号）'," +
+      "  `waybill_id` BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '所属货单（0=还没绑定，等电脑端点保存）'," +
+      "  `token`      CHAR(32)      DEFAULT NULL         COMMENT '上传时用的临时令牌（绑定后清空）'," +
+      "  `object_key` VARCHAR(512)  NOT NULL             COMMENT '七牛对象 key（不含域名，展示时签名）'," +
+      "  `mime`       VARCHAR(64)   DEFAULT NULL         COMMENT '图片类型（image/jpeg 等）'," +
+      "  `size`       INT UNSIGNED  DEFAULT NULL         COMMENT '图片字节数'," +
+      "  `sort`       INT           NOT NULL DEFAULT 0   COMMENT '同单内展示顺序'," +
+      '  `created_at` DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,' +
+      '  PRIMARY KEY (`id`),' +
+      '  KEY `idx_wi_waybill` (`waybill_id`, `user_id`, `sort`),' +
+      '  KEY `idx_wi_token`   (`token`, `user_id`)' +
+      ') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci' +
+      "  COMMENT='货单图片（存七牛 key；waybill_id=0 为待绑定）'"
+    );
+  }
+
+  if (!(await tableExists('waybill_upload_token'))) {
+    await q(
+      'CREATE TABLE `waybill_upload_token` (' +
+      "  `token`      CHAR(32)      NOT NULL             COMMENT '32 位十六进制随机串（URL 里带 ?t=）'," +
+      "  `user_id`    INT           NOT NULL DEFAULT 1   COMMENT '图片归属用户（= 生成链接的人所属主体）'," +
+      "  `created_by` VARCHAR(64)   DEFAULT NULL         COMMENT '生成链接的人（登录账号）'," +
+      "  `expires_at` DATETIME      NOT NULL             COMMENT '失效时间（NOW()+5 分钟）'," +
+      "  `used_count` INT           NOT NULL DEFAULT 0   COMMENT '已成功上传张数（仅统计）'," +
+      '  `created_at` DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,' +
+      '  PRIMARY KEY (`token`),' +
+      '  KEY `idx_wut_expire` (`expires_at`),' +
+      '  KEY `idx_wut_user`   (`user_id`, `created_at`)' +
+      ') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci' +
+      "  COMMENT='货单图片的手机上传临时令牌（5 分钟有效）'"
+    );
+  }
+
+  // ── 「员工有的菜单，主体默认也有」（v0.3.0 用户要求）──
+  //   老板给员工开了某个菜单、自己却因为没开而看不见，是最容易被投诉的形态。
+  //   规则**只加不减**：只把员工的 1 并到主体，从不把主体的 1 改回 0 —— 所以每次启动都跑也安全，
+  //   也能把历史上「员工有、主体没有」的账号一次性补齐。
+  //   ⚠ 列名在这里硬编码一份：不能 require server.js 的 MENU_PERMS（那边反过来依赖本文件，会循环）。
+  //     新增菜单时这里要同步加列名。
+  const MENU_COLS = [
+    'qnh_refund_enabled', 'qnh_profit_enabled', 'product_enabled', 'market_enabled',
+    'billing_enabled', 'replenish_enabled', 'price_enabled', 'after_sale_enabled',
+    'supplier_enabled', 'waybill_enabled',
+  ];
+  try {
+    const usable = [];
+    for (const col of MENU_COLS) if (await colExists('app_user', col)) usable.push(col);
+    if (usable.length) {
+      const pick = usable.map((c) => `MAX(\`${c}\`) AS \`${c}\``).join(', ');
+      const sets = usable.map((c) => `o.\`${c}\` = GREATEST(o.\`${c}\`, s.\`${c}\`)`).join(', ');
+      await q(
+        'UPDATE `app_user` o JOIN (' +
+        `  SELECT owner_id, ${pick} FROM \`app_user\` WHERE owner_id IS NOT NULL AND owner_id > 0 GROUP BY owner_id` +
+        `) s ON s.owner_id = o.id SET ${sets}`
+      );
+    }
+  } catch (e) {
+    // 回填失败不影响启动：只是少了一次历史补齐，新授权走 runtime 的自动同步
+    console.warn('[db] 菜单权限回填（员工→主体）失败：', (e && e.message) || e);
+  }
+
   // ── 种子化超级管理员 + 存量数据归属 ──
   await seedAdmin(conn, dbName);
 }

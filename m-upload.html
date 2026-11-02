@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="format-detection" content="telephone=no">
+<title>上传货单图片</title>
+<style>
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  :root { --bg:#f5f7fa; --card:#fff; --text:#1f2d3d; --text2:#7b8794; --line:#e4e7ed;
+          --pri:#409eff; --ok:#52c41a; --err:#f56c6c; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text);
+    font: 16px/1.6 -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif; }
+  .wrap { max-width: 560px; margin: 0 auto;
+    padding: 18px 14px calc(28px + env(safe-area-inset-bottom)); }
+  header { padding: 6px 4px 14px; }
+  h1 { margin: 0 0 4px; font-size: 19px; font-weight: 600; }
+  .sub { margin: 0; font-size: 13px; color: var(--text2); }
+  .sub.warn { color: #e6a23c; }
+  .sub.bad { color: var(--err); }
+  .card { background: var(--card); border-radius: 12px; padding: 16px;
+    box-shadow: 0 1px 3px rgba(0,0,0,.06); margin-bottom: 12px; }
+  .bar { display: flex; align-items: center; justify-content: space-between;
+    font-size: 13px; color: var(--text2); margin-bottom: 12px; }
+  .bar b { color: var(--text); font-size: 15px; }
+  .clock { font-variant-numeric: tabular-nums; }
+  .clock.warn { color: #e6a23c; }
+  .clock.bad { color: var(--err); }
+  .pick { display: block; width: 100%; padding: 18px 12px; border: 0; border-radius: 10px;
+    background: var(--pri); color: #fff; font-size: 17px; font-weight: 600;
+    letter-spacing: .5px; cursor: pointer; }
+  .pick:active { background: #3a8ee6; }
+  .pick[disabled] { background: #c0c4cc; cursor: not-allowed; }
+  .tip { margin: 12px 2px 0; font-size: 12.5px; color: var(--text2); line-height: 1.7; }
+  .list { display: grid; grid-template-columns: repeat(auto-fill, minmax(84px, 1fr));
+    gap: 8px; margin-top: 14px; }
+  .thumb { position: relative; padding-top: 100%; border-radius: 8px; overflow: hidden;
+    background: #f0f2f5; }
+  .thumb img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+  .thumb .st { position: absolute; inset: 0; display: flex; align-items: center;
+    justify-content: center; background: rgba(0,0,0,.45); color: #fff; font-size: 22px; }
+  .thumb.done .st { background: rgba(82,196,26,.85); font-size: 26px; }
+  .thumb.fail .st { background: rgba(245,108,108,.9); font-size: 13px; padding: 4px; text-align: center; }
+  .msg { font-size: 13.5px; padding: 12px 14px; border-radius: 10px; background: #fef0f0;
+    color: #c45656; }
+  .msg.ok { background: #f0f9eb; color: #529b2e; }
+  .msg:empty { display: none; }
+  .foot { text-align: center; font-size: 12px; color: #a8b1bb; margin-top: 18px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>上传货单图片</h1>
+    <p class="sub" id="sub">正在校验链接…</p>
+  </header>
+
+  <div class="card" id="main" hidden>
+    <div class="bar">
+      <span>已上传 <b id="cnt">0</b> / <span id="max">9</span> 张</span>
+      <span class="clock" id="clock">--:--</span>
+    </div>
+    <button class="pick" id="pick" type="button">拍照 / 选择图片</button>
+    <input type="file" id="file" accept="image/*" multiple hidden>
+    <p class="tip">
+      可一次选多张，图片会自动压缩后上传，每张不超过 5MB。<br>
+      传完回到电脑上点「保存货单」即可，这些图会挂到这张货单上。
+    </p>
+    <div class="list" id="list"></div>
+  </div>
+
+  <div class="msg" id="msg"></div>
+  <div class="foot">链接 5 分钟内有效 · 仅用于上传图片</div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+  var T = new URLSearchParams(location.search).get('t') || '';
+  var MAXEDGE = 1600;          // 最长边压到这个尺寸（跟电脑端的售后凭证一致）
+  var QUALITY = 0.85;
+  var leftSec = 0;
+  var count = 0;
+  var max = 9;
+  var timer = null;
+  var busy = false;
+  var dead = false;
+
+  var $ = function (id) { return document.getElementById(id); };
+  var sub = $('sub'), main = $('main'), msg = $('msg'), list = $('list');
+  var cnt = $('cnt'), maxEl = $('max'), clock = $('clock'), pick = $('pick'), file = $('file');
+
+  function say(text, cls) {
+    msg.textContent = text || '';
+    msg.className = 'msg' + (cls ? ' ' + cls : '');
+  }
+  function fail(text) {
+    dead = true;
+    if (timer) { clearInterval(timer); timer = null; }
+    sub.textContent = '链接不可用';
+    sub.className = 'sub bad';
+    main.hidden = true;
+    say(text, '');
+  }
+  function renderClock() {
+    var s = Math.max(0, leftSec);
+    clock.textContent = '剩余 ' + String(Math.floor(s / 60)).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0');
+    clock.className = 'clock' + (s <= 30 ? ' bad' : (s <= 90 ? ' warn' : ''));
+    if (s <= 0 && !dead) fail('链接已过期（有效期 5 分钟），请让电脑上重新生成一个。');
+  }
+  function renderCount() {
+    cnt.textContent = String(count);
+    maxEl.textContent = String(max);
+    pick.disabled = dead || busy || count >= max;
+    pick.textContent = count >= max ? '已传满 ' + max + ' 张' : '拍照 / 选择图片';
+  }
+
+  /** 压到最长边 1600 的 jpeg；gif 原样传（压缩会丢动画） */
+  function compress(f) {
+    return new Promise(function (resolve, reject) {
+      if (/^image\/gif$/i.test(f.type || '')) {
+        var fr0 = new FileReader();
+        fr0.onload = function () { resolve(fr0.result); };
+        fr0.onerror = function () { reject(new Error('读取失败')); };
+        fr0.readAsDataURL(f);
+        return;
+      }
+      var u = URL.createObjectURL(f);
+      var im = new Image();
+      im.onload = function () {
+        try {
+          var w = im.width, h = im.height;
+          var k = Math.min(1, MAXEDGE / Math.max(w, h));
+          w = Math.max(1, Math.round(w * k));
+          h = Math.max(1, Math.round(h * k));
+          var cv = document.createElement('canvas');
+          cv.width = w; cv.height = h;
+          var ctx = cv.getContext('2d');
+          ctx.fillStyle = '#fff';           // png 透明底转 jpeg 会变黑，先铺白
+          ctx.fillRect(0, 0, w, h);
+          ctx.drawImage(im, 0, 0, w, h);
+          resolve(cv.toDataURL('image/jpeg', QUALITY));
+        } catch (e) { reject(e); }
+        finally { URL.revokeObjectURL(u); }
+      };
+      im.onerror = function () { URL.revokeObjectURL(u); reject(new Error('图片格式无法解析')); };
+      im.src = u;
+    });
+  }
+
+  function addThumb(f) {
+    var d = document.createElement('div');
+    d.className = 'thumb';
+    var img = document.createElement('img');
+    img.alt = '';
+    d.appendChild(img);
+    var st = document.createElement('div');
+    st.className = 'st';
+    st.textContent = '…';
+    d.appendChild(st);
+    try { img.src = URL.createObjectURL(f); } catch (e) { /* 忽略 */ }
+    list.appendChild(d);
+    return { box: d, st: st, img: img };
+  }
+
+  async function uploadOne(f, node) {
+    var dataUrl;
+    try {
+      dataUrl = await compress(f);
+    } catch (e) {
+      node.box.classList.add('fail');
+      node.st.textContent = '压缩失败';
+      return { ok: false, error: '图片压缩失败：' + (e.message || e) };
+    }
+    var r, d;
+    try {
+      r = await fetch('/api/pub/waybill-upload?t=' + encodeURIComponent(T), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ image: dataUrl }),
+      });
+      d = await r.json();
+    } catch (e) {
+      node.box.classList.add('fail');
+      node.st.textContent = '网络错误';
+      return { ok: false, error: '网络中断，请检查手机网络后重试' };
+    }
+    if (!d || !d.ok) {
+      node.box.classList.add('fail');
+      node.st.textContent = (d && d.error) || '失败';
+      return { ok: false, error: (d && d.error) || '上传失败' };
+    }
+    node.box.classList.add('done');
+    node.st.textContent = '✓';
+    count = d.count;
+    if (typeof d.leftSec === 'number') leftSec = d.leftSec;
+    renderClock();
+    renderCount();
+    return { ok: true };
+  }
+
+  async function onFiles(files) {
+    var arr = Array.prototype.slice.call(files || []);
+    if (!arr.length || busy || dead) return;
+    // 张数上限：先按剩余名额截断，多的明确告诉用户
+    var room = max - count;
+    if (arr.length > room) {
+      arr = arr.slice(0, room);
+      say('一次最多再传 ' + room + ' 张，多的没上传。', '');
+    } else {
+      say('', '');
+    }
+    busy = true;
+    renderCount();
+    var okN = 0, lastErr = '';
+    for (var i = 0; i < arr.length; i++) {
+      var node = addThumb(arr[i]);
+      var out = await uploadOne(arr[i], node);
+      if (out.ok) {
+        okN++;
+        // 本地预览用 blob，传完就不再需要了，避免手机内存堆积
+        try { URL.revokeObjectURL(node.img.src); } catch (e) { /* 忽略 */ }
+        node.img.remove();
+      } else {
+        lastErr = out.error;
+        if (/过期|无效/.test(out.error)) { busy = false; fail(out.error); return; }
+      }
+    }
+    busy = false;
+    renderCount();
+    if (okN) say('已上传 ' + okN + ' 张，共 ' + count + ' 张。' + (lastErr ? '（有失败：' + lastErr + '）' : ''), 'ok');
+    else if (lastErr) say(lastErr, '');
+  }
+
+  pick.addEventListener('click', function () { if (!dead && !busy) file.click(); });
+  file.addEventListener('change', function () {
+    onFiles(file.files);
+    file.value = '';           // 允许再次选同一张（用户重拍时很常见）
+  });
+
+  async function boot() {
+    if (!/^[0-9a-f]{32}$/.test(T)) return fail('链接不完整，请让电脑上重新生成二维码。');
+    try {
+      var r = await fetch('/api/pub/waybill-upload?t=' + encodeURIComponent(T), { cache: 'no-store' });
+      var d = await r.json();
+      if (!d || !d.ok) return fail((d && d.error) || '链接已失效，请让电脑上重新生成。');
+      leftSec = Number(d.leftSec) || 0;
+      count = Number(d.imgCount) || 0;
+      max = Number(d.max) || 9;
+      sub.textContent = '传完回到电脑上点「保存货单」即可';
+      sub.className = 'sub';
+      main.hidden = false;
+      renderClock();
+      renderCount();
+      timer = setInterval(function () { leftSec--; renderClock(); }, 1000);
+    } catch (e) {
+      fail('网络不通，打不开这个链接。请确认手机和电脑在同一个网络，或让电脑上重新生成。');
+    }
+  }
+
+  boot();
+  // 页面回到前台时校准一次倒计时（手机锁屏后 setInterval 会停）
+  document.addEventListener('visibilitychange', async function () {
+    if (document.visibilityState !== 'visible' || dead) return;
+    try {
+      var r = await fetch('/api/pub/waybill-upload?t=' + encodeURIComponent(T), { cache: 'no-store' });
+      var d = await r.json();
+      if (!d || !d.ok) return fail((d && d.error) || '链接已失效。');
+      leftSec = Number(d.leftSec) || 0;
+      count = Number(d.imgCount) || 0;
+      renderClock();
+      renderCount();
+    } catch (e) { /* 忽略：真的断网时下一次操作还会报错 */ }
+  });
+})();
+</script>
+</body>
+</html>

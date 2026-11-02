@@ -50,6 +50,8 @@ CREATE TABLE IF NOT EXISTS `app_user` (
   `qht_x_user`           VARCHAR(64)   DEFAULT NULL            COMMENT '齐货通接口登录态 x-user（一般是登录手机号）',
   `product_enabled`      TINYINT(1)    NOT NULL DEFAULT 0      COMMENT '是否允许查看商品列表页（含补货/齐货通；1=开启，超级管理员始终可见）',
   `after_sale_enabled`   TINYINT(1)    NOT NULL DEFAULT 0      COMMENT '是否允许查看售后管理页（1=开启，超级管理员始终可见）',
+  `supplier_enabled`     TINYINT(1)    NOT NULL DEFAULT 0      COMMENT '是否允许查看供应商管理页（1=开启，超级管理员始终可见）',
+  `waybill_enabled`      TINYINT(1)    NOT NULL DEFAULT 0      COMMENT '是否允许查看货单管理页（1=开启，超级管理员始终可见）',
   `market_enabled`       TINYINT(1)    NOT NULL DEFAULT 0      COMMENT '是否允许查看交易市场页（1=开启，超级管理员始终可见）',
   `billing_enabled`      TINYINT(1)    NOT NULL DEFAULT 0      COMMENT '是否允许查看账单页（1=开启，超级管理员始终可见）',
   `token_version`        INT           NOT NULL DEFAULT 1      COMMENT '会话版本：改密/禁用时 +1，旧登录态立即失效',
@@ -592,3 +594,84 @@ CREATE TABLE IF NOT EXISTS `qnh_after_attach` (
   KEY `idx_qaa_time` (`user_id`, `created_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   COMMENT='售后凭证图片（每次状态变更一张，存七牛 key）';
+
+-- ----------------------------------------------------------------------------
+-- 表 5: supplier —— 供应商字典（供应商管理页，v0.3.0）
+--   本系统自己维护，不连任何平台；按账号隔离（员工录入归属所属主体账号）。
+--   同名供应商在同一账号下只允许一条，避免建货单时下拉里出现两个一样的名字。
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `supplier` (
+  `id`         INT           NOT NULL AUTO_INCREMENT,
+  `user_id`    INT           NOT NULL DEFAULT 1   COMMENT '数据归属用户（员工录入时是所属主体账号）',
+  `name`       VARCHAR(64)   NOT NULL             COMMENT '供应商名称（同账号下唯一）',
+  `note`       VARCHAR(255)  DEFAULT NULL         COMMENT '备注（联系方式、结算方式等）',
+  `created_by` VARCHAR(64)   DEFAULT NULL         COMMENT '录入人（登录账号）',
+  `created_at` DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '新建日期',
+  `updated_at` DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_supplier_user_name` (`user_id`, `name`),
+  KEY `idx_supplier_user` (`user_id`, `id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  COMMENT='供应商字典（供应商管理页维护，货单引用）';
+
+-- ----------------------------------------------------------------------------
+-- 表 5.1: waybill —— 货单（采购台账，v0.3.0）
+--   supplier_name 是建单时的名称快照：供应商被改名后展示仍取当前名（JOIN），
+--   万一供应商行没了才回落到快照，不至于列表里出现空白供应商。
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `waybill` (
+  `id`            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `user_id`       INT           NOT NULL DEFAULT 1   COMMENT '数据归属用户（员工录入时是所属主体账号）',
+  `supplier_id`   INT           NOT NULL DEFAULT 0   COMMENT '供应商（supplier.id）',
+  `supplier_name` VARCHAR(64)   NOT NULL DEFAULT ''  COMMENT '建单时的供应商名称快照（供应商被删时兜底展示）',
+  `amount`        DECIMAL(12,2) NOT NULL DEFAULT 0.00 COMMENT '货单金额（元）',
+  `bill_date`     DATE          NOT NULL             COMMENT '货单日期（按此列查询与排序）',
+  `note`          VARCHAR(255)  DEFAULT NULL         COMMENT '备注',
+  `created_by`    VARCHAR(64)   DEFAULT NULL         COMMENT '录入人（登录账号）',
+  `created_at`    DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '新建日期',
+  `updated_at`    DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_waybill_user_date`  (`user_id`, `bill_date`),
+  KEY `idx_waybill_user_sup`   (`user_id`, `supplier_id`),
+  KEY `idx_waybill_user_ctime` (`user_id`, `created_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  COMMENT='货单（供应商 + 金额 + 货单日期 + 图片）';
+
+-- ----------------------------------------------------------------------------
+-- 表 5.2: waybill_image —— 货单图片（v0.3.0）
+--   只存七牛对象 key，展示时现签临时链接；waybill_id=0 表示「手机刚传上来、还没绑到货单」，
+--   靠 token 关联到那次新建操作（见 waybill_upload_token）。
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `waybill_image` (
+  `id`         BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `user_id`    INT           NOT NULL DEFAULT 1   COMMENT '数据归属用户（员工操作时记所属主体账号）',
+  `waybill_id` BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '所属货单（0=还没绑定，等电脑端点保存）',
+  `token`      CHAR(32)      DEFAULT NULL         COMMENT '上传时用的临时令牌（绑定后清空）',
+  `object_key` VARCHAR(512)  NOT NULL             COMMENT '七牛对象 key（不含域名，展示时签名）',
+  `mime`       VARCHAR(64)   DEFAULT NULL         COMMENT '图片类型（image/jpeg 等）',
+  `size`       INT UNSIGNED  DEFAULT NULL         COMMENT '图片字节数',
+  `sort`       INT           NOT NULL DEFAULT 0   COMMENT '同单内展示顺序（绑定前是 0..n，绑定时改为自增 id）',
+  `created_at` DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_wi_waybill` (`waybill_id`, `user_id`, `sort`),
+  KEY `idx_wi_token`   (`token`, `user_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  COMMENT='货单图片（存七牛 key；waybill_id=0 为待绑定）';
+
+-- ----------------------------------------------------------------------------
+-- 表 5.3: waybill_upload_token —— 手机扫码上传的临时凭证（v0.3.0）
+--   电脑端点「生成手机上传链接」写一行，5 分钟后失效；只能传图，不能读任何已有数据。
+--   过期 1 天的行会被下一次生成链接时顺手清掉。
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `waybill_upload_token` (
+  `token`      CHAR(32)      NOT NULL             COMMENT '32 位十六进制随机串（URL 里带 ?t=）',
+  `user_id`    INT           NOT NULL DEFAULT 1   COMMENT '图片归属用户（= 生成链接的人所属主体）',
+  `created_by` VARCHAR(64)   DEFAULT NULL         COMMENT '生成链接的人（登录账号）',
+  `expires_at` DATETIME      NOT NULL             COMMENT '失效时间（NOW()+5 分钟）',
+  `used_count` INT           NOT NULL DEFAULT 0   COMMENT '已成功上传张数（仅统计，上限看配置）',
+  `created_at` DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`token`),
+  KEY `idx_wut_expire` (`expires_at`),
+  KEY `idx_wut_user`   (`user_id`, `created_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  COMMENT='货单图片的手机上传临时令牌（5 分钟有效）';

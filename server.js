@@ -72,6 +72,7 @@ const qnh = require('./lib/qnh');
 const qagent = require('./lib/qnh-agent');
 const jagent = require('./lib/jd-agent');
 const qiniu = require('./lib/qiniu');
+const waybill = require('./lib/waybill');
 const pdd = require('./lib/pdd');
 const pddOrders = require('./lib/pdd-orders');
 const aliOrders = require('./lib/ali-orders');
@@ -422,6 +423,9 @@ function publicUser(u) {
     replenishEnabled: u.role === 'admin' ? true : !!Number(u.replenish_enabled),
     // 售后管理页权限（v0.2.104，独立菜单，默认关闭）
     afterSaleEnabled: u.role === 'admin' ? true : !!Number(u.after_sale_enabled),
+    // 供应商管理 / 货单管理（v0.3.0，两个独立菜单，默认关闭）
+    supplierEnabled: u.role === 'admin' ? true : !!Number(u.supplier_enabled),
+    waybillEnabled: u.role === 'admin' ? true : !!Number(u.waybill_enabled),
     // 平台取价权限（v0.2.95）：齐货通登录/重新取价、阿发Token/自动匹配/取价、选购加购
     priceEnabled: u.role === 'admin' ? true : !!Number(u.price_enabled),
     // 所属品牌方（商品数据按品牌方共享：同品牌下所有用户看到同一套商品）
@@ -600,6 +604,8 @@ const MENU_PERMS = {
   replenish: { col: 'replenish_enabled', label: '补货', field: 'replenishEnabled' },
   price: { col: 'price_enabled', label: '平台取价', field: 'priceEnabled' },
   after: { col: 'after_sale_enabled', label: '售后管理', field: 'afterSaleEnabled' },
+  supplier: { col: 'supplier_enabled', label: '供应商管理', field: 'supplierEnabled' },
+  waybill: { col: 'waybill_enabled', label: '货单管理', field: 'waybillEnabled' },
 };
 
 /**
@@ -615,8 +621,15 @@ async function setMenuPermit(actor, id, menu, enabled) {
     return { code: 400, body: { error: `超级管理员默认拥有${m.label}权限，无需开启` } };
   }
   await db.exec(`UPDATE app_user SET ${m.col} = ? WHERE id = ?`, [enabled ? 1 : 0, id]);
-  await logOp(actor, 'qnh.permit', { username: rows[0].username, menu, enabled });
-  return { code: 200, body: { ok: true, id, menu, enabled, [m.field]: enabled } };
+  // 「员工有的菜单，主体默认也有」（v0.3.0 用户要求）：给员工开启时连带把主体账号同名列置 1，
+  // 免得老板给员工开了权限、自己反而看不见。只加不减 —— 关掉员工的不会连带关掉主体的。
+  let ownerSynced = false;
+  if (enabled && Number(rows[0].owner_id) > 0) {
+    await db.exec(`UPDATE app_user SET ${m.col} = 1 WHERE id = ?`, [Number(rows[0].owner_id)]);
+    ownerSynced = true;
+  }
+  await logOp(actor, 'qnh.permit', { username: rows[0].username, menu, menuLabel: m.label, enabled, ownerSynced });
+  return { code: 200, body: { ok: true, id, menu, enabled, ownerSynced, [m.field]: enabled } };
 }
 
 /** 写操作只允许作用于自己的数据（管理员查看他人为只读，员工可写所属主体的数据） */
@@ -1088,7 +1101,14 @@ const OP_ACTIONS = {
     + (d.accountName ? `「${d.accountName}」` : '')
     + (d.agentCleared ? '（含本机登录态）' : '（本机助手未同步清除）'),
   'qnh.config': (d) => `修改了退单同步设置（${d.items}）`,
-  'qnh.permit': (d) => `${d.enabled ? '开启' : '关闭'}了账号「${d.username}」的退单列表权限`,
+  'qnh.permit': (d) => `${d.enabled ? '开启' : '关闭'}了账号「${d.username}」的${d.menuLabel || '退单列表'}权限`
+    + (d.ownerSynced ? '（同步开启了所属主体账号的同名菜单）' : ''),
+  'waybill.supplier_create': (d) => `新增供应商「${d.name || ''}」`,
+  'waybill.supplier_update': (d) => `修改供应商「${d.name || ''}」`,
+  'waybill.supplier_delete': (d) => `删除供应商「${d.name || ''}」`,
+  'waybill.create': (d) => `新增货单（供应商「${d.supplierName || ''}」，金额 ${d.amount == null ? '' : d.amount}，${d.billDate || ''}，${d.images || 0} 张图）`,
+  'waybill.delete': (d) => `删除货单（供应商「${d.supplierName || ''}」，${d.billDate || ''}）`,
+  'waybill.upload_token': (d) => `生成了货单图片的手机上传链接（5 分钟有效）`,
   'qnh.view': () => '打开了退单列表页',
   'pdd.apply.start': (d) => `发起了批量申请发票任务（${d.total || 0} 单${d.invalid ? `，跳过 ${d.invalid} 单` : ''}）`,
   'pdd.apply': (d) => d.ok === false
@@ -2758,6 +2778,9 @@ async function listUsers() {
     priceEnabled: u.role === 'admin' ? true : !!Number(u.price_enabled),
     // 售后管理权限（v0.2.104）
     afterSaleEnabled: u.role === 'admin' ? true : !!Number(u.after_sale_enabled),
+    // 供应商管理 / 货单管理（v0.3.0）
+    supplierEnabled: u.role === 'admin' ? true : !!Number(u.supplier_enabled),
+    waybillEnabled: u.role === 'admin' ? true : !!Number(u.waybill_enabled),
     // 员工号标记（v0.2.104）：ownerId 非空表示数据归属主体账号，自己名下没有业务数据
     ownerId: Number(u.owner_id) || null,
     ownerUsername: u.owner_username || '',
@@ -2960,6 +2983,27 @@ const server = http.createServer(async (req, res) => {
       return sendHtml(res, 'bookmarklet.html');
     }
     if (method === 'GET' && p === '/healthz') return sendJson(res, 200, { ok: true, ts: new Date().toISOString() });
+    // 手机扫码上传页（v0.3.0）：**不需要登录**，凭证是 URL 里的 5 分钟一次性令牌。
+    // 扫码的人多半是仓库/司机，没有账号；所以这里刻意放在鉴权之前，且只暴露上传能力。
+    if (method === 'GET' && (p === '/m-upload' || p === '/m-upload.html')) return sendHtml(res, 'm-upload.html');
+    if (p === '/api/pub/waybill-upload') {
+      if (method === 'GET') {
+        const s = await waybill.uploadSession(url.searchParams.get('t') || '');
+        if (!s.ok) return sendJson(res, 200, s);
+        // 只回状态，不回 userId（令牌被人捡到也读不到归属信息）
+        return sendJson(res, 200, { ok: true, leftSec: s.leftSec, imgCount: s.imgCount, max: s.max });
+      }
+      if (method === 'POST') {
+        const body = await readBody(req, 9e6);   // 5MB 图片 base64 后约 6.7MB
+        const out = await waybill.uploadImageToToken({
+          token: url.searchParams.get('t') || body.t,
+          dataUrl: body.image || body.imageBase64,
+          ip: String(req.headers['x-forwarded-for'] || '').split(',')[0].trim()
+            || (req.socket && req.socket.remoteAddress) || '',
+        });
+        return sendJson(res, out.ok ? 200 : 400, out);
+      }
+    }
     // 品牌图标：浏览器默认会请求 /favicon.ico，这里给真实图标而不是一条 404
     // 直接复用桌面端那套 ICO（内含 16/20/24 的简化帧，小尺寸不糊）
     if (method === 'GET' && p === '/favicon.ico') return sendAsset(req, res, 'app-icon-mascot.ico');
@@ -4879,6 +4923,148 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { started: true, channel: 'client' });
     }
 
+    // ── 供应商 / 货单管理（v0.3.0）────────────────────────────────────────────
+    //    两个菜单各一个开关（supplier / waybill）。数据归属同样走 tenantOf：
+    //    员工永远作用于所属主体账号的数据，超管可用 ?tenant= 代入（代入时只读）。
+    //    ⚠ 货单页新建时要读供应商下拉，所以「有货单权限」也允许读供应商；
+    //      但增删改供应商仍然只认供应商菜单权限。
+    if (p.startsWith('/api/waybill/')) {
+      const canSupplier = isAdmin || !!Number(user.supplier_enabled);
+      const canWaybill = isAdmin || !!Number(user.waybill_enabled);
+      const denySupplier = () => sendJson(res, 403, { error: '未开启供应商管理权限，请联系超级管理员' });
+      const denyWaybill = () => sendJson(res, 403, { error: '未开启货单管理权限，请联系超级管理员' });
+      const wbUid = tenantId;
+
+      // —— 供应商 ——
+      if (method === 'GET' && p === '/api/waybill/suppliers') {
+        if (!canSupplier && !canWaybill) return denySupplier();
+        const q = url.searchParams;
+        return sendJson(res, 200, await waybill.listSuppliers({
+          userId: wbUid, keyword: q.get('keyword') || '', page: q.get('page'), size: q.get('size'),
+        }));
+      }
+      if (method === 'GET' && p === '/api/waybill/suppliers/all') {
+        if (!canSupplier && !canWaybill) return denySupplier();
+        return sendJson(res, 200, { rows: await waybill.allSuppliers(wbUid) });
+      }
+      if (method === 'POST' && p === '/api/waybill/suppliers/create') {
+        if (!canSupplier) return denySupplier();
+        const body = await readBody(req);
+        writeGuard();
+        const out = await waybill.createSupplier({
+          userId: wbUid, name: body.name, note: body.note, operator: user.username,
+        });
+        if (out.ok) await logOp(user, 'waybill.supplier_create', { tenantId: wbUid, id: out.id, name: out.name });
+        return sendJson(res, out.ok ? 200 : 400, out);
+      }
+      if (method === 'POST' && p === '/api/waybill/suppliers/update') {
+        if (!canSupplier) return denySupplier();
+        const body = await readBody(req);
+        writeGuard();
+        const out = await waybill.updateSupplier({
+          userId: wbUid, id: body.id, name: body.name, note: body.note, operator: user.username,
+        });
+        if (out.ok) await logOp(user, 'waybill.supplier_update', { tenantId: wbUid, id: out.id, name: out.name });
+        return sendJson(res, out.ok ? 200 : 400, out);
+      }
+      if (method === 'POST' && p === '/api/waybill/suppliers/delete') {
+        if (!canSupplier) return denySupplier();
+        const body = await readBody(req);
+        writeGuard();
+        const out = await waybill.deleteSupplier({ userId: wbUid, id: body.id });
+        if (out.ok) await logOp(user, 'waybill.supplier_delete', { tenantId: wbUid, id: out.id });
+        return sendJson(res, out.ok ? 200 : 400, out);
+      }
+
+      // —— 货单 ——
+      if (method === 'GET' && p === '/api/waybill/list') {
+        if (!canWaybill) return denyWaybill();
+        const q = url.searchParams;
+        return sendJson(res, 200, await waybill.listWaybills({
+          userId: wbUid,
+          supplier: q.get('supplier') || '',
+          from: q.get('from') || '', to: q.get('to') || '',
+          page: q.get('page'), size: q.get('size'),
+        }));
+      }
+      if (method === 'GET' && p === '/api/waybill/detail') {
+        if (!canWaybill) return denyWaybill();
+        const out = await waybill.getWaybill({ userId: wbUid, id: url.searchParams.get('id') });
+        return sendJson(res, out.ok ? 200 : 404, out);
+      }
+      if (method === 'POST' && p === '/api/waybill/create') {
+        if (!canWaybill) return denyWaybill();
+        const body = await readBody(req);
+        writeGuard();
+        const out = await waybill.createWaybill({
+          userId: wbUid, supplierId: body.supplierId, amount: body.amount,
+          billDate: body.billDate, note: body.note, operator: user.username, token: body.token,
+        });
+        if (out.ok) {
+          await logOp(user, 'waybill.create', {
+            tenantId: wbUid, id: out.id, supplierName: body.supplierName,
+            amount: body.amount, billDate: body.billDate, images: out.imageCount,
+          });
+        }
+        return sendJson(res, out.ok ? 200 : 400, out);
+      }
+      if (method === 'POST' && p === '/api/waybill/delete') {
+        if (!canWaybill) return denyWaybill();
+        const body = await readBody(req);
+        writeGuard();
+        const out = await waybill.deleteWaybill({ userId: wbUid, id: body.id });
+        if (out.ok) await logOp(user, 'waybill.delete', { tenantId: wbUid, id: out.id, supplierName: body.supplierName, billDate: body.billDate });
+        return sendJson(res, out.ok ? 200 : 400, out);
+      }
+
+      // —— 建单时的图片：5 分钟临时上传链接（手机扫码传图）——
+      //    电脑端只负责「生成链接 → 显示二维码 → 轮询已传张数」，图片走手机浏览器直传，
+      //    这样仓库里拍的照不用先倒到电脑上。token 只能传图，读不到任何已有数据。
+      if (method === 'POST' && p === '/api/waybill/upload-token') {
+        if (!canWaybill) return denyWaybill();
+        writeGuard();
+        const out = await waybill.createUploadToken({ userId: wbUid, operator: user.username });
+        if (!out.ok) return sendJson(res, 400, out);
+        const link = serverUrlOf(req) + '/m-upload?t=' + out.token;
+        await logOp(user, 'waybill.upload_token', { tenantId: wbUid });
+        return sendJson(res, 200, Object.assign(out, { link }));
+      }
+      if (method === 'GET' && p === '/api/waybill/upload-token') {
+        if (!canWaybill) return denyWaybill();
+        const token = url.searchParams.get('token') || '';
+        const out = await waybill.uploadSession(token);
+        if (!out.ok) return sendJson(res, 200, out);
+        // 同一账号下的令牌才给看图（防止拿到别人的 token 串进来偷看）
+        const imgs = await waybill.tokenImages({ userId: wbUid, token });
+        return sendJson(res, 200, Object.assign(out, { images: imgs }));
+      }
+      // 电脑端也能传：复用同一个 token，和手机传的图放在一起，保存时一并绑定
+      if (method === 'POST' && p === '/api/waybill/upload') {
+        if (!canWaybill) return denyWaybill();
+        writeGuard();
+        const body = await readBody(req, 9e6);   // 5MB 图片 base64 后约 6.7MB
+        const sess = await waybill.uploadSession(body.token);
+        if (!sess.ok) return sendJson(res, 400, sess);
+        if (Number(sess.userId) !== Number(wbUid)) {
+          return sendJson(res, 403, { error: '这个上传链接不属于当前账号' });
+        }
+        const out = await waybill.uploadImageToToken({
+          token: body.token, dataUrl: body.image || body.imageBase64,
+          ip: req.headers['x-forwarded-for'] || (req.socket && req.socket.remoteAddress) || '',
+        });
+        return sendJson(res, out.ok ? 200 : 400, out);
+      }
+      if (method === 'POST' && p === '/api/waybill/upload/remove') {
+        if (!canWaybill) return denyWaybill();
+        const body = await readBody(req);
+        writeGuard();
+        const out = await waybill.removeTokenImage({ userId: wbUid, id: body.id });
+        return sendJson(res, out.ok ? 200 : 400, out);
+      }
+
+      return sendJson(res, 404, { error: '未知的货单管理接口' });
+    }
+
     // ── 牵牛花：退单列表 / 实时毛利（按「菜单权限」分别放行；超级管理员始终可用）──
     //    数据归属：tenantOf(req, url, user) —— 普通用户永远是自己的数据；
     //    超级管理员通过 ?tenant=<userId>「以某个用户的角色进入」查看/操作该用户的数据。
@@ -6148,7 +6334,8 @@ const server = http.createServer(async (req, res) => {
         const rows = await db.query(
           `SELECT id, username, status, display_name, note, last_login_at, created_at,
                   qnh_refund_enabled, qnh_profit_enabled, product_enabled, market_enabled,
-                  billing_enabled, replenish_enabled, price_enabled, after_sale_enabled
+                  billing_enabled, replenish_enabled, price_enabled, after_sale_enabled,
+                  supplier_enabled, waybill_enabled
              FROM app_user WHERE id = ? AND owner_id = ?`, [n, ownerId]
         );
         return rows[0] || null;
@@ -6165,13 +6352,16 @@ const server = http.createServer(async (req, res) => {
         replenishEnabled: !!Number(u.replenish_enabled),
         priceEnabled: !!Number(u.price_enabled),
         afterSaleEnabled: !!Number(u.after_sale_enabled),
+        supplierEnabled: !!Number(u.supplier_enabled),
+        waybillEnabled: !!Number(u.waybill_enabled),
       });
 
       if (method === 'GET' && p === '/api/staff/users') {
         const rows = await db.query(
           `SELECT id, username, status, display_name, note, last_login_at, created_at,
                   qnh_refund_enabled, qnh_profit_enabled, product_enabled, market_enabled,
-                  billing_enabled, replenish_enabled, price_enabled, after_sale_enabled
+                  billing_enabled, replenish_enabled, price_enabled, after_sale_enabled,
+                  supplier_enabled, waybill_enabled
              FROM app_user WHERE owner_id = ? ORDER BY id ASC`, [ownerId]
         );
         return sendJson(res, 200, {
@@ -6205,8 +6395,15 @@ const server = http.createServer(async (req, res) => {
         );
         const menus = (b.menus && typeof b.menus === 'object') ? b.menus : null;
         if (menus) {
-          const sets = Object.keys(MENU_PERMS).filter((k) => !!menus[k]).map((k) => `${MENU_PERMS[k].col} = 1`);
+          const on = Object.keys(MENU_PERMS).filter((k) => !!menus[k]);
+          const sets = on.map((k) => `${MENU_PERMS[k].col} = 1`);
           if (sets.length) await db.exec(`UPDATE app_user SET ${sets.join(', ')} WHERE id = ?`, [r.insertId]);
+          // 「员工有的菜单，主体默认也有」（v0.3.0）：建员工时勾上的菜单，顺手给主体也开上，
+          // 否则老板给新员工配了菜单、自己反倒看不见。只加不减。
+          if (on.length) {
+            const ownerSets = on.map((k) => `${MENU_PERMS[k].col} = 1`);
+            await db.exec(`UPDATE app_user SET ${ownerSets.join(', ')} WHERE id = ?`, [ownerId]);
+          }
         }
         await logOp(user, 'staff.create', { username: uname, staffId: r.insertId });
         const fresh = await myStaff(r.insertId);
