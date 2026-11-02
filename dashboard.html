@@ -921,9 +921,10 @@
             </el-table-column>
             <el-table-column label="商品图片" width="72">
               <template slot-scope="p">
-                <img v-if="p.row.image_url" :src="p.row.image_url" :alt="p.row.goods_name"
+                <img v-if="p.row.image_url" :src="imgThumb(p.row.image_url, 96)" :alt="p.row.goods_name"
+                     width="48" height="48" loading="lazy" decoding="async"
                      style="width:48px;height:48px;object-fit:cover;border-radius:4px;display:block"
-                     @error="e => { e.target.style.display='none'; }" />
+                     @error="imgError($event, p.row.image_url)" />
                 <span v-else class="loginid">—</span>
               </template>
             </el-table-column>
@@ -1019,9 +1020,10 @@
             </el-table-column>
             <el-table-column label="商品图片" width="64">
               <template slot-scope="p">
-                <img v-if="p.row.image_url" :src="p.row.image_url" :alt="p.row.goods_name"
+                <img v-if="p.row.image_url" :src="imgThumb(p.row.image_url, 96)" :alt="p.row.goods_name"
+                     width="46" height="46" loading="lazy" decoding="async"
                      style="width:46px;height:46px;object-fit:cover;border-radius:4px;display:block"
-                     @error="e => { e.target.style.display='none'; }" />
+                     @error="imgError($event, p.row.image_url)" />
                 <span v-else class="loginid">—</span>
               </template>
             </el-table-column>
@@ -1047,9 +1049,10 @@
                   <template v-if="rp.prices[pkey(p.row, 'qht')] && rp.prices[pkey(p.row, 'qht')].ok">
                     <div style="display:flex;flex-direction:column;gap:2px;min-width:120px">
                       <img v-if="rp.prices[pkey(p.row, 'qht')].picture || p.row.image_url"
-                           :src="rp.prices[pkey(p.row, 'qht')].picture || p.row.image_url" :alt="p.row.goods_name"
+                           :src="imgThumb(rp.prices[pkey(p.row, 'qht')].picture || p.row.image_url, 80)" :alt="p.row.goods_name"
+                           width="40" height="40" loading="lazy" decoding="async"
                            style="width:40px;height:40px;object-fit:cover;border-radius:4px;display:block"
-                           @error="e => { e.target.style.display='none'; }" />
+                           @error="imgError($event, rp.prices[pkey(p.row, 'qht')].picture || p.row.image_url)" />
                       <div style="display:flex;justify-content:space-between;gap:8px;font-size:12px;line-height:18px">
                         <span class="loginid">单价</span><b class="amount ok">¥{{ rp.prices[pkey(p.row, 'qht')].unitPrice }}</b>
                       </div>
@@ -1078,9 +1081,10 @@
                   <template v-if="rp.afaPrices[pkey(p.row, 'afa')] && rp.afaPrices[pkey(p.row, 'afa')].ok">
                     <div style="display:flex;flex-direction:column;gap:2px;min-width:120px">
                       <img v-if="rp.afaPrices[pkey(p.row, 'afa')].picture || p.row.image_url"
-                           :src="rp.afaPrices[pkey(p.row, 'afa')].picture || p.row.image_url" :alt="p.row.goods_name"
+                           :src="imgThumb(rp.afaPrices[pkey(p.row, 'afa')].picture || p.row.image_url, 80)" :alt="p.row.goods_name"
+                           width="40" height="40" loading="lazy" decoding="async"
                            style="width:40px;height:40px;object-fit:cover;border-radius:4px;display:block"
-                           @error="e => { e.target.style.display='none'; }" />
+                           @error="imgError($event, rp.afaPrices[pkey(p.row, 'afa')].picture || p.row.image_url)" />
                       <div style="display:flex;justify-content:space-between;gap:8px;font-size:12px;line-height:18px">
                         <span class="loginid">单价</span><b class="amount ok">¥{{ rp.afaPrices[pkey(p.row, 'afa')].unitPrice }}</b>
                       </div>
@@ -1113,9 +1117,10 @@
                   <template v-if="rp.jdPrices[pkey(p.row, 'jd')] && rp.jdPrices[pkey(p.row, 'jd')].ok">
                     <div style="display:flex;flex-direction:column;gap:2px;min-width:120px">
                       <img v-if="rp.jdPrices[pkey(p.row, 'jd')].picture || p.row.image_url"
-                           :src="rp.jdPrices[pkey(p.row, 'jd')].picture || p.row.image_url" :alt="p.row.goods_name"
+                           :src="imgThumb(rp.jdPrices[pkey(p.row, 'jd')].picture || p.row.image_url, 80)" :alt="p.row.goods_name"
+                           width="40" height="40" loading="lazy" decoding="async"
                            style="width:40px;height:40px;object-fit:cover;border-radius:4px;display:block"
-                           @error="e => { e.target.style.display='none'; }" />
+                           @error="imgError($event, rp.jdPrices[pkey(p.row, 'jd')].picture || p.row.image_url)" />
                       <div style="display:flex;justify-content:space-between;gap:8px;font-size:12px;line-height:18px">
                         <span class="loginid">整件价</span><b class="amount ok">¥{{ rp.jdPrices[pkey(p.row, 'jd')].packPrice }}</b>
                       </div>
@@ -7811,9 +7816,12 @@ const vm = new Vue({
       } catch (e) { this.$message.error('补货列表加载失败: ' + e.message); }
       finally { this.rp.loading = false; }
       // 列表一出来就把库里已缓存的价格带出来（mode=cache 只读本地库，绝不去平台取价）
-      await this.loadQhtPrices(this.rp.rows, { mode: 'cache' });
-      await this.loadAfaPrices(this.rp.rows, { mode: 'cache' });
-      await this.loadJdPrices(this.rp.rows, { mode: 'cache' });
+      // 三个接口互不依赖（各写各的 prices/afaPrices/jdPrices），并发跑：串行时 200 条要多等 100ms 以上
+      await Promise.all([
+        this.loadQhtPrices(this.rp.rows, { mode: 'cache' }),
+        this.loadAfaPrices(this.rp.rows, { mode: 'cache' }),
+        this.loadJdPrices(this.rp.rows, { mode: 'cache' }),
+      ]);
       // 重排一次列宽：页面用 v-show 常驻 DOM，在隐藏状态下渲染过的表格列宽会算错，进页面/切视图后必须 doLayout
       this.$nextTick(() => { const t = this.$refs.rpTable; if (t && t.doLayout) t.doLayout(); });
     },
@@ -8136,6 +8144,38 @@ const vm = new Vue({
     async loadQhtSession() {
       try { this.rp.session = await this.api('/api/qht/session'); } catch (e) { /* 静默：状态提示而已 */ }
     },
+    /**
+     * 商品图缩略图地址（v0.2.105）：商品图都存的是原图，平均 243 KB/张（png 能到 1.3 MB），
+     * 而页面只显示 40~48px。美团图床原生支持 `@宽w_高h_1e_1c.webp` 后缀，实测
+     * 109 KB 的 jpg → 1.4 KB、1.33 MB 的 png → 910 B，体积降两个数量级。
+     * 只对 *.meituan.net 追加（其他图床规则未知，原样返回），已经是缩略图的也不重复加。
+     * @param {string} url 原图地址
+     * @param {number} w 显示边长的 2 倍（高清屏用）
+     */
+    imgThumb(url, w) {
+      const u = String(url || '').trim();
+      if (!u) return '';
+      if (!/^https?:\/\/[^/]*\.meituan\.net\//i.test(u)) return u;
+      if (/@\d+w_\d+h/.test(u)) return u;
+      const s = Number(w) > 0 ? Math.round(Number(w)) : 80;
+      return u + '@' + s + 'w_' + s + 'h_1e_1c.webp';
+    },
+    /**
+     * 图片加载失败兜底：先退回原图（缩略图后缀万一以后失效不至于整列白图），原图也失败才隐藏。
+     * 原逻辑是一失败就 display:none，换成缩略图后必须保留这条退路。
+     */
+    imgError(e, fullUrl) {
+      const el = e && e.target ? e.target : e;
+      if (!el || !el.style) return;
+      const full = String(fullUrl || '');
+      if (full && !el.dataset.retried && el.src !== full) {
+        el.dataset.retried = '1';
+        el.src = full;
+        return;
+      }
+      el.style.display = 'none';
+    },
+
     /** 价格表键 = 品牌方 + 平台商品ID：同一个 goodsId 在不同品牌方价格可能不同，只用 goodsId 会串价 */
     pkey(row, kind) {
       if (!row) return '';
