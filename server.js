@@ -73,6 +73,7 @@ const qagent = require('./lib/qnh-agent');
 const jagent = require('./lib/jd-agent');
 const qiniu = require('./lib/qiniu');
 const waybill = require('./lib/waybill');
+const afterSales = require('./lib/supplier-after');
 const pdd = require('./lib/pdd');
 const pddOrders = require('./lib/pdd-orders');
 const aliOrders = require('./lib/ali-orders');
@@ -603,7 +604,7 @@ const MENU_PERMS = {
   billing: { col: 'billing_enabled', label: '账单', field: 'billingEnabled' },
   replenish: { col: 'replenish_enabled', label: '补货', field: 'replenishEnabled' },
   price: { col: 'price_enabled', label: '平台取价', field: 'priceEnabled' },
-  after: { col: 'after_sale_enabled', label: '售后管理', field: 'afterSaleEnabled' },
+  after: { col: 'after_sale_enabled', label: '供应商售后', field: 'afterSaleEnabled' },
   supplier: { col: 'supplier_enabled', label: '供应商管理', field: 'supplierEnabled' },
   waybill: { col: 'waybill_enabled', label: '货单管理', field: 'waybillEnabled' },
 };
@@ -1109,6 +1110,9 @@ const OP_ACTIONS = {
   'waybill.create': (d) => `新增货单（供应商「${d.supplierName || ''}」，金额 ${d.amount == null ? '' : d.amount}，${d.billDate || ''}，${d.images || 0} 张图）`,
   'waybill.delete': (d) => `删除货单（供应商「${d.supplierName || ''}」，${d.billDate || ''}）`,
   'waybill.upload_token': (d) => `生成了货单图片的手机上传链接（5 分钟有效）`,
+  'after.create': (d) => `新增供应商售后（供应商「${d.supplierName || ''}」，金额 ${d.amount == null ? '' : d.amount}，${d.afterDate || ''}）`,
+  'after.delete': (d) => `删除供应商售后（供应商「${d.supplierName || ''}」，${d.afterDate || ''}）`,
+  'after.status': (d) => `推进了供应商售后状态到「${d.statusLabel || ''}」（供应商「${d.supplierName || ''}」，凭证 ${d.imageKey || ''}）`,
   'qnh.view': () => '打开了退单列表页',
   'pdd.apply.start': (d) => `发起了批量申请发票任务（${d.total || 0} 单${d.invalid ? `，跳过 ${d.invalid} 单` : ''}）`,
   'pdd.apply': (d) => d.ok === false
@@ -5065,6 +5069,98 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 404, { error: '未知的货单管理接口' });
     }
 
+    // ── 供应商售后（v0.3.2）────────────────────────────────────────────────
+    //    售后管理菜单整页替换为「针对供应商的售后」，与牵牛花退单脱钩：
+    //    旧 /api/qnh/after-sales/* 一族已下线（数据保留在库），这里换新接口。
+    //    权限沿用 after_sale_enabled 列（超管恒可用）；数据归属同供应商/货单（tenantOf）。
+    if (p.startsWith('/api/after/')) {
+      const canAfter = isAdmin || !!Number(user.after_sale_enabled);
+      if (!canAfter) return sendJson(res, 403, { error: '未开启供应商售后权限，请联系超级管理员' });
+      const afUid = tenantId;   // 数据归属用户（员工录入归属所属主体，写入合法性由 writeGuard 判）
+
+      // 供应商下拉：与货单/供应商管理共用同一本字典（售后页筛选与新增都用它）
+      if (method === 'GET' && p === '/api/after/suppliers') {
+        return sendJson(res, 200, { rows: await afterSales.allSuppliers(afUid) });
+      }
+
+      // 列表：按供应商 / 状态 / 日期区间 / 关键字，带四档计数与凭证（现签 1 小时链接）
+      if (method === 'GET' && p === '/api/after/list') {
+        const q = url.searchParams;
+        const [list, counts] = await Promise.all([
+          afterSales.listAfter({
+            supplier: q.get('supplier') || '',
+            status: q.get('status') == null ? '' : q.get('status'),
+            from: q.get('from') || '',
+            to: q.get('to') || '',
+            keyword: q.get('keyword') || '',
+            page: q.get('page'),
+            size: q.get('size'),
+            userId: afUid,
+          }),
+          afterSales.afterCounts(afUid),
+        ]);
+        return sendJson(res, 200, Object.assign(list, { counts, statuses: afterSales.AFTER_STATUSES }));
+      }
+
+      // 单条详情（凭证弹窗直接用列表里带出的 attaches，这个接口留给刷新/外链场景）
+      if (method === 'GET' && p === '/api/after/detail') {
+        const out = await afterSales.getAfter({ userId: afUid, id: url.searchParams.get('id') });
+        return sendJson(res, out.ok ? 200 : 404, out);
+      }
+
+      // 新增：供应商（字典必选）+ 内容 + 金额 + 售后日期 + 备注
+      if (method === 'POST' && p === '/api/after/create') {
+        const body = await readBody(req);
+        writeGuard();
+        const out = await afterSales.createAfter({
+          userId: afUid, supplierId: body.supplierId, goodsDesc: body.goodsDesc,
+          amount: body.amount, afterDate: body.afterDate, note: body.note, operator: user.username,
+        });
+        if (out.ok) await logOp(user, 'after.create', {
+          tenantId: afUid, id: out.id, supplierName: out.supplierName,
+          amount: body.amount, afterDate: body.afterDate,
+        });
+        return sendJson(res, out.ok ? 200 : 400, out);
+      }
+
+      // 删除（凭证记录一起删；七牛对象保留，误删可找回）
+      if (method === 'POST' && p === '/api/after/delete') {
+        const body = await readBody(req);
+        writeGuard();
+        const out = await afterSales.deleteAfter({ userId: afUid, id: body.id });
+        if (out.ok) await logOp(user, 'after.delete', {
+          tenantId: afUid, id: out.id, supplierName: out.supplierName, afterDate: body.afterDate,
+        });
+        return sendJson(res, out.ok ? 200 : 400, out);
+      }
+
+      // 一键推进下一档：服务端按「当前 +1」算状态，凭证图必传（先传七牛拿 key）。
+      //   ⚠ 先确认记录存在且未到已退款，再传图 —— 否则被拒的请求会把图白白传上七牛留成孤儿。
+      if (method === 'POST' && p === '/api/after/status') {
+        const body = await readBody(req, 9e6);   // 5MB 图片 base64 后约 6.7MB
+        writeGuard();
+        const pre = await afterSales.getAfter({ userId: afUid, id: body.id });
+        if (!pre.ok) return sendJson(res, 404, { ok: false, error: pre.error });
+        if (Number(pre.after.status) >= 3) {
+          return sendJson(res, 400, { ok: false, error: '这条售后已到「已退款」，流程结束' });
+        }
+        const img = qiniu.decodeImagePayload(body.image || body.imageBase64);
+        if (!img.ok) return sendJson(res, 400, { ok: false, error: img.error });
+        const up = await qiniu.uploadImage(img.buffer, { mime: img.mime, userId: afUid, prefix: 'after-sale' });
+        if (!up.ok) return sendJson(res, 400, { ok: false, error: up.error });
+        const out = await afterSales.advanceAfter({
+          userId: afUid, id: body.id, note: body.note,
+          imageKey: up.key, imageMime: up.mime, imageSize: up.size, operator: user.username,
+        });
+        if (out.ok) await logOp(user, 'after.status', {
+          tenantId: afUid, id: out.id, statusLabel: out.statusLabel, imageKey: out.imageKey,
+        });
+        return sendJson(res, out.ok ? 200 : 400, out);
+      }
+
+      return sendJson(res, 404, { error: '未知的供应商售后接口' });
+    }
+
     // ── 牵牛花：退单列表 / 实时毛利（按「菜单权限」分别放行；超级管理员始终可用）──
     //    数据归属：tenantOf(req, url, user) —— 普通用户永远是自己的数据；
     //    超级管理员通过 ?tenant=<userId>「以某个用户的角色进入」查看/操作该用户的数据。
@@ -5075,13 +5171,10 @@ const server = http.createServer(async (req, res) => {
       const canAfterSale = isAdmin || !!Number(user.after_sale_enabled);
       const qnhUid = tenantId;   // 本块所有读写的「数据归属用户」
       const profitApi = p === '/api/qnh/profit' || p === '/api/qnh/profit/pull' || p === '/api/qnh/profit/trend';
-      const afterApi = p.startsWith('/api/qnh/after-sales');
-      // 退款原因两个页面都能改（退单列表 + 售后管理的「改原因」），任一菜单权限即可
+      // 退款原因在退单列表改（供应商售后 v0.3.2 起不再读退单，旧售后页的「改原因」已下线）
       const reasonApi = p === '/api/qnh/refunds/reason';
-      if (afterApi) {
-        if (!canAfterSale) return sendJson(res, 403, { error: '未开启售后管理权限，请联系超级管理员' });
-      } else if (reasonApi) {
-        if (!canRefund && !canAfterSale) return sendJson(res, 403, { error: '未开启退单列表或售后管理权限，请联系超级管理员' });
+      if (reasonApi) {
+        if (!canRefund) return sendJson(res, 403, { error: '未开启退单列表权限，请联系超级管理员' });
       } else if (profitApi) {
         if (!canProfit) return sendJson(res, 403, { error: '未开启毛利监控权限，请联系超级管理员' });
       } else if (p === '/api/qnh/status' || p === '/api/qnh/logout') {
@@ -5143,114 +5236,6 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 200, { days: await qnh.refundTrend(url.searchParams.get('days') || 30, qnhUid) });
       }
 
-      // ── 售后管理（v0.2.104；v0.2.106 起含手工登记）────────────────────────
-      //   两个来源合并成一页：牵牛花同步来的平台退单 + 「新增售后」手工录入的记录。
-      //   处理状态（0待处理 1已申请 2已退货 3已退款）与售后原因都是本系统人工维护的：
-      //   同步只更新平台字段，不会把它们冲掉。
-      if (method === 'GET' && p === '/api/qnh/after-sales') {
-        const q = url.searchParams;
-        const [list, counts] = await Promise.all([
-          qnh.listAfterSales({
-            status: q.get('status') == null ? '' : q.get('status'),
-            from: q.get('from') || '',
-            to: q.get('to') || '',
-            keyword: q.get('keyword') || '',
-            page: q.get('page'),
-            size: q.get('size'),
-            userId: qnhUid,
-          }),
-          qnh.afterSaleCounts(qnhUid),
-        ]);
-        return sendJson(res, 200, Object.assign(list, { counts, statuses: qnh.AFTER_SALE_STATUSES }));
-      }
-
-      // 「新增售后」的商品搜索：按商品名称 / SKU 模糊查本地商品（不连平台、不取价）
-      //   品牌商品（同品牌共享）+ 个人导入的补货商品，同 SKU 只留一条（优先带图的品牌行）
-      if (method === 'GET' && p === '/api/qnh/after-sales/goods') {
-        const kw = (url.searchParams.get('kw') || '').trim().slice(0, 64);
-        if (!kw) return sendJson(res, 200, { rows: [] });
-        const like = `%${kw}%`;
-        const limit = Math.min(30, Math.max(1, Number(url.searchParams.get('size')) || 20));
-        const brandId = Number(user.brand_id) || 1;
-        const bo = brandOf(req, url, user);
-        const [brandRows, mineRows] = await Promise.all([
-          (bo.all
-            ? db.query(
-              `SELECT sku, goods_name, image_url FROM brand_product
-                WHERE sku LIKE ? OR goods_name LIKE ?
-                ORDER BY (sku = ?) DESC, updated_at DESC LIMIT ${limit}`, [like, like, kw])
-            : db.query(
-              `SELECT sku, goods_name, image_url FROM brand_product
-                WHERE brand_id = ? AND (sku LIKE ? OR goods_name LIKE ?)
-                ORDER BY (sku = ?) DESC, updated_at DESC LIMIT ${limit}`, [brandId, like, like, kw])),
-          db.query(
-            `SELECT sku, goods_name, image_url FROM product_item
-              WHERE user_id = ? AND (sku LIKE ? OR goods_name LIKE ?)
-              ORDER BY (sku = ?) DESC, updated_at DESC LIMIT ${limit}`, [qnhUid, like, like, kw]),
-        ]);
-        const seen = new Set();
-        const rows = [];
-        for (const r of [...brandRows, ...mineRows]) {
-          const sku = String(r.sku || '').trim();
-          const name = String(r.goods_name || '').trim();
-          const id = sku || ('name:' + name);
-          if (!id || seen.has(id)) continue;
-          seen.add(id);
-          rows.push({ sku, goodsName: name, imageUrl: r.image_url || '' });
-          if (rows.length >= limit) break;
-        }
-        return sendJson(res, 200, { rows });
-      }
-
-      // 新增手工售后：选中商品 + 数量 + 原因 → 落 qnh_after_manual（不进退单列表、不受同步影响）
-      if (method === 'POST' && p === '/api/qnh/after-sales/manual') {
-        const body = await readBody(req);
-        writeGuard();
-        const out = await qnh.createManualAfterSale({
-          userId: qnhUid, sku: body.sku, goodsName: body.goodsName, imageUrl: body.imageUrl,
-          qty: body.qty, reason: body.reason, note: body.note, operator: user.username,
-        });
-        if (out.ok) await logOp(user, 'qnh.after_create', { tenantId: qnhUid, id: out.id, sku: out.sku, qty: out.qty });
-        return sendJson(res, out.ok ? 200 : 400, out);
-      }
-
-      // 删除手工售后（平台退单不能删，只能改状态）
-      if (method === 'POST' && p === '/api/qnh/after-sales/manual/delete') {
-        const body = await readBody(req);
-        writeGuard();
-        const out = await qnh.deleteManualAfterSale({ id: body.id, userId: qnhUid });
-        if (out.ok) await logOp(user, 'qnh.after_delete', { tenantId: qnhUid, id: out.id });
-        return sendJson(res, out.ok ? 200 : 400, out);
-      }
-
-      // 售后状态变更（v0.2.108）：必须带一张凭证图 —— 先传七牛拿 key，再连状态一起写库。
-      //   图与状态同一次请求：七牛失败就直接返回，状态不变（"凭证必填"的代价，见方案说明）。
-      if (method === 'POST' && p === '/api/qnh/after-sales/status') {
-        const body = await readBody(req, 9e6);   // 5MB 图片 base64 后约 6.7MB
-        writeGuard();
-        const img = qiniu.decodeImagePayload(body.image || body.imageBase64);
-        if (!img.ok) return sendJson(res, 400, { ok: false, error: img.error });
-        const up = await qiniu.uploadImage(img.buffer, { mime: img.mime, userId: qnhUid, prefix: 'after-sale' });
-        if (!up.ok) return sendJson(res, 400, { ok: false, error: up.error });
-        const out = await qnh.setAfterSaleStatus({
-          key: body.key, refundNo: body.refundNo, status: body.status, note: body.note,
-          imageKey: up.key, imageMime: up.mime, imageSize: up.size,
-          userId: qnhUid, operator: user.username,
-        });
-        if (out.ok) await logOp(user, 'qnh.after_status', { tenantId: qnhUid, key: out.key, status: out.status, imageKey: out.imageKey });
-        return sendJson(res, out.ok ? 200 : 400, out);
-      }
-
-      // 售后页「改原因」：平台退单写人工列 refund_reason，手工登记直接改它自己的原因
-      if (method === 'POST' && p === '/api/qnh/after-sales/reason') {
-        const body = await readBody(req);
-        writeGuard();
-        const out = await qnh.setAfterSaleReason({
-          key: body.key, refundNo: body.refundNo, reason: body.reason, userId: qnhUid,
-        });
-        if (out.ok) await logOp(user, 'qnh.after_reason', { tenantId: qnhUid, key: out.key });
-        return sendJson(res, out.ok ? 200 : 400, out);
-      }
 
       // 退单列表的「退款原因」：人工列，写 refund_reason；传空 = 清空（页面回落到平台原值）
       if (method === 'POST' && p === '/api/qnh/refunds/reason') {
