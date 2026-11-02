@@ -2424,14 +2424,6 @@
 
       <!-- ══════════ 售后管理（v0.2.104，独立菜单权限） ══════════ -->
       <div v-show="page === 'after'" id="page-after">
-        <div class="page-bar">
-          <span class="pb-info"></span>
-          <span class="pb-actions">
-            <el-button size="small" type="primary" icon="el-icon-plus" @click="openAfCreate">新增售后</el-button>
-            <el-button size="small" icon="el-icon-refresh" :loading="af.loading" @click="loadAfterSales">刷新</el-button>
-          </span>
-        </div>
-
         <qnh-tenant-picker v-if="isAdmin" :users="qnhUsers" :value="qnhTenant"
                            :sessions="qnhSessions" :self-id="me && me.id"
                            @change="onQnhTenantChange"></qnh-tenant-picker>
@@ -2464,6 +2456,7 @@
                       placeholder="商品名 / SKU / 售后原因（平台单也可按退单号、订单号搜）"
                       @keyup.enter.native="onAfFilter" @clear="onAfFilter"></el-input>
             <el-button size="small" type="primary" plain @click="onAfFilter">查询</el-button>
+            <el-button size="small" type="primary" icon="el-icon-plus" @click="openAfCreate">新增售后</el-button>
             <span class="fb-spacer"></span>
             <span class="loginid">共 {{ af.total }} 条</span>
           </div>
