@@ -1565,12 +1565,15 @@ function onPddLoginDone(uid, msg) {
 }
 
 /**
- * 助手回报「登录1688」结果：把 Cookie 串写进 data/ali-cookie.txt（mtop 直连取数用的就是它）。
+ * 助手回报「登录1688」结果：把 Cookie 串写进**该账号自己的** data/users/<uid>/ali-cookie.txt
+ * （mtop 直连取数用的就是它）。登录态按账号隔离，不写全局文件。
  * 与拼多多不同：1688 的服务器侧登录态是文件不是数据库 —— saveCookie / clearCookie 都在 lib/ali-orders.js。
  */
 function onAliLoginDone(uid, msg) {
   const ctx = ALI_LOGINS.get(String((msg && msg.taskId) || ''));
-  if (!ctx || ctx.userId !== Number(uid) || ctx.status !== 'pending') return;
+  if (!ctx || ctx.status !== 'pending') return;
+  // 接受两种情况：助手就是该账号本人的电脑；或管理员代入该账号、登录窗口开在管理员电脑上
+  if (ctx.userId !== Number(uid) && ctx.loginBy !== Number(uid)) return;
   if (!msg.ok) {
     ctx.status = 'failed';
     ctx.message = String(msg.error || '助手未采集到登录态').slice(0, 300);
@@ -1585,7 +1588,7 @@ function onAliLoginDone(uid, msg) {
     return;
   }
   try {
-    const r = aliOrders.saveCookie(cookie);
+    const r = aliOrders.saveCookie(ctx.userId, cookie);
     ctx.status = 'done';
     ctx.cookieCount = cookie.split(';').filter((s) => s.trim()).length;
     ctx.writtenAt = new Date();
@@ -3163,19 +3166,20 @@ const server = http.createServer(async (req, res) => {
 
     // ── 1688 订单同步（mtop: OrderListDataLineService.buyerOrderList）──
     // 「1688发票」页的刷新按钮打这里：从库里最近的订单时间起，往后翻页拉全部订单。
-    // 登录态不进数据库，只读 data/ali-cookie.txt（或环境变量 ALI_COOKIE）。
+    // 登录态不进数据库，按账号读 data/users/<uid>/ali-cookie.txt（或环境变量 ALI_COOKIE，运维全局覆盖）。
     if (method === 'GET' && p === '/api/ali/orders-session') {
-      const st = aliOrders.sessionStatus();
+      const st = aliOrders.sessionStatus(tenantId);
       return sendJson(res, 200, Object.assign(st, {
         latestOrderTime: await aliOrders.latestOrderTime(tenantId).catch(() => null),
         pageSize: aliOrders.PAGE_SIZE,
-        cookieFileHint: 'data/ali-cookie.txt',
+        cookieFileHint: st.fileHint || ('data/users/' + tenantId + '/ali-cookie.txt'),
       }));
     }
     // ── 「登录1688」：本机助手弹桌面窗口（persist:1688 分区）→ 用户登录 → Cookie 串回传 →
-    // 写进 data/ali-cookie.txt。从此不用再手工粘贴 Cookie。
+    // 写进**该账号自己的** data/users/<uid>/ali-cookie.txt。从此不用再手工粘贴 Cookie。
     if (method === 'POST' && p === '/api/ali/login') {
-      // 管理员代入他人时，登录窗口开在「有在线助手的那台电脑」上，登录态仍写到该租户共用的文件
+      // 管理员代入他人时，登录窗口开在「有在线助手的那台电脑」上，登录态仍写到被代入账号自己的文件
+      // （loginBy 记下发起人，回传时两者任一匹配都认，避免「代登录回传被丢」）
       const aUid = agentUidFor(user, tenantId);
       const onMyPc = aUid && Number(aUid) !== Number(tenantId);
       if (!aUid) {
@@ -3197,7 +3201,7 @@ const server = http.createServer(async (req, res) => {
       }
       const taskId = 'alilogin-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
       const ctx = {
-        taskId, userId: Number(tenantId), status: 'pending', message: '',
+        taskId, userId: Number(tenantId), loginBy: Number(user.id), status: 'pending', message: '',
         cookieCount: 0, writtenAt: null, createdAt: Date.now(),
         expiresAt: Date.now() + ALI_LOGIN_TTL_MS,
       };
@@ -3240,7 +3244,7 @@ const server = http.createServer(async (req, res) => {
     // ② 下发 logout 指令让本机助手清掉 persist:1688 分区并等回执（最多 6 秒）。
     // 只清①的话，本机分区还留着旧账号，发消息窗口会免登进旧号（看起来像没退掉）。
     if (method === 'POST' && p === '/api/ali/logout') {
-      const cleared = aliOrders.clearCookie();
+      const cleared = aliOrders.clearCookie(tenantId);
       const agent = await agentLogout(agentUidFor(user, tenantId) || tenantId, '1688');
       await logOp(user, 'ali.logout', { tenantId, agentCleared: !!agent.ok, hadFile: cleared.hadFile });
       let note;
@@ -3374,7 +3378,7 @@ const server = http.createServer(async (req, res) => {
         pushLog('✗ 同步异常：' + ctx.message);
       });
 
-      const st = aliOrders.sessionStatus();
+      const st = aliOrders.sessionStatus(tenantId);
       if (!st.configured) {
         return sendJson(res, 200, {
           ok: false, pending: false, needLogin: true,
@@ -4937,10 +4941,15 @@ const server = http.createServer(async (req, res) => {
         let full = b.full === true || b.full === 'true';
         if (!(await pddOrders.hasOrderData(pddUid))) full = true;
 
+        // 合并按钮（0.2.99）：「同步订单与发票」= 先拉订单增量，拉完紧接着刷发票状态。
+        // b.withInvoice === false 时只拉订单（排查/脚本用），默认两段都跑。
+        const withInvoice = b.withInvoice !== false;
+
         const taskId = 'pddord-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
         const ctx = {
-          taskId, kind: 'orders', full, userId: Number(pddUid), status: 'pending', message: '',
-          total: 0, results: [], okCount: 0, failCount: 0,
+          taskId, kind: 'orders', phase: 'orders', withInvoice, full,
+          userId: Number(pddUid), status: 'pending', message: '',
+          total: 0, results: [], okCount: 0, failCount: 0, invoice: null,
           progress: { page: 0, fetched: 0, rows: 0, saved: 0, newCount: 0, current: '' },
           progressLog: [], createdAt: Date.now(), expiresAt: Date.now() + 30 * 60 * 1000,
         };
@@ -4964,9 +4973,7 @@ const server = http.createServer(async (req, res) => {
             pushLog(`第 ${pr.page} 页：已拉 ${pr.fetched} 单（子单 ${pr.rows} 条），入库 ${pr.saved} 条，新增 ${pr.newCount}`);
           },
           shouldStop: () => !!ctx.stopping,
-        }).then((out) => {
-          ctx.status = out.ok ? 'done' : 'failed';
-          ctx.message = out.message || '';
+        }).then(async (out) => {
           ctx.truncated = !!out.truncated;
           ctx.maxPages = out.maxPages || null;
           ctx.progress = Object.assign({}, ctx.progress, {
@@ -4975,10 +4982,44 @@ const server = http.createServer(async (req, res) => {
             saved: out.saved || 0, newCount: out.newCount || 0, percent: 100,
           });
           ctx.total = out.fetched || ctx.total;
+          if (ctx.truncated) pushLog(`已到翻页上限（${out.maxPages} 页），更早的订单未拉取，可在系统管理调大上限`);
+          pushLog((out.ok ? '✓ ' : '✗ ') + '订单：' + (out.message || ''));
+
+          // 第二段：刷新发票状态（与原来「刷新发票状态」按钮同一套 pdd.sync 逻辑）
+          // 订单段失败就不再往下跑：登录态/接口多半同一个原因，接着跑只会再报一次同样的错。
+          if (!out.ok || !withInvoice) {
+            ctx.status = out.ok ? 'done' : 'failed';
+            ctx.message = out.message || '';
+            ctx.finishedAt = Date.now();
+            ctx.expiresAt = Date.now() + PDD_APPLY_TTL_MS;
+            return;
+          }
+
+          ctx.phase = 'invoice';
+          ctx.progress = Object.assign({}, ctx.progress, { percent: 100, current: '正在刷新发票状态…' });
+          pushLog('订单已追平，开始刷新发票状态…');
+          try {
+            const inv = await pdd.sync({ userId: Number(pddUid), trigger: 'manual' });
+            ctx.invoice = {
+              ok: !!inv.ok, loginish: !!inv.loginish,
+              total: inv.total || 0, message: inv.message || '',
+            };
+            pushLog((inv.ok ? '✓ ' : '✗ ') + '发票状态：' + (inv.message || ''));
+            // 订单成功了就按「完成」算，发票那段失败只降级成警告文案，不推翻已入库的订单
+            ctx.status = 'done';
+            ctx.message = (out.message || '订单同步完成') + '；'
+              + (inv.ok
+                ? (inv.message || '发票状态已刷新')
+                : '发票状态刷新失败：' + (inv.message || '未知原因'));
+            await logOp(user, 'pdd.sync', { ok: !!inv.ok, total: inv.total, tenantId: pddUid, chained: true });
+          } catch (e) {
+            ctx.status = 'done';
+            ctx.message = (out.message || '订单同步完成') + '；发票状态刷新异常：'
+              + ((e && e.message) || String(e));
+            pushLog('✗ 发票状态刷新异常：' + ((e && e.message) || e));
+          }
           ctx.finishedAt = Date.now();
           ctx.expiresAt = Date.now() + PDD_APPLY_TTL_MS;
-          if (ctx.truncated) pushLog(`已到翻页上限（${out.maxPages} 页），更早的订单未拉取，可在系统管理调大上限`);
-          pushLog((out.ok ? '✓ ' : '✗ ') + (out.message || ''));
         }).catch((e) => {
           ctx.status = 'failed';
           ctx.message = (e && e.message) || String(e);
@@ -4986,12 +5027,13 @@ const server = http.createServer(async (req, res) => {
           pushLog('✗ 同步异常：' + ctx.message);
         });
 
-        await logOp(user, 'pdd.orders.sync', { tenantId: pddUid, full });
+        await logOp(user, 'pdd.orders.sync', { tenantId: pddUid, full, withInvoice });
         return sendJson(res, 200, {
-          ok: true, pending: true, taskId, full,
-          message: full
-            ? '已开始全量拉取订单（不限时间范围），进度见下方…'
-            : '已开始增量拉取订单（追平即停），进度见下方…',
+          ok: true, pending: true, taskId, full, withInvoice,
+          message: (full
+            ? '已开始全量拉取订单（不限时间范围）'
+            : '已开始增量拉取订单（追平即停）')
+            + (withInvoice ? '，拉完自动刷新发票状态，进度见下方…' : '，进度见下方…'),
         });
       }
 
@@ -5264,6 +5306,10 @@ const server = http.createServer(async (req, res) => {
         if (!mine) return sendJson(res, 404, { error: '任务不存在或已结束' });
         return sendJson(res, 200, {
           kind: ctx.kind || 'apply',
+          // 合并任务（订单→发票）的当前阶段：orders / invoice；老任务没有这个字段就是 orders
+          phase: ctx.phase || 'orders',
+          withInvoice: !!ctx.withInvoice,
+          invoice: ctx.invoice || null,
           status: ctx.status,
           ok: ctx.status === 'done',
           message: ctx.message || '',
@@ -5884,6 +5930,19 @@ server.listen(PORT, async () => {
     if (admin) {
       const notes = tenancy.migrateLegacyData(admin.id);
       for (const n of notes) console.log('  [迁移] ' + n);
+    }
+    // 1688 登录态自 0.2.99 起按账号隔离：旧的全局 data/ali-cookie.txt 一次性归给
+    // 「订单最多的账号」（一条订单都没有就给 admin）。原文件保留不动，只写标记，只迁一次。
+    try {
+      const rows = await db.query(
+        'SELECT user_id AS uid, COUNT(*) AS n FROM invoice_order GROUP BY user_id ORDER BY n DESC LIMIT 1');
+      const target = rows && rows[0] ? Number(rows[0].uid) : (admin ? Number(admin.id) : 0);
+      const mig = aliOrders.migrateLegacyCookieOnce(target);
+      if (mig.migrated) {
+        console.log(`  [迁移] 旧 1688 全局登录态已归给账号 #${target} → ${mig.to}（原 data/ali-cookie.txt 保留）`);
+      }
+    } catch (e) {
+      console.error('  [迁移] 1688 登录态归属迁移跳过:', e.message);
     }
     const v = await db.ping();
     console.log(`✓ 数据库连接正常 (MySQL ${v})`);

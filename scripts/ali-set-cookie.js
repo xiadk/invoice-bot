@@ -7,10 +7,12 @@
  *   node scripts/ali-set-cookie.js              ← 从剪贴板读取
  *   node scripts/ali-set-cookie.js "a=1; b=2"   ← 直接传串
  *   node scripts/ali-set-cookie.js --file c.txt ← 从文件读
+ *   node scripts/ali-set-cookie.js --uid 3 ...  ← 指定数据归属账号（登录态按账号隔离，0.2.99 起）
  *
  * 它会：
  *   1) 校验关键项（cookie2 / __cn_logon__），缺了直接告诉你
- *   2) 写入 data/ali-cookie.txt（该目录已被 .gitignore 排除，不进版本库）
+ *   2) 写入 data/users/<uid>/ali-cookie.txt（该目录已被 .gitignore 排除，不进版本库）
+ *      ⚠ 登录态按账号隔离：同一个 1688 账号给不同租户用，就要分别写各自的 uid 目录
  *   3) 用「库中最近订单时间」真打一次 mtop，把返回码和首单字段名打出来
  *      —— 字段名是校准入库映射的依据
  */
@@ -70,10 +72,7 @@ function normalize(raw) {
     process.exit(1);
   }
 
-  ali.saveCookie(cookie);
-  console.log('✓ 已写入', ali.COOKIE_FILE);
-
-  // 起点时间：按数据归属用户取；不指定就自动找「有订单的那个用户」
+  // 数据归属账号：必须指定；不指定就自动找「订单最多的那个用户」（与历史脚本口径一致）
   const uidArg = args.indexOf('--uid');
   let uid = uidArg >= 0 ? Number(args[uidArg + 1]) : null;
   if (!uid) {
@@ -81,9 +80,17 @@ function normalize(raw) {
       const db = require(path.join(ROOT, 'db'));
       const rows = await db.query(
         'SELECT user_id AS uid, COUNT(*) AS n FROM invoice_order GROUP BY user_id ORDER BY n DESC LIMIT 1');
-      uid = rows && rows[0] ? Number(rows[0].uid) : 1;
-    } catch (e) { uid = 1; }
+      uid = rows && rows[0] ? Number(rows[0].uid) : 0;
+    } catch (e) { uid = 0; }
+    console.log('· 未指定 --uid，自动取「订单最多的账号」');
   }
+  if (!uid) {
+    console.error('✗ 找不到数据归属账号，请显式传 --uid <用户ID>（登录态按账号隔离，必须落到具体账号）');
+    process.exit(1);
+  }
+
+  const saved = ali.saveCookie(uid, cookie);
+  console.log('✓ 已写入', saved.file);
   const t = await ali.latestOrderTime(uid).catch(() => null);
   console.log('· 数据归属 user_id = %d，库中最近订单时间: %s', uid, t || '(无，需指定起点)');
 

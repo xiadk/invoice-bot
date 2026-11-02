@@ -453,6 +453,28 @@
           <div class="log-panel" ref="logPanel" v-html="logHtml"></div>
         </el-card>
 
+        <!-- 顶部状态条：1688 登录 / 刷新（与「拼多多发票」页同一套 qnh-login-bar 布局，登录态按账号隔离） -->
+        <el-card class="section-card" shadow="never" :body-style="{ padding: '12px 14px' }">
+          <qnh-login-bar service="1688" :cookie="aliCookieBar" action-text="刷新"
+                         :action-loading="aliSync.running" :can-logout="true" hide-meta
+                         @login="onAliLoginBtn" @logout="logoutAli" @action="syncAliOrders">
+            <template slot="actions">
+              <el-tag v-if="aliSync.running || aliSync.text" size="small"
+                      :type="aliSync.running ? 'warning' : 'info'">{{ aliSync.running ? '同步中' : '上次同步已结束' }}</el-tag>
+            </template>
+          </qnh-login-bar>
+          <!-- 订单同步进度：只在同步中/刚结束时出现，不占用常驻版面 -->
+          <div v-if="aliSync.running || aliSync.text" class="ali-sync-bar">
+            <span class="ali-sync-dot" :class="{ on: aliSync.running }"></span>
+            <span class="ali-sync-text">{{ aliSync.text }}</span>
+            <span class="ali-sync-meta" v-if="aliSync.fetched">
+              已拉 {{ aliSync.fetched }} 单 · 入库 {{ aliSync.saved }} · 新增 {{ aliSync.newCount }}
+            </span>
+            <span class="spacer" style="flex:1"></span>
+            <el-button v-if="aliSync.running" size="mini" type="text" @click="stopAliSync">停止</el-button>
+          </div>
+        </el-card>
+
         <!-- 工具栏 -->
         <el-card class="section-card" shadow="never" :body-style="{ padding: '12px 14px' }">
           <div class="toolbar toolbar-tight">
@@ -474,28 +496,11 @@
             <el-input v-model="draftKeyword" size="small" style="width:190px" placeholder="搜索卖家公司名 / 登录ID"
                       clearable @keyup.enter.native="applyFilters"></el-input>
             <el-button size="small" type="primary" plain :loading="boardLoading" @click="applyFilters" title="按当前筛选条件重新请求数据">查询</el-button>
-            <el-button size="small" :loading="boardLoading || aliSync.running" @click="syncAliOrders"
-                       :title="aliSync.running ? '正在从 1688 拉取订单…' : '从 1688 拉取订单：下单时间起点 ' + (aliSync.startDateTime || '库中最近下单时间（自动回退 1 天重叠）') + '，逐页拉到没有下一页为止；拉完再按开票时间增量刷新「已开票」状态'">刷新</el-button>
-            <!-- 1688 登录态：未登录时显示「登录1688」（唤起助手弹窗），已登录时显示「退出1688」（双清联动） -->
-            <el-button size="small" :type="(aliSession && aliSession.configured) ? 'default' : 'success'"
-                       :loading="aliLogin.loading"
-                       @click="(aliSession && aliSession.configured) ? logoutAli() : onAliLoginBtn()"
-                       :title="(aliSession && aliSession.configured) ? '退出 1688：同时清除服务器登录态与本机助手登录态（双清联动）' : '在本机助手里弹出 1688 登录窗口，登录后 Cookie 自动回传服务器，不用再手工粘贴'">{{ (aliSession && aliSession.configured) ? '退出1688' : '登录1688' }}</el-button>
             <span class="spacer"></span>
             <el-button size="small" @click="openUpload('orders')" title="导入1688订单数据：上传从 1688 导出的订单 Excel 并导入（重复订单按最新数据更新）">导入订单</el-button>
             <el-button size="small" @click="openUpload('invoices')" title="导入税务局发票数据：上传从电子税务局导出的发票 Excel 并导入（重复发票按最新数据更新）">导入发票</el-button>
             <el-button size="small" type="primary" :disabled="readonly" @click="batchSend"
                        title="发送话术里的抬头/税号/邮箱取本账号默认抬头（系统管理 → 用户管理 维护）">发送催收消息 ({{ selectedCount }})</el-button>
-          </div>
-          <!-- 订单同步进度：只在同步中/刚结束时出现，不占用常驻版面 -->
-          <div v-if="aliSync.running || aliSync.text" class="ali-sync-bar">
-            <span class="ali-sync-dot" :class="{ on: aliSync.running }"></span>
-            <span class="ali-sync-text">{{ aliSync.text }}</span>
-            <span class="ali-sync-meta" v-if="aliSync.fetched">
-              已拉 {{ aliSync.fetched }} 单 · 入库 {{ aliSync.saved }} · 新增 {{ aliSync.newCount }}
-            </span>
-            <span class="spacer" style="flex:1"></span>
-            <el-button v-if="aliSync.running" size="mini" type="text" @click="stopAliSync">停止</el-button>
           </div>
         </el-card>
 
@@ -1753,7 +1758,7 @@
         <el-card shadow="never" class="section-card">
           <div slot="header">
             <b>拼多多 · 翻页上限</b>
-            <span class="loginid">（「刷新发票状态」与「获取订单数据」共用）</span>
+            <span class="loginid">（「同步订单与发票」的两段共用：拉订单 → 刷发票状态）</span>
           </div>
           <el-form label-position="top" size="small">
             <el-row :gutter="12">
@@ -1765,7 +1770,7 @@
               </el-col>
             </el-row>
             <div class="form-tip">
-              默认 <b>300</b> 页。发票刷新一页 20 条（约 6000 单）、「获取订单数据」一页 50 条（约 15000 单），
+              默认 <b>300</b> 页。发票刷新一页 20 条（约 6000 单）、拉订单一页 50 条（约 15000 单），
               两者都是<b>翻到空页才停</b>，这个上限只用于防止接口异常时无限翻页。<br>
               撞到上限时页面会明确提示「已到翻页上限」，不会静默少拉；若确认还有更早的订单没拉到，把这里调大即可。<br>
               保存后<b>立即生效</b>（下一次同步就读新值），不需要重启服务。
@@ -2480,21 +2485,16 @@
                            :sessions="pddSessions" :self-id="me && me.id"
                            @change="onQnhTenantChange"></qnh-tenant-picker>
 
-        <!-- 顶部状态条：登录 / 刷新（与退单列表、毛利监控共用同一组件，只换服务名） -->
+        <!-- 顶部状态条：登录 / 同步（0.2.99 起「刷新发票状态」与「获取订单数据」合并成一个按钮：
+             点一次先在后台拉订单增量，拉完自动接着刷发票状态，两段进度都在下方进度卡里） -->
         <el-card class="section-card" shadow="never" :body-style="{ padding: '12px 14px' }">
           <qnh-login-bar service="拼多多" :cookie="pd.cookie" :last-run="pd.lastRun"
-                         :who-label="qnhWhoLabel" action-text="刷新发票状态" hide-meta
-                         :action-loading="pd.syncing" :can-logout="true"
-                         @login="onPddLoginBtn" @logout="logoutPdd" @action="doPddSync">
+                         :who-label="qnhWhoLabel" action-text="同步订单与发票" hide-meta
+                         :action-loading="pd.orderSyncing" :can-logout="true"
+                         @login="onPddLoginBtn" @logout="logoutPdd" @action="syncPddOrders">
             <template slot="actions">
-              <el-button size="small" type="success" plain :loading="pd.orderSyncing"
-                         @click="syncPddOrders"
-                         :title="pd.orderSync && pd.orderSync.synced
-                           ? '从最新订单往前增量拉取，追平即停'
-                           : '首次同步：不限时间范围，一直往前翻到空页为止'">
-                {{ pd.orderSync && pd.orderSync.synced ? '获取订单数据' : '获取订单数据（首次全量）' }}
-              </el-button>
-              <el-tag v-if="pd.orderSync && pd.orderSync.lastAt" size="small" type="info">
+              <el-tag v-if="pd.orderSync && pd.orderSync.lastAt" size="small" type="info"
+                      title="最近一次订单同步时间（取数来自拼多多「我的订单」）">
                 订单同步 {{ String(pd.orderSync.lastAt).slice(0, 16) }}
               </el-tag>
             </template>
@@ -2531,7 +2531,7 @@
                     :closable="false" show-icon style="margin-top:10px"
                     :title="'任务失败：' + (pd.applyDialog.message || '未知原因')"
                     :description="pd.applyDialog.kind === 'orders'
-                      ? '拉取订单失败。常见原因：拼多多登录态过期（重新登录后再试）、接口风控限流（过几分钟再试）。已入库的部分不受影响。'
+                      ? '拉取订单失败，发票状态也未刷新。常见原因：拼多多登录态过期（重新登录后再试）、接口风控限流（过几分钟再试）。已入库的部分不受影响。'
                       : (pd.applyDialog.kind === 'send'
                         ? '未发出任何催收消息。可按提示处理后重试（等待上一个任务结束 / 重新登录拼多多 / 升级助手）；已发出去的部分不受影响。'
                         : '未提交开票申请。可按提示处理后重试（等待上一个任务结束 / 重新登录拼多多 / 升级助手）；已提交成功的部分不受影响。')"></el-alert>
@@ -2540,7 +2540,7 @@
                     :title="pd.applyDialog.message"></el-alert>
           <el-alert v-else-if="!pd.applyDialog.running && pd.applyDialog.status === 'done'" type="success"
                     :closable="false" show-icon style="margin-top:10px"
-                    :title="pd.applyDialog.message || (pd.applyDialog.kind === 'orders' ? '订单同步完成' : '申请提交完成')"></el-alert>
+                    :title="pd.applyDialog.message || (pd.applyDialog.kind === 'orders' ? '同步完成' : '申请提交完成')"></el-alert>
         </el-card>
 
         <!-- 筛选 + 列表 -->
@@ -3394,10 +3394,10 @@ const vm = new Vue({
       pd: {
         loading: false, rows: [], total: 0, page: 1, size: 20,
         filter: { status: '', keyword: '', sort: 'time_desc' },
-        summary: null, lastRun: null, syncing: false,
+        summary: null, lastRun: null,
         cookie: { logined: false, loading: false, message: '', accountName: '', pdduid: '', writtenAt: null },
-        // 「获取订单数据」（订单列表接口）：首次全量、之后增量；orderSync 来自 /api/pdd/status
-        // maxPages = 翻页上限（与发票刷新共用，系统管理可配，默认 300）
+        // 「同步订单与发票」：一次点击 = 后台拉订单（首次全量、之后增量）+ 拉完接着刷发票状态
+        // orderSync 来自 /api/pdd/status；maxPages = 翻页上限（两段共用，系统管理可配，默认 300）
         orderSyncing: false, orderTaskId: '', orderSync: null, maxPages: 300,
         // 批量申请发票
         // selected = 跨页累计的已勾选行（翻页不清空）；picked 是它的 {orderSn: row} 索引，
@@ -3706,6 +3706,16 @@ const vm = new Vue({
     gapTooSmall() { return Number(this.cfg.gapMin) < 15 || Number(this.cfg.gapMax) < 15; },
     // 管理员必须先选定一个账号，才能看该账号的牵牛花数据
     qnhNeedPick() { return this.isAdmin && this.qnhTenant == null; },
+    // 1688 登录条：把 /api/ali/orders-session 的结果映射成 qnh-login-bar 认识的 cookie 结构
+    // （登录态按账号隔离，所以换账号后必须重新拉一次，不能沿用上一张卡的状态）
+    aliCookieBar() {
+      const s = this.aliSession || {};
+      return {
+        logined: !!s.configured,
+        loading: !!this.aliLogin.loading,
+        message: '',
+      };
+    },
     // 拼多多催收话术预览：用当前查看账号的抬头填充（「1688发票」页里各账号抬头不同）
     pddMsgPreview() {
       const tpl = String(this.cfg.pddChat || '');
@@ -3745,17 +3755,24 @@ const vm = new Vue({
       const p = ad.progress;
       const isSend = ad.kind === 'send';
       const isOrders = ad.kind === 'orders';
-      const name = isOrders ? '获取订单数据' : (isSend ? '批量催商家开票' : '批量申请发票');
+      const name = isOrders ? '同步订单与发票' : (isSend ? '批量催商家开票' : '批量申请发票');
       const done = p ? (Number(p.index) || 0) : 0;
       const total = p ? (Number(p.total) || 0) : 0;
       let s;
       if (isOrders) {
-        s = (ad.running ? name + '：' : name + '（已结束）：')
-          + '第 ' + (Number(p && p.page) || 0) + ' 页 · 已拉 ' + (Number(p && p.fetched) || 0) + ' 单'
+        const orderPart = '已拉 ' + (Number(p && p.fetched) || 0) + ' 单'
           + ' · 入库 ' + (Number(p && p.saved) || 0) + ' 条（新增 ' + (Number(p && p.newCount) || 0) + '）';
-        // 全量不再限时间：进度标题上写清翻页上限，撞上限时用户能看到原因
-        if (ad.full) s += ' · 全量（翻到空页为止，上限 ' + (this.pd.maxPages || 300) + ' 页）';
-        else if (ad.running) s += ' · 增量（追平即停）';
+        if (ad.phase === 'invoice') {
+          // 第二段：订单已拉完，正在刷发票状态（接口不给进度，只能报阶段）
+          s = name + '：① 订单完成（' + orderPart + '）· ② '
+            + (ad.running ? '正在刷新发票状态…' : '发票状态已刷新');
+        } else {
+          s = (ad.running ? name + '：① 拉取订单 ' : name + '（已结束）：① 拉取订单 ')
+            + '第 ' + (Number(p && p.page) || 0) + ' 页 · ' + orderPart;
+          // 全量不再限时间：进度标题上写清翻页上限，撞上限时用户能看到原因
+          if (ad.full) s += ' · 全量（翻到空页为止，上限 ' + (this.pd.maxPages || 300) + ' 页）';
+          else if (ad.running) s += ' · 增量（追平即停）';
+        }
       } else {
         s = (ad.running ? name + '：' : name + '（已结束）：') + done + '/' + total;
         if (ad.running && p && p.current) s += ' · 当前: ' + p.current;
@@ -5220,7 +5237,7 @@ const vm = new Vue({
         : '你当前登录的';
       try {
         await this.$confirm(
-          `退出后服务器会清除${who}${accTxt}的登录态，之后刷新发票状态、获取订单数据都需要重新登录。`
+          `退出后服务器会清除${who}${accTxt}的登录态，之后「同步订单与发票」需要重新登录。`
           + '\n本机助手里的拼多多登录态会一并清除；助手不在线时，请到助手面板「本机登录态」里手动清除。'
           + '\n已同步的订单与发票数据不受影响，不会被删除。',
           '退出拼多多账号',
@@ -5351,34 +5368,10 @@ const vm = new Vue({
     },
     onPddPage(p) { this.pd.page = p; this.loadPddOrders(); },
     onPddSize(s) { this.pd.size = s; this.pd.page = 1; this.loadPddOrders(); },
-    async doPddSync() {
-      if (this.pd.syncing) return;
-      if (this.qnhNeedPick) { this.$message.warning('请先选择要以哪个账号的身份同步'); return; }
-      this.pd.syncing = true;
-      try {
-        this.$message.info('已开始拉取，完成后会自动刷新列表');
-        const d = await this.pddApi('/api/pdd/sync', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
-        if (d.loginish || (d.error && /登录/.test(d.error))) {
-          this.$message.warning(d.message || d.error || '登录态已失效，请重新登录拼多多');
-          await this.loadPddStatus();
-          return;
-        }
-        if (d.error || !d.ok) {
-          this.$message.error(d.message || d.error || '拉取失败');
-          return;
-        }
-        this.$message.success(d.message || '拉取完成');
-        this.pd.lastRun = { status: 'success', finishedAt: new Date().toLocaleString('zh-CN', { hour12: false }), message: d.message || '' };
-        await this.loadPddStatus();
-        this.loadPddOrders();
-      } catch (e) {
-        this.$message.error('拉取失败：' + e.message);
-      } finally {
-        this.pd.syncing = false;
-      }
-    },
 
-    // ── 「获取订单数据」：拉「我的订单」全部订单（首次全量、之后增量）──
+    // ── 「同步订单与发票」：一次点击跑两段（0.2.99 合并）──
+    //   ① 拉「我的订单」订单（首次全量、之后增量追平）
+    //   ② 拉完自动刷新发票状态（服务端接着跑，页面关掉也会跑完）
     //   后端是后台任务（全量要翻几十页），这里只负责发起 + 轮询进度，进度卡复用批量申请发票那张
     async syncPddOrders() {
       if (this.pd.orderSyncing) { this.$message.info('正在同步中，请看下方进度'); return; }
@@ -5390,7 +5383,7 @@ const vm = new Vue({
           await this.$confirm(
             `首次同步为全量拉取：不限时间范围，会一直往前翻到空页为止，账号历史订单越多耗时越长。`
             + `\n\n翻页上限 ${this.pd.maxPages} 页（发票一页 20 条 / 订单一页 50 条），撞上限时会明确提示。`
-            + `\n\n之后再点「获取订单数据」为增量拉取（只补新订单，追平即停）。`,
+            + `\n\n拉完会自动接着刷新发票状态（两段都在下方进度卡里）；之后再点本按钮为增量拉取（只补新订单，追平即停）。`,
             '首次同步 · 全量拉取',
             { confirmButtonText: '开始拉取', cancelButtonText: '取消', type: 'info' }
           );
@@ -5409,11 +5402,11 @@ const vm = new Vue({
         this.pd.orderTaskId = d.taskId || '';
         this.pd.applyDialog = {
           visible: true, running: true, kind: 'orders', status: '', message: '',
-          full: !!d.full,
-          progress: { page: 0, fetched: 0, rows: 0, saved: 0, newCount: 0 }, log: [],
+          full: !!d.full, phase: 'orders',
+          progress: { page: 0, fetched: 0, rows: 0, saved: 0, newCount: 0, current: '' }, log: [],
           startedAt: Date.now(),
         };
-        this.$message.info(d.message || '已开始拉取订单，进度见下方');
+        this.$message.info(d.message || '已开始同步订单，进度见下方');
         this.$nextTick(() => {
           const el = this.$refs.applyCard && this.$refs.applyCard.$el;
           if (el && el.scrollIntoView) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -5432,7 +5425,7 @@ const vm = new Vue({
         if (Date.now() - started > 20 * 60 * 1000) {
           this.pd.applyDialog.running = false;
           this.pd.applyDialog.status = 'timeout';
-          this.pd.applyDialog.message = '等待超时（20 分钟）。同步可能仍在后台进行，稍后点「刷新发票状态」或重新打开本页查看结果。';
+          this.pd.applyDialog.message = '等待超时（20 分钟）。同步可能仍在后台进行，稍后重新打开本页查看结果。';
           this.pd.orderSyncing = false;
           return;
         }
@@ -5444,6 +5437,8 @@ const vm = new Vue({
         }
         if (d && !d.error) {
           if (d.full !== undefined) this.pd.applyDialog.full = !!d.full;
+          if (d.phase) this.pd.applyDialog.phase = d.phase;
+          if (d.invoice) this.pd.applyDialog.invoice = d.invoice;
           if (d.progress) this.pd.applyDialog.progress = d.progress;
           if (Array.isArray(d.progressLog)) this.pd.applyDialog.log = d.progressLog;
           if (d.status !== 'pending') {
@@ -5456,8 +5451,15 @@ const vm = new Vue({
               newCount: (d.progress && d.progress.newCount) || 0,
             });
             this.pd.orderSyncing = false;
-            if (d.ok) this.$message.success(d.message || '订单同步完成');
-            else this.$message.error(d.message || '订单同步失败');
+            // 顶部「最近同步」标签：合并后只有这一条链路，成功/失败都记在一次上
+            this.pd.lastRun = {
+              status: d.ok ? 'success' : 'failed',
+              finishedAt: new Date().toLocaleString('zh-CN', { hour12: false }),
+              message: d.message || '',
+            };
+            // 两段都跑完才落到这里；发票那段失败时后端仍给 done（订单已入库），文案里已写清失败原因
+            if (d.ok) this.$message.success(d.message || '同步完成');
+            else this.$message.error(d.message || '同步失败');
             await this.loadPddStatus();
             this.loadPddOrders();
             return;
@@ -6764,6 +6766,9 @@ const vm = new Vue({
       this.selected = {};
       this.expanded = {}; this.orderOpen = {}; this.detailCache = {};
       this.dashPage = 1;
+      // 1688 登录态按账号隔离：换了查看身份就得重新拉一次，否则会显示上一个账号的登录状态
+      this.aliSession = null;
+      this.loadAliSession();
       this.switchPage('board');
       this.loadData();
     },
