@@ -2616,7 +2616,7 @@
               <div v-if="a.note" style="margin-top:4px">{{ a.note }}</div>
             </div>
             <img v-if="a.url" :src="a.url" class="af-att-img" alt="凭证" @click="openAfImage(a.url)">
-            <span v-else class="loginid">（图片链接不可用：存储未配置，或链接已过期 —— 重新打开本弹框会现签一次）</span>
+            <span v-else class="loginid">（图片链接不可用：存储未配置，或链接已过期 —— 链接随列表加载签发，刷新列表后重新打开即可）</span>
           </div>
         </el-dialog>
 
