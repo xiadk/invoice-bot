@@ -3919,7 +3919,7 @@
 
   <!-- ══════════ 导入数据（拖拽上传） ══════════ -->
   <el-dialog :title="up.title" :visible.sync="up.visible" width="640px" append-to-body :close-on-click-modal="!up.busy">
-    <div class="up-guide" v-html="up.guide"></div>
+    <div class="up-guide" v-if="up.guide" v-html="up.guide"></div>
     <el-upload drag action="#" :auto-upload="false" :show-file-list="false" :accept="up.accept"
                :on-change="onUpChange" :disabled="up.busy">
       <i class="el-icon-upload"></i>
@@ -4007,12 +4007,7 @@ const UP_GUIDES = {
   products: {
     title: '导入前置仓补货参考',
     accept: '.xlsx,.xls',
-    html: `<div style="font-weight:600;margin-bottom:4px">第一步：导出「前置仓补货参考」Excel</div>
-      <ol>
-        <li>在补货系统里按需要筛选后，使用「<b>批量导出</b>」下载 Excel（文件名类似「前置仓补货参考批量导出…」）</li>
-        <li>系统会自动识别列：商品名称、商品SKU、采购单价、采购状态、可用/在途库存、30天总销量</li>
-      </ol>
-      <div style="margin-top:8px;color:#5a7291">第二步：把导出的 Excel 拖到下方上传区导入（重复商品按本次文件内容更新）</div>`,
+    html: '',
   },
 };
 
