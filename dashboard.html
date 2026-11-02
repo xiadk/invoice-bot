@@ -430,6 +430,29 @@
           </el-col>
         </el-row>
 
+        <!-- 顶部状态条：登录 / 同步（与「拼多多发票」页同一套 qnh-login-bar 组件与排布，
+             位置在统计卡下方、趋势图上方；登录态按账号隔离，换账号要看自己的登录状态） -->
+        <el-card class="section-card" shadow="never" :body-style="{ padding: '12px 14px' }">
+          <qnh-login-bar service="1688" :cookie="aliCookieBar" action-text="同步1688订单"
+                         :action-loading="aliSync.running" :can-logout="true" hide-meta
+                         @login="onAliLoginBtn" @logout="logoutAli" @action="syncAliOrders">
+            <template slot="actions">
+              <el-tag v-if="aliSync.running || aliSync.text" size="small"
+                      :type="aliSync.running ? 'warning' : 'info'">{{ aliSync.running ? '同步中' : '上次同步已结束' }}</el-tag>
+            </template>
+          </qnh-login-bar>
+          <!-- 订单同步进度：只在同步中/刚结束时出现，不占用常驻版面 -->
+          <div v-if="aliSync.running || aliSync.text" class="ali-sync-bar">
+            <span class="ali-sync-dot" :class="{ on: aliSync.running }"></span>
+            <span class="ali-sync-text">{{ aliSync.text }}</span>
+            <span class="ali-sync-meta" v-if="aliSync.fetched">
+              已拉 {{ aliSync.fetched }} 单 · 入库 {{ aliSync.saved }} · 新增 {{ aliSync.newCount }}
+            </span>
+            <span class="spacer" style="flex:1"></span>
+            <el-button v-if="aliSync.running" size="mini" type="text" @click="stopAliSync">停止</el-button>
+          </div>
+        </el-card>
+
         <!-- 趋势图（Element UI 卡片 + ECharts；点某一天可查看当天明细） -->
         <el-row :gutter="12" class="section-card">
           <el-col :xs="24" :sm="24" v-for="c in charts" :key="c.key">
@@ -451,28 +474,6 @@
           </div>
           <el-progress :percentage="taskPercent" :stroke-width="10" :show-text="false"></el-progress>
           <div class="log-panel" ref="logPanel" v-html="logHtml"></div>
-        </el-card>
-
-        <!-- 顶部状态条：1688 登录 / 刷新（与「拼多多发票」页同一套 qnh-login-bar 布局，登录态按账号隔离） -->
-        <el-card class="section-card" shadow="never" :body-style="{ padding: '12px 14px' }">
-          <qnh-login-bar service="1688" :cookie="aliCookieBar" action-text="刷新"
-                         :action-loading="aliSync.running" :can-logout="true" hide-meta
-                         @login="onAliLoginBtn" @logout="logoutAli" @action="syncAliOrders">
-            <template slot="actions">
-              <el-tag v-if="aliSync.running || aliSync.text" size="small"
-                      :type="aliSync.running ? 'warning' : 'info'">{{ aliSync.running ? '同步中' : '上次同步已结束' }}</el-tag>
-            </template>
-          </qnh-login-bar>
-          <!-- 订单同步进度：只在同步中/刚结束时出现，不占用常驻版面 -->
-          <div v-if="aliSync.running || aliSync.text" class="ali-sync-bar">
-            <span class="ali-sync-dot" :class="{ on: aliSync.running }"></span>
-            <span class="ali-sync-text">{{ aliSync.text }}</span>
-            <span class="ali-sync-meta" v-if="aliSync.fetched">
-              已拉 {{ aliSync.fetched }} 单 · 入库 {{ aliSync.saved }} · 新增 {{ aliSync.newCount }}
-            </span>
-            <span class="spacer" style="flex:1"></span>
-            <el-button v-if="aliSync.running" size="mini" type="text" @click="stopAliSync">停止</el-button>
-          </div>
         </el-card>
 
         <!-- 工具栏 -->
