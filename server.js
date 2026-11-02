@@ -4738,6 +4738,19 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 200, { error: String((e && e.message) || e) });
       }
     }
+    // 同步齐货通订单（v0.3.3）：「我的 → 全部订单」拉回落库，账单页「齐货通当月订单金额」的数据源。
+    // 走 billing 权限而不是商品权限——它只是账单统计的数据来源；登录态用的是该账号自己的 x-token。
+    if (method === 'POST' && p === '/api/billing/qht-sync') {
+      if (!canBilling) return denyBilling();
+      writeGuard();
+      try {
+        return sendJson(res, 200, await qht.syncOrders(tenantId));
+      } catch (e) {
+        const code = e && e.code;
+        const hint = code === 'no_session' || code === 'auth' ? '（请先在补货页登录齐货通）' : '';
+        return sendJson(res, 200, { error: String((e && e.message) || e) + hint });
+      }
+    }
 
     // 订单级开票状态
     if (method === 'POST' && p === '/api/order-state') { writeGuard(); return sendJson(res, 200, await setOrderState(tenantId, await readBody(req))); }
