@@ -1,6 +1,6 @@
 {
   "name": "invoice-bot",
-  "version": "0.2.102",
+  "version": "0.2.103",
   "description": "1688/拼多多采购发票催收自动化",
   "main": "server.js",
   "scripts": {
@@ -29,18 +29,12 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
-    "@xenova/transformers": "2.17.2",
     "jpeg-js": "^0.4.4",
     "mysql2": "^3.24.5",
     "node-forge": "^1.4.2",
-    "sharp": "0.33.5",
     "ws": "^8.22.0",
     "xlsx": "^0.18.5"
   },
-  "overrides": {
-    "sharp": "0.33.5"
-  },
-  "_overrides_comment": "必须强制 sharp 0.33：@xenova/transformers 2.x 声明的 ^0.32 在安装时要额外从 GitHub releases 下载 libvips 预编译包，国内必超时（实测 Installation error: Request timed out）。0.33 的二进制走 npm 平台包（@img/sharp-win32-x64），安装不碰 GitHub。",
   "optionalDependencies": {
     "playwright": "^1.64.0"
   },
@@ -66,12 +60,6 @@
       "!node_modules/playwright-core{,/**/*}",
       "!node_modules/mysql2{,/**/*}",
       "!node_modules/xlsx{,/**/*}",
-      "!node_modules/@xenova{,/**/*}",
-      "!node_modules/onnxruntime-node{,/**/*}",
-      "!node_modules/onnxruntime-common{,/**/*}",
-      "!node_modules/onnxruntime-web{,/**/*}",
-      "!node_modules/sharp{,/**/*}",
-      "!node_modules/@img{,/**/*}",
       "!node_modules/**/{test,tests,example,examples,benchmark,benchmarks}/**",
       "!node_modules/**/*.{md,map,ts,d.ts}"
     ],

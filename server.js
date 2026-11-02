@@ -77,8 +77,6 @@ const aliOrders = require('./lib/ali-orders');
 const psync = require('./lib/pdd-sync');
 const sdc = require('./lib/sdc');
 // 商品匹配（自动匹配阿发）：CLIP 图文相似度 + 业务规则。依赖缺失时模块自身降级，不影响服务启动
-const skuMatchLib = require('./lib/sku-match');
-const clipEmbed = require('./lib/clip-embed');
 
 const PORT = Number(process.env.PORT) || 8787;
 const ROOT = __dirname;
@@ -547,236 +545,8 @@ function linkBrandId(user, body) {
 
 const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
 
-/** 自动匹配阿发单次上限：每个商品要真搜一次（限速 250ms）并下载候选图做 CLIP 编码，再大就会把两边都拖垮 */
+/** 自动匹配阿发单次上限：每个商品要真搜一次阿发（限速 250ms），再大就会把对方接口打挂 */
 const MATCH_MAX_PER_RUN = 500;
-/** 每个商品只对「文本相似度」粗排前 N 个候选做图片编码（CLIP 单图约 80ms，全量编码太慢） */
-const MATCH_CAND_TOPN = 12;
-/** 判定匹配的阈值：CLIP 图像余弦基线偏高（同品类 0.73~0.96），0.70 几乎不筛人，按实测校准到 0.80 */
-const MATCH_SCORE_THRESHOLD = Number(process.env.MATCH_SCORE_THRESHOLD) || 0.8;
-/** 自动匹配任务：内存态（重启即丢，进度本来也只活一次操作），保留 30 分钟供页面轮询 */
-const MATCH_TASKS = new Map();
-const MATCH_TASK_KEEP_MS = 30 * 60 * 1000;
-
-/** 清理过期任务，避免 Map 无限增长（每建任务顺手清一次） */
-function pruneMatchTasks() {
-  const now = Date.now();
-  for (const [id, t] of MATCH_TASKS) {
-    if (!t.running && now - (t.finishedAt || t.startedAt || now) > MATCH_TASK_KEEP_MS) MATCH_TASKS.delete(id);
-  }
-}
-
-/** 候选池条目 → 页面用的精简结构（保留阿发原生字段，价格列不用二次请求） */
-function pickAfaCandidate(c, extra) {
-  return Object.assign({
-    goodsId: String(c.goodsId),
-    goodsName: c.goodsName || '',
-    picture: c.picture || '',
-    salePrice: c.salePrice,
-    unitPrice: c.unitPrice,
-    factorName: c.factorName || '',
-  }, extra || {});
-}
-
-/**
- * 自动匹配任务主体（后台跑，页面轮询 /api/products/auto-match/status 看进度）
- *
- * 每个未关联商品：
- *   ① 用商品名称搜阿发，拿候选池（限速 250ms）
- *   ② 先按「中文 2-gram 文本相似度」粗排取前 MATCH_CAND_TOPN 个（CLIP 编码贵，别对 50 条全算）
- *   ③ 对这 N 个候选做 CLIP 图文打分（图片 0.6 + 文本 0.4，再叠加 IP/竞品/容量/款式规则）
- *   ④ 最高分且 is_match 且 ≥ 阈值(0.80) 才写库；否则留空等人工
- *   ⑤ 降级：CLIP 不可用 / 商品无主图 → 回退「搜索结果第一条」并标注，保证不空转
- */
-async function runMatchTask(task, items, opts) {
-  const { tenantId, apply, brandFallback } = opts;
-  const setMsg = (m) => { task.message = m; };
-  const bump = (k) => { task.stats[k] = (task.stats[k] || 0) + 1; };
-
-  // ── CLIP 就绪（失败则整轮降级为「回退第一条」）──
-  let clipOn = clipEmbed.isAvailable();
-  if (clipOn) {
-    setMsg('正在加载 CLIP 模型（首次需下载约 150MB，约 1 分钟）…');
-    try {
-      await clipEmbed.ensureModels();
-      task.model = clipEmbed.info();
-    } catch (e) {
-      clipOn = false;
-      task.warn = 'CLIP 模型加载失败，已回退「名称搜索第一条」：' + String((e && e.message) || e).slice(0, 160);
-    }
-  } else {
-    task.warn = 'CLIP 依赖不可用（' + clipEmbed.unavailableReason() + '），已回退「名称搜索第一条」';
-  }
-  if (!clipOn) task.fallbackAll = true;
-
-  const poolCache = new Map();
-  let lastErr = '';
-
-  for (const it of items) {
-    if (task.stop) { task.state = 'stopped'; break; }
-
-    const base = {
-      sku: it.sku,
-      goods_name: it.goods_name,
-      image_url: it.image_url,
-      brand_id: Number(it.brand_id) || brandFallback,
-      inBrand: !!it.bp_id,
-    };
-
-    // ① 已关联：直接回显，不覆盖人工调整
-    if (it.afa_goods_id) {
-      bump('linked');
-      task.items.push(Object.assign(base, {
-        keyword: '', state: 'linked', picked: String(it.afa_goods_id),
-        candidate: null, note: '已关联（ID ' + it.afa_goods_id + '）',
-      }));
-      task.done += 1;
-      continue;
-    }
-
-    const kw = String(it.goods_name || '').trim();
-    if (!kw) {
-      bump('none');
-      task.items.push(Object.assign(base, { keyword: '', state: 'none', picked: '', candidate: null, note: '商品名称为空，无法搜索' }));
-      task.done += 1;
-      continue;
-    }
-
-    setMsg(`正在匹配 ${task.done + 1}/${task.total}：${kw.slice(0, 24)}`);
-
-    // ② 搜候选池（同关键词只搜一次）
-    if (!poolCache.has(kw)) {
-      try {
-        const r = await afa.searchPool(tenantId, kw, { pages: 1, size: 50 });
-        poolCache.set(kw, r.rows || []);
-        await sleepMs(250);   // 限速：别把对方接口打挂
-      } catch (e) {
-        poolCache.set(kw, []);
-        lastErr = String((e && e.message) || e).slice(0, 160);
-      }
-    }
-    const pool = poolCache.get(kw);
-    if (!pool.length) {
-      bump('none');
-      task.items.push(Object.assign(base, {
-        keyword: kw, state: 'none', picked: '', candidate: null,
-        note: lastErr ? '阿发接口报错：' + lastErr : '阿发搜不到该商品名，请手工关联',
-      }));
-      task.done += 1;
-      continue;
-    }
-
-    // ③ CLIP 打分（有图才走；无图/模型不可用直接降级）
-    let picked = null;      // 选中的阿发商品（原生结构）
-    let scoreInfo = null;   // 打分详情（页面展示）
-    let state = '';
-    let note = '';
-    if (clipOn && base.image_url) {
-      // 文本粗排：字面最像的 N 个才值得算图像向量
-      const ranked = pool
-        .map((c, idx) => ({ c, idx, t: skuMatchLib.textSimilarity(kw, c.goodsName || '') }))
-        .sort((a, b) => b.t - a.t)
-        .slice(0, MATCH_CAND_TOPN);
-      let scores = [];
-      try {
-        scores = await skuMatchLib.scoreCandidates(
-          { name: kw, imagePath: base.image_url },
-          ranked.map((x) => ({ name: x.c.goodsName || ('候选' + x.idx), imagePath: x.c.picture || '' })),
-          MATCH_SCORE_THRESHOLD
-        );
-      } catch (e) {
-        lastErr = String((e && e.message) || e).slice(0, 160);
-      }
-      let top = null;
-      for (const s of scores) if (!top || s.final_score > top.final_score) top = s;
-      if (top) {
-        const chosen = ranked[top.index] ? ranked[top.index].c : null;
-        scoreInfo = {
-          score: top.final_score, imgSim: top.img_similarity, textSim: top.text_similarity,
-          reason: top.match_reason, isMatch: top.is_match,
-          candidatesScored: scores.length, candidatesTotal: pool.length,
-        };
-        if (top.is_match && chosen) {
-          picked = chosen;
-          state = 'matched';
-        } else {
-          state = 'no_match';
-          note = `最高分 ${top.final_score}（图文 ${top.img_similarity} / 文本 ${top.text_similarity}）未达 ${MATCH_SCORE_THRESHOLD} 门槛，留空待人工`;
-        }
-      } else {
-        state = 'fallback';
-        picked = pool[0];
-        note = 'CLIP 打分异常，已回退搜索结果第一条';
-      }
-    } else {
-      state = 'fallback';
-      picked = pool[0];
-      note = clipOn ? '商品没有主图，已回退搜索结果第一条' : 'CLIP 不可用，已回退搜索结果第一条';
-    }
-
-    if (!picked) {
-      // no_match：不写库，只报告
-      bump('noMatch');
-      task.items.push(Object.assign(base, {
-        keyword: kw, state, picked: '', candidate: null, score: scoreInfo, note,
-      }));
-      task.done += 1;
-      continue;
-    }
-
-    const best = pickAfaCandidate(picked, {
-      score: scoreInfo ? scoreInfo.score : null,
-      imgSim: scoreInfo ? scoreInfo.imgSim : null,
-      textSim: scoreInfo ? scoreInfo.textSim : null,
-      reason: scoreInfo ? scoreInfo.reason : '',
-      isMatch: state === 'matched',
-      isFallback: state === 'fallback',
-    });
-
-    // ④ 写库：品牌商品表有该 SKU 写品牌（同品牌共享），否则写个人补货行
-    if (apply) {
-      try {
-        const wr = await writeProductLink('afa_goods_id', best.goodsId, { brandId: base.brand_id, userId: tenantId, sku: it.sku });
-        best.scope = wr.scope;
-        if (wr.scope === 'brand') {
-          await db.exec(
-            'UPDATE brand_product SET afa_match_score = ?, afa_match_at = NOW() WHERE brand_id = ? AND sku = ?',
-            [scoreInfo ? scoreInfo.score : null, base.brand_id, it.sku]
-          );
-        }
-      } catch (e) {
-        best.writeError = String((e && e.message) || e).slice(0, 160);
-        lastErr = best.writeError;
-        bump('failed');
-      }
-    }
-
-    bump(state === 'fallback' ? 'fallback' : 'matched');
-    task.items.push(Object.assign(base, {
-      keyword: kw,
-      state: apply ? state : (state === 'fallback' ? 'fallback' : 'suggest'),
-      picked: best.goodsId, candidate: best,
-      score: scoreInfo, note: best.writeError ? '写入失败：' + best.writeError : note,
-    }));
-    task.done += 1;
-  }
-
-  // ── 收尾统计 ──
-  const s = task.stats;
-  const parts = [
-    `共 ${task.total} 个商品（原有 ${s.linked || 0} 个已关联）`,
-    `CLIP 匹配 ${s.matched || 0} 个`,
-    `低于阈值留空 ${s.noMatch || 0} 个`,
-    s.fallback ? `回退首条 ${s.fallback} 个` : '',
-    `搜不到 ${s.none || 0} 个`,
-    s.failed ? `写入失败 ${s.failed} 个` : '',
-  ].filter(Boolean);
-  const tip = lastErr && !(s.matched || s.fallback) ? `（最近错误：${lastErr}）` : '';
-  task.state = task.state === 'stopped' ? 'stopped' : 'done';
-  task.running = false;
-  task.finishedAt = Date.now();
-  task.message = (apply ? '匹配完成：' : '建议关联：') + parts.join('、') + tip;
-  if (task.warn) task.message += '｜' + task.warn;
-}
 
 /** 写操作只允许作用于自己的数据（管理员查看他人为只读） */
 function assertWritable(user, tenantId) {
@@ -4548,17 +4318,12 @@ const server = http.createServer(async (req, res) => {
       const w = await writeProductLink('local_price', v, { brandId: bid, userId: tenantId, sku });
       return sendJson(res, 200, { ok: true, sku, localPrice: v, scope: w.scope });
     }
-
-    // ── 自动匹配阿发商品（v0.2.101：CLIP 图文打分 + 后台任务）─────────────────────
-    // 以前是「名称搜阿发 → 直接取第一条」，同步跑完再返回；改成后台任务的三件套：
-    //   POST /api/products/auto-match         启动任务，立刻返回 taskId
-    //   GET  /api/products/auto-match/status  轮询进度（done/total + 已完成明细）
-    //   POST /api/products/auto-match/stop    停止（跑完当前商品就退出）
-    // 理由：每个商品要搜 1 次阿发 + 下 N 张候选图 + 跑 CLIP 编码，几百个商品要几分钟到十几分钟，
-    //       同步请求必然被浏览器/网关掐断。
-    // 打分口径见 lib/sku-match.js（图片 0.6 + 文本 0.4，叠加 IP/竞品/容量/款式规则），
-    // 阈值 MATCH_SCORE_THRESHOLD（默认 0.80，环境变量可调），低于阈值留空等人工。
-    // 范围 = 当前筛选出来的商品（q / status / batch / brand 与列表共用 productScope）。
+    // ── 自动匹配阿发商品（v0.2.92）────────────────────────────────────────
+    // 思路：拿「商品名称」原样去阿发搜，**直接取搜索结果的第一条建立关联**，不做筛选与打分。
+    // v0.2.92 起只处理「当前筛选出来的商品」（q / status / batch / brand 与列表共用 productScope），
+    // 不再是全量；误关联由页面上的「修改 / 删除关联」兜回来，已关联的跳过不覆盖。
+    // 落库走 writeProductLink：品牌商品表有该 SKU 写品牌（同品牌共享），否则写个人补货行。
+    // 入参 { q?, status?, batch?, brand?, apply? }：apply=true 直接写库；false 只给建议。
     if (method === 'POST' && p === '/api/products/auto-match') {
       if (!canProduct) return denyProduct();
       if (!canPrice) return denyPrice();
@@ -4581,12 +4346,10 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 500, { error: '查询待匹配商品失败：' + e.message });
       }
       if (!items.length) {
-        return sendJson(res, 200, { ok: true, taskId: null, total: 0, message: '当前筛选下没有商品' });
+        return sendJson(res, 200, { ok: true, total: 0, todo: 0, linked: 0, picked: 0, items: [], message: '当前筛选下没有商品' });
       }
+      // 逐个商品都要真搜一次阿发（限速 250ms），全量跑几千条会把对方接口打挂，先要求收窄筛选
       const pendingCount = items.filter((it) => !it.afa_goods_id).length;
-      if (!pendingCount) {
-        return sendJson(res, 200, { ok: true, taskId: null, total: items.length, message: '当前筛选下的商品都已关联阿发，无需匹配' });
-      }
       if (pendingCount > MATCH_MAX_PER_RUN) {
         return sendJson(res, 200, {
           ok: false, tooMany: true, pending: pendingCount, cap: MATCH_MAX_PER_RUN,
@@ -4594,66 +4357,100 @@ const server = http.createServer(async (req, res) => {
             + '请先用「商品SKU/名称」或「采购状态」把范围缩小，或导入补货参考文件后按文件匹配。',
         });
       }
-      // 同一账号已有任务在跑：直接复用，避免重复点按钮把阿发接口打爆
-      pruneMatchTasks();
-      for (const t of MATCH_TASKS.values()) {
-        if (t.running && Number(t.tenantId) === Number(tenantId)) {
-          return sendJson(res, 200, {
-            ok: true, taskId: t.id, total: t.total, pending: pendingCount, reused: true,
-            threshold: MATCH_SCORE_THRESHOLD, message: '已有一个匹配任务在跑，正在显示它的进度',
-          });
-        }
-      }
-      const taskId = 'm' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
-      const task = {
-        id: taskId, tenantId: Number(tenantId), userId: Number(user.id), apply,
-        running: true, state: 'running', total: items.length, done: 0,
-        items: [], stats: {}, message: '任务已创建，正在准备…',
-        startedAt: Date.now(), finishedAt: 0, stop: false, warn: '', model: null, fallbackAll: false,
-      };
-      MATCH_TASKS.set(taskId, task);
+
+      const poolCache = new Map();
       const brandFallback = await brandIdOfUser(tenantId).catch(() => 1);
-      // 故意不 await：请求立刻返回，任务在后台推进，页面轮询 status
-      runMatchTask(task, items, { tenantId, apply, brandFallback }).catch((e) => {
-        task.running = false;
-        task.state = 'failed';
-        task.finishedAt = Date.now();
-        task.message = '匹配任务失败：' + String((e && e.message) || e).slice(0, 200);
-      });
-      return sendJson(res, 200, {
-        ok: true, taskId, total: items.length, pending: pendingCount,
-        threshold: MATCH_SCORE_THRESHOLD, apply,
-        message: `已启动匹配：共 ${items.length} 个商品（待匹配 ${pendingCount} 个）`,
-      });
-    }
+      const out = [];
+      let linked = 0;
+      let picked = 0;
+      let none = 0;
+      let queried = 0;
+      let lastErr = '';
 
-    // 自动匹配进度：页面每 1~2 秒轮询一次，返回已完成的部分结果
-    if (method === 'GET' && p === '/api/products/auto-match/status') {
-      if (!canProduct) return denyProduct();
-      const taskId = String(url.searchParams.get('taskId') || '').trim();
-      const t = MATCH_TASKS.get(taskId);
-      // 任务按账号隔离：别人的 taskId 一律当不存在，别泄露
-      if (!t || Number(t.tenantId) !== Number(tenantId)) {
-        return sendJson(res, 404, { error: '任务不存在或已过期（服务重启后需重新匹配）' });
+      for (const it of items) {
+        const base = {
+          sku: it.sku, goods_name: it.goods_name, image_url: it.image_url,
+          brand_id: Number(it.brand_id) || brandFallback, inBrand: !!it.bp_id,
+        };
+
+        // ① 已关联的直接回显，不再搜（重跑不会覆盖手工调整）
+        if (it.afa_goods_id) {
+          linked += 1;
+          out.push(Object.assign(base, {
+            keyword: '', state: 'linked', picked: String(it.afa_goods_id),
+            candidate: null, note: '已关联（ID ' + it.afa_goods_id + '）',
+          }));
+          continue;
+        }
+
+        // ② 拿商品名称原样去搜（不降级、不筛、不打分）
+        const kw = String(it.goods_name || '').trim();
+        if (!kw) {
+          none += 1;
+          out.push(Object.assign(base, { keyword: '', state: 'none', picked: '', candidate: null, note: '商品名称为空，无法搜索' }));
+          continue;
+        }
+        if (!poolCache.has(kw)) {
+          try {
+            const r = await afa.searchPool(tenantId, kw, { pages: 1, size: 50 });
+            poolCache.set(kw, r.rows || []);
+            queried += 1;
+            await sleepMs(250);   // 限速：别把对方接口打挂
+          } catch (e) {
+            poolCache.set(kw, []);
+            lastErr = String((e && e.message) || e).slice(0, 160);
+          }
+        }
+        const pool = poolCache.get(kw);
+        if (!pool.length) {
+          none += 1;
+          out.push(Object.assign(base, {
+            keyword: kw, state: 'none', picked: '', candidate: null,
+            note: lastErr ? '阿发接口报错：' + lastErr : '阿发搜不到该商品名，请手工关联',
+          }));
+          continue;
+        }
+
+        // ③ 直接取搜索结果的第一条，不做任何筛选与打分
+        const first = pool[0];
+        const best = {
+          goodsId: String(first.goodsId), goodsName: first.goodsName || '',
+          picture: first.picture || '', salePrice: first.salePrice,
+          unitPrice: first.unitPrice, factorName: first.factorName || '',
+        };
+
+        // ④ 写库：品牌商品表有该 SKU 就写品牌（同品牌共享），否则写个人补货行
+        if (apply) {
+          try {
+            const wr = await writeProductLink('afa_goods_id', best.goodsId, { brandId: base.brand_id, userId: tenantId, sku: it.sku });
+            best.scope = wr.scope;
+            if (wr.scope === 'brand') {
+              await db.exec(
+                'UPDATE brand_product SET afa_match_score = NULL, afa_match_at = NOW() WHERE brand_id = ? AND sku = ?',
+                [base.brand_id, it.sku]
+              );
+            }
+          } catch (e) {
+            best.writeError = String((e && e.message) || e).slice(0, 160);
+            lastErr = best.writeError;
+          }
+        }
+        picked += 1;
+        out.push(Object.assign(base, {
+          keyword: kw,
+          state: apply ? 'linked' : 'suggest',
+          picked: best.goodsId, candidate: best,
+          note: best.writeError ? '写入失败：' + best.writeError : '',
+        }));
       }
-      return sendJson(res, 200, {
-        ok: true, taskId, state: t.state, running: t.running, apply: t.apply,
-        total: t.total, done: t.done, percent: t.total ? Math.round((t.done / t.total) * 100) : 0,
-        stats: t.stats, message: t.message, warn: t.warn,
-        threshold: MATCH_SCORE_THRESHOLD,
-        model: t.model || clipEmbed.info(),
-        items: t.items,
-      });
-    }
 
-    // 停止自动匹配：跑完当前商品就退出（不强杀，避免把写库切成半截）
-    if (method === 'POST' && p === '/api/products/auto-match/stop') {
-      if (!canProduct) return denyProduct();
-      const b = await readBody(req).catch(() => ({}));
-      const t = MATCH_TASKS.get(String(b.taskId || '').trim());
-      if (!t || Number(t.tenantId) !== Number(tenantId)) return sendJson(res, 404, { error: '任务不存在或已过期' });
-      t.stop = true;
-      return sendJson(res, 200, { ok: true, message: '已请求停止，跑完当前商品就退出' });
+      const tip = lastErr && !picked ? `（阿发接口报错：${lastErr}，请检查是否已配置有效 Token）` : '';
+      const act = apply ? '已关联' : '建议关联';
+      return sendJson(res, 200, {
+        ok: true, total: items.length, todo: items.length - linked, linked, picked, none,
+        queriedKeywords: queried, applied: apply, items: out,
+        message: `共 ${items.length} 个商品（原有 ${linked} 个已关联）：本次${act} ${picked} 个、没找到 ${none} 个${tip}`,
+      });
     }
 
     // 商品同步（仅超级管理员）：按页拉取牵牛花前置仓商品（筛选「正常采购」），

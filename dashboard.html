@@ -1356,26 +1356,17 @@
           </div>
         </el-dialog>
 
-        <!-- 自动匹配阿发商品：CLIP 图文打分（后台任务，页面轮询进度） -->
-        <el-dialog title="自动匹配阿发商品（CLIP 图文匹配）" :visible.sync="rpMatch.visible" width="1180px" top="4vh" append-to-body
-                   :close-on-click-modal="false">
-          <div style="display:flex;gap:10px;align-items:center;margin-bottom:8px;flex-wrap:wrap">
-            <span class="loginid" style="flex:1;min-width:280px">{{ rpMatch.message }}</span>
+        <!-- 自动匹配阿发商品：拿商品名称原样搜索 → 直接取第一条关联 → 逐条可改可删 -->
+        <el-dialog title="自动匹配阿发商品" :visible.sync="rpMatch.visible" width="1040px" top="4vh" append-to-body>
+          <div style="display:flex;gap:10px;align-items:center;margin-bottom:10px;flex-wrap:wrap">
+            <span class="loginid">{{ rpMatch.message }}</span>
+            <span style="flex:1"></span>
             <el-button size="small" type="primary" plain icon="el-icon-refresh" :loading="rpMatch.loading"
-                       :disabled="rpMatch.running" @click="runAutoMatch(true)">重新匹配未关联</el-button>
-            <el-button v-if="rpMatch.running" size="small" type="danger" plain @click="stopAutoMatch">停止</el-button>
-          </div>
-          <el-progress :percentage="rpMatch.percent" :status="rpMatch.running ? '' : 'success'" :stroke-width="14"
-                       style="margin-bottom:8px"></el-progress>
-          <div class="loginid" style="font-size:12px;line-height:17px;margin-bottom:8px">
-            打分口径：<b>图片相似度 × 0.6 + 中文文本相似度 × 0.4</b>，再叠加 IP 一致 +0.08、竞品互斥 −0.30、
-            容量不一致 −0.20、罐型冲突（矮罐/摩登罐）−0.15；总分 ≥ <b>{{ rpMatch.threshold }}</b> 才自动关联，否则留空等人工。
-            <span v-if="rpMatch.model && rpMatch.model.modelId">｜模型 {{ rpMatch.model.modelId }}<span v-if="rpMatch.model.loadMs">（加载 {{ rpMatch.model.loadMs }}ms）</span></span>
-            <span v-if="rpMatch.warn" style="color:#e6a23c">｜{{ rpMatch.warn }}</span>
+                       @click="runAutoMatch(true)">重新匹配未关联</el-button>
           </div>
           <el-table :data="rpMatch.items" size="small" border :max-height="tblH.link" style="width:100%" v-loading="rpMatch.loading"
                     empty-text="补货表里还没有商品">
-            <el-table-column label="商品名称（搜索词）" min-width="240">
+            <el-table-column label="商品名称（搜索词）" min-width="250">
               <template slot-scope="p">
                 <div style="display:flex;gap:8px;align-items:center">
                   <img v-if="p.row.image_url" :src="p.row.image_url" :alt="p.row.goods_name"
@@ -1387,7 +1378,7 @@
                 </div>
               </template>
             </el-table-column>
-            <el-table-column label="匹配到的阿发商品" min-width="430">
+            <el-table-column label="阿发搜索结果第一条" min-width="380">
               <template slot-scope="p">
                 <div v-if="p.row.candidate" style="display:flex;gap:8px;align-items:center">
                   <img v-if="p.row.candidate.picture" :src="p.row.candidate.picture" :alt="p.row.candidate.goodsName"
@@ -1405,24 +1396,7 @@
                 <div v-else class="loginid">{{ p.row.note || '—' }}</div>
               </template>
             </el-table-column>
-            <el-table-column label="打分" width="240">
-              <template slot-scope="p">
-                <div v-if="p.row.score" style="font-size:11px;line-height:16px">
-                  <div>
-                    总分 <b :style="{ color: p.row.score.isMatch ? '#67c23a' : '#e6a23c' }">{{ p.row.score.score }}</b>
-                    <span class="loginid" style="margin-left:6px">图文 {{ p.row.score.imgSim }} / 文本 {{ p.row.score.textSim }}</span>
-                  </div>
-                  <div class="loginid" :title="p.row.score.reason" style="color:#909399;max-height:32px;overflow:hidden">
-                    {{ p.row.score.reason }}
-                  </div>
-                  <div class="loginid" style="color:#c0c4cc" v-if="p.row.score.candidatesTotal">
-                    候选 {{ p.row.score.candidatesScored }}/{{ p.row.score.candidatesTotal }} 个参与打分
-                  </div>
-                </div>
-                <span v-else class="loginid">—</span>
-              </template>
-            </el-table-column>
-            <el-table-column label="状态" width="110">
+            <el-table-column label="状态" width="100">
               <template slot-scope="p">
                 <el-tag size="mini" :type="matchTag(p.row).type">{{ matchTag(p.row).text }}</el-tag>
               </template>
@@ -1434,10 +1408,10 @@
               </template>
             </el-table-column>
           </el-table>
-          <div slot="footer" style="display:flex;align-items:flex-end;gap:12px">
-            <span class="loginid" style="flex:1;line-height:17px;text-align:left">
-              先用商品名称搜城配速达拿候选，再用 CLIP 图片向量 + 中文文本相似度打分，只对<b>总分达标</b>的自动关联；
-              没达标的留空，点「修改」可手工挑一个。CLIP 不可用或商品没主图时，会回退「搜索结果第一条」并标黄提醒。
+          <div slot="footer">
+            <span class="loginid" style="float:left;line-height:32px;max-width:700px;text-align:left">
+              搜索词就是商品名称；结果里第一条即关联对象，不做筛选也不打分。
+              关联错了直接点「修改」换个商品，或「删除关联」清空后重新匹配。
             </span>
             <el-button size="small" @click="rpMatch.visible = false">关闭</el-button>
           </div>
@@ -3616,8 +3590,7 @@ const vm = new Vue({
       rpAfaLink: { visible: false, sku: '', keyword: '', rows: [], loading: false, error: '', picked: null, total: 0, page: 1, size: 20 },
       rpAfaBuy: { visible: false, sku: '', goodsId: null, goodsName: '', qty: 1, saving: false },
       // 自动匹配阿发（v0.2.91）：用商品名称原样搜 → 直接取搜索结果第一条 → 可改可删
-      rpMatch: { visible: false, loading: false, running: false, taskId: null, percent: 0, stats: {},
-                 threshold: 0.8, model: null, warn: '', items: [], message: '', batchId: null },
+      rpMatch: { visible: false, loading: false, items: [], message: '', batchId: null },
       afaDlg: { visible: false, token: '', storeId: '', appId: 'wxc050ff76c31c4371', saving: false },
       // 发布到交易市场（单个/批量共用弹窗）
       publish: { visible: false, title: '', discount: 100, items: [], saving: false },
@@ -7864,33 +7837,22 @@ const vm = new Vue({
           + (this.rp.status ? '，采购状态「' + this.rp.status + '」' : '')
           + (this.isAdmin && this.rp.brand ? '，品牌方已限定' : '')
           + '），共 <b>' + (this.rp.total || 0) + '</b> 个；<b>不会动筛选范围之外的商品</b>。<br><br>'
-          + '其中<b>还没关联阿发</b>的商品会用<b>商品名称</b>去城配速达搜索，'
-          + '再用 <b>CLIP 图片向量 + 中文文本相似度</b>打分挑选最像的那个（不是无脑取第一条）；'
-          + '<b>总分达不到阈值的不关联</b>，留空等人工点「修改」挑。<br>'
-          + 'CLIP 不可用或商品没有主图时会回退「搜索结果第一条」并标黄。'
-          + '已关联的商品不会被覆盖，关联错了可以点<b>「修改」</b>换一个，或<b>「删除关联」</b>清空重来。'
+          + '其中<b>还没关联阿发</b>的商品会用<b>商品名称原样</b>去城配速达搜索，'
+          + '<b>直接取搜索结果第一条建立关联</b>；搜不到就留空，需要手工点「修改」去关联。<br>'
+          + '已关联的商品不会被覆盖。关联错了可以点<b>「修改」</b>换一个，或<b>「删除关联」</b>清空重来。'
           + '</div>',
           '自动匹配阿发商品',
-          { dangerouslyUseHTMLString: true, confirmButtonText: '开始匹配', cancelButtonText: '取消', type: 'warning' }
+          { dangerouslyUseHTMLString: true, confirmButtonText: '开始匹配并关联', cancelButtonText: '取消', type: 'warning' }
         );
       } catch (e) { return; }
       this.rpMatch.visible = true;
       await this.runAutoMatch(true);
     },
-    /**
-     * 执行匹配（v0.2.101 起是后台任务）：启动任务 → 每 1.5 秒轮询进度 → 结束后回填补货表。
-     * 为什么要后端任务：每个商品要搜阿发 + 下候选图 + 跑 CLIP，几百个商品要几分钟，同步请求必被掐断。
-     */
+    /** 执行匹配；apply=true 直接把第一条写库。范围 = 当前筛选（q/status/batch/brand） */
     async runAutoMatch(apply) {
-      if (this.rpMatch.running) return;
-      this.stopMatchPolling();
       this.rpMatch.loading = true;
-      this.rpMatch.running = true;
       this.rpMatch.items = [];
-      this.rpMatch.percent = 0;
-      this.rpMatch.stats = {};
-      this.rpMatch.warn = '';
-      this.rpMatch.message = '正在启动匹配任务…';
+      this.rpMatch.message = '正在对当前筛选出来的商品搜索城配速达并关联第一条（每个商品搜一次）…';
       try {
         const d = await this.api('/api/products/auto-match', {
           method: 'POST', headers: { 'content-type': 'application/json' },
@@ -7902,92 +7864,23 @@ const vm = new Vue({
             apply: apply !== false,
           }),
         });
-        if (!d || d.error) {
-          this.rpMatch.message = '匹配失败：' + ((d && d.error) || '未知错误');
-          this.finishMatchPolling();
-          return;
-        }
-        if (!d.taskId) {
-          this.rpMatch.message = d.message || '没有需要匹配的商品';
-          this.finishMatchPolling();
-          return;
-        }
-        this.rpMatch.taskId = d.taskId;
-        if (d.threshold != null) this.rpMatch.threshold = d.threshold;
-        this.rpMatch.message = d.message || '任务已启动…';
-        this.pollMatchTask();
-      } catch (e) {
-        this.rpMatch.message = '匹配失败：' + e.message;
-        this.finishMatchPolling();
-      }
-    },
-    /** 轮询任务进度（1.5s 一次）；任务跑完自动停并回填列表 */
-    async pollMatchTask() {
-      if (!this.rpMatch.taskId) return;
-      const taskId = this.rpMatch.taskId;
-      try {
-        const d = await this.api('/api/products/auto-match/status?taskId=' + encodeURIComponent(taskId));
-        if (!d || d.error) {
-          // 任务过期（比如服务重启）就停掉，别让进度条一直转
-          this.rpMatch.message = '进度获取失败：' + ((d && d.error) || '未知错误');
-          this.finishMatchPolling();
-          return;
-        }
+        if (!d || d.error) { this.rpMatch.message = '匹配失败：' + ((d && d.error) || '未知错误'); return; }
         this.rpMatch.items = d.items || [];
-        this.rpMatch.percent = Number(d.percent) || 0;
-        this.rpMatch.stats = d.stats || {};
         this.rpMatch.message = d.message || '';
-        this.rpMatch.warn = d.warn || '';
-        if (d.model) this.rpMatch.model = d.model;
-        if (!d.running) {
-          this.finishMatchPolling();
-          return;
+        if (apply !== false) {
+          // 把新关联回填到补货表当前页，阿发价列从「关联」回到「未取价」（点「阿发重新取价」才真正取价）
+          const map = {};
+          this.rpMatch.items.forEach((x) => { if (x.picked) map[x.sku] = x.picked; });
+          (this.rp.rows || []).forEach((r) => { if (map[r.sku]) r.afa_goods_id = map[r.sku]; });
         }
-      } catch (e) {
-        this.rpMatch.message = '进度获取失败：' + e.message;
-        this.finishMatchPolling();
-        return;
-      }
-      this._matchTimer = setTimeout(() => this.pollMatchTask(), 1500);
+      } catch (e) { this.rpMatch.message = '匹配失败：' + e.message; }
+      finally { this.rpMatch.loading = false; }
     },
-    /** 结束轮询：恢复按钮状态，把新关联回填到补货表当前页 */
-    finishMatchPolling() {
-      this.stopMatchPolling();
-      this.rpMatch.running = false;
-      this.rpMatch.loading = false;
-      if (this.rpMatch.percent >= 100 || this.rpMatch.percent > 0) this.rpMatch.percent = 100;
-      const map = {};
-      (this.rpMatch.items || []).forEach((x) => { if (x.picked) map[x.sku] = x.picked; });
-      (this.rp.rows || []).forEach((r) => { if (map[r.sku]) r.afa_goods_id = map[r.sku]; });
-    },
-    stopMatchPolling() {
-      if (this._matchTimer) { clearTimeout(this._matchTimer); this._matchTimer = null; }
-    },
-    /** 请求停止：服务端跑完当前商品就退出（不强杀，避免写库切半截） */
-    async stopAutoMatch() {
-      if (!this.rpMatch.taskId) return;
-      try {
-        const d = await this.api('/api/products/auto-match/stop', {
-          method: 'POST', headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ taskId: this.rpMatch.taskId }),
-        });
-        this.rpMatch.message = (d && d.message) || '已请求停止…';
-      } catch (e) { this.$message.error('停止失败：' + e.message); }
-    },
-    /** 状态标签：已关联 / 匹配 / 回退首条 / 低于阈值 / 没找到 / 写入失败 */
+    /** 状态标签：已关联 / 没找到 / 写入失败 */
     matchTag(row) {
-      if (!row) return { text: '—', type: 'info' };
+      if (!row || !row.picked) return { text: '没找到', type: 'info' };
       if (row.candidate && row.candidate.writeError) return { text: '写入失败', type: 'danger' };
-      switch (row.state) {
-        case 'linked': return { text: '已关联', type: 'success' };
-        case 'matched': return { text: '匹配', type: 'success' };
-        case 'suggest': return { text: '建议关联', type: 'success' };
-        case 'fallback': return { text: '回退首条', type: 'warning' };
-        case 'no_match': return { text: '低于阈值', type: 'info' };
-        case 'none': return { text: '没找到', type: 'info' };
-        default:
-          return row.picked ? { text: '已关联', type: 'success' } : { text: '没找到', type: 'info' };
-      }
+      return { text: '已关联', type: 'success' };
     },
     /** 修改关联：复用「关联城配速达商品」弹窗（默认搜索词就是商品名） */
     editAfaMatch(row) {
