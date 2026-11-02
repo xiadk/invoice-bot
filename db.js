@@ -248,6 +248,32 @@ async function ensureQnhSchema(q) {
       "  PRIMARY KEY (`key`)" +
       ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='牵牛花退单同步状态'",
 
+    // 手工登记的售后（v0.2.106）：售后管理页「新增售后」写这里。
+    //   和 qnh_refund_order 完全分开：那边是牵牛花同步来的平台退单，这边是人工记账
+    //   （线下单、客诉、补发等没有平台退单号的情况），同步逻辑永远不会碰这张表。
+    //   列表在 lib/qnh.js 的 listAfterSales 里用 UNION ALL 与平台退单合并成一页，
+    //   但退单列表 / 统计 / 趋势图只读 qnh_refund_order，所以手工记录不会串到那些地方。
+    'CREATE TABLE IF NOT EXISTS `qnh_after_manual` (' +
+      "  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT," +
+      "  `user_id` INT NOT NULL DEFAULT 1 COMMENT '数据归属用户（员工录入时是所属主体账号）'," +
+      "  `sku` VARCHAR(64) NOT NULL DEFAULT '' COMMENT '商品SKU（从商品列表搜索选中）'," +
+      "  `goods_name` VARCHAR(512) NOT NULL DEFAULT '' COMMENT '商品名称（选中后可手改，兼容搜不到的商品）'," +
+      "  `image_url` VARCHAR(512) DEFAULT NULL COMMENT '商品主图（选中商品时带上，仅展示用）'," +
+      "  `qty` INT NOT NULL DEFAULT 1 COMMENT '售后数量'," +
+      "  `apply_reason` VARCHAR(512) DEFAULT NULL COMMENT '售后原因（人工填写）'," +
+      "  `status` TINYINT NOT NULL DEFAULT 0 COMMENT '售后处理状态：0待处理 1已申请 2已退货 3已退款'," +
+      "  `note` VARCHAR(255) DEFAULT NULL COMMENT '处理备注'," +
+      "  `handled_by` VARCHAR(64) DEFAULT NULL COMMENT '最后处理人'," +
+      "  `handled_at` DATETIME DEFAULT NULL COMMENT '最后处理时间'," +
+      "  `created_by` VARCHAR(64) DEFAULT NULL COMMENT '录入人'," +
+      "  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP," +
+      "  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP," +
+      "  PRIMARY KEY (`id`)," +
+      "  KEY `idx_qam_user_time` (`user_id`,`created_at`)," +
+      "  KEY `idx_qam_user_status` (`user_id`,`status`)," +
+      "  KEY `idx_qam_sku` (`user_id`,`sku`)" +
+      ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='手工登记的售后（售后管理页「新增售后」）'",
+
     // 实时毛利监控：订单毛利明细（数据经「本机助手」页内签名接口拉取，见 lib/qnh.js）
     'CREATE TABLE IF NOT EXISTS `qnh_profit_order` (' +
       "  `user_id` INT NOT NULL DEFAULT 1 COMMENT '数据归属用户'," +

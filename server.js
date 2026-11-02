@@ -3898,8 +3898,9 @@ const server = http.createServer(async (req, res) => {
     if (method === 'GET' && p === '/api/products') {
       if (!canProduct) return denyProduct();
       const page = Math.max(1, Number(url.searchParams.get('page')) || 1);
-      // 上限 2000：补货界面要一次展示本次导入的全部商品（导入文件常见几百~上千行）
-      const size = Math.min(2000, Math.max(1, Number(url.searchParams.get('size')) || 20));
+      // 上限 200：分页器最多给到 100（v0.2.106 去掉了 2000 选项），这里留一倍余量兜底。
+      // 不能再放到 2000：el-table 无虚拟滚动，一次返回上千行会让浏览器主线程卡死十几秒
+      const size = Math.min(200, Math.max(1, Number(url.searchParams.get('size')) || 20));
       const q = (url.searchParams.get('q') || '').trim();
       const status = (url.searchParams.get('status') || '').trim();
       const sortRaw = url.searchParams.get('sort') || '';
@@ -4948,9 +4949,10 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 200, { days: await qnh.refundTrend(url.searchParams.get('days') || 30, qnhUid) });
       }
 
-      // ── 售后管理（v0.2.104）────────────────────────────────────────────
-      //   一行一个退单（商品名称/SKU/数量取明细），处理状态与退款原因都是本系统人工维护的：
-      //   同步只更新平台字段，不会把它们冲掉。状态语义：0待处理 1已申请 2已退货 3已退款。
+      // ── 售后管理（v0.2.104；v0.2.106 起含手工登记）────────────────────────
+      //   两个来源合并成一页：牵牛花同步来的平台退单 + 「新增售后」手工录入的记录。
+      //   处理状态（0待处理 1已申请 2已退货 3已退款）与售后原因都是本系统人工维护的：
+      //   同步只更新平台字段，不会把它们冲掉。
       if (method === 'GET' && p === '/api/qnh/after-sales') {
         const q = url.searchParams;
         const [list, counts] = await Promise.all([
@@ -4968,14 +4970,84 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 200, Object.assign(list, { counts, statuses: qnh.AFTER_SALE_STATUSES }));
       }
 
+      // 「新增售后」的商品搜索：按商品名称 / SKU 模糊查本地商品（不连平台、不取价）
+      //   品牌商品（同品牌共享）+ 个人导入的补货商品，同 SKU 只留一条（优先带图的品牌行）
+      if (method === 'GET' && p === '/api/qnh/after-sales/goods') {
+        const kw = (url.searchParams.get('kw') || '').trim().slice(0, 64);
+        if (!kw) return sendJson(res, 200, { rows: [] });
+        const like = `%${kw}%`;
+        const limit = Math.min(30, Math.max(1, Number(url.searchParams.get('size')) || 20));
+        const brandId = Number(user.brand_id) || 1;
+        const bo = brandOf(req, url, user);
+        const [brandRows, mineRows] = await Promise.all([
+          (bo.all
+            ? db.query(
+              `SELECT sku, goods_name, image_url FROM brand_product
+                WHERE sku LIKE ? OR goods_name LIKE ?
+                ORDER BY (sku = ?) DESC, updated_at DESC LIMIT ${limit}`, [like, like, kw])
+            : db.query(
+              `SELECT sku, goods_name, image_url FROM brand_product
+                WHERE brand_id = ? AND (sku LIKE ? OR goods_name LIKE ?)
+                ORDER BY (sku = ?) DESC, updated_at DESC LIMIT ${limit}`, [brandId, like, like, kw])),
+          db.query(
+            `SELECT sku, goods_name, image_url FROM product_item
+              WHERE user_id = ? AND (sku LIKE ? OR goods_name LIKE ?)
+              ORDER BY (sku = ?) DESC, updated_at DESC LIMIT ${limit}`, [qnhUid, like, like, kw]),
+        ]);
+        const seen = new Set();
+        const rows = [];
+        for (const r of [...brandRows, ...mineRows]) {
+          const sku = String(r.sku || '').trim();
+          const name = String(r.goods_name || '').trim();
+          const id = sku || ('name:' + name);
+          if (!id || seen.has(id)) continue;
+          seen.add(id);
+          rows.push({ sku, goodsName: name, imageUrl: r.image_url || '' });
+          if (rows.length >= limit) break;
+        }
+        return sendJson(res, 200, { rows });
+      }
+
+      // 新增手工售后：选中商品 + 数量 + 原因 → 落 qnh_after_manual（不进退单列表、不受同步影响）
+      if (method === 'POST' && p === '/api/qnh/after-sales/manual') {
+        const body = await readBody(req);
+        writeGuard();
+        const out = await qnh.createManualAfterSale({
+          userId: qnhUid, sku: body.sku, goodsName: body.goodsName, imageUrl: body.imageUrl,
+          qty: body.qty, reason: body.reason, note: body.note, operator: user.username,
+        });
+        if (out.ok) await logOp(user, 'qnh.after_create', { tenantId: qnhUid, id: out.id, sku: out.sku, qty: out.qty });
+        return sendJson(res, out.ok ? 200 : 400, out);
+      }
+
+      // 删除手工售后（平台退单不能删，只能改状态）
+      if (method === 'POST' && p === '/api/qnh/after-sales/manual/delete') {
+        const body = await readBody(req);
+        writeGuard();
+        const out = await qnh.deleteManualAfterSale({ id: body.id, userId: qnhUid });
+        if (out.ok) await logOp(user, 'qnh.after_delete', { tenantId: qnhUid, id: out.id });
+        return sendJson(res, out.ok ? 200 : 400, out);
+      }
+
       if (method === 'POST' && p === '/api/qnh/after-sales/status') {
         const body = await readBody(req);
         writeGuard();
         const out = await qnh.setAfterSaleStatus({
-          refundNo: body.refundNo, status: body.status, note: body.note,
+          key: body.key, refundNo: body.refundNo, status: body.status, note: body.note,
           userId: qnhUid, operator: user.username,
         });
-        if (out.ok) await logOp(user, 'qnh.after_status', { tenantId: qnhUid, refundNo: out.refundNo, status: out.status });
+        if (out.ok) await logOp(user, 'qnh.after_status', { tenantId: qnhUid, key: out.key, status: out.status });
+        return sendJson(res, out.ok ? 200 : 400, out);
+      }
+
+      // 售后页「改原因」：平台退单写人工列 refund_reason，手工登记直接改它自己的原因
+      if (method === 'POST' && p === '/api/qnh/after-sales/reason') {
+        const body = await readBody(req);
+        writeGuard();
+        const out = await qnh.setAfterSaleReason({
+          key: body.key, refundNo: body.refundNo, reason: body.reason, userId: qnhUid,
+        });
+        if (out.ok) await logOp(user, 'qnh.after_reason', { tenantId: qnhUid, key: out.key });
         return sendJson(res, out.ok ? 200 : 400, out);
       }
 
