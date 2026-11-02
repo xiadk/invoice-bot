@@ -181,6 +181,26 @@
                    padding: 10px 12px; border: 1px solid #ebeef5; border-radius: 6px; margin-bottom: 10px; }
   /* 新增售后弹窗：字段较多，矮屏（笔记本 768）时让弹窗内部滚动，别把「备注」顶到屏幕外 */
   .af-new-dlg .el-dialog__body { max-height: calc(88vh - 150px); overflow-y: auto; }
+  /* 处理售后弹窗（v0.2.108）：只做「上传凭证 + 备注」，矮屏时同样内部滚动 */
+  .af-up-dlg .el-dialog__body { max-height: calc(90vh - 160px); overflow-y: auto; }
+  .af-up-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+  /* 上传区：点击 / 拖拽 / 粘贴三合一，虚线框；拖拽悬停与校验失败各有状态色 */
+  .af-up-drop { display: flex; flex-direction: column; align-items: center; justify-content: center;
+                gap: 6px; text-align: center; padding: 18px 14px; border: 1px dashed #dcdfe6;
+                border-radius: 8px; background: #fafbfc; cursor: pointer; transition: .15s;
+                font-size: 13px; color: var(--text-2); min-height: 132px; }
+  .af-up-drop:hover { border-color: #409eff; background: #f2f8ff; }
+  .af-up-drop.is-drag { border-color: #409eff; background: #ecf5ff; }
+  .af-up-drop.is-error { border-color: #f56c6c; background: #fef0f0; }
+  .af-up-thumb { max-width: 100%; max-height: 260px; border-radius: 6px; display: block; }
+  .af-up-ops { display: flex; align-items: center; justify-content: space-between; margin-top: 6px; }
+  .af-up-err { color: #f56c6c; font-size: 12px; margin-top: 6px; }
+  /* 凭证查看：一条一条列，图片可点开大图 */
+  .af-att-row { padding: 10px 0; border-bottom: 1px solid #f0f0f0; }
+  .af-att-row:last-child { border-bottom: 0; }
+  .af-att-meta { font-size: 12px; margin-bottom: 8px; }
+  .af-att-img { width: 132px; height: 132px; object-fit: cover; border-radius: 6px;
+                border: 1px solid #ebeef5; cursor: zoom-in; }
   /* 员工新增弹窗里的菜单开关：两列网格，省高度 */
   .staff-menu-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 10px; width: 100%; }
   .staff-menu-grid .menu-perm-row { margin-bottom: 8px; padding: 8px 10px; }
@@ -2519,9 +2539,15 @@
             <el-table-column label="申请时间" width="145">
               <template slot-scope="p"><span class="loginid">{{ p.row.applyTime || '—' }}</span></template>
             </el-table-column>
-            <el-table-column label="操作" width="170">
+            <el-table-column label="操作" width="245">
               <template slot-scope="p">
-                <el-button type="text" size="mini" @click="openAfStatus(p.row)">处理</el-button>
+                <el-button type="text" size="mini" :disabled="readonly || afNextStatus(p.row) === null"
+                           :title="afNextStatus(p.row) === null ? '已退款，流程结束' : ('推进到「' + afStatusLabel(afNextStatus(p.row)) + '」，需要上传一张凭证截图')"
+                           @click="openAfStatus(p.row)">
+                  {{ afNextStatus(p.row) === null ? '已完成' : '→ ' + afStatusLabel(afNextStatus(p.row)) }}
+                </el-button>
+                <el-button v-if="(p.row.attaches || []).length" type="text" size="mini"
+                           @click="openAfAttach(p.row)">凭证({{ p.row.attaches.length }})</el-button>
                 <el-button type="text" size="mini" @click="openAfReason(p.row)">改原因</el-button>
                 <el-button v-if="p.row.src === 'manual'" type="text" size="mini"
                            style="color:#f56c6c" @click="deleteAfManual(p.row)">删除</el-button>
@@ -2538,19 +2564,37 @@
           </div>
         </el-card>
 
-        <!-- 处理售后：选状态 + 备注 -->
-        <el-dialog title="处理售后" :visible.sync="afDlg.visible" width="520px" append-to-body>
-          <div class="form-tip" style="margin-bottom:10px">
-            {{ afDlg.goodsText || '—' }}<br>
-            <template v-if="afDlg.src === 'manual'">来源：手工新增（不受牵牛花同步影响）</template>
-            <template v-else>平台原始原因：{{ afDlg.applyReason || '—' }}</template>
+        <!-- 处理售后（v0.2.108）：一键推进下一档，必须上传一张凭证截图；弹框里不再选状态 -->
+        <el-dialog title="上传售后凭证" :visible.sync="afDlg.visible" width="560px" top="6vh" append-to-body
+                   custom-class="af-up-dlg" @closed="onAfDlgClosed">
+          <div class="af-up-head">
+            <span class="fb-label">将标记为</span>
+            <el-tag size="small" type="warning">{{ afDlg.nextLabel }}</el-tag>
+            <span class="loginid">当前「{{ afDlg.fromLabel }}」，确定后立即变更</span>
           </div>
-          <el-form label-position="top" size="small">
-            <el-form-item label="处理状态 *">
-              <el-radio-group v-model="afDlg.status">
-                <el-radio-button v-for="s in af.statuses" :key="s.value" :label="s.value">{{ s.label }}</el-radio-button>
-              </el-radio-group>
-            </el-form-item>
+
+          <div class="af-up-drop" :class="{ 'is-drag': afDlg.dragging, 'is-error': !!afDlg.imgError }"
+               @click="pickAfImage"
+               @dragover.prevent="afDlg.dragging = true"
+               @dragleave.prevent="afDlg.dragging = false"
+               @drop.prevent="onAfDrop">
+            <template v-if="!afDlg.imgPreview">
+              <i class="el-icon-picture-outline" style="font-size:30px;color:#c0c4cc"></i>
+              <div>点击选择图片，或直接 <b>Ctrl+V 粘贴</b> 截图，也可以把图片拖进来</div>
+              <div class="loginid">必填 · 支持 png / jpg / webp / gif · 单张 ≤5MB（过大的图会自动压缩）</div>
+            </template>
+            <img v-else :src="afDlg.imgPreview" class="af-up-thumb" alt="凭证预览">
+          </div>
+          <input ref="afFile" type="file" accept="image/png,image/jpeg,image/webp,image/gif"
+                 style="display:none" @change="onAfFile">
+
+          <div v-if="afDlg.imgPreview" class="af-up-ops">
+            <span class="loginid">{{ afDlg.imgName || '已选择图片' }}</span>
+            <el-button type="text" size="mini" @click.stop="clearAfImage">重新选择</el-button>
+          </div>
+          <div v-if="afDlg.imgError" class="af-up-err">{{ afDlg.imgError }}</div>
+
+          <el-form label-position="top" size="small" style="margin-top:12px">
             <el-form-item label="备注（选填，记录处理过程）">
               <el-input type="textarea" :rows="3" v-model="afDlg.note" maxlength="255" show-word-limit
                         placeholder="如：已联系顾客，等快递上门取件"></el-input>
@@ -2558,8 +2602,22 @@
           </el-form>
           <span slot="footer">
             <el-button size="small" @click="afDlg.visible = false">取消</el-button>
-            <el-button size="small" type="primary" :loading="afDlg.saving" @click="saveAfStatus">保存</el-button>
+            <el-button size="small" type="primary" :loading="afDlg.saving" @click="saveAfStatus">确定变更</el-button>
           </span>
+        </el-dialog>
+
+        <!-- 凭证查看：一次状态变更一张，最新在前 -->
+        <el-dialog :title="afAttach.title" :visible.sync="afAttach.visible" width="620px" top="6vh" append-to-body>
+          <div v-if="!afAttach.rows.length" class="loginid">这条记录还没有凭证图片（v0.2.108 之前处理的不补图）</div>
+          <div v-for="(a, i) in afAttach.rows" :key="i" class="af-att-row">
+            <div class="af-att-meta">
+              <el-tag size="mini" :type="afStatusTag(a.status)">{{ a.statusLabel }}</el-tag>
+              <span class="loginid" style="margin-left:8px">{{ a.at }} · {{ a.by || '—' }}</span>
+              <div v-if="a.note" style="margin-top:4px">{{ a.note }}</div>
+            </div>
+            <img v-if="a.url" :src="a.url" class="af-att-img" alt="凭证" @click="openAfImage(a.url)">
+            <span v-else class="loginid">（图片链接不可用：存储未配置，或链接已过期 —— 重新打开本弹框会现签一次）</span>
+          </div>
         </el-dialog>
 
         <!-- 新增售后：按商品名称 / SKU 模糊搜索本地商品 → 选中 → 填数量与原因 -->
@@ -4033,7 +4091,14 @@ const vm = new Vue({
           { value: 2, label: '已退货', tag: '' }, { value: 3, label: '已退款', tag: 'success' },
         ],
       },
-      afDlg: { visible: false, key: '', src: 'refund', refundNo: '', status: 0, note: '', goodsText: '', applyReason: '', saving: false },
+      // 处理售后（v0.2.108）：一键推进下一档，弹框只收「凭证图 + 备注」，不再选状态
+      afDlg: {
+        visible: false, key: '', src: 'refund', refundNo: '', status: 0,
+        fromLabel: '', nextLabel: '', note: '', saving: false,
+        img: '', imgPreview: '', imgName: '', imgError: '', dragging: false,
+      },
+      // 凭证查看：点「凭证(n)」打开，列出这条售后每次变更的截图
+      afAttach: { visible: false, title: '售后凭证', rows: [] },
       // 新增售后（手工登记）：先按名称/SKU 搜商品，选中后填数量与原因
       afNew: {
         visible: false, kw: '', searching: false, options: [], pickKey: '',
@@ -5640,6 +5705,15 @@ const vm = new Vue({
       const hit = (this.af.statuses || []).find((x) => Number(x.value) === Number(s));
       return hit ? hit.tag : 'info';
     },
+    afStatusLabel(s) {
+      const hit = (this.af.statuses || []).find((x) => Number(x.value) === Number(s));
+      return hit ? hit.label : '';
+    },
+    /** 下一档：待处理→已申请→已退货→已退款，到顶返回 null（按钮显示「已完成」并禁用） */
+    afNextStatus(row) {
+      const s = Number(row && row.status) || 0;
+      return s >= 3 ? null : s + 1;
+    },
     toggleAfStatus(key) {
       this.af.status = this.af.status === key ? '' : key;
       this.af.page = 1;
@@ -5671,21 +5745,124 @@ const vm = new Vue({
     },
     openAfStatus(row) {
       if (this.readonly) { this.$message.warning('只读模式下不能修改'); return; }
+      const cur = Number(row.status) || 0;
+      const next = this.afNextStatus(row);
+      if (next === null) { this.$message.info('这条售后已到「已退款」，流程结束'); return; }
       this.afDlg = {
         visible: true, key: row.key || '', src: row.src || 'refund',
-        refundNo: row.refundNo || '', status: Number(row.status) || 0,
-        note: row.note || '', goodsText: this.afGoodsText(row), applyReason: row.reasonText || '',
-        saving: false,
+        refundNo: row.refundNo || '', status: next,
+        fromLabel: this.afStatusLabel(cur), nextLabel: this.afStatusLabel(next),
+        note: row.note || '', saving: false,
+        img: '', imgPreview: '', imgName: '', imgError: '', dragging: false,
       };
+      // 粘贴截图：只在弹框打开期间挂，关掉就摘
+      this._afPasteHandler = (e) => this.onAfPaste(e);
+      document.addEventListener('paste', this._afPasteHandler);
+      this.$nextTick(() => { if (this.$refs.afFile) this.$refs.afFile.value = ''; });
+    },
+    onAfDlgClosed() {
+      if (this._afPasteHandler) {
+        document.removeEventListener('paste', this._afPasteHandler);
+        this._afPasteHandler = null;
+      }
+      this.afDlg.img = '';
+      this.afDlg.imgPreview = '';
+    },
+    /** Ctrl+V：从剪贴板取第一张图（截图工具复制出来的一般是 image/png） */
+    onAfPaste(e) {
+      if (!this.afDlg.visible) return;
+      const items = (e.clipboardData && e.clipboardData.items) || [];
+      for (const it of items) {
+        if (it.kind === 'file' && /^image\//.test(it.type)) {
+          const f = it.getAsFile();
+          if (f) {
+            e.preventDefault();
+            this.setAfImage(f, '粘贴的截图');
+            return;
+          }
+        }
+      }
+    },
+    pickAfImage() { if (this.$refs.afFile) this.$refs.afFile.click(); },
+    onAfFile(e) {
+      const f = (e.target.files || [])[0];
+      if (f) this.setAfImage(f, f.name);
+    },
+    onAfDrop(e) {
+      this.afDlg.dragging = false;
+      const f = (e.dataTransfer && e.dataTransfer.files || [])[0];
+      if (f) this.setAfImage(f, f.name);
+    },
+    clearAfImage() {
+      this.afDlg.img = '';
+      this.afDlg.imgPreview = '';
+      this.afDlg.imgName = '';
+      this.afDlg.imgError = '';
+      if (this.$refs.afFile) this.$refs.afFile.value = '';
+    },
+    /** 收下图片文件：先校验类型/大小，再压到最长边 1600 的 jpeg（手机截图 3MB 压完约 200KB） */
+    async setAfImage(file, name) {
+      const okType = /^image\/(png|jpeg|jpg|webp|gif)$/i.test(file.type || '');
+      if (!okType) { this.afDlg.imgError = '只支持 png / jpg / webp / gif 图片'; return; }
+      if (file.size > 5 * 1024 * 1024) {
+        this.afDlg.imgError = '图片超过 5MB（' + (file.size / 1048576).toFixed(1) + 'MB），请压缩后再传';
+        return;
+      }
+      this.afDlg.imgError = '';
+      try {
+        const dataUrl = await this.compressAfImage(file);
+        this.afDlg.img = dataUrl;
+        this.afDlg.imgPreview = dataUrl;
+        this.afDlg.imgName = name || '图片';
+      } catch (e) {
+        this.afDlg.imgError = '读取图片失败：' + (e.message || e);
+      }
+    },
+    compressAfImage(file) {
+      return new Promise((resolve, reject) => {
+        // gif 可能是动图，压缩就没动画了，原样读
+        if (/^image\/gif$/i.test(file.type || '')) {
+          const fr = new FileReader();
+          fr.onload = () => resolve(fr.result);
+          fr.onerror = () => reject(new Error('读取失败'));
+          fr.readAsDataURL(file);
+          return;
+        }
+        const url = URL.createObjectURL(file);
+        const img = new Image();
+        img.onload = () => {
+          try {
+            const MAX = 1600;
+            let { width: w, height: h } = img;
+            const scale = Math.min(1, MAX / Math.max(w, h));
+            w = Math.round(w * scale);
+            h = Math.round(h * scale);
+            const cv = document.createElement('canvas');
+            cv.width = w; cv.height = h;
+            const ctx = cv.getContext('2d');
+            ctx.fillStyle = '#fff';           // png 透明底转 jpeg 会变黑，先铺白
+            ctx.fillRect(0, 0, w, h);
+            ctx.drawImage(img, 0, 0, w, h);
+            resolve(cv.toDataURL('image/jpeg', 0.85));
+          } catch (e) {
+            reject(e);
+          } finally {
+            URL.revokeObjectURL(url);
+          }
+        };
+        img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('图片格式无法解析')); };
+        img.src = url;
+      });
     },
     async saveAfStatus() {
       const d0 = this.afDlg;
       if ((!d0.key && !d0.refundNo) || d0.saving) return;
+      if (!d0.img) { d0.imgError = '请先上传售后凭证图片（每次变更都要留一张）'; return; }
       d0.saving = true;
       try {
         const d = await this.qnhApi('/api/qnh/after-sales/status', {
           method: 'POST', headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ key: d0.key, refundNo: d0.refundNo, status: d0.status, note: d0.note }),
+          body: JSON.stringify({ key: d0.key, refundNo: d0.refundNo, status: d0.status, note: d0.note, image: d0.img }),
         });
         if (!d || d.error) { this.$message.error((d && d.error) || '保存失败'); return; }
         const row = (this.af.rows || []).find((r) => (d0.key ? r.key === d0.key : r.refundNo === d0.refundNo));
@@ -5697,13 +5874,24 @@ const vm = new Vue({
         }
         this.$message.success('已标记为「' + (d.statusLabel || '') + '」');
         d0.visible = false;
-        // 统计卡要跟着变（状态数变了）
+        // 统计卡与凭证数都要跟着变，整页重拉
         this.loadAfterSales();
       } catch (e) {
         this.$message.error('保存失败：' + e.message);
       } finally {
         d0.saving = false;
       }
+    },
+    /** 凭证查看：列表里已带签名链接（1 小时有效），直接展示 */
+    openAfAttach(row) {
+      this.afAttach = {
+        visible: true,
+        title: '售后凭证 · ' + (this.afGoodsText(row) || ''),
+        rows: (row.attaches || []).slice(),
+      };
+    },
+    openAfImage(url) {
+      if (url) window.open(url, '_blank');
     },
 
     // ── 新增售后（手工登记，v0.2.106）──

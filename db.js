@@ -274,6 +274,26 @@ async function ensureQnhSchema(q) {
       "  KEY `idx_qam_sku` (`user_id`,`sku`)" +
       ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='手工登记的售后（售后管理页「新增售后」）'",
 
+    // 售后凭证图片（v0.2.108）：每次状态变更必须留一张，存七牛对象 key（不含域名）。
+    //   行键 row_key 与列表一致：ref:<退单号> / man:<手工售后id>；
+    //   展示时由 lib/qiniu.js 的 signUrl() 现签私有空间临时链接，库里不存 URL
+    //   （换域名、换空间都不用改历史数据）。
+    'CREATE TABLE IF NOT EXISTS `qnh_after_attach` (' +
+      "  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT," +
+      "  `user_id` INT NOT NULL DEFAULT 1 COMMENT '数据归属用户（员工操作时记所属主体账号）'," +
+      "  `row_key` VARCHAR(64) NOT NULL COMMENT '售后行键：ref:<退单号> / man:<手工售后id>'," +
+      "  `status` TINYINT NOT NULL DEFAULT 0 COMMENT '本次变更后的处理状态：0待处理 1已申请 2已退货 3已退款'," +
+      "  `object_key` VARCHAR(512) NOT NULL COMMENT '七牛对象 key（不含域名，展示时签名）'," +
+      "  `mime` VARCHAR(64) DEFAULT NULL COMMENT '图片类型（image/png 等）'," +
+      "  `size` INT UNSIGNED DEFAULT NULL COMMENT '图片字节数'," +
+      "  `note` VARCHAR(255) DEFAULT NULL COMMENT '本次变更的备注（冗余一份，附件单独看也能读到）'," +
+      "  `created_by` VARCHAR(64) DEFAULT NULL COMMENT '操作人'," +
+      "  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP," +
+      "  PRIMARY KEY (`id`)," +
+      "  KEY `idx_qaa_row` (`user_id`,`row_key`,`created_at`)," +
+      "  KEY `idx_qaa_time` (`user_id`,`created_at`)" +
+      ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='售后凭证图片（每次状态变更一张，存七牛 key）'",
+
     // 实时毛利监控：订单毛利明细（数据经「本机助手」页内签名接口拉取，见 lib/qnh.js）
     'CREATE TABLE IF NOT EXISTS `qnh_profit_order` (' +
       "  `user_id` INT NOT NULL DEFAULT 1 COMMENT '数据归属用户'," +

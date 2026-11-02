@@ -547,3 +547,48 @@ CREATE TABLE IF NOT EXISTS `goods_price_cache` (
   KEY `idx_pc_goods` (`kind`, `goods_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   COMMENT='平台商品价格缓存（取一次即持久化，按品牌方共用）';
+
+-- ----------------------------------------------------------------------------
+-- 售后管理（牵牛花模块）
+--   ⚠ 其余 qnh_* 表（退单、明细、日志、同步批次、毛利等）历来由 db.js 的
+--     ensureQnhSchema() 建，这里是 v0.2.108 起补上的两张售后表，保证全新部署
+--     按本文件建库也能一次建对。两份 DDL 必须保持一致，改动时同步 db.js。
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `qnh_after_manual` (
+  `id`           BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `user_id`      INT           NOT NULL DEFAULT 1   COMMENT '数据归属用户（员工录入时是所属主体账号）',
+  `sku`          VARCHAR(64)   NOT NULL DEFAULT ''  COMMENT '商品SKU（从商品列表搜索选中）',
+  `goods_name`   VARCHAR(512)  NOT NULL DEFAULT ''  COMMENT '商品名称（选中后可手改，兼容搜不到的商品）',
+  `image_url`    VARCHAR(512)  DEFAULT NULL         COMMENT '商品主图（选中商品时带上，仅展示用）',
+  `qty`          INT           NOT NULL DEFAULT 1   COMMENT '售后数量',
+  `apply_reason` VARCHAR(512)  DEFAULT NULL         COMMENT '售后原因（人工填写）',
+  `status`       TINYINT       NOT NULL DEFAULT 0   COMMENT '售后处理状态：0待处理 1已申请 2已退货 3已退款',
+  `note`         VARCHAR(255)  DEFAULT NULL         COMMENT '处理备注',
+  `handled_by`   VARCHAR(64)   DEFAULT NULL         COMMENT '最后处理人',
+  `handled_at`   DATETIME      DEFAULT NULL         COMMENT '最后处理时间',
+  `created_by`   VARCHAR(64)   DEFAULT NULL         COMMENT '录入人',
+  `created_at`   DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at`   DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_qam_user_time`   (`user_id`, `created_at`),
+  KEY `idx_qam_user_status` (`user_id`, `status`),
+  KEY `idx_qam_sku`         (`user_id`, `sku`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  COMMENT='手工登记的售后（售后管理页「新增售后」）';
+
+CREATE TABLE IF NOT EXISTS `qnh_after_attach` (
+  `id`          BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `user_id`     INT           NOT NULL DEFAULT 1   COMMENT '数据归属用户（员工操作时记所属主体账号）',
+  `row_key`     VARCHAR(64)   NOT NULL             COMMENT '售后行键：ref:<退单号> / man:<手工售后id>',
+  `status`      TINYINT       NOT NULL DEFAULT 0   COMMENT '本次变更后的处理状态：0待处理 1已申请 2已退货 3已退款',
+  `object_key`  VARCHAR(512)  NOT NULL             COMMENT '七牛对象 key（不含域名，展示时签名）',
+  `mime`        VARCHAR(64)   DEFAULT NULL         COMMENT '图片类型（image/png 等）',
+  `size`        INT UNSIGNED  DEFAULT NULL         COMMENT '图片字节数',
+  `note`        VARCHAR(255)  DEFAULT NULL         COMMENT '本次变更的备注（冗余一份，附件单独看也能读到）',
+  `created_by`  VARCHAR(64)   DEFAULT NULL         COMMENT '操作人',
+  `created_at`  DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_qaa_row`  (`user_id`, `row_key`, `created_at`),
+  KEY `idx_qaa_time` (`user_id`, `created_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  COMMENT='售后凭证图片（每次状态变更一张，存七牛 key）';

@@ -71,6 +71,7 @@ const { buildMessages } = require('./lib/sender');
 const qnh = require('./lib/qnh');
 const qagent = require('./lib/qnh-agent');
 const jagent = require('./lib/jd-agent');
+const qiniu = require('./lib/qiniu');
 const pdd = require('./lib/pdd');
 const pddOrders = require('./lib/pdd-orders');
 const aliOrders = require('./lib/ali-orders');
@@ -159,11 +160,18 @@ function normalizeDay(v) {
   if (Number.isNaN(t.getTime())) return null;
   return s;
 }
-function readBody(req) {
+/**
+ * 读 JSON body
+ * @param {object} req
+ * @param {number} [maxLen] 字符上限，默认 2e6（2MB）。带图片 dataURL 的接口要放大，
+ *   例如售后凭证图 5MB 上限，base64 后约 6.7MB，调用方传 9e6。
+ */
+function readBody(req, maxLen) {
+  const cap = Number(maxLen) || 2e6;
   return new Promise((resolve) => {
     let body = '';
     let tooBig = false;
-    req.on('data', (c) => { body += c; if (body.length > 2e6) { tooBig = true; req.destroy(); } });
+    req.on('data', (c) => { body += c; if (body.length > cap) { tooBig = true; req.destroy(); } });
     req.on('end', () => { if (tooBig) return resolve({}); try { resolve(JSON.parse(body || '{}')); } catch (e) { resolve({}); } });
   });
 }
@@ -5029,14 +5037,21 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, out.ok ? 200 : 400, out);
       }
 
+      // 售后状态变更（v0.2.108）：必须带一张凭证图 —— 先传七牛拿 key，再连状态一起写库。
+      //   图与状态同一次请求：七牛失败就直接返回，状态不变（"凭证必填"的代价，见方案说明）。
       if (method === 'POST' && p === '/api/qnh/after-sales/status') {
-        const body = await readBody(req);
+        const body = await readBody(req, 9e6);   // 5MB 图片 base64 后约 6.7MB
         writeGuard();
+        const img = qiniu.decodeImagePayload(body.image || body.imageBase64);
+        if (!img.ok) return sendJson(res, 400, { ok: false, error: img.error });
+        const up = await qiniu.uploadImage(img.buffer, { mime: img.mime, userId: qnhUid, prefix: 'after-sale' });
+        if (!up.ok) return sendJson(res, 400, { ok: false, error: up.error });
         const out = await qnh.setAfterSaleStatus({
           key: body.key, refundNo: body.refundNo, status: body.status, note: body.note,
+          imageKey: up.key, imageMime: up.mime, imageSize: up.size,
           userId: qnhUid, operator: user.username,
         });
-        if (out.ok) await logOp(user, 'qnh.after_status', { tenantId: qnhUid, key: out.key, status: out.status });
+        if (out.ok) await logOp(user, 'qnh.after_status', { tenantId: qnhUid, key: out.key, status: out.status, imageKey: out.imageKey });
         return sendJson(res, out.ok ? 200 : 400, out);
       }
 

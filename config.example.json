@@ -57,5 +57,15 @@
     "_comment5": "牵牛花退单同步工程（qnh-refund-sync，含 bridge.py）的位置与 Python 解释器。留空则自动探测：环境变量 QNH_SYNC_DIR/QNH_PYTHON > 本段 > %HOME%/WorkBuddy/*/qnh-refund-sync 取最新 > 项目同级 qnh-refund-sync；Python 回退到本机 .workbuddy venv，再回退 PATH 上的 python",
     "syncDir": "",
     "python": ""
+  },
+  "qiniu": {
+    "_comment": "售后凭证图片存储（七牛 Kodo，私有空间）。不配也不影响服务启动，只是售后页变更状态时无法上传凭证图。域名用 http：qiniu.xiadk.pw 的 https 证书当前不匹配（边缘证书是别家的），https 会直接 TLS 报错。uploadHost 留空则按 region 推断（华南=upload-z2）。",
+    "accessKey": "",
+    "secretKey": "",
+    "bucket": "",
+    "domain": "http://qiniu.xiadk.pw",
+    "region": "华南",
+    "uploadHost": "",
+    "expireSec": 3600
   }
 }
