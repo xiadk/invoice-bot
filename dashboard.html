@@ -1649,6 +1649,9 @@
             <b>按月收支</b>
             <span class="loginid">（净利润 = 总收入 − 总支出）</span>
             <span style="flex:1"></span>
+            <el-button size="small" :loading="bill.syncing"
+                       @click="syncQhtOrders"
+                       title="从齐货通「我的 → 全部订单」拉回订单落库（首次全量，之后增量）。账单里「齐货通当月订单金额」统计的就是这些数据。">同步齐货通订单</el-button>
             <el-button size="small" :loading="bill.loading" @click="loadBilling()">刷新</el-button>
             <el-button size="small" type="primary" @click="openAddMonth">新增月份</el-button>
           </div>
@@ -4247,7 +4250,7 @@ const vm = new Vue({
       // 交易市场
       market: { loading: false, rows: [], total: 0, page: 1, size: 20, summary: {} },
       // 账单（按月）：cols = 每个月一列 { month, hasRow, cells(手工项), auto(1688/拼多多), totals }
-      bill: { loading: false, items: [], cols: [] },
+      bill: { loading: false, syncing: false, items: [], cols: [] },
       billAdd: { visible: false, month: '', copyFrom: '', saving: false },
       // 账单「系统」支出项的订单明细弹窗（点金额打开，用于核对条数与合计）
       billOrders: { visible: false, loading: false, platform: '', month: '', title: '', rows: [], total: 0, sum: 0, page: 1, size: 50 },
@@ -4545,7 +4548,8 @@ const vm = new Vue({
         mom = '较上月 ' + (diff >= 0 ? '+' : '') + diff.toFixed(1) + '%';
       }
       const auto = cur.auto || {};
-      const plat = (Number(auto.auto_1688) || 0) + (Number(auto.auto_pdd) || 0) + (Number(auto.auto_sdc) || 0);
+      const plat = (Number(auto.auto_1688) || 0) + (Number(auto.auto_pdd) || 0)
+        + (Number(auto.auto_sdc) || 0) + (Number(auto.auto_qht) || 0);
       return [
         { key: 'net', num: this.yuan(t.net), label: '本月净利润 · ' + this.monthText(cur.month), sub: mom },
         { key: 'income', num: this.yuan(t.income), label: '本月总收入', sub: '美团 / 淘宝 / 京东' },
@@ -9618,6 +9622,22 @@ const vm = new Vue({
         this.bill.cols = d.months || [];
       } catch (e) { this.$message.error('账单加载失败: ' + e.message); }
       finally { if (!silent) this.bill.loading = false; }
+    },
+    /** 同步齐货通订单（v0.3.3）：拉「我的 → 全部订单」落库，完成后刷新账单金额 */
+    async syncQhtOrders() {
+      this.bill.syncing = true;
+      try {
+        const d = await this.api('/api/billing/qht-sync', { method: 'POST' });
+        if (d && d.error) { this.$message.error(d.error); return; }
+        const scope = d.fullSync ? '全量' : '增量';
+        this.$message.success('齐货通订单同步完成（' + scope + '）：本次拉取 ' + (d.pulled || 0)
+          + ' 单，入库 ' + (d.saved || 0) + ' 单，累计 ' + (d.total || 0) + ' 单');
+        await this.loadBilling(true);
+      } catch (e) {
+        this.$message.error('同步失败: ' + e.message);
+      } finally {
+        this.bill.syncing = false;
+      }
     },
     /** 改一个单元格 → 立即保存，静默重算（保存后重新拉一次，金额口径统一由服务端算） */
     async saveBillCell(col, item, value) {
