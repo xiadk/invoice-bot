@@ -996,6 +996,11 @@
                        title="用商品名称原样搜索城配速达，直接取搜索结果第一条关联；只对当前筛选出来的商品生效">自动匹配阿发</el-button>
             <el-button v-if="canPrice" size="small" :loading="rp.afaPricing" @click="refreshRpPrices('afa')"
                        title="对当前筛选出来的全部商品重新取阿发价（不是全量）">阿发重新取价</el-button>
+            <el-button v-if="canPrice" size="small" :type="rp.jdSession.configured ? 'danger' : 'primary'"
+                       title="京东只放行真实浏览器：点这里会在这台电脑上弹出万商登录窗口"
+                       @click="openJdLoginDlg">{{ rp.jdSession.configured ? '万商已登录' : '万商登录' }}</el-button>
+            <el-button v-if="canPrice" size="small" :loading="rp.jdPricing" @click="refreshRpPrices('jd')"
+                       title="对当前筛选出来的已关联商品取京东万商价（由本机助手在万商页面里逐个取，约 0.5~1 秒/个）">京东取价</el-button>
             <span class="loginid">共 {{ rp.total }} 个商品</span>
             <span v-if="rp.expect && rp.total < rp.expect" style="font-size:12px;color:#e6a23c">
               本次导入 {{ rp.expect }} 个，当前筛出 {{ rp.total }} 个（同名 SKU 已合并）
@@ -1097,6 +1102,49 @@
                   <span v-else class="loginid">未取价</span>
                 </template>
                 <el-button v-else size="mini" type="warning" plain @click="openAfaLinkDlg(p.row)">关联</el-button>
+              </template>
+            </el-table-column>
+            <el-table-column label="京东万商价" min-width="215" class-name="col-price">
+              <template slot-scope="p">
+                <template v-if="p.row.jd_sku_id">
+                  <template v-if="rp.jdPrices[pkey(p.row, 'jd')] && rp.jdPrices[pkey(p.row, 'jd')].ok">
+                    <div style="display:flex;flex-direction:column;gap:2px;min-width:120px">
+                      <img v-if="rp.jdPrices[pkey(p.row, 'jd')].picture || p.row.image_url"
+                           :src="rp.jdPrices[pkey(p.row, 'jd')].picture || p.row.image_url" :alt="p.row.goods_name"
+                           style="width:40px;height:40px;object-fit:cover;border-radius:4px;display:block"
+                           @error="e => { e.target.style.display='none'; }" />
+                      <div style="display:flex;justify-content:space-between;gap:8px;font-size:12px;line-height:18px">
+                        <span class="loginid">整件价</span><b class="amount ok">¥{{ rp.jdPrices[pkey(p.row, 'jd')].packPrice }}</b>
+                      </div>
+                      <div style="display:flex;justify-content:space-between;gap:8px;font-size:12px;line-height:18px">
+                        <span class="loginid">折合单价</span>
+                        <b v-if="rp.jdPrices[pkey(p.row, 'jd')].unitPrice != null">¥{{ rp.jdPrices[pkey(p.row, 'jd')].unitPrice }}</b>
+                        <span v-else class="loginid" title="商品标题里没解析出装箱量，无法折算单价">—</span>
+                      </div>
+                      <div style="display:flex;justify-content:space-between;gap:8px;font-size:12px;line-height:18px">
+                        <span class="loginid">规格</span><span class="loginid">{{ rp.jdPrices[pkey(p.row, 'jd')].spec || '—' }}</span>
+                      </div>
+                      <div v-if="rp.jdPrices[pkey(p.row, 'jd')].fetchedAt"
+                           style="font-size:11px;line-height:14px;color:#909399">
+                        缓存于 {{ rp.jdPrices[pkey(p.row, 'jd')].fetchedAt }}
+                      </div>
+                    </div>
+                    <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:4px">
+                      <el-button size="mini" type="primary" plain @click="openJdLinkDlg(p.row)">修改</el-button>
+                      <el-button size="mini" type="danger" plain @click="unlinkJdRow(p.row)">解除</el-button>
+                    </div>
+                  </template>
+                  <span v-else-if="rp.jdPrices[pkey(p.row, 'jd')]" class="loginid" style="color:#f56c6c"
+                        :title="rp.jdPrices[pkey(p.row, 'jd')].error || '取价失败'">取价失败</span>
+                  <template v-else>
+                    <span class="loginid">未取价</span>
+                    <div style="margin-top:4px">
+                      <el-button size="mini" type="primary" plain @click="openJdLinkDlg(p.row)">修改</el-button>
+                      <el-button size="mini" type="danger" plain @click="unlinkJdRow(p.row)">解除</el-button>
+                    </div>
+                  </template>
+                </template>
+                <el-button v-else size="mini" type="warning" plain @click="openJdLinkDlg(p.row)">关联</el-button>
               </template>
             </el-table-column>
             <el-table-column label="本地价" width="118">
@@ -1231,17 +1279,103 @@
           </div>
         </el-dialog>
 
-        <!-- 自动匹配阿发商品：拿商品名称原样搜索 → 直接取第一条关联 → 逐条可改可删 -->
-        <el-dialog title="自动匹配阿发商品" :visible.sync="rpMatch.visible" width="1040px" top="4vh" append-to-body>
-          <div style="display:flex;gap:10px;align-items:center;margin-bottom:10px;flex-wrap:wrap">
-            <span class="loginid">{{ rpMatch.message }}</span>
-            <span style="flex:1"></span>
+        <!-- 关联京东万商商品：粘贴商品链接/skuId → 预览 → 确认（京东搜索接口要 h5st 签名，
+             服务端算不出来，所以没做关键字搜索，只能粘贴链接） -->
+        <el-dialog title="关联京东万商商品" :visible.sync="rpJdLink.visible" width="660px" top="6vh" append-to-body>
+          <div class="loginid" style="font-size:12px;line-height:18px;margin-bottom:10px">
+            补货商品：<b>{{ rpJdLink.goodsName || rpJdLink.sku }}</b><br>
+            到 <b>b.jd.com</b> 找到对应商品 → 复制商品页链接（形如
+            <span style="font-family:Consolas,monospace">https://b.jd.com/product/10235591362865.html</span>）→ 粘到下面。
+            直接粘 skuId 数字也可以。京东搜索接口需要动态签名（服务器算不出来），所以这里不做关键字搜索。<br>
+            <span style="color:#909399">预览由这台电脑的助手在万商页面里取，需助手在线且已登录京东万商。</span>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px">
+            <el-input v-model="rpJdLink.input" size="small" placeholder="粘贴万商商品链接 或 skuId（如 10235591362865）"
+                      style="flex:1" clearable @keyup.enter.native="previewJdLink"></el-input>
+            <el-button size="small" type="primary" :loading="rpJdLink.loading" @click="previewJdLink">预览</el-button>
+          </div>
+          <el-alert v-if="rpJdLink.error" type="error" :closable="false" show-icon :title="rpJdLink.error" style="margin-bottom:10px"></el-alert>
+          <el-card v-if="rpJdLink.picked" shadow="never" :body-style="{ padding: '12px' }">
+            <div style="display:flex;gap:12px">
+              <img v-if="rpJdLink.picked.picture" :src="rpJdLink.picked.picture"
+                   style="width:88px;height:88px;object-fit:cover;border-radius:6px;flex:none"
+                   @error="e => { e.target.style.display='none'; }" />
+              <div style="flex:1;min-width:0">
+                <div style="font-weight:600;line-height:20px">{{ rpJdLink.picked.goodsName }}</div>
+                <div class="loginid" style="font-size:12px;line-height:20px;margin-top:4px">
+                  万商价 <b class="amount ok">¥{{ rpJdLink.picked.packPrice }}</b>
+                  <span v-if="rpJdLink.picked.packQty">／ {{ rpJdLink.picked.packQty }} 件装，
+                    折合 <b>¥{{ rpJdLink.picked.unitPrice }}</b></span>
+                  <span v-if="rpJdLink.picked.originalPrice">（原价 ¥{{ rpJdLink.picked.originalPrice }}）</span>
+                </div>
+                <div class="loginid" style="font-size:12px;line-height:18px">
+                  规格 {{ rpJdLink.picked.spec || '—' }}
+                  <span v-if="rpJdLink.picked.brand"> · 品牌 {{ rpJdLink.picked.brand }}</span>
+                  <span v-if="rpJdLink.picked.shelfLife"> · 保质期 {{ rpJdLink.picked.shelfLife }}</span>
+                </div>
+                <div class="loginid" style="font-size:12px;line-height:18px;color:#909399">
+                  skuId {{ rpJdLink.picked.skuId }}<span v-if="rpJdLink.picked.stock"> · {{ rpJdLink.picked.stock }}</span>
+                </div>
+              </div>
+            </div>
+          </el-card>
+          <div slot="footer">
+            <el-button size="small" @click="rpJdLink.visible = false">取消</el-button>
+            <el-button size="small" type="primary" :disabled="!rpJdLink.picked" :loading="rpJdLink.saving"
+                       @click="confirmJdLink">确认关联</el-button>
+          </div>
+        </el-dialog>
+
+        <!-- 京东万商登录：在助手窗口里登录（京东只放行真实浏览器，服务器直连必 403） -->
+        <el-dialog title="京东万商登录" :visible.sync="rpJdLogin.visible" width="660px" top="8vh" append-to-body>
+          <el-alert v-if="rp.jdSession.configured" type="success" :closable="false" show-icon
+                    :title="'当前账号已登录：' + (rp.jdSession.shop || '（未取到店铺名）') + (rp.jdSession.savedAt ? '，登录于 ' + String(rp.jdSession.savedAt).slice(0, 19).replace('T', ' ') : '')"
+                    style="margin-bottom:10px"></el-alert>
+          <el-alert v-if="rp.jdSession.agent && !rp.jdSession.agent.online" type="warning" :closable="false" show-icon
+                    title="本机助手未连接：请先在这台电脑上启动「催收小助手」并点页面右上角「绑定本机助手」"
+                    style="margin-bottom:10px"></el-alert>
+          <el-alert v-else-if="rp.jdSession.agent && !rp.jdSession.agent.capable" type="warning" :closable="false" show-icon
+                    :title="'这台电脑上的助手版本过旧（' + (rp.jdSession.agent.version || '未知') + '），需要 v' + (rp.jdSession.agent.minVersion || '') + ' 及以上，请点右上角「下载本机助手」更新'"
+                    style="margin-bottom:10px"></el-alert>
+          <div class="loginid" style="font-size:12px;line-height:20px;margin-bottom:8px">
+            京东只允许在真实浏览器里取价，服务器直连会被网关拦（403），所以登录与取价都在这台电脑上完成。<br>
+            ① 点下面 <b>开始登录</b>，这台电脑会弹出 <b>京东万商（b.jd.com）</b> 窗口；<br>
+            ② 在窗口里登录（账号密码只在你的电脑上输入，助手不读取、不保存）；<br>
+            ③ 登录成功后自动回传，页面会刷新登录状态，最多等 5 分钟。<br>
+            <span style="color:#909399">服务器只保存设备指纹与收货地址（用于组取价参数），不保存账号密码。</span>
+          </div>
+          <el-alert v-if="rpJdLogin.message" type="info" :closable="false" show-icon :title="rpJdLogin.message" style="margin-bottom:8px"></el-alert>
+          <el-alert v-if="rpJdLogin.error" type="error" :closable="false" show-icon :title="rpJdLogin.error"></el-alert>
+          <div slot="footer">
+            <el-button v-if="rp.jdSession.configured" size="small" type="danger" plain :loading="rpJdLogin.checking"
+                       @click="clearJdSession">退出（清除本账号登录态）</el-button>
+            <el-button size="small" @click="rpJdLogin.visible = false">关闭</el-button>
+            <el-button size="small" type="primary" :loading="rpJdLogin.starting"
+                       :disabled="rp.jdSession.agent && !rp.jdSession.agent.capable"
+                       @click="startJdLogin">开始登录</el-button>
+          </div>
+        </el-dialog>
+
+        <!-- 自动匹配阿发商品：CLIP 图文打分（后台任务，页面轮询进度） -->
+        <el-dialog title="自动匹配阿发商品（CLIP 图文匹配）" :visible.sync="rpMatch.visible" width="1180px" top="4vh" append-to-body
+                   :close-on-click-modal="false">
+          <div style="display:flex;gap:10px;align-items:center;margin-bottom:8px;flex-wrap:wrap">
+            <span class="loginid" style="flex:1;min-width:280px">{{ rpMatch.message }}</span>
             <el-button size="small" type="primary" plain icon="el-icon-refresh" :loading="rpMatch.loading"
-                       @click="runAutoMatch(true)">重新匹配未关联</el-button>
+                       :disabled="rpMatch.running" @click="runAutoMatch(true)">重新匹配未关联</el-button>
+            <el-button v-if="rpMatch.running" size="small" type="danger" plain @click="stopAutoMatch">停止</el-button>
+          </div>
+          <el-progress :percentage="rpMatch.percent" :status="rpMatch.running ? '' : 'success'" :stroke-width="14"
+                       style="margin-bottom:8px"></el-progress>
+          <div class="loginid" style="font-size:12px;line-height:17px;margin-bottom:8px">
+            打分口径：<b>图片相似度 × 0.6 + 中文文本相似度 × 0.4</b>，再叠加 IP 一致 +0.08、竞品互斥 −0.30、
+            容量不一致 −0.20、罐型冲突（矮罐/摩登罐）−0.15；总分 ≥ <b>{{ rpMatch.threshold }}</b> 才自动关联，否则留空等人工。
+            <span v-if="rpMatch.model && rpMatch.model.modelId">｜模型 {{ rpMatch.model.modelId }}<span v-if="rpMatch.model.loadMs">（加载 {{ rpMatch.model.loadMs }}ms）</span></span>
+            <span v-if="rpMatch.warn" style="color:#e6a23c">｜{{ rpMatch.warn }}</span>
           </div>
           <el-table :data="rpMatch.items" size="small" border :max-height="tblH.link" style="width:100%" v-loading="rpMatch.loading"
                     empty-text="补货表里还没有商品">
-            <el-table-column label="商品名称（搜索词）" min-width="250">
+            <el-table-column label="商品名称（搜索词）" min-width="240">
               <template slot-scope="p">
                 <div style="display:flex;gap:8px;align-items:center">
                   <img v-if="p.row.image_url" :src="p.row.image_url" :alt="p.row.goods_name"
@@ -1253,7 +1387,7 @@
                 </div>
               </template>
             </el-table-column>
-            <el-table-column label="阿发搜索结果第一条" min-width="380">
+            <el-table-column label="匹配到的阿发商品" min-width="430">
               <template slot-scope="p">
                 <div v-if="p.row.candidate" style="display:flex;gap:8px;align-items:center">
                   <img v-if="p.row.candidate.picture" :src="p.row.candidate.picture" :alt="p.row.candidate.goodsName"
@@ -1271,7 +1405,24 @@
                 <div v-else class="loginid">{{ p.row.note || '—' }}</div>
               </template>
             </el-table-column>
-            <el-table-column label="状态" width="100">
+            <el-table-column label="打分" width="240">
+              <template slot-scope="p">
+                <div v-if="p.row.score" style="font-size:11px;line-height:16px">
+                  <div>
+                    总分 <b :style="{ color: p.row.score.isMatch ? '#67c23a' : '#e6a23c' }">{{ p.row.score.score }}</b>
+                    <span class="loginid" style="margin-left:6px">图文 {{ p.row.score.imgSim }} / 文本 {{ p.row.score.textSim }}</span>
+                  </div>
+                  <div class="loginid" :title="p.row.score.reason" style="color:#909399;max-height:32px;overflow:hidden">
+                    {{ p.row.score.reason }}
+                  </div>
+                  <div class="loginid" style="color:#c0c4cc" v-if="p.row.score.candidatesTotal">
+                    候选 {{ p.row.score.candidatesScored }}/{{ p.row.score.candidatesTotal }} 个参与打分
+                  </div>
+                </div>
+                <span v-else class="loginid">—</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="状态" width="110">
               <template slot-scope="p">
                 <el-tag size="mini" :type="matchTag(p.row).type">{{ matchTag(p.row).text }}</el-tag>
               </template>
@@ -1283,10 +1434,10 @@
               </template>
             </el-table-column>
           </el-table>
-          <div slot="footer">
-            <span class="loginid" style="float:left;line-height:32px;max-width:700px;text-align:left">
-              搜索词就是商品名称；结果里第一条即关联对象，不做筛选也不打分。
-              关联错了直接点「修改」换个商品，或「删除关联」清空后重新匹配。
+          <div slot="footer" style="display:flex;align-items:flex-end;gap:12px">
+            <span class="loginid" style="flex:1;line-height:17px;text-align:left">
+              先用商品名称搜城配速达拿候选，再用 CLIP 图片向量 + 中文文本相似度打分，只对<b>总分达标</b>的自动关联；
+              没达标的留空，点「修改」可手工挑一个。CLIP 不可用或商品没主图时，会回退「搜索结果第一条」并标黄提醒。
             </span>
             <el-button size="small" @click="rpMatch.visible = false">关闭</el-button>
           </div>
@@ -3447,20 +3598,26 @@ const vm = new Vue({
       },
       // 补货界面（导入完成后进入）+ 关联的齐货通弹窗
       // 补货默认 20 条/页（页码可翻）；页大小可切 20/50/100/全部(2000)
-      rp: { visible: false, loading: false, pricing: false, afaPricing: false, batchId: null, rows: [], prices: {}, afaPrices: {}, total: 0, page: 1, size: 20, expect: 0, filteredValue: 0,
+      rp: { visible: false, loading: false, pricing: false, afaPricing: false, jdPricing: false, batchId: null, rows: [], prices: {}, afaPrices: {}, jdPrices: {}, total: 0, page: 1, size: 20, expect: 0, filteredValue: 0,
             // 筛选（v0.2.92）：默认展示当前品牌方全部商品；draftQ 是输入框，q 是「已生效」的关键词
             draftQ: '', q: '', status: '', brand: '', brandStats: [],
-            session: { configured: false, tokenMasked: '', xUser: '' }, afaSession: { configured: false, tokenMasked: '', storeId: '', appId: '' } },
+            session: { configured: false, tokenMasked: '', xUser: '' }, afaSession: { configured: false, tokenMasked: '', storeId: '', appId: '' },
+            // 京东万商：登录态按账号隔离（在助手窗口里登录，服务器只存 eid/uuid/收货地址）
+            jdSession: { configured: false, shop: '', savedAt: null, agent: { online: false, capable: false, version: '', minVersion: '' } } },
       // 弹窗表格高度按视口动态算（写死 vh 在小屏笔记本上会把弹窗撑出屏幕）
       tblH: { rp: 500, link: 320 },
       rpLink: { visible: false, sku: '', keyword: '', rows: [], loading: false, error: '', picked: null, total: 0, page: 1, size: 20 },
       rpBuy: { visible: false, sku: '', goodsId: null, goodsName: '', qty: 1, saving: false },
       qhtDlg: { visible: false, account: '', password: '', saving: false },
+      // 京东万商：关联弹窗（粘贴链接/skuId → 预览确认）/ 登录弹窗（本机助手窗口登录）
+      rpJdLink: { visible: false, sku: '', goodsName: '', input: '', loading: false, error: '', picked: null },
+      rpJdLogin: { visible: false, starting: false, error: '', message: '', checking: false },
       // 城配速达（阿发）：关联弹窗 / 选购弹窗 / Token 配置弹窗
       rpAfaLink: { visible: false, sku: '', keyword: '', rows: [], loading: false, error: '', picked: null, total: 0, page: 1, size: 20 },
       rpAfaBuy: { visible: false, sku: '', goodsId: null, goodsName: '', qty: 1, saving: false },
       // 自动匹配阿发（v0.2.91）：用商品名称原样搜 → 直接取搜索结果第一条 → 可改可删
-      rpMatch: { visible: false, loading: false, items: [], message: '', batchId: null },
+      rpMatch: { visible: false, loading: false, running: false, taskId: null, percent: 0, stats: {},
+                 threshold: 0.8, model: null, warn: '', items: [], message: '', batchId: null },
       afaDlg: { visible: false, token: '', storeId: '', appId: 'wxc050ff76c31c4371', saving: false },
       // 发布到交易市场（单个/批量共用弹窗）
       publish: { visible: false, title: '', discount: 100, items: [], saving: false },
@@ -7081,7 +7238,7 @@ const vm = new Vue({
       this.rp.q = '';
       this.rp.draftQ = '';
       this.rp.status = '';
-      await Promise.all([this.loadReplenish(), this.loadQhtSession(), this.loadAfaSession()]);
+      await Promise.all([this.loadReplenish(), this.loadQhtSession(), this.loadAfaSession(), this.loadJdSession()]);
       this._rpSkipWatch = false;
     },
     /** 「自动匹配 / 重新取价」的筛选条件：与列表用同一份，保证只作用于当前筛出来的商品 */
@@ -7131,6 +7288,7 @@ const vm = new Vue({
       // 列表一出来就把库里已缓存的价格带出来（mode=cache 只读本地库，绝不去平台取价）
       await this.loadQhtPrices(this.rp.rows, { mode: 'cache' });
       await this.loadAfaPrices(this.rp.rows, { mode: 'cache' });
+      await this.loadJdPrices(this.rp.rows, { mode: 'cache' });
       // 重排一次列宽：页面用 v-show 常驻 DOM，在隐藏状态下渲染过的表格列宽会算错，进页面/切视图后必须 doLayout
       this.$nextTick(() => { const t = this.$refs.rpTable; if (t && t.doLayout) t.doLayout(); });
     },
@@ -7147,6 +7305,8 @@ const vm = new Vue({
      * 再按品牌分组强制去平台刷新，取到的价格写入 goods_price_cache；以后打开列表直接读库。
      */
     async refreshRpPrices(kind) {
+      // 京东万商：取价范围直接从当前行数据算（jd_sku_id 已在行里），不需要再查 targets
+      if (kind === 'jd') return this.refreshJdPrices();
       const isAfa = kind === 'afa';
       const btn = isAfa ? 'afaPricing' : 'pricing';
       const label = isAfa ? '阿发' : '齐货通';
@@ -7190,13 +7350,271 @@ const vm = new Vue({
         : await this.loadQhtPrices(pseudo, { mode: 'refresh' });
       if (r && r.fetched) this.$message.success(`已刷新并缓存 ${r.fetched} 个${label}商品的价格`);
     },
+    // ── 京东万商（b.jd.com）────────────────────────────────────────────────
+    //   取价：本机助手在万商页面里发（服务器直连必 403）；关联：粘贴链接（搜索接口要 h5st，算不出来）
+    async loadJdSession() {
+      try { this.rp.jdSession = await this.api('/api/jd/session'); } catch (e) { /* 状态提示而已 */ }
+    },
+    /** 从当前行数据里挑出已关联的万商商品，按品牌分组（jd_sku_id 已随行下发，不用另查） */
+    jdGroupsOf(rows) {
+      const groups = new Map();
+      for (const r of (rows || this.rp.rows || [])) {
+        const id = String(r.jd_sku_id || '').trim();
+        if (!id) continue;
+        const b = Number(r.brand_id) || Number(this.me && this.me.brandId) || 1;
+        if (!groups.has(b)) groups.set(b, new Set());
+        groups.get(b).add(id);
+      }
+      return groups;
+    },
+    /** 取价（或只读缓存）。mode=cache 不打京东，页面加载走这条 */
+    async loadJdPrices(rows, opts) {
+      const src = Array.isArray(rows) ? rows : (this.rp.rows || []);
+      const mode = (opts && opts.mode) === 'refresh' ? 'refresh' : 'cache';
+      const groups = this.jdGroupsOf(src);
+      if (!groups.size) return { cached: 0, fetched: 0 };
+      const acc = {};
+      let cached = 0; let fetched = 0; let err = null;
+      if (mode === 'refresh') this.rp.jdPricing = true;
+      try {
+        for (const [brandId, ids] of groups) {
+          const arr = [...ids];
+          // 一次最多 50 个：服务端是串行取，批量太大浏览器要等太久，也不好观察进度
+          for (let i = 0; i < arr.length; i += 50) {
+            const part = arr.slice(i, i + 50);
+            const d = await this.api('/api/jd/prices?mode=' + mode + '&brand=' + brandId
+              + '&ids=' + encodeURIComponent(part.join(',')));
+            if (d.error) { err = d; break; }
+            const pref = brandId + ':';
+            for (const [gid, v] of Object.entries(d.prices || {})) acc[pref + gid] = v;
+            cached += Number(d.cached) || 0;
+            fetched += Number(d.fetched) || 0;
+          }
+          if (err) break;
+        }
+      } catch (e) { this.$message.error('京东取价请求失败: ' + e.message); }
+      finally { if (mode === 'refresh') this.rp.jdPricing = false; }
+      // 整体替换而不是逐个加键：Vue2 对对象新增属性不响应
+      if (Object.keys(acc).length || mode === 'refresh') this.rp.jdPrices = Object.assign({}, this.rp.jdPrices, acc);
+      if (err) {
+        this.$message.warning('京东取价失败：' + (err.error || '未知原因')
+          + ((err.code === 'no_session' || /登录态|403/.test(String(err.error || ''))) ? '（点「万商登录」重新登录）' : ''));
+      }
+      return { cached, fetched, err };
+    },
+    /** 「京东取价」按钮：对当前列表已关联商品强制重新取价 */
+    async refreshJdPrices() {
+      if (this.rp.jdPricing) return;
+      const groups = this.jdGroupsOf(this.rp.rows);
+      let count = 0;
+      for (const [, ids] of groups) count += ids.size;
+      if (!count) {
+        this.$message.info('当前列表里没有已关联京东万商的商品（先在「京东万商价」列点「关联」）');
+        return;
+      }
+      const jdSess = this.rp.jdSession || {};
+      const ag = jdSess.agent || {};
+      if (!jdSess.configured) {
+        this.$message.warning('还没有登录京东万商，点「万商登录」在这台电脑的窗口里登录一次');
+        return;
+      }
+      if (!ag.online) {
+        this.$message.warning('本机助手未连接：京东取价必须在本机浏览器里做，请先启动「催收小助手」并绑定');
+        return;
+      }
+      if (!ag.capable) {
+        this.$message.warning('这台电脑上的助手版本过旧（' + (ag.version || '未知') + '），需要 v' + (ag.minVersion || '') + ' 及以上');
+        return;
+      }
+      try {
+        await this.$confirm(
+          `将对当前列表里 <b>${count}</b> 个已关联商品取京东万商价（由本机助手在万商页面里逐个取，约 0.5~1 秒/个，共约 ${Math.ceil(count * 0.8 / 60)} 分钟）。<br>`
+          + '取价过程中这台电脑的助手会在后台跑，请不要退出助手；取到的价写入缓存，下次打开直接读库。<br>'
+          + '若出现大量「取价失败」，多半是被京东临时限流，过 10~20 分钟再试。',
+          '京东取价', { dangerouslyUseHTMLString: true, confirmButtonText: '开始取价', cancelButtonText: '取消', type: 'warning' }
+        );
+      } catch (e) { return; }
+      const r = await this.loadJdPrices(this.rp.rows, { mode: 'refresh' });
+      if (r && r.fetched) this.$message.success(`已取到 ${r.fetched} 个商品的万商价`);
+    },
+
+    // ── 万商登录（在本机助手窗口里登录，不再手抠 Cookie）──
+    openJdLoginDlg() {
+      this.rpJdLogin.error = '';
+      this.rpJdLogin.message = '';
+      this.rpJdLogin.visible = true;
+      this.loadJdSession();
+    },
+    /** 「开始登录」：下发任务 → 本机弹窗 → 轮询结果（最长 5.5 分钟） */
+    async startJdLogin() {
+      if (this.rpJdLogin.starting) return;
+      const ag = this.rp.jdSession.agent || {};
+      if (!ag.online) {
+        this.rpJdLogin.error = '本机助手未连接：请先在这台电脑上启动「催收小助手」并点右上角「绑定本机助手」';
+        return;
+      }
+      this.rpJdLogin.starting = true;
+      this.rpJdLogin.error = '';
+      this.rpJdLogin.message = '';
+      try {
+        const d = await this.api('/api/jd/login', {
+          method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+        });
+        if (!d || !d.ok || !d.taskId) {
+          this.rpJdLogin.error = (d && (d.message || d.error)) || '发起登录失败';
+          return;
+        }
+        this.rpJdLogin.message = d.message || '已打开万商窗口，请在窗口里登录…';
+        const r = await this.pollJdLogin(d.taskId);
+        if (r === 'done') {
+          await this.loadJdSession();
+          this.rpJdLogin.message = '登录成功，可以开始取价了';
+          this.$message.success('京东万商已登录' + (this.rp.jdSession.shop ? '：' + this.rp.jdSession.shop : ''));
+          this.rpJdLogin.visible = false;
+          // 顺手把已关联商品的价格取一遍，用户不用再点一次
+          if (this.jdGroupsOf(this.rp.rows).size) this.loadJdPrices(this.rp.rows, { mode: 'refresh' });
+          return;
+        }
+        if (r === 'failed') this.rpJdLogin.error = this._jdLoginMsg || '登录未完成';
+        else this.rpJdLogin.error = '等待登录超时：在助手窗口里登录后，再点一次「开始登录」';
+      } catch (e) {
+        this.rpJdLogin.error = '发起登录失败：' + e.message;
+      } finally {
+        this.rpJdLogin.starting = false;
+      }
+    },
+    /** 轮询「京东万商登录」任务 */
+    async pollJdLogin(taskId) {
+      const deadline = Date.now() + 5.5 * 60 * 1000;
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 2000));
+        let d = null;
+        try { d = await this.api('/api/jd/login-status?taskId=' + encodeURIComponent(taskId)); } catch (e) { continue; }
+        if (!d) continue;
+        this._jdLoginMsg = d.message || '';
+        if (d.message) this.rpJdLogin.message = d.message;
+        if (d.status === 'done') return 'done';
+        if (d.status === 'failed') return 'failed';
+        if (d.error) return 'gone';
+      }
+      return 'timeout';
+    },
+    /** 退出：删服务器登录态 + 清本机分区（不清分区会免登录进旧账号） */
+    async clearJdSession() {
+      try {
+        await this.$confirm(
+          '退出后当前账号就取不到万商价了，需要重新登录。\n'
+          + '服务器与这台电脑上的登录态都会清除；已取到的价格缓存不受影响。确定退出？',
+          '退出京东万商',
+          { confirmButtonText: '退出', cancelButtonText: '取消', type: 'warning' }
+        );
+      } catch (e) { return; }
+      this.rpJdLogin.checking = true;
+      try {
+        const d = await this.api('/api/jd/session/clear', {
+          method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+        });
+        await this.loadJdSession();
+        this.rpJdLogin.visible = false;
+        this.rpJdPrices = {};
+        if (d && d.ok && !d.agentCleared && !d.agentOffline) {
+          this.$alert((d.message || '已清除本账号的万商登录态') + '\n本机登录态没能清掉，请到助手面板「本机登录态」里手动清除。',
+            '已退出（本机可能还留着登录态）', { type: 'warning' });
+        } else {
+          this.$message.success((d && d.message) || '已清除本账号的万商登录态');
+        }
+      } catch (e) {
+        this.$message.error('清除失败：' + e.message);
+      } finally {
+        this.rpJdLogin.checking = false;
+      }
+    },
+
+    // ── 关联万商商品（粘贴链接 → 预览 → 确认）──
+    openJdLinkDlg(row) {
+      this.rpJdLink.sku = row.sku;
+      this.rpJdLink.goodsName = row.goods_name || '';
+      this.rpJdLink.input = row.jd_sku_id ? String(row.jd_sku_id) : '';
+      this.rpJdLink.picked = null;
+      this.rpJdLink.error = '';
+      this.rpJdLink.saving = false;
+      this.rpJdLink.visible = true;
+      // 已关联的直接把上次的价格当预览，省一次请求
+      const pv = this.rp.jdPrices[this.pkey(row, 'jd')];
+      if (row.jd_sku_id && pv && pv.ok) {
+        this.rpJdLink.picked = {
+          ok: true, skuId: row.jd_sku_id, goodsName: pv.goodsName, picture: pv.picture,
+          packPrice: pv.packPrice, unitPrice: pv.unitPrice, packQty: pv.packQty,
+          spec: pv.spec, originalPrice: null, brand: '', shelfLife: '', stock: '',
+        };
+      }
+    },
+    async previewJdLink() {
+      if (!this.rpJdLink.input || this.rpJdLink.loading) return;
+      this.rpJdLink.loading = true;
+      this.rpJdLink.error = '';
+      this.rpJdLink.picked = null;
+      try {
+        const d = await this.api('/api/jd/preview', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ input: this.rpJdLink.input }),
+        });
+        if (!d || d.error || !d.ok) {
+          this.rpJdLink.error = (d && (d.error || d.message)) || '预览失败';
+          return;
+        }
+        this.rpJdLink.picked = d;
+      } catch (e) {
+        this.rpJdLink.error = '预览失败：' + e.message;
+      } finally { this.rpJdLink.loading = false; }
+    },
+    async confirmJdLink() {
+      const picked = this.rpJdLink.picked;
+      if (!picked || !picked.skuId) return;
+      this.rpJdLink.saving = true;
+      try {
+        const d = await this.api('/api/jd/link', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ sku: this.rpJdLink.sku, jdSkuId: picked.skuId }),
+        });
+        if (!d || d.error || !d.ok) {
+          this.$message.error((d && d.error) || '关联失败');
+          return;
+        }
+        // 行数据同步更新，模板立刻从「关联」变成价格展示
+        const row = (this.rp.rows || []).find((x) => x.sku === this.rpJdLink.sku);
+        if (row) row.jd_sku_id = picked.skuId;
+        const b = row ? (Number(row.brand_id) || Number(this.me && this.me.brandId) || 1) : (Number(this.me && this.me.brandId) || 1);
+        this.rp.jdPrices = Object.assign({}, this.rp.jdPrices, { [b + ':' + picked.skuId]: picked });
+        this.rpJdLink.visible = false;
+        this.$message.success('已关联：' + (picked.goodsName || picked.skuId));
+      } catch (e) {
+        this.$message.error('关联失败：' + e.message);
+      } finally { this.rpJdLink.saving = false; }
+    },
+    async unlinkJdRow(row) {
+      try {
+        await this.$confirm(`解除与万商商品 ${row.jd_sku_id} 的关联？之后该行不再显示万商价（价格缓存保留）。`,
+          '解除关联', { confirmButtonText: '解除', cancelButtonText: '取消', type: 'warning' });
+      } catch (e) { return; }
+      try {
+        const d = await this.api('/api/jd/link', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ sku: row.sku, jdSkuId: '' }),
+        });
+        if (!d || d.error || !d.ok) { this.$message.error((d && d.error) || '解除失败'); return; }
+        row.jd_sku_id = null;
+        this.$message.success('已解除关联');
+      } catch (e) { this.$message.error('解除失败：' + e.message); }
+    },
+
     async loadQhtSession() {
       try { this.rp.session = await this.api('/api/qht/session'); } catch (e) { /* 静默：状态提示而已 */ }
     },
     /** 价格表键 = 品牌方 + 平台商品ID：同一个 goodsId 在不同品牌方价格可能不同，只用 goodsId 会串价 */
     pkey(row, kind) {
       if (!row) return '';
-      const id = kind === 'afa' ? row.afa_goods_id : row.qht_goods_id;
+      const id = kind === 'afa' ? row.afa_goods_id : (kind === 'jd' ? row.jd_sku_id : row.qht_goods_id);
       if (!id) return '';
       const b = Number(row.brand_id) || Number(this.me && this.me.brandId) || 1;
       return b + ':' + id;
@@ -7446,22 +7864,33 @@ const vm = new Vue({
           + (this.rp.status ? '，采购状态「' + this.rp.status + '」' : '')
           + (this.isAdmin && this.rp.brand ? '，品牌方已限定' : '')
           + '），共 <b>' + (this.rp.total || 0) + '</b> 个；<b>不会动筛选范围之外的商品</b>。<br><br>'
-          + '其中<b>还没关联阿发</b>的商品会用<b>商品名称原样</b>去城配速达搜索，'
-          + '<b>直接取搜索结果第一条建立关联</b>；搜不到就留空，需要手工点「修改」去关联。<br>'
-          + '已关联的商品不会被覆盖。关联错了可以点<b>「修改」</b>换一个，或<b>「删除关联」</b>清空重来。'
+          + '其中<b>还没关联阿发</b>的商品会用<b>商品名称</b>去城配速达搜索，'
+          + '再用 <b>CLIP 图片向量 + 中文文本相似度</b>打分挑选最像的那个（不是无脑取第一条）；'
+          + '<b>总分达不到阈值的不关联</b>，留空等人工点「修改」挑。<br>'
+          + 'CLIP 不可用或商品没有主图时会回退「搜索结果第一条」并标黄。'
+          + '已关联的商品不会被覆盖，关联错了可以点<b>「修改」</b>换一个，或<b>「删除关联」</b>清空重来。'
           + '</div>',
           '自动匹配阿发商品',
-          { dangerouslyUseHTMLString: true, confirmButtonText: '开始匹配并关联', cancelButtonText: '取消', type: 'warning' }
+          { dangerouslyUseHTMLString: true, confirmButtonText: '开始匹配', cancelButtonText: '取消', type: 'warning' }
         );
       } catch (e) { return; }
       this.rpMatch.visible = true;
       await this.runAutoMatch(true);
     },
-    /** 执行匹配；apply=true 直接把第一条写库。范围 = 当前筛选（q/status/batch/brand） */
+    /**
+     * 执行匹配（v0.2.101 起是后台任务）：启动任务 → 每 1.5 秒轮询进度 → 结束后回填补货表。
+     * 为什么要后端任务：每个商品要搜阿发 + 下候选图 + 跑 CLIP，几百个商品要几分钟，同步请求必被掐断。
+     */
     async runAutoMatch(apply) {
+      if (this.rpMatch.running) return;
+      this.stopMatchPolling();
       this.rpMatch.loading = true;
+      this.rpMatch.running = true;
       this.rpMatch.items = [];
-      this.rpMatch.message = '正在对当前筛选出来的商品搜索城配速达并关联第一条（每个商品搜一次）…';
+      this.rpMatch.percent = 0;
+      this.rpMatch.stats = {};
+      this.rpMatch.warn = '';
+      this.rpMatch.message = '正在启动匹配任务…';
       try {
         const d = await this.api('/api/products/auto-match', {
           method: 'POST', headers: { 'content-type': 'application/json' },
@@ -7473,23 +7902,92 @@ const vm = new Vue({
             apply: apply !== false,
           }),
         });
-        if (!d || d.error) { this.rpMatch.message = '匹配失败：' + ((d && d.error) || '未知错误'); return; }
-        this.rpMatch.items = d.items || [];
-        this.rpMatch.message = d.message || '';
-        if (apply !== false) {
-          // 把新关联回填到补货表当前页，阿发价列从「关联」回到「未取价」（点「阿发重新取价」才真正取价）
-          const map = {};
-          this.rpMatch.items.forEach((x) => { if (x.picked) map[x.sku] = x.picked; });
-          (this.rp.rows || []).forEach((r) => { if (map[r.sku]) r.afa_goods_id = map[r.sku]; });
+        if (!d || d.error) {
+          this.rpMatch.message = '匹配失败：' + ((d && d.error) || '未知错误');
+          this.finishMatchPolling();
+          return;
         }
-      } catch (e) { this.rpMatch.message = '匹配失败：' + e.message; }
-      finally { this.rpMatch.loading = false; }
+        if (!d.taskId) {
+          this.rpMatch.message = d.message || '没有需要匹配的商品';
+          this.finishMatchPolling();
+          return;
+        }
+        this.rpMatch.taskId = d.taskId;
+        if (d.threshold != null) this.rpMatch.threshold = d.threshold;
+        this.rpMatch.message = d.message || '任务已启动…';
+        this.pollMatchTask();
+      } catch (e) {
+        this.rpMatch.message = '匹配失败：' + e.message;
+        this.finishMatchPolling();
+      }
     },
-    /** 状态标签：已关联 / 没找到 / 写入失败 */
+    /** 轮询任务进度（1.5s 一次）；任务跑完自动停并回填列表 */
+    async pollMatchTask() {
+      if (!this.rpMatch.taskId) return;
+      const taskId = this.rpMatch.taskId;
+      try {
+        const d = await this.api('/api/products/auto-match/status?taskId=' + encodeURIComponent(taskId));
+        if (!d || d.error) {
+          // 任务过期（比如服务重启）就停掉，别让进度条一直转
+          this.rpMatch.message = '进度获取失败：' + ((d && d.error) || '未知错误');
+          this.finishMatchPolling();
+          return;
+        }
+        this.rpMatch.items = d.items || [];
+        this.rpMatch.percent = Number(d.percent) || 0;
+        this.rpMatch.stats = d.stats || {};
+        this.rpMatch.message = d.message || '';
+        this.rpMatch.warn = d.warn || '';
+        if (d.model) this.rpMatch.model = d.model;
+        if (!d.running) {
+          this.finishMatchPolling();
+          return;
+        }
+      } catch (e) {
+        this.rpMatch.message = '进度获取失败：' + e.message;
+        this.finishMatchPolling();
+        return;
+      }
+      this._matchTimer = setTimeout(() => this.pollMatchTask(), 1500);
+    },
+    /** 结束轮询：恢复按钮状态，把新关联回填到补货表当前页 */
+    finishMatchPolling() {
+      this.stopMatchPolling();
+      this.rpMatch.running = false;
+      this.rpMatch.loading = false;
+      if (this.rpMatch.percent >= 100 || this.rpMatch.percent > 0) this.rpMatch.percent = 100;
+      const map = {};
+      (this.rpMatch.items || []).forEach((x) => { if (x.picked) map[x.sku] = x.picked; });
+      (this.rp.rows || []).forEach((r) => { if (map[r.sku]) r.afa_goods_id = map[r.sku]; });
+    },
+    stopMatchPolling() {
+      if (this._matchTimer) { clearTimeout(this._matchTimer); this._matchTimer = null; }
+    },
+    /** 请求停止：服务端跑完当前商品就退出（不强杀，避免写库切半截） */
+    async stopAutoMatch() {
+      if (!this.rpMatch.taskId) return;
+      try {
+        const d = await this.api('/api/products/auto-match/stop', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ taskId: this.rpMatch.taskId }),
+        });
+        this.rpMatch.message = (d && d.message) || '已请求停止…';
+      } catch (e) { this.$message.error('停止失败：' + e.message); }
+    },
+    /** 状态标签：已关联 / 匹配 / 回退首条 / 低于阈值 / 没找到 / 写入失败 */
     matchTag(row) {
-      if (!row || !row.picked) return { text: '没找到', type: 'info' };
+      if (!row) return { text: '—', type: 'info' };
       if (row.candidate && row.candidate.writeError) return { text: '写入失败', type: 'danger' };
-      return { text: '已关联', type: 'success' };
+      switch (row.state) {
+        case 'linked': return { text: '已关联', type: 'success' };
+        case 'matched': return { text: '匹配', type: 'success' };
+        case 'suggest': return { text: '建议关联', type: 'success' };
+        case 'fallback': return { text: '回退首条', type: 'warning' };
+        case 'no_match': return { text: '低于阈值', type: 'info' };
+        case 'none': return { text: '没找到', type: 'info' };
+        default:
+          return row.picked ? { text: '已关联', type: 'success' } : { text: '没找到', type: 'info' };
+      }
     },
     /** 修改关联：复用「关联城配速达商品」弹窗（默认搜索词就是商品名） */
     editAfaMatch(row) {

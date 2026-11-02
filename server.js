@@ -61,6 +61,8 @@ const tenancy = require('./lib/tenancy');
 const { runImport, importOrderUpload, importInvoiceUpload } = require('./import-to-db');
 const qht = require('./lib/qht');
 const afa = require('./lib/afa');
+const jd = require('./lib/jd-bmall');
+const priceCache = require('./lib/price-cache');
 const products = require('./lib/products');
 const billing = require('./lib/billing');
 const { loadConfig } = require('./lib/config');
@@ -68,11 +70,15 @@ const { AgentHub } = require('./lib/agent-hub');
 const { buildMessages } = require('./lib/sender');
 const qnh = require('./lib/qnh');
 const qagent = require('./lib/qnh-agent');
+const jagent = require('./lib/jd-agent');
 const pdd = require('./lib/pdd');
 const pddOrders = require('./lib/pdd-orders');
 const aliOrders = require('./lib/ali-orders');
 const psync = require('./lib/pdd-sync');
 const sdc = require('./lib/sdc');
+// 商品匹配（自动匹配阿发）：CLIP 图文相似度 + 业务规则。依赖缺失时模块自身降级，不影响服务启动
+const skuMatchLib = require('./lib/sku-match');
+const clipEmbed = require('./lib/clip-embed');
 
 const PORT = Number(process.env.PORT) || 8787;
 const ROOT = __dirname;
@@ -485,6 +491,7 @@ function productScope(o) {
       imageExpr: "COALESCE(NULLIF(pi.image_url, ''), bp.image_url)",
       qhtExpr: 'COALESCE(pi.qht_goods_id, bp.qht_goods_id)',
       afaExpr: 'COALESCE(pi.afa_goods_id, bp.afa_goods_id)',
+      jdExpr: 'COALESCE(pi.jd_sku_id, bp.jd_sku_id)',
       localExpr: 'COALESCE(pi.local_price, bp.local_price)',
       bpIdExpr: 'bp.id', suggestExpr: 'pi.suggest_qty', fileExpr: 'pi.source_file', batchExpr: 'pi.batch_id',
     };
@@ -506,6 +513,7 @@ function productScope(o) {
     imageExpr: 'bp.image_url',
     qhtExpr: 'bp.qht_goods_id',
     afaExpr: 'bp.afa_goods_id',
+    jdExpr: 'bp.jd_sku_id',
     localExpr: 'bp.local_price',
     bpIdExpr: 'bp.id', suggestExpr: 'NULL', fileExpr: 'NULL', batchExpr: 'NULL',
   };
@@ -518,7 +526,7 @@ function productScope(o) {
  * @returns {{scope:'brand'|'item', affected:number}}
  */
 async function writeProductLink(col, value, { brandId, userId, sku }) {
-  const ALLOWED = ['qht_goods_id', 'afa_goods_id', 'local_price'];
+  const ALLOWED = ['qht_goods_id', 'afa_goods_id', 'jd_sku_id', 'local_price'];
   if (!ALLOWED.includes(col)) throw new Error('不允许写入的列：' + col);
   const ex = await db.query('SELECT id FROM brand_product WHERE brand_id = ? AND sku = ? LIMIT 1', [brandId, sku]);
   if (ex.length) {
@@ -539,8 +547,236 @@ function linkBrandId(user, body) {
 
 const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
 
-/** 自动匹配阿发单次上限：每个商品要真搜一次（限速 250ms），再大就会把对方接口打挂 */
+/** 自动匹配阿发单次上限：每个商品要真搜一次（限速 250ms）并下载候选图做 CLIP 编码，再大就会把两边都拖垮 */
 const MATCH_MAX_PER_RUN = 500;
+/** 每个商品只对「文本相似度」粗排前 N 个候选做图片编码（CLIP 单图约 80ms，全量编码太慢） */
+const MATCH_CAND_TOPN = 12;
+/** 判定匹配的阈值：CLIP 图像余弦基线偏高（同品类 0.73~0.96），0.70 几乎不筛人，按实测校准到 0.80 */
+const MATCH_SCORE_THRESHOLD = Number(process.env.MATCH_SCORE_THRESHOLD) || 0.8;
+/** 自动匹配任务：内存态（重启即丢，进度本来也只活一次操作），保留 30 分钟供页面轮询 */
+const MATCH_TASKS = new Map();
+const MATCH_TASK_KEEP_MS = 30 * 60 * 1000;
+
+/** 清理过期任务，避免 Map 无限增长（每建任务顺手清一次） */
+function pruneMatchTasks() {
+  const now = Date.now();
+  for (const [id, t] of MATCH_TASKS) {
+    if (!t.running && now - (t.finishedAt || t.startedAt || now) > MATCH_TASK_KEEP_MS) MATCH_TASKS.delete(id);
+  }
+}
+
+/** 候选池条目 → 页面用的精简结构（保留阿发原生字段，价格列不用二次请求） */
+function pickAfaCandidate(c, extra) {
+  return Object.assign({
+    goodsId: String(c.goodsId),
+    goodsName: c.goodsName || '',
+    picture: c.picture || '',
+    salePrice: c.salePrice,
+    unitPrice: c.unitPrice,
+    factorName: c.factorName || '',
+  }, extra || {});
+}
+
+/**
+ * 自动匹配任务主体（后台跑，页面轮询 /api/products/auto-match/status 看进度）
+ *
+ * 每个未关联商品：
+ *   ① 用商品名称搜阿发，拿候选池（限速 250ms）
+ *   ② 先按「中文 2-gram 文本相似度」粗排取前 MATCH_CAND_TOPN 个（CLIP 编码贵，别对 50 条全算）
+ *   ③ 对这 N 个候选做 CLIP 图文打分（图片 0.6 + 文本 0.4，再叠加 IP/竞品/容量/款式规则）
+ *   ④ 最高分且 is_match 且 ≥ 阈值(0.80) 才写库；否则留空等人工
+ *   ⑤ 降级：CLIP 不可用 / 商品无主图 → 回退「搜索结果第一条」并标注，保证不空转
+ */
+async function runMatchTask(task, items, opts) {
+  const { tenantId, apply, brandFallback } = opts;
+  const setMsg = (m) => { task.message = m; };
+  const bump = (k) => { task.stats[k] = (task.stats[k] || 0) + 1; };
+
+  // ── CLIP 就绪（失败则整轮降级为「回退第一条」）──
+  let clipOn = clipEmbed.isAvailable();
+  if (clipOn) {
+    setMsg('正在加载 CLIP 模型（首次需下载约 150MB，约 1 分钟）…');
+    try {
+      await clipEmbed.ensureModels();
+      task.model = clipEmbed.info();
+    } catch (e) {
+      clipOn = false;
+      task.warn = 'CLIP 模型加载失败，已回退「名称搜索第一条」：' + String((e && e.message) || e).slice(0, 160);
+    }
+  } else {
+    task.warn = 'CLIP 依赖不可用（' + clipEmbed.unavailableReason() + '），已回退「名称搜索第一条」';
+  }
+  if (!clipOn) task.fallbackAll = true;
+
+  const poolCache = new Map();
+  let lastErr = '';
+
+  for (const it of items) {
+    if (task.stop) { task.state = 'stopped'; break; }
+
+    const base = {
+      sku: it.sku,
+      goods_name: it.goods_name,
+      image_url: it.image_url,
+      brand_id: Number(it.brand_id) || brandFallback,
+      inBrand: !!it.bp_id,
+    };
+
+    // ① 已关联：直接回显，不覆盖人工调整
+    if (it.afa_goods_id) {
+      bump('linked');
+      task.items.push(Object.assign(base, {
+        keyword: '', state: 'linked', picked: String(it.afa_goods_id),
+        candidate: null, note: '已关联（ID ' + it.afa_goods_id + '）',
+      }));
+      task.done += 1;
+      continue;
+    }
+
+    const kw = String(it.goods_name || '').trim();
+    if (!kw) {
+      bump('none');
+      task.items.push(Object.assign(base, { keyword: '', state: 'none', picked: '', candidate: null, note: '商品名称为空，无法搜索' }));
+      task.done += 1;
+      continue;
+    }
+
+    setMsg(`正在匹配 ${task.done + 1}/${task.total}：${kw.slice(0, 24)}`);
+
+    // ② 搜候选池（同关键词只搜一次）
+    if (!poolCache.has(kw)) {
+      try {
+        const r = await afa.searchPool(tenantId, kw, { pages: 1, size: 50 });
+        poolCache.set(kw, r.rows || []);
+        await sleepMs(250);   // 限速：别把对方接口打挂
+      } catch (e) {
+        poolCache.set(kw, []);
+        lastErr = String((e && e.message) || e).slice(0, 160);
+      }
+    }
+    const pool = poolCache.get(kw);
+    if (!pool.length) {
+      bump('none');
+      task.items.push(Object.assign(base, {
+        keyword: kw, state: 'none', picked: '', candidate: null,
+        note: lastErr ? '阿发接口报错：' + lastErr : '阿发搜不到该商品名，请手工关联',
+      }));
+      task.done += 1;
+      continue;
+    }
+
+    // ③ CLIP 打分（有图才走；无图/模型不可用直接降级）
+    let picked = null;      // 选中的阿发商品（原生结构）
+    let scoreInfo = null;   // 打分详情（页面展示）
+    let state = '';
+    let note = '';
+    if (clipOn && base.image_url) {
+      // 文本粗排：字面最像的 N 个才值得算图像向量
+      const ranked = pool
+        .map((c, idx) => ({ c, idx, t: skuMatchLib.textSimilarity(kw, c.goodsName || '') }))
+        .sort((a, b) => b.t - a.t)
+        .slice(0, MATCH_CAND_TOPN);
+      let scores = [];
+      try {
+        scores = await skuMatchLib.scoreCandidates(
+          { name: kw, imagePath: base.image_url },
+          ranked.map((x) => ({ name: x.c.goodsName || ('候选' + x.idx), imagePath: x.c.picture || '' })),
+          MATCH_SCORE_THRESHOLD
+        );
+      } catch (e) {
+        lastErr = String((e && e.message) || e).slice(0, 160);
+      }
+      let top = null;
+      for (const s of scores) if (!top || s.final_score > top.final_score) top = s;
+      if (top) {
+        const chosen = ranked[top.index] ? ranked[top.index].c : null;
+        scoreInfo = {
+          score: top.final_score, imgSim: top.img_similarity, textSim: top.text_similarity,
+          reason: top.match_reason, isMatch: top.is_match,
+          candidatesScored: scores.length, candidatesTotal: pool.length,
+        };
+        if (top.is_match && chosen) {
+          picked = chosen;
+          state = 'matched';
+        } else {
+          state = 'no_match';
+          note = `最高分 ${top.final_score}（图文 ${top.img_similarity} / 文本 ${top.text_similarity}）未达 ${MATCH_SCORE_THRESHOLD} 门槛，留空待人工`;
+        }
+      } else {
+        state = 'fallback';
+        picked = pool[0];
+        note = 'CLIP 打分异常，已回退搜索结果第一条';
+      }
+    } else {
+      state = 'fallback';
+      picked = pool[0];
+      note = clipOn ? '商品没有主图，已回退搜索结果第一条' : 'CLIP 不可用，已回退搜索结果第一条';
+    }
+
+    if (!picked) {
+      // no_match：不写库，只报告
+      bump('noMatch');
+      task.items.push(Object.assign(base, {
+        keyword: kw, state, picked: '', candidate: null, score: scoreInfo, note,
+      }));
+      task.done += 1;
+      continue;
+    }
+
+    const best = pickAfaCandidate(picked, {
+      score: scoreInfo ? scoreInfo.score : null,
+      imgSim: scoreInfo ? scoreInfo.imgSim : null,
+      textSim: scoreInfo ? scoreInfo.textSim : null,
+      reason: scoreInfo ? scoreInfo.reason : '',
+      isMatch: state === 'matched',
+      isFallback: state === 'fallback',
+    });
+
+    // ④ 写库：品牌商品表有该 SKU 写品牌（同品牌共享），否则写个人补货行
+    if (apply) {
+      try {
+        const wr = await writeProductLink('afa_goods_id', best.goodsId, { brandId: base.brand_id, userId: tenantId, sku: it.sku });
+        best.scope = wr.scope;
+        if (wr.scope === 'brand') {
+          await db.exec(
+            'UPDATE brand_product SET afa_match_score = ?, afa_match_at = NOW() WHERE brand_id = ? AND sku = ?',
+            [scoreInfo ? scoreInfo.score : null, base.brand_id, it.sku]
+          );
+        }
+      } catch (e) {
+        best.writeError = String((e && e.message) || e).slice(0, 160);
+        lastErr = best.writeError;
+        bump('failed');
+      }
+    }
+
+    bump(state === 'fallback' ? 'fallback' : 'matched');
+    task.items.push(Object.assign(base, {
+      keyword: kw,
+      state: apply ? state : (state === 'fallback' ? 'fallback' : 'suggest'),
+      picked: best.goodsId, candidate: best,
+      score: scoreInfo, note: best.writeError ? '写入失败：' + best.writeError : note,
+    }));
+    task.done += 1;
+  }
+
+  // ── 收尾统计 ──
+  const s = task.stats;
+  const parts = [
+    `共 ${task.total} 个商品（原有 ${s.linked || 0} 个已关联）`,
+    `CLIP 匹配 ${s.matched || 0} 个`,
+    `低于阈值留空 ${s.noMatch || 0} 个`,
+    s.fallback ? `回退首条 ${s.fallback} 个` : '',
+    `搜不到 ${s.none || 0} 个`,
+    s.failed ? `写入失败 ${s.failed} 个` : '',
+  ].filter(Boolean);
+  const tip = lastErr && !(s.matched || s.fallback) ? `（最近错误：${lastErr}）` : '';
+  task.state = task.state === 'stopped' ? 'stopped' : 'done';
+  task.running = false;
+  task.finishedAt = Date.now();
+  task.message = (apply ? '匹配完成：' : '建议关联：') + parts.join('、') + tip;
+  if (task.warn) task.message += '｜' + task.warn;
+}
 
 /** 写操作只允许作用于自己的数据（管理员查看他人为只读） */
 function assertWritable(user, tenantId) {
@@ -1313,6 +1549,11 @@ const ALI_LOGIN_TTL_MS = ALI_LOGIN_TIMEOUT_MS + 60 * 1000;
 // 支持「登录1688」的最低助手版本（0.2.72 起助手才有 ali_login 内核）
 const ALI_LOGIN_MIN_AGENT = '0.2.72';
 
+// ── 「登录京东万商」任务：同一套路（本机助手弹窗登录 → Cookie 回传，只取 eid/uuid/收货地址）──
+const JD_LOGINS = new Map();                   // taskId -> ctx
+const JD_LOGIN_TIMEOUT_MS = Number(process.env.JD_LOGIN_TIMEOUT_MS) || 5 * 60 * 1000;
+const JD_LOGIN_TTL_MS = JD_LOGIN_TIMEOUT_MS + 60 * 1000;
+
 // ── 拼多多「页内操作」任务：助手加载真实页面执行（anti-content 由页面风控 SDK 生成）──
 //    kind='apply' 申请发票（开票页点提交） / kind='send' 催商家开票（聊天页发消息）
 const PDD_TASKS = new Map();                   // taskId -> ctx
@@ -1455,6 +1696,7 @@ const qnhLoginSweeper = setInterval(() => {
   for (const [id, c] of PDD_TASKS) if (now > c.expiresAt && c.status !== 'pending') PDD_TASKS.delete(id);
   for (const [id, c] of SDC_LOGINS) if (now > c.expiresAt) SDC_LOGINS.delete(id);
   for (const [id, c] of SDC_TASKS) if (now > c.expiresAt && c.status !== 'pending') SDC_TASKS.delete(id);
+  for (const [id, c] of JD_LOGINS) if (now > c.expiresAt) JD_LOGINS.delete(id);
 }, 60000);
 if (qnhLoginSweeper.unref) qnhLoginSweeper.unref();
 
@@ -1481,6 +1723,28 @@ function findQnhAgent(wantUid) {
 
 qagent.setTransport({
   findAgent: findQnhAgent,
+  send: (uid, msg) => agentHub.send(uid, msg),
+});
+
+// ── 「京东万商页内取价」通道：请求由助手在 b.jd.com 页面里发 ──
+//    服务器直连 api.m.jd.com 即使 Cookie 有效也 403（京东校验出口 IP + 指纹 + Cookie 三者自洽）。
+const JD_MIN_AGENT = '0.2.101';
+
+/** 找该账号自己在线且支持京东取价的助手（万商登录态是按账号存的，必须派给本人） */
+function findJdAgent(wantUid) {
+  const target = Number(wantUid) || 0;
+  for (const [uid] of agentHub.conns) {
+    if (!agentHub.isOnline(uid)) continue;
+    if (target && Number(uid) !== target) continue;
+    const ver = agentHub.status(uid).agentVer || '';
+    if (ver && !verGte(ver, JD_MIN_AGENT)) continue;
+    return { uid, ver };
+  }
+  return null;
+}
+
+jagent.setTransport({
+  findAgent: findJdAgent,
   send: (uid, msg) => agentHub.send(uid, msg),
 });
 
@@ -1518,6 +1782,36 @@ function onQnhLoginDone(uid, msg) {
     ctx.message = '保存登录态失败：' + String((e && e.message) || e).slice(0, 200);
     logOp(Number(uid), 'qnh.login', { ok: false });
   });
+}
+
+/**
+ * 助手回报「登录京东万商」结果：Cookie 落本机文件（data/users/<uid>/jd-session.json）。
+ * 只为了从里面取 eid / uuid / 收货地址去组请求体 —— 真正的取价请求由助手页面发、Cookie 由浏览器自己带。
+ */
+function onJdLoginDone(uid, msg) {
+  const ctx = JD_LOGINS.get(String((msg && msg.taskId) || ''));
+  // 回执可能来自「数据归属用户」的助手，也可能来自「管理员本机」的助手（代入场景）
+  const from = Number(uid);
+  if (!ctx || ctx.status !== 'pending') return;
+  if (from !== Number(ctx.userId) && from !== Number(ctx.agentUid)) return;
+  if (!msg.ok) {
+    ctx.status = 'failed';
+    ctx.message = String(msg.error || '助手未采集到登录态').slice(0, 300);
+    logOp(Number(uid), 'jd.login', { ok: false });
+    return;
+  }
+  try {
+    const s = jd.saveSession(ctx.userId, { cookie: msg.cookie });
+    ctx.status = 'done';
+    ctx.writtenAt = s.savedAt || new Date().toISOString();
+    ctx.shop = s.pin || String(msg.account || '');
+    ctx.message = '万商登录态已更新' + (ctx.shop ? '：' + ctx.shop : '');
+    logOp(Number(uid), 'jd.login', { ok: true, shop: ctx.shop });
+  } catch (e) {
+    ctx.status = 'failed';
+    ctx.message = '保存万商登录态失败：' + String((e && e.message) || e).slice(0, 200);
+    logOp(Number(uid), 'jd.login', { ok: false });
+  }
 }
 
 /**
@@ -1869,6 +2163,10 @@ function handleAgentMessage(uid, msg) {
   if (msg.type === 'sdc_send_progress') { onSdcSendProgress(uid, msg); return; }
   // 「牵牛花页内签名请求」：助手回传配送日志 / 毛利明细等接口结果
   if (msg.type === 'qnh_fetch_done') { qagent.onDone(uid, msg); return; }
+  // 「京东万商页内取价」：助手在万商页面里取回的价格
+  if (msg.type === 'jd_fetch_done') { jagent.onDone(uid, msg); return; }
+  // 「登录京东万商」：助手弹窗登录后回传 Cookie
+  if (msg.type === 'jd_login_done') { onJdLoginDone(uid, msg); return; }
   // 「清除本机登录态」：助手清掉本机浏览器分区后回执
   if (msg.type === 'logout_done') { onAgentLogoutDone(uid, msg); return; }
   if (msg.type === 'login_state') { agentHub.setLoggedIn(uid, msg.loggedIn); return; }
@@ -3778,6 +4076,7 @@ const server = http.createServer(async (req, res) => {
                ${sc.salesExpr} AS sales_30d, ${sc.suggestExpr} AS suggest_qty,
                ${sc.fileExpr} AS source_file, ${sc.imageExpr} AS image_url,
                ${sc.qhtExpr} AS qht_goods_id, ${sc.afaExpr} AS afa_goods_id, ${sc.localExpr} AS local_price,
+               ${sc.jdExpr} AS jd_sku_id,
                ${sc.file ? 'NULL' : 'b.name'} AS brand_name,
                ${sc.file ? 'pi.updated_at' : 'bp.updated_at'} AS updated_at,
                ${sc.file ? 'NULL' : 'bp.synced_at'} AS synced_at,
@@ -3971,6 +4270,170 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
+    // ── 京东万商（b.jd.com）取价 ──────────────────────────────────────────────
+    //   与齐货通/阿发最大的不同（2026-11-02 实测）：
+    //     · 请求必须由本机助手在万商页面里发 —— 服务器直连即使 Cookie 有效也 403
+    //       （京东校验「出口 IP + 浏览器指纹 + Cookie」三者自洽，云端 IP 打几次就被标记）
+    //     · 详情接口 wareBusiness.style 不要 h5st 签名，只要页面环境 → 取价可走助手
+    //     · 搜索接口必须 h5st（几分钟就过期、强绑定 body）→ 关联只能「粘贴链接/skuId」
+    //   细节与取证过程见 lib/jd-bmall.js / lib/jd-agent.js / electron/agent/jd-login.js 头部注释。
+    if (p.startsWith('/api/jd/') && !canProduct) return denyProduct();
+
+    /**
+     * 京东请求派给哪台助手：优先数据归属用户自己的助手，其次当前操作者本机
+     * （管理员代入他人时，登录窗口通常开在管理员这台电脑上；与拼多多/牵牛花同一口径）。
+     */
+    const jdAgentUid = () => Number(agentUidFor(user, tenantId) || tenantId);
+
+    /** 当前账号的助手是否具备京东取价能力（页面据此决定按钮能不能点、提示写什么） */
+    const jdAgentInfo = () => {
+      const au = jdAgentUid();
+      const online = agentHub.isOnline(au);
+      const ver = online ? (agentHub.status(au).agentVer || '') : '';
+      const capable = !!(online && ver && verGte(ver, JD_MIN_AGENT));
+      return { online, version: ver, capable, minVersion: JD_MIN_AGENT };
+    };
+
+    if (method === 'GET' && p === '/api/jd/session') {
+      return sendJson(res, 200, Object.assign(jd.sessionStatus(tenantId), { agent: jdAgentInfo() }));
+    }
+    // 「万商登录」：在助手窗口里登录，登录态回传（不再让用户手抠 Cookie）
+    if (method === 'POST' && p === '/api/jd/login') {
+      if (!canPrice) return denyPrice();
+      writeGuard();
+      const info = jdAgentInfo();
+      if (!info.online) {
+        return sendJson(res, 200, {
+          ok: false, needAgent: true,
+          message: '本机助手未连接：请先在这台电脑上启动「催收小助手」并完成绑定。'
+            + '京东万商只允许在真实浏览器里取价，登录也必须在本机完成。',
+        });
+      }
+      if (!info.capable) {
+        return sendJson(res, 200, {
+          ok: false, needAgent: true, agentOutdated: true,
+          message: `这台电脑上的催收小助手是 v${info.version || '未知'}，还不支持京东万商。`
+            + `请下载安装 v${JD_MIN_AGENT} 及以上版本。`,
+        });
+      }
+      const taskId = 'jdlo-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+      const aUid = jdAgentUid();
+      const ctx = {
+        taskId, userId: Number(tenantId), agentUid: aUid, status: 'pending', message: '',
+        shop: '', writtenAt: null, createdAt: Date.now(),
+        expiresAt: Date.now() + JD_LOGIN_TTL_MS,
+      };
+      const sent = agentHub.send(aUid, {
+        type: 'jd_login', taskId, uid: Number(tenantId), timeoutMs: JD_LOGIN_TIMEOUT_MS,
+      });
+      if (!sent) {
+        return sendJson(res, 200, {
+          ok: false, needAgent: true,
+          message: '下发登录任务失败：本机助手连接已断开，请确认助手正在运行。',
+        });
+      }
+      JD_LOGINS.set(taskId, ctx);
+      await logOp(user, 'jd.login.start', { tenantId });
+      return sendJson(res, 200, {
+        ok: true, pending: true, taskId,
+        message: '已在这台电脑上打开京东万商窗口，请在其中登录（最长等 5 分钟）',
+      });
+    }
+    if (method === 'GET' && p === '/api/jd/login-status') {
+      const ctx = JD_LOGINS.get(String(url.searchParams.get('taskId') || ''));
+      if (!ctx || ctx.userId !== Number(tenantId)) return sendJson(res, 404, { error: '登录任务不存在或已结束' });
+      return sendJson(res, 200, {
+        status: ctx.status,
+        ok: ctx.status === 'done',
+        message: ctx.message || '',
+        shop: ctx.shop || '',
+        writtenAt: ctx.writtenAt,
+      });
+    }
+    // 清掉本账号的万商登录态（服务器文件 + 本机分区，换账号时用）
+    if (method === 'POST' && p === '/api/jd/session/clear') {
+      if (!canPrice) return denyPrice();
+      writeGuard();
+      const r = jd.clearSession(tenantId);
+      // 本机分区不清，下次点「万商登录」会直接免登录进旧账号，看起来像没退掉
+      const agent = await agentLogout(jdAgentUid(), 'jd');
+      await logOp(user, 'jd.session.clear', { tenantId, agentCleared: !!agent.ok });
+      return sendJson(res, 200, Object.assign({
+        ok: true,
+        agentCleared: !!agent.ok,
+        agentOffline: !!agent.offline,
+        message: '已清除本账号的万商登录态' + (agent.ok ? '（本机登录态已一并清除）' : ''),
+      }, r));
+    }
+    // 关联前预览：粘贴链接/skuId → 返回万商商品信息（不写库）
+    if (method === 'POST' && p === '/api/jd/preview') {
+      if (!canPrice) return denyPrice();
+      const b = await readBody(req);
+      const skuId = jd.parseSkuId(b.input);
+      if (!skuId) return sendJson(res, 200, { ok: false, error: '没识别出商品ID：请粘贴万商商品链接，或直接粘纯数字 skuId' });
+      const sess = jd.loadSession(tenantId);
+      if (!sess) {
+        return sendJson(res, 200, { ok: false, code: 'no_session', error: '还没有登录京东万商：点「万商登录」，在弹窗里登录一次' });
+      }
+      try {
+        const r = await jd.fetchDetail(skuId, sess, { uid: jdAgentUid() });
+        return sendJson(res, 200, Object.assign({ skuId }, r));
+      } catch (e) {
+        return sendJson(res, 200, { ok: false, skuId, error: String((e && e.message) || e) });
+      }
+    }
+    // 关联/解除：body.sku = 补货 SKU，body.jdSkuId = 万商 skuId（留空 = 解除关联）
+    if (method === 'POST' && p === '/api/jd/link') {
+      if (!canProduct) return denyProduct();
+      writeGuard();
+      const b = await readBody(req);
+      const sku = String(b.sku || '').trim();
+      if (!sku) return sendJson(res, 200, { error: '缺少 sku' });
+      const jdSkuId = String(b.jdSkuId == null ? '' : b.jdSkuId).trim() || null;
+      const bid = linkBrandId(user, b);
+      const w = await writeProductLink('jd_sku_id', jdSkuId, { brandId: bid, userId: tenantId, sku });
+      if (jdSkuId) await logOp(user, 'jd.link', { tenantId, sku, jdSkuId });
+      return sendJson(res, 200, { ok: true, sku, jdSkuId, scope: w.scope, affected: w.affected });
+    }
+    // 批量取价：ids = 万商 skuId 逗号分隔
+    //   mode=cache  ：只读价格缓存表（页面加载用，**不打京东**）；没缓存的显示「未取价」
+    //   mode=refresh：去京东取新价并写缓存（点「京东取价」用）
+    //   brand       ：参与缓存键（同品牌方共用一份价格）；普通用户强制自己品牌
+    if (method === 'GET' && p === '/api/jd/prices') {
+      const ids = String(url.searchParams.get('ids') || '').split(',').map((s) => s.trim()).filter(Boolean);
+      if (!ids.length) return sendJson(res, 200, { prices: {}, cached: 0, fetched: 0 });
+      const bo = brandOf(req, url, user);
+      const brandId = bo.brandId || (Number(user.brand_id) || 1);
+      const mode = String(url.searchParams.get('mode') || 'cache').toLowerCase() === 'refresh' ? 'refresh' : 'cache';
+      if (mode === 'cache') {
+        const prices = await priceCache.readPrices('jd', brandId, ids);
+        return sendJson(res, 200, { prices, cached: Object.keys(prices).length, fetched: 0 });
+      }
+      if (!canPrice) return denyPrice();
+      const sess = jd.loadSession(tenantId);
+      if (!sess) {
+        return sendJson(res, 200, {
+          error: '还没有登录京东万商：点「万商登录」，在弹窗里登录一次',
+          code: 'no_session', prices: {}, cached: 0, fetched: 0,
+        });
+      }
+      try {
+        const r = await jd.fetchPrices(ids, sess, { uid: jdAgentUid(), interval: 500 });
+        const okPrices = {};
+        for (const [k, v] of Object.entries(r.prices)) if (v && v.ok) okPrices[k] = v;
+        await priceCache.savePrices('jd', brandId, okPrices);
+        const prices = await priceCache.readPrices('jd', brandId, ids);
+        return sendJson(res, 200, {
+          prices, cached: Object.keys(prices).length, fetched: r.fetched, failed: r.failed, total: r.total,
+          // 中途停下的原因（没登录 / 助手掉线），页面据此给一句准确的提示
+          error: r.stopReason || undefined,
+          code: r.stopReason ? (r.failed && r.fetched === 0 ? 'stopped' : 'partial') : undefined,
+        });
+      } catch (e) {
+        return sendJson(res, 200, { error: String((e && e.message) || e), code: (e && e.code) || 'unknown', prices: {}, cached: 0, fetched: 0 });
+      }
+    }
+
     // ── 城配速达（阿发）── 随「商品列表」菜单权限一同放行；本项目只做 Token 配置，不做登录/解绑
     if (p.startsWith('/api/afa/') && !canProduct) return denyProduct();
     if (method === 'GET' && p === '/api/afa/session') {
@@ -4086,12 +4549,16 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { ok: true, sku, localPrice: v, scope: w.scope });
     }
 
-    // ── 自动匹配阿发商品（v0.2.92）────────────────────────────────────────
-    // 思路：拿「商品名称」原样去阿发搜，**直接取搜索结果的第一条建立关联**，不做筛选与打分。
-    // v0.2.92 起只处理「当前筛选出来的商品」（q / status / batch / brand 与列表共用 productScope），
-    // 不再是全量；误关联由页面上的「修改 / 删除关联」兜回来，已关联的跳过不覆盖。
-    // 落库走 writeProductLink：品牌商品表有该 SKU 写品牌（同品牌共享），否则写个人补货行。
-    // 入参 { q?, status?, batch?, brand?, apply? }：apply=true 直接写库；false 只给建议。
+    // ── 自动匹配阿发商品（v0.2.101：CLIP 图文打分 + 后台任务）─────────────────────
+    // 以前是「名称搜阿发 → 直接取第一条」，同步跑完再返回；改成后台任务的三件套：
+    //   POST /api/products/auto-match         启动任务，立刻返回 taskId
+    //   GET  /api/products/auto-match/status  轮询进度（done/total + 已完成明细）
+    //   POST /api/products/auto-match/stop    停止（跑完当前商品就退出）
+    // 理由：每个商品要搜 1 次阿发 + 下 N 张候选图 + 跑 CLIP 编码，几百个商品要几分钟到十几分钟，
+    //       同步请求必然被浏览器/网关掐断。
+    // 打分口径见 lib/sku-match.js（图片 0.6 + 文本 0.4，叠加 IP/竞品/容量/款式规则），
+    // 阈值 MATCH_SCORE_THRESHOLD（默认 0.80，环境变量可调），低于阈值留空等人工。
+    // 范围 = 当前筛选出来的商品（q / status / batch / brand 与列表共用 productScope）。
     if (method === 'POST' && p === '/api/products/auto-match') {
       if (!canProduct) return denyProduct();
       if (!canPrice) return denyPrice();
@@ -4114,10 +4581,12 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 500, { error: '查询待匹配商品失败：' + e.message });
       }
       if (!items.length) {
-        return sendJson(res, 200, { ok: true, total: 0, todo: 0, linked: 0, picked: 0, items: [], message: '当前筛选下没有商品' });
+        return sendJson(res, 200, { ok: true, taskId: null, total: 0, message: '当前筛选下没有商品' });
       }
-      // 逐个商品都要真搜一次阿发（限速 250ms），全量跑几千条会把对方接口打挂，先要求收窄筛选
       const pendingCount = items.filter((it) => !it.afa_goods_id).length;
+      if (!pendingCount) {
+        return sendJson(res, 200, { ok: true, taskId: null, total: items.length, message: '当前筛选下的商品都已关联阿发，无需匹配' });
+      }
       if (pendingCount > MATCH_MAX_PER_RUN) {
         return sendJson(res, 200, {
           ok: false, tooMany: true, pending: pendingCount, cap: MATCH_MAX_PER_RUN,
@@ -4125,100 +4594,66 @@ const server = http.createServer(async (req, res) => {
             + '请先用「商品SKU/名称」或「采购状态」把范围缩小，或导入补货参考文件后按文件匹配。',
         });
       }
-
-      const poolCache = new Map();
-      const brandFallback = await brandIdOfUser(tenantId).catch(() => 1);
-      const out = [];
-      let linked = 0;
-      let picked = 0;
-      let none = 0;
-      let queried = 0;
-      let lastErr = '';
-
-      for (const it of items) {
-        const base = {
-          sku: it.sku, goods_name: it.goods_name, image_url: it.image_url,
-          brand_id: Number(it.brand_id) || brandFallback, inBrand: !!it.bp_id,
-        };
-
-        // ① 已关联的直接回显，不再搜（重跑不会覆盖手工调整）
-        if (it.afa_goods_id) {
-          linked += 1;
-          out.push(Object.assign(base, {
-            keyword: '', state: 'linked', picked: String(it.afa_goods_id),
-            candidate: null, note: '已关联（ID ' + it.afa_goods_id + '）',
-          }));
-          continue;
+      // 同一账号已有任务在跑：直接复用，避免重复点按钮把阿发接口打爆
+      pruneMatchTasks();
+      for (const t of MATCH_TASKS.values()) {
+        if (t.running && Number(t.tenantId) === Number(tenantId)) {
+          return sendJson(res, 200, {
+            ok: true, taskId: t.id, total: t.total, pending: pendingCount, reused: true,
+            threshold: MATCH_SCORE_THRESHOLD, message: '已有一个匹配任务在跑，正在显示它的进度',
+          });
         }
-
-        // ② 拿商品名称原样去搜（不降级、不筛、不打分）
-        const kw = String(it.goods_name || '').trim();
-        if (!kw) {
-          none += 1;
-          out.push(Object.assign(base, { keyword: '', state: 'none', picked: '', candidate: null, note: '商品名称为空，无法搜索' }));
-          continue;
-        }
-        if (!poolCache.has(kw)) {
-          try {
-            const r = await afa.searchPool(tenantId, kw, { pages: 1, size: 50 });
-            poolCache.set(kw, r.rows || []);
-            queried += 1;
-            await sleepMs(250);   // 限速：别把对方接口打挂
-          } catch (e) {
-            poolCache.set(kw, []);
-            lastErr = String((e && e.message) || e).slice(0, 160);
-          }
-        }
-        const pool = poolCache.get(kw);
-        if (!pool.length) {
-          none += 1;
-          out.push(Object.assign(base, {
-            keyword: kw, state: 'none', picked: '', candidate: null,
-            note: lastErr ? '阿发接口报错：' + lastErr : '阿发搜不到该商品名，请手工关联',
-          }));
-          continue;
-        }
-
-        // ③ 直接取搜索结果的第一条，不做任何筛选与打分
-        const first = pool[0];
-        const best = {
-          goodsId: String(first.goodsId), goodsName: first.goodsName || '',
-          picture: first.picture || '', salePrice: first.salePrice,
-          unitPrice: first.unitPrice, factorName: first.factorName || '',
-        };
-
-        // ④ 写库：品牌商品表有该 SKU 就写品牌（同品牌共享），否则写个人补货行
-        if (apply) {
-          try {
-            const wr = await writeProductLink('afa_goods_id', best.goodsId, { brandId: base.brand_id, userId: tenantId, sku: it.sku });
-            best.scope = wr.scope;
-            if (wr.scope === 'brand') {
-              await db.exec(
-                'UPDATE brand_product SET afa_match_score = NULL, afa_match_at = NOW() WHERE brand_id = ? AND sku = ?',
-                [base.brand_id, it.sku]
-              );
-            }
-          } catch (e) {
-            best.writeError = String((e && e.message) || e).slice(0, 160);
-            lastErr = best.writeError;
-          }
-        }
-        picked += 1;
-        out.push(Object.assign(base, {
-          keyword: kw,
-          state: apply ? 'linked' : 'suggest',
-          picked: best.goodsId, candidate: best,
-          note: best.writeError ? '写入失败：' + best.writeError : '',
-        }));
       }
-
-      const tip = lastErr && !picked ? `（阿发接口报错：${lastErr}，请检查是否已配置有效 Token）` : '';
-      const act = apply ? '已关联' : '建议关联';
-      return sendJson(res, 200, {
-        ok: true, total: items.length, todo: items.length - linked, linked, picked, none,
-        queriedKeywords: queried, applied: apply, items: out,
-        message: `共 ${items.length} 个商品（原有 ${linked} 个已关联）：本次${act} ${picked} 个、没找到 ${none} 个${tip}`,
+      const taskId = 'm' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+      const task = {
+        id: taskId, tenantId: Number(tenantId), userId: Number(user.id), apply,
+        running: true, state: 'running', total: items.length, done: 0,
+        items: [], stats: {}, message: '任务已创建，正在准备…',
+        startedAt: Date.now(), finishedAt: 0, stop: false, warn: '', model: null, fallbackAll: false,
+      };
+      MATCH_TASKS.set(taskId, task);
+      const brandFallback = await brandIdOfUser(tenantId).catch(() => 1);
+      // 故意不 await：请求立刻返回，任务在后台推进，页面轮询 status
+      runMatchTask(task, items, { tenantId, apply, brandFallback }).catch((e) => {
+        task.running = false;
+        task.state = 'failed';
+        task.finishedAt = Date.now();
+        task.message = '匹配任务失败：' + String((e && e.message) || e).slice(0, 200);
       });
+      return sendJson(res, 200, {
+        ok: true, taskId, total: items.length, pending: pendingCount,
+        threshold: MATCH_SCORE_THRESHOLD, apply,
+        message: `已启动匹配：共 ${items.length} 个商品（待匹配 ${pendingCount} 个）`,
+      });
+    }
+
+    // 自动匹配进度：页面每 1~2 秒轮询一次，返回已完成的部分结果
+    if (method === 'GET' && p === '/api/products/auto-match/status') {
+      if (!canProduct) return denyProduct();
+      const taskId = String(url.searchParams.get('taskId') || '').trim();
+      const t = MATCH_TASKS.get(taskId);
+      // 任务按账号隔离：别人的 taskId 一律当不存在，别泄露
+      if (!t || Number(t.tenantId) !== Number(tenantId)) {
+        return sendJson(res, 404, { error: '任务不存在或已过期（服务重启后需重新匹配）' });
+      }
+      return sendJson(res, 200, {
+        ok: true, taskId, state: t.state, running: t.running, apply: t.apply,
+        total: t.total, done: t.done, percent: t.total ? Math.round((t.done / t.total) * 100) : 0,
+        stats: t.stats, message: t.message, warn: t.warn,
+        threshold: MATCH_SCORE_THRESHOLD,
+        model: t.model || clipEmbed.info(),
+        items: t.items,
+      });
+    }
+
+    // 停止自动匹配：跑完当前商品就退出（不强杀，避免把写库切成半截）
+    if (method === 'POST' && p === '/api/products/auto-match/stop') {
+      if (!canProduct) return denyProduct();
+      const b = await readBody(req).catch(() => ({}));
+      const t = MATCH_TASKS.get(String(b.taskId || '').trim());
+      if (!t || Number(t.tenantId) !== Number(tenantId)) return sendJson(res, 404, { error: '任务不存在或已过期' });
+      t.stop = true;
+      return sendJson(res, 200, { ok: true, message: '已请求停止，跑完当前商品就退出' });
     }
 
     // 商品同步（仅超级管理员）：按页拉取牵牛花前置仓商品（筛选「正常采购」），

@@ -55,6 +55,8 @@ class AgentClient extends EventEmitter {
     this._helloTimer = null;
     this._qnhBusy = false;
     this._sdcBusy = false;
+    this._jdFetchBusy = false;
+    this._jdLoginBusy = false;
     this._aliBusy = false;
   }
 
@@ -111,7 +113,9 @@ class AgentClient extends EventEmitter {
       qnh: !!this._qnhBusy,
       sdc: !!this._sdcBusy,
       ali: !!this._aliBusy,
-      any: !!(this.sending || this._pddBusy || this._qnhBusy || this._sdcBusy || this._aliBusy),
+      jd: !!(this._jdFetchBusy || this._jdLoginBusy),
+      any: !!(this.sending || this._pddBusy || this._qnhBusy || this._sdcBusy || this._aliBusy
+        || this._jdFetchBusy || this._jdLoginBusy),
     };
   }
 
@@ -187,6 +191,8 @@ class AgentClient extends EventEmitter {
     if (m.type === 'export_orders') { this._runExport(m).catch((e) => this.log('订单导出异常: ' + e.message)); return; }
     if (m.type === 'qnh_login') { this._runQnhLogin(m).catch((e) => this.log('牵牛花登录异常: ' + e.message)); return; }
     if (m.type === 'qnh_fetch') { this._runQnhFetch(m).catch((e) => this.log('牵牛花页内请求异常: ' + e.message)); return; }
+    if (m.type === 'jd_login') { this._runJdLogin(m).catch((e) => this.log('京东万商登录异常: ' + e.message)); return; }
+    if (m.type === 'jd_fetch') { this._runJdFetch(m).catch((e) => this.log('京东万商取价异常: ' + e.message)); return; }
     if (m.type === 'pdd_login') { this._runPddLogin(m).catch((e) => this.log('拼多多登录异常: ' + e.message)); return; }
     if (m.type === 'ali_login') { this._runAliLogin(m).catch((e) => this.log('1688 登录异常: ' + e.message)); return; }
     if (m.type === 'pdd_apply') { this._runPddApply(m).catch((e) => this.log('拼多多申请异常: ' + e.message)); return; }
@@ -262,6 +268,12 @@ class AgentClient extends EventEmitter {
 
   /** 注册「牵牛花页内签名请求」处理器（main.js 注入 qnh-login.createFetchHandler） */
   setQnhFetchHandler(fn) { this._qnhFetchHandler = fn; }
+
+  /** 注册「登录京东万商」处理器（main.js 注入 jd-login.createLoginHandler） */
+  setJdLoginHandler(fn) { this._jdLoginHandler = fn; }
+
+  /** 注册「京东万商页内取价」处理器（main.js 注入 jd-login.createFetchHandler） */
+  setJdFetchHandler(fn) { this._jdFetchHandler = fn; }
 
   /** 注册「登录拼多多」处理器（main.js 注入 pdd-login 模块） */
   setPddLoginHandler(fn) { this._pddLoginHandler = fn; }
@@ -345,6 +357,72 @@ class AgentClient extends EventEmitter {
       done({ ok: false, error: String((e && e.message) || e).slice(0, 200) });
     } finally {
       this._qnhBusy = false;
+      this.stopFlag = false;
+      this.currentTaskId = null;
+      this._emitState();
+    }
+  }
+
+  /**
+   * 「京东万商取价」：在万商页面里发一次「服务器已组好参数」的表单请求。
+   * 服务器直连 api.m.jd.com 必被网关拦（出口 IP + 浏览器指纹 + Cookie 不自洽），
+   * 只有本机真实页面里发才通 —— 与牵牛花/闪电帮帮同一条思路，只是京东不需要签名。
+   */
+  async _runJdFetch(m) {
+    const done = (payload) => this.send(Object.assign({
+      type: 'jd_fetch_done', taskId: m.taskId,
+    }, payload || {}));
+
+    if (this._jdFetchBusy) { done({ ok: false, error: '上一个京东取价请求还没结束，请稍后再试' }); return; }
+    if (typeof this._jdFetchHandler !== 'function') {
+      done({ ok: false, error: '助手版本过旧，不支持京东取价，请重新下载安装助手' });
+      return;
+    }
+    this._jdFetchBusy = true;
+    const api = {
+      log: (text) => this.send({ type: 'log', text: String(text == null ? '' : text).slice(0, 200) }),
+      report: done,
+    };
+    try {
+      await this._jdFetchHandler(m, api);
+    } catch (e) {
+      done({ ok: false, error: String((e && e.message) || e).slice(0, 200) });
+    } finally {
+      this._jdFetchBusy = false;
+    }
+  }
+
+  /** 「登录京东万商」：本机弹窗登录，登录后把 Cookie 回传服务器（服务器只取 eid/uuid/收货地址） */
+  async _runJdLogin(m) {
+    const done = (payload) => this.send(Object.assign({
+      type: 'jd_login_done', taskId: m.taskId,
+    }, payload || {}));
+
+    if (this._jdLoginBusy) { done({ ok: false, error: '已有京东万商登录任务在进行中' }); return; }
+    if (typeof this._jdLoginHandler !== 'function') {
+      done({ ok: false, error: '助手版本过旧，不支持登录京东万商，请重新下载安装助手' });
+      return;
+    }
+    this._jdLoginBusy = true;
+    this.stopFlag = false;
+    this.currentTaskId = m.taskId;
+    this._emitState();
+    const api = {
+      log: (text) => this.send({ type: 'log', text: String(text == null ? '' : text).slice(0, 200) }),
+      isStopped: () => this.stopFlag,
+      sleep: async (ms) => {
+        for (let waited = 0; waited < ms && !this.stopFlag; waited += 300) {
+          await new Promise((r) => setTimeout(r, Math.min(300, ms - waited)));
+        }
+      },
+      report: done,
+    };
+    try {
+      await this._jdLoginHandler(m, api);
+    } catch (e) {
+      done({ ok: false, error: String((e && e.message) || e).slice(0, 200) });
+    } finally {
+      this._jdLoginBusy = false;
       this.stopFlag = false;
       this.currentTaskId = null;
       this._emitState();
@@ -661,7 +739,8 @@ class AgentClient extends EventEmitter {
     const busy = this.busy();
     if (busy.any) {
       const what = busy.sending ? '发送催收消息'
-        : (busy.pdd ? '拼多多任务' : (busy.qnh ? '牵牛花任务' : '闪电帮帮任务'));
+        : (busy.pdd ? '拼多多任务' : (busy.qnh ? '牵牛花任务'
+          : (busy.sdc ? '闪电帮帮任务' : '京东万商任务')));
       done({ ok: false, error: `助手正在执行任务（${what}），请等任务结束后再退出账号` });
       return;
     }

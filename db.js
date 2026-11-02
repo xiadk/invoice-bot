@@ -718,6 +718,7 @@ async function migrate(conn, dbName) {
       ['suggest_qty', "INT NOT NULL DEFAULT 0 COMMENT '建议量（基础单位，来自补货参考文件的「建议量(基础单位)」列）'"],
       ['qht_goods_id', "VARCHAR(64) DEFAULT NULL COMMENT '关联的齐货通商品ID（goodsId，用于实时取价与加购）'"],
       ['afa_goods_id', "VARCHAR(64) DEFAULT NULL COMMENT '关联的城配速达商品ID（goodsId，用于实时取价与加购）'"],
+      ['jd_sku_id', "VARCHAR(64) DEFAULT NULL COMMENT '关联的京东万商 skuId（b.jd.com 商品ID，用于取万商价）'"],
       ['local_price', "DECIMAL(12,2) DEFAULT NULL COMMENT '本地价（手工填写并保存，仅作比价参考）'"],
       ['image_url', "VARCHAR(512) DEFAULT NULL COMMENT '商品主图（由「商品同步」从牵牛花拉取，按 sku 匹配更新）'"],
     ]) {
@@ -821,6 +822,7 @@ async function migrate(conn, dbName) {
     for (const [col, decl] of [
       ['qht_goods_id', "VARCHAR(64) DEFAULT NULL COMMENT '关联的齐货通商品ID（goodsId，用于实时取价与加购）'"],
       ['afa_goods_id', "VARCHAR(64) DEFAULT NULL COMMENT '关联的城配速达商品ID（goodsId，用于实时取价与加购）'"],
+      ['jd_sku_id', "VARCHAR(64) DEFAULT NULL COMMENT '关联的京东万商 skuId（b.jd.com 商品ID，用于取万商价）'"],
       ['local_price', "DECIMAL(12,2) DEFAULT NULL COMMENT '本地价（手工填写，仅作比价参考）'"],
       ['afa_match_score', "SMALLINT DEFAULT NULL COMMENT '阿发自动匹配得分（0-100；手工关联留空）'"],
       ['afa_match_at', "DATETIME DEFAULT NULL COMMENT '阿发自动匹配写入时间（非空=自动匹配结果）'"],
@@ -831,6 +833,9 @@ async function migrate(conn, dbName) {
     }
     if (!(await idxExists('brand_product', 'idx_bp_afa'))) {
       await q('ALTER TABLE `brand_product` ADD KEY `idx_bp_afa` (`brand_id`, `afa_goods_id`)');
+    }
+    if (!(await idxExists('brand_product', 'idx_bp_jd'))) {
+      await q('ALTER TABLE `brand_product` ADD KEY `idx_bp_jd` (`brand_id`, `jd_sku_id`)');
     }
   }
   // 牵牛花登录态按品牌方隔离：每个品牌方一个账号，老登录态归默认品牌（优购哆）

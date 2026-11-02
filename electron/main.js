@@ -23,6 +23,7 @@ const { AgentClient } = require('./agent/ws-client');
 const sender = require('./agent/sender');
 const orderExport = require('./agent/order-export');
 const qnhLogin = require('./agent/qnh-login');
+const jdLogin = require('./agent/jd-login');
 const pddLogin = require('./agent/pdd-login');
 const aliLogin = require('./agent/ali-login');
 const pddApply = require('./agent/pdd-apply');
@@ -110,6 +111,8 @@ const LOGOUT_WINDOWS = {
   1688: [() => { try { sender.closeSendWindow(); } catch (e) { /* 忽略 */ } return null; }, () => aliLogin.peekWindow()],
   // 闪电帮帮：登录窗口 + 承载页内请求的后台窗口 + 客服会话窗口
   sdc: [() => sdc.peekWindow(), () => sdc.peekApiWindow(), () => sdc.peekChatWindow()],
+  // 京东万商：登录窗口同时承载页内取价，关掉即可释放分区
+  jd: [() => jdLogin.peekWindow()],
 };
 
 /**
@@ -123,7 +126,8 @@ async function doLocalLogout(target) {
     return {
       ok: false,
       error: '助手正在执行任务（' + (busy.sending ? '发送催收消息'
-        : (busy.pdd ? '拼多多任务' : (busy.qnh ? '牵牛花任务' : '闪电帮帮任务')))
+        : (busy.pdd ? '拼多多任务' : (busy.qnh ? '牵牛花任务'
+          : (busy.sdc ? '闪电帮帮任务' : '京东万商任务'))))
         + '），请等任务结束后再退出登录态',
     };
   }
@@ -290,6 +294,14 @@ function startAgent() {
   // 「牵牛花页内签名请求」内核：配送日志 / 订单毛利明细等接口要求 mtgsig 签名，
   // 服务器直连 403，只有真实页面环境里的 fetch 能自动带上——这个环境只有本机有。
   client.setQnhFetchHandler(qnhLogin.createFetchHandler({
+    log: (m) => { log(m); pushState(); },
+  }));
+  // 「京东万商」两个内核：网关校验「出口 IP + 浏览器指纹 + Cookie」三者自洽，服务器直连必 403，
+  // 所以登录与取价都在本机真实页面里做（京东详情接口不需要签名，只要页面环境）。
+  client.setJdLoginHandler(jdLogin.createLoginHandler({
+    log: (m) => { log(m); pushState(); },
+  }));
+  client.setJdFetchHandler(jdLogin.createFetchHandler({
     log: (m) => { log(m); pushState(); },
   }));
   // 「登录拼多多」内核：与牵牛花同一套路（服务器没有浏览器，登录只在本机完成），

@@ -392,6 +392,7 @@ CREATE TABLE IF NOT EXISTS `brand_product` (
   `sales_30d`       INT           NOT NULL DEFAULT 0    COMMENT '30天销量（sale30Num）',
   `qht_goods_id`    VARCHAR(64)   DEFAULT NULL          COMMENT '关联的齐货通商品ID（goodsId）',
   `afa_goods_id`    VARCHAR(64)   DEFAULT NULL          COMMENT '关联的城配速达商品ID（goodsId）',
+  `jd_sku_id`       VARCHAR(64)   DEFAULT NULL          COMMENT '关联的京东万商 skuId（b.jd.com 商品ID）',
   `local_price`     DECIMAL(12,2) DEFAULT NULL          COMMENT '本地价（手工填写，仅作比价参考）',
   `afa_match_score` SMALLINT      DEFAULT NULL          COMMENT '阿发自动匹配得分（0-100；手工关联留空）',
   `afa_match_at`    DATETIME      DEFAULT NULL          COMMENT '阿发自动匹配写入时间（非空=自动匹配结果）',
@@ -403,6 +404,7 @@ CREATE TABLE IF NOT EXISTS `brand_product` (
   KEY `idx_bp_brand_status` (`brand_id`, `purchase_status`),
   KEY `idx_bp_brand_scode` (`brand_id`, `purchase_status_code`),
   KEY `idx_bp_afa` (`brand_id`, `afa_goods_id`),
+  KEY `idx_bp_jd` (`brand_id`, `jd_sku_id`),
   KEY `idx_bp_sku` (`sku`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   COMMENT='品牌商品（商品同步写入；同品牌全员共享）';
@@ -427,6 +429,7 @@ CREATE TABLE IF NOT EXISTS `product_item` (
   `suggest_qty`     INT           NOT NULL DEFAULT 0    COMMENT '建议量（基础单位，来自补货参考文件的「建议量(基础单位)」列）',
   `qht_goods_id`    VARCHAR(64)   DEFAULT NULL          COMMENT '关联的齐货通商品ID（goodsId，用于实时取价与加购）',
   `afa_goods_id`    VARCHAR(64)   DEFAULT NULL          COMMENT '关联的城配速达商品ID（goodsId，用于实时取价与加购）',
+  `jd_sku_id`       VARCHAR(64)   DEFAULT NULL          COMMENT '关联的京东万商 skuId（b.jd.com 商品ID，用于取万商价）',
   `local_price`    DECIMAL(12,2) DEFAULT NULL           COMMENT '本地价（手工填写并保存，仅作比价参考）',
   `batch_id`        BIGINT UNSIGNED NULL                COMMENT '最近一次导入批次（product_import_batch.id）',
   `source_file`     VARCHAR(255)  DEFAULT NULL          COMMENT '来源文件名',
