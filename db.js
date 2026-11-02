@@ -140,6 +140,11 @@ async function ensureQnhSchema(q) {
       "  `audit_time` DATETIME DEFAULT NULL," +
       "  `audit_operator` VARCHAR(64) DEFAULT NULL," +
       "  `audit_reason` VARCHAR(512) DEFAULT NULL," +
+      "  `refund_reason` VARCHAR(512) DEFAULT NULL COMMENT '人工填写的退款原因（同步不覆盖，页面优先展示）'," +
+      "  `after_sale_status` TINYINT NOT NULL DEFAULT 0 COMMENT '售后处理状态：0待处理 1已申请 2已退货 3已退款'," +
+      "  `after_sale_note` VARCHAR(255) DEFAULT NULL COMMENT '售后备注'," +
+      "  `after_sale_by` VARCHAR(64) DEFAULT NULL COMMENT '最后处理人'," +
+      "  `after_sale_at` DATETIME DEFAULT NULL COMMENT '最后处理时间'," +
       "  `item_kinds` INT DEFAULT NULL COMMENT '商品行数'," +
       "  `detail_synced` TINYINT(1) NOT NULL DEFAULT 0," +
       "  `has_delivery_log` TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否有配送日志（含接单）'," +
@@ -775,6 +780,26 @@ async function migrate(conn, dbName) {
   if (!(await idxExists('app_user', 'idx_app_user_brand'))) {
     await q('ALTER TABLE `app_user` ADD KEY `idx_app_user_brand` (`brand_id`)');
   }
+  // ── 员工账号（v0.2.104）───────────────────────────────────────────────────
+  //   owner_id = 该账号归属的主体账号（「老板」）；NULL = 自主账号（现有账号全是 NULL）。
+  //   员工登录后所有业务数据都落在 owner_id 名下（tenantOf 会把它当数据归属者），
+  //   自己那一行只承载登录凭据 + 菜单开关，因此一个字段就能复用整套多租户逻辑。
+  if (!(await colExists('app_user', 'owner_id'))) {
+    await q(
+      "ALTER TABLE `app_user` ADD COLUMN `owner_id` INT DEFAULT NULL " +
+      "COMMENT '归属主体账号（员工号指向老板的 app_user.id；NULL=自主账号）' AFTER `brand_id`"
+    );
+  }
+  if (!(await idxExists('app_user', 'idx_app_user_owner'))) {
+    await q('ALTER TABLE `app_user` ADD KEY `idx_app_user_owner` (`owner_id`)');
+  }
+  // 售后管理菜单（v0.2.104）：默认 0，与其它菜单一样由超管逐个开启
+  if (!(await colExists('app_user', 'after_sale_enabled'))) {
+    await q(
+      'ALTER TABLE `app_user` ADD COLUMN `after_sale_enabled` TINYINT(1) NOT NULL DEFAULT 0 ' +
+      "COMMENT '是否允许查看售后管理页（1=开启，超级管理员始终可见）'"
+    );
+  }
   // 品牌级商品主数据：一次同步写入，同品牌下所有用户共享
   if (!(await tableExists('brand_product'))) {
     await q(
@@ -935,6 +960,21 @@ async function migrate(conn, dbName) {
       if (!(await colExists('qnh_refund_order', col))) {
         await q(`ALTER TABLE \`qnh_refund_order\` ADD COLUMN \`${col}\` ${decl}`);
       }
+    }
+    // 售后管理 / 退款原因（v0.2.104）：两列都只由本系统写，同步只更新平台字段，不会覆盖这里
+    for (const [col, decl] of [
+      ['refund_reason', "VARCHAR(512) DEFAULT NULL COMMENT '人工填写的退款原因（同步不覆盖，页面优先展示）'"],
+      ['after_sale_status', "TINYINT NOT NULL DEFAULT 0 COMMENT '售后处理状态：0待处理 1已申请 2已退货 3已退款'"],
+      ['after_sale_note', "VARCHAR(255) DEFAULT NULL COMMENT '售后备注'"],
+      ['after_sale_by', "VARCHAR(64) DEFAULT NULL COMMENT '最后处理人'"],
+      ['after_sale_at', "DATETIME DEFAULT NULL COMMENT '最后处理时间'"],
+    ]) {
+      if (!(await colExists('qnh_refund_order', col))) {
+        await q(`ALTER TABLE \`qnh_refund_order\` ADD COLUMN \`${col}\` ${decl}`);
+      }
+    }
+    if (!(await idxExists('qnh_refund_order', 'idx_qro_after'))) {
+      await q('ALTER TABLE `qnh_refund_order` ADD KEY `idx_qro_after` (`user_id`, `after_sale_status`)');
     }
   }
 

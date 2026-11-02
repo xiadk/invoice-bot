@@ -179,6 +179,9 @@
                 padding: 8px 12px; border: 1px solid var(--line); border-radius: 6px; margin-bottom: 10px; }
   .menu-perm-row { display: flex; align-items: center; justify-content: space-between;
                    padding: 10px 12px; border: 1px solid #ebeef5; border-radius: 6px; margin-bottom: 10px; }
+  /* 员工新增弹窗里的菜单开关：两列网格，省高度 */
+  .staff-menu-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 10px; width: 100%; }
+  .staff-menu-grid .menu-perm-row { margin-bottom: 8px; padding: 8px 10px; }
   .amount { font-weight: 600; color: #e53935; }
   .amount.ok { color: #2e7d32; }
   .amount.zero { color: var(--sub); font-weight: 400; }
@@ -1945,7 +1948,10 @@
             <el-table-column label="账号" width="150">
               <template slot-scope="p"><b>{{ p.row.username }}</b><div v-if="p.row.mustChangePassword" class="loginid">需改密</div></template>
             </el-table-column>
-            <el-table-column label="角色" width="110"><template slot-scope="p"><el-tag size="mini" :type="p.row.role === 'admin' ? 'warning' : 'info'">{{ p.row.role === 'admin' ? '超级管理员' : '普通用户' }}</el-tag></template></el-table-column>
+            <el-table-column label="角色" width="130"><template slot-scope="p">
+              <el-tag size="mini" :type="p.row.role === 'admin' ? 'warning' : 'info'">{{ p.row.role === 'admin' ? '超级管理员' : '普通用户' }}</el-tag>
+              <el-tag v-if="p.row.ownerId" size="mini" type="success" style="margin-left:4px">员工</el-tag>
+            </template></el-table-column>
             <el-table-column label="品牌方" width="120">
               <template slot-scope="p">
                 <el-tag v-if="p.row.brandName" size="mini" type="success">{{ p.row.brandName }}</el-tag>
@@ -1982,7 +1988,9 @@
                           style="margin-right:4px">商品</el-tag>
                   <el-tag size="mini" :type="p.row.marketEnabled ? 'success' : 'info'"
                           style="margin-right:4px">市场</el-tag>
-                  <el-tag size="mini" :type="p.row.billingEnabled ? 'success' : 'info'">账单</el-tag>
+                  <el-tag size="mini" :type="p.row.billingEnabled ? 'success' : 'info'"
+                          style="margin-right:4px">账单</el-tag>
+                  <el-tag size="mini" :type="p.row.afterSaleEnabled ? 'success' : 'info'">售后</el-tag>
                 </template>
               </template>
             </el-table-column>
@@ -2046,7 +2054,109 @@
         </el-dialog>
       </div>
 
-      <!-- ══════════ 操作日志（仅超级管理员可见） ══════════ -->
+      <!-- ══════════ 员工管理（v0.2.104，仅主体账号可见） ══════════ -->
+      <div v-show="page === 'staff'" id="page-staff">
+        <div class="page-bar">
+          <span class="pb-info">
+            员工账号是<b>菜单受限的操作员</b>：登录后看到的退单 / 商品 / 补货等数据与<b>你完全同一套</b>，
+            区别只在能看到哪些菜单。员工<b>不能再建员工</b>，也看不到本页。
+          </span>
+          <span class="pb-actions">
+            <el-button size="small" @click="loadStaff">刷新</el-button>
+            <el-button size="small" type="primary" @click="openStaffCreate">+ 新增员工</el-button>
+          </span>
+        </div>
+
+        <el-alert type="info" :closable="false" show-icon style="margin-bottom:12px"
+                  :title="'所属主体账号：' + ((staffOwner && staffOwner.username) || '—') + (staffOwner && staffOwner.brandName ? '（品牌方：' + staffOwner.brandName + '）' : '')"
+                  description="员工的有效期跟随你的账号：你的账号到期或被停用后，所有员工账号会同时无法登录。"></el-alert>
+
+        <el-card shadow="never" class="section-card">
+          <div slot="header">
+            <b>员工列表</b> <span class="loginid">（{{ staff.rows.length }} 个账号）</span>
+          </div>
+          <el-table :data="staff.rows" size="small" border style="width:100%" empty-text="还没有员工账号，点右上角「+ 新增员工」"
+                    v-loading="staff.loading">
+            <el-table-column label="登录账号" width="170">
+              <template slot-scope="p"><b>{{ p.row.username }}</b></template>
+            </el-table-column>
+            <el-table-column label="姓名 / 备注" min-width="180">
+              <template slot-scope="p">
+                <div>{{ p.row.displayName || '—' }}</div>
+                <div v-if="p.row.note" class="loginid">{{ p.row.note }}</div>
+              </template>
+            </el-table-column>
+            <el-table-column label="状态" width="90">
+              <template slot-scope="p">
+                <el-tag size="mini" :type="p.row.status === 'active' ? 'success' : 'danger'">
+                  {{ p.row.status === 'active' ? '正常' : '已禁用' }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="菜单权限" min-width="300">
+              <template slot-scope="p">
+                <el-tag v-for="t in staffMenuTags(p.row)" :key="t.key" size="mini"
+                        :type="t.on ? 'success' : 'info'" style="margin:0 4px 4px 0">{{ t.label }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="最近登录" width="150">
+              <template slot-scope="p"><span class="loginid">{{ fmtMinute(p.row.lastLoginAt) || '从未登录' }}</span></template>
+            </el-table-column>
+            <el-table-column label="操作" width="300">
+              <template slot-scope="p">
+                <div style="display:flex;gap:6px;flex-wrap:wrap">
+                  <el-button size="mini" type="primary" plain @click="openStaffPermit(p.row)">菜单权限</el-button>
+                  <el-button size="mini" @click="openStaffEdit(p.row)">编辑</el-button>
+                  <el-button size="mini" @click="resetStaffPwd(p.row)">重置密码</el-button>
+                  <el-button v-if="p.row.status === 'active'" size="mini" type="danger" plain
+                             @click="toggleStaffStatus(p.row, 'disabled')">禁用</el-button>
+                  <el-button v-else size="mini" @click="toggleStaffStatus(p.row, 'active')">启用</el-button>
+                  <el-button size="mini" type="danger" plain @click="deleteStaff(p.row)">删除</el-button>
+                </div>
+              </template>
+            </el-table-column>
+          </el-table>
+        </el-card>
+
+        <!-- 新增 / 编辑员工 -->
+        <el-dialog :title="staffDlg.id ? '编辑员工' : '新增员工'" :visible.sync="staffDlg.visible"
+                   width="620px" top="8vh" append-to-body>
+          <el-form label-position="top" size="small">
+            <el-row :gutter="12">
+              <el-col :xs="24" :md="12"><el-form-item label="登录账号 *">
+                <el-input v-model="staffDlg.username" placeholder="如：xiaowang（中文/字母/数字均可）"></el-input>
+              </el-form-item></el-col>
+              <el-col :xs="24" :md="12" v-if="!staffDlg.id"><el-form-item label="初始密码 *">
+                <el-input v-model="staffDlg.password" placeholder="至少 4 位"></el-input>
+              </el-form-item></el-col>
+              <el-col :xs="24" :md="12"><el-form-item label="姓名 / 显示名">
+                <el-input v-model="staffDlg.displayName" placeholder="如：王小明"></el-input>
+              </el-form-item></el-col>
+              <el-col :xs="24" :md="12"><el-form-item label="备注">
+                <el-input v-model="staffDlg.note" placeholder="可选，如：售后专员"></el-input>
+              </el-form-item></el-col>
+            </el-row>
+            <el-form-item label="菜单权限（创建后可随时改）">
+              <div class="staff-menu-grid">
+                <div class="menu-perm-row" v-for="m in staffMenus" :key="m.key">
+                  <div><b>{{ m.label }}</b></div>
+                  <el-switch v-model="staffDlg.menus[m.key]"></el-switch>
+                </div>
+              </div>
+            </el-form-item>
+          </el-form>
+          <div class="form-tip">
+            员工与你共用同一套数据，所以<b>退单、商品这些菜单只是「能看哪块」</b>，不是数据隔离。
+            默认全部关闭，按岗位勾选即可（例如售后专员只勾「售后管理」）。
+          </div>
+          <span slot="footer">
+            <el-button size="small" @click="staffDlg.visible = false">取消</el-button>
+            <el-button size="small" type="primary" :loading="staffDlg.saving" @click="saveStaff">保存</el-button>
+          </span>
+        </el-dialog>
+      </div>
+
+
       <div v-show="page === 'audit'" id="page-audit">
         <div class="page-bar">
           <span class="pb-info">
@@ -2242,6 +2352,15 @@
                 {{ p.row.refundType || '—' }}
               </template>
             </el-table-column>
+            <el-table-column label="退款原因" min-width="190">
+              <template slot-scope="p">
+                <div style="display:flex;align-items:flex-start;gap:6px">
+                  <span style="flex:1" :title="p.row.reasonText || ''">{{ p.row.reasonText || '—' }}</span>
+                  <el-button type="text" size="mini" @click="openReason(p.row, 'refund')">编辑</el-button>
+                </div>
+                <div v-if="p.row.refundReason" class="loginid">（人工填写，同步不覆盖）</div>
+              </template>
+            </el-table-column>
             <el-table-column label="退单金额" width="100" align="right">
               <template slot-scope="p"><span class="amount">{{ p.row.refundAmount == null ? '—' : yuan(p.row.refundAmount) }}</span></template>
             </el-table-column>
@@ -2288,6 +2407,167 @@
         <!-- 退单提醒设置 → 独立页「退单提醒配置」（switchPage('refundalert')），字段与接口未变 -->
         <!-- 定时同步设置 → 独立页「牵牛花配置」（switchPage('qnhcfg')），仅超级管理员可见 -->
 
+      </div>
+
+      <!-- ══════════ 售后管理（v0.2.104，独立菜单权限） ══════════ -->
+      <div v-show="page === 'after'" id="page-after">
+        <div class="page-bar">
+          <span class="pb-info">
+            退单商品的售后台账 · <b>一行一个退单</b>，商品名称 / SKU / 数量取该单的商品明细（多商品可展开看全部）。
+            <b>处理状态</b>和<b>售后原因</b>是人工维护的，牵牛花同步只写平台字段，不会覆盖你的修改。
+          </span>
+          <span class="pb-actions">
+            <el-button size="small" icon="el-icon-refresh" :loading="af.loading" @click="loadAfterSales">刷新</el-button>
+          </span>
+        </div>
+
+        <qnh-tenant-picker v-if="isAdmin" :users="qnhUsers" :value="qnhTenant"
+                           :sessions="qnhSessions" :self-id="me && me.id"
+                           @change="onQnhTenantChange"></qnh-tenant-picker>
+
+        <el-alert v-if="rq.cookie && !rq.cookie.logined" type="warning" :closable="false" show-icon
+                  style="margin-bottom:12px" title="当前账号还没有可用的牵牛花登录态"
+                  description="售后列表的数据来自退单同步。请到「退单列表」点「登录牵牛花」并同步一次，这里才有商品与原因。">
+          <el-button v-if="canRefund" size="mini" style="margin-top:6px" @click="switchPage('refund')">去退单列表</el-button>
+        </el-alert>
+
+        <!-- 处理状态统计（点卡片即按该状态筛选，再点一次取消） -->
+        <div class="stat-row">
+          <el-card v-for="s in afStatCards" :key="s.key" shadow="never" class="stat-card"
+                   :body-style="{ padding: '14px 16px' }"
+                   :style="{ flex: 1, minWidth: '128px', cursor: 'pointer', borderColor: af.status === s.key ? '#409eff' : '' }"
+                   @click.native="toggleAfStatus(s.key)">
+            <div class="num">{{ s.num }}</div>
+            <div class="label">{{ s.label }}</div>
+          </el-card>
+        </div>
+
+        <el-card shadow="never" class="section-card">
+          <div class="filter-bar">
+            <span class="fb-label">筛选</span>
+            <el-select v-model="af.status" size="small" style="width:130px" @change="onAfFilter">
+              <el-option label="全部状态" value=""></el-option>
+              <el-option v-for="s in af.statuses" :key="s.value" :label="s.label" :value="String(s.value)"></el-option>
+            </el-select>
+            <el-input v-model="af.keyword" size="small" style="width:280px" clearable
+                      placeholder="退单号 / 订单号 / 门店 / 顾客 / 商品名 / SKU"
+                      @keyup.enter.native="onAfFilter" @clear="onAfFilter"></el-input>
+            <el-button size="small" type="primary" plain @click="onAfFilter">查询</el-button>
+            <span class="fb-spacer"></span>
+            <span class="loginid">共 {{ af.total }} 条</span>
+          </div>
+
+          <el-table :data="af.rows" size="small" border style="width:100%" v-loading="af.loading"
+                    empty-text="没有符合条件的售后记录">
+            <!-- 展开：该退单的全部商品明细 -->
+            <el-table-column type="expand" width="36">
+              <template slot-scope="p">
+                <div class="rf-detail" style="padding:8px 12px">
+                  <el-table :data="p.row.items" size="mini" border style="width:100%"
+                            empty-text="商品明细还没同步（下次同步会补拉）">
+                    <el-table-column label="SKU" width="200"><template slot-scope="q"><span class="loginid">{{ q.row.sku || '—' }}</span></template></el-table-column>
+                    <el-table-column label="商品名称" min-width="300" show-overflow-tooltip><template slot-scope="q">{{ q.row.skuName || '—' }}</template></el-table-column>
+                    <el-table-column label="规格" width="140"><template slot-scope="q">{{ q.row.spec || '—' }}</template></el-table-column>
+                    <el-table-column label="数量" width="80" align="right"><template slot-scope="q">{{ q.row.qty == null ? '—' : q.row.qty }}</template></el-table-column>
+                  </el-table>
+                  <div class="loginid" style="margin-top:6px">
+                    平台退单状态：{{ p.row.refundStatus || '—' }} · 退单类型：{{ p.row.refundType || '—' }}
+                    · 平台原始原因：{{ p.row.applyReason || '—' }}
+                    <span v-if="p.row.handledBy"> · 最后处理：{{ p.row.handledBy }} {{ p.row.handledAt || '' }}</span>
+                  </div>
+                </div>
+              </template>
+            </el-table-column>
+
+            <el-table-column label="退单号" width="150">
+              <template slot-scope="p"><span class="loginid">{{ p.row.refundNo }}</span></template>
+            </el-table-column>
+            <el-table-column label="商品名称" min-width="260">
+              <template slot-scope="p">
+                <span :title="p.row.nameText">{{ afGoodsText(p.row) }}</span>
+                <div v-if="p.row.itemKinds > 1" class="loginid">共 {{ p.row.itemKinds }} 种商品，展开看明细</div>
+              </template>
+            </el-table-column>
+            <el-table-column label="商品SKU" width="190">
+              <template slot-scope="p">
+                <span class="loginid" :title="p.row.skuText">{{ p.row.skuText || '—' }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="数量" width="80" align="right">
+              <template slot-scope="p">{{ p.row.refundQty == null ? '—' : p.row.refundQty }}</template>
+            </el-table-column>
+            <el-table-column label="售后原因" min-width="200">
+              <template slot-scope="p">
+                <span :title="p.row.reasonText">{{ p.row.reasonText || '—' }}</span>
+                <div v-if="p.row.refundReason" class="loginid">（人工填写）</div>
+              </template>
+            </el-table-column>
+            <el-table-column label="处理状态" width="130">
+              <template slot-scope="p">
+                <el-tag size="mini" :type="afStatusTag(p.row.status)">{{ p.row.statusLabel }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="申请时间" width="145">
+              <template slot-scope="p"><span class="loginid">{{ p.row.applyTime || '—' }}</span></template>
+            </el-table-column>
+            <el-table-column label="门店" min-width="130" show-overflow-tooltip>
+              <template slot-scope="p">{{ p.row.storeName || '—' }}</template>
+            </el-table-column>
+            <el-table-column label="操作" width="150">
+              <template slot-scope="p">
+                <el-button size="mini" type="primary" plain @click="openAfStatus(p.row)">处理</el-button>
+                <el-button size="mini" @click="openReason(p.row, 'after')">改原因</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+
+          <div class="pager-wrap">
+            <el-pagination background layout="total, sizes, prev, pager, next"
+                           :current-page="af.page" :page-size="af.size"
+                           :page-sizes="[20, 50, 100]" :total="af.total"
+                           @current-change="onAfPage" @size-change="onAfSize"></el-pagination>
+            <span class="total">共 {{ af.total }} 条</span>
+          </div>
+        </el-card>
+
+        <!-- 处理售后：选状态 + 备注 -->
+        <el-dialog :title="'处理售后 · ' + (afDlg.refundNo || '')" :visible.sync="afDlg.visible"
+                   width="520px" append-to-body>
+          <div class="form-tip" style="margin-bottom:10px">
+            {{ afDlg.goodsText || '—' }}<br>
+            平台原始原因：{{ afDlg.applyReason || '—' }}
+          </div>
+          <el-form label-position="top" size="small">
+            <el-form-item label="处理状态 *">
+              <el-radio-group v-model="afDlg.status">
+                <el-radio-button v-for="s in af.statuses" :key="s.value" :label="s.value">{{ s.label }}</el-radio-button>
+              </el-radio-group>
+            </el-form-item>
+            <el-form-item label="备注（选填，记录处理过程）">
+              <el-input type="textarea" :rows="3" v-model="afDlg.note" maxlength="255" show-word-limit
+                        placeholder="如：已联系顾客，等快递上门取件"></el-input>
+            </el-form-item>
+          </el-form>
+          <span slot="footer">
+            <el-button size="small" @click="afDlg.visible = false">取消</el-button>
+            <el-button size="small" type="primary" :loading="afDlg.saving" @click="saveAfStatus">保存</el-button>
+          </span>
+        </el-dialog>
+
+        <!-- 改售后原因（与退单列表共用同一个弹窗） -->
+        <el-dialog :title="'退款原因 · ' + (reasonDlg.refundNo || '')" :visible.sync="reasonDlg.visible"
+                   width="560px" append-to-body>
+          <div class="form-tip" style="margin-bottom:10px">
+            平台原始原因（只读）：{{ reasonDlg.raw || '—' }}<br>
+            下面这一栏是本系统自己记的原因，<b>每天同步不会覆盖</b>；清空后页面回落到平台原值。
+          </div>
+          <el-input type="textarea" :rows="3" v-model="reasonDlg.value" maxlength="512" show-word-limit
+                    placeholder="如：顾客嫌日期不新鲜，已退款"></el-input>
+          <span slot="footer">
+            <el-button size="small" @click="reasonDlg.visible = false">取消</el-button>
+            <el-button size="small" type="primary" :loading="reasonDlg.saving" @click="saveReason">保存</el-button>
+          </span>
+        </el-dialog>
       </div>
 
       <!-- ══════════ 实时毛利监控（按「菜单权限」开放） ══════════ -->
@@ -3205,7 +3485,7 @@
   <el-dialog :title="'菜单权限 · ' + (menuPermit.username || '')" :visible.sync="menuPermit.visible"
              width="460px" append-to-body>
     <div class="form-tip" style="margin-bottom:12px">
-      勾选后该用户登录即可看到对应菜单；超级管理员默认拥有全部菜单，无需设置。
+      勾选后该账号登录即可看到对应菜单；超管默认拥有全部菜单，无需设置。
     </div>
     <div class="menu-perm-row">
       <div>
@@ -3255,6 +3535,13 @@
         <div class="loginid">登录齐货通、重新取价、配置阿发Token、自动匹配阿发、阿发取价、选购加购（默认关闭）</div>
       </div>
       <el-switch v-model="menuPermit.price"></el-switch>
+    </div>
+    <div class="menu-perm-row">
+      <div>
+        <b>售后管理</b>
+        <div class="loginid">退单商品的售后台账：处理状态（待处理 / 已申请 / 已退货 / 已退款）与售后原因（默认关闭）</div>
+      </div>
+      <el-switch v-model="menuPermit.after"></el-switch>
     </div>
     <div slot="footer">
       <el-button @click="menuPermit.visible = false">取消</el-button>
@@ -3657,8 +3944,34 @@ const vm = new Vue({
       creatingUser: false, createOk: false,
       userEdit: { visible: false, id: null, title: '', company: '', taxNo: '', email: '', note: '', brandId: 1, hint: '', lockCompany: false, saving: false, expiryMode: 'permanent', expiresAt: '' },
       // 菜单权限弹窗（退单列表 / 实时毛利监控）
-      menuPermit: { visible: false, id: null, username: '', refund: false, profit: false, product: false, market: false, billing: false, replenish: false, price: false, saving: false,
-                    origin: { refund: false, profit: false, product: false, market: false, billing: false, replenish: false, price: false } },
+      menuPermit: { visible: false, id: null, username: '', scope: 'admin', refund: false, profit: false, product: false, market: false, billing: false, replenish: false, price: false, after: false, saving: false,
+                    origin: { refund: false, profit: false, product: false, market: false, billing: false, replenish: false, price: false, after: false } },
+      // ── 员工管理（v0.2.104，仅主体账号）──
+      staff: { rows: [], loading: false },
+      staffOwner: null,
+      staffMenus: [
+        { key: 'refund', label: '退单列表', field: 'qnhRefundEnabled' },
+        { key: 'after', label: '售后管理', field: 'afterSaleEnabled' },
+        { key: 'profit', label: '实时毛利监控', field: 'qnhProfitEnabled' },
+        { key: 'product', label: '商品列表', field: 'productEnabled' },
+        { key: 'replenish', label: '补货', field: 'replenishEnabled' },
+        { key: 'market', label: '交易市场', field: 'marketEnabled' },
+        { key: 'billing', label: '账单', field: 'billingEnabled' },
+        { key: 'price', label: '平台取价', field: 'priceEnabled' },
+      ],
+      staffDlg: { visible: false, id: null, username: '', password: '', displayName: '', note: '', saving: false, menus: {} },
+      // ── 售后管理（v0.2.104）──
+      af: {
+        loading: false, rows: [], total: 0, page: 1, size: 20,
+        status: '', keyword: '', counts: { all: 0, 0: 0, 1: 0, 2: 0, 3: 0 },
+        statuses: [
+          { value: 0, label: '待处理', tag: 'info' }, { value: 1, label: '已申请', tag: 'warning' },
+          { value: 2, label: '已退货', tag: '' }, { value: 3, label: '已退款', tag: 'success' },
+        ],
+      },
+      afDlg: { visible: false, refundNo: '', status: 0, note: '', goodsText: '', applyReason: '', saving: false },
+      // 退款原因编辑（退单列表与售后管理共用）
+      reasonDlg: { visible: false, refundNo: '', value: '', raw: '', from: 'refund', saving: false },
       // 操作日志（仅超级管理员）
       opLog: { draftUsername: '', username: '', page: 1, size: 20, total: 0, rows: [], loading: false, summary: {} },
       // 退单列表（牵牛花）
@@ -3710,9 +4023,11 @@ const vm = new Vue({
         ].filter(Boolean) },
         { title: '牵牛花监控', items: [
           this.canRefund ? { key: 'refund', label: '退单列表', icon: 'el-icon-s-claim' } : null,
+          this.canAfter ? { key: 'after', label: '售后管理', icon: 'el-icon-refresh-left' } : null,
           this.canProfit ? { key: 'profit', label: '实时毛利监控', icon: 'el-icon-s-data' } : null,
         ].filter(Boolean) },
         { title: '系统', items: [
+          this.canStaff ? { key: 'staff', label: '员工管理', icon: 'el-icon-user-solid' } : null,
           this.isAdmin ? { key: 'admin', label: '系统管理', icon: 'el-icon-setting' } : null,
           this.isAdmin ? { key: 'users', label: '用户管理', icon: 'el-icon-user' } : null,
           this.isAdmin ? { key: 'audit', label: '操作日志', icon: 'el-icon-tickets' } : null,
@@ -3773,6 +4088,22 @@ const vm = new Vue({
     // 平台取价权限（v0.2.95）：登录齐货通 / 重新取价 / 配置阿发Token / 自动匹配阿发 / 阿发重新取价 / 选购加购
     //   这些操作要动平台真实账号，默认只给超级管理员，普通账号由超管在「菜单权限 → 平台取价」里授权
     canPrice() { return !!(this.me && (this.me.role === 'admin' || this.me.priceEnabled)); },
+    // 售后管理权限（v0.2.104）：独立菜单，默认关闭，可与退单列表分开授权
+    canAfter() { return !!(this.me && (this.me.role === 'admin' || this.me.afterSaleEnabled)); },
+    // 员工管理（v0.2.104）：只有「主体账号」能用（员工账号 owner_id 非空，看不到该菜单）
+    canStaff() { return !!(this.me && this.me.canStaff); },
+    /** 售后状态统计卡（点卡片按该状态筛选，再点一次取消） */
+    afStatCards() {
+      const c = this.af.counts || {};
+      const n = (k) => Number(c[k] || 0);
+      return [
+        { key: '', label: '全部退单', num: n('all') },
+        { key: '0', label: '待处理', num: n(0) },
+        { key: '1', label: '已申请', num: n(1) },
+        { key: '2', label: '已退货', num: n(2) },
+        { key: '3', label: '已退款', num: n(3) },
+      ];
+    },
     /** 账单：收入组二级列（美团/淘宝/京东，均可手工编辑） */
     billIncomeItems() { return (this.bill.items || []).filter((i) => i.group === 'income'); },
     /** 账单：支出组二级列（前两项系统统计只读，其余手工编辑） */
@@ -4405,6 +4736,8 @@ const vm = new Vue({
       if (p === 'refundalert' && !this.canRefund) p = 'board';
       if (p === 'qnhcfg' && !(this.canProfit || this.canRefund)) p = 'board';
       if (p === 'profit' && !this.canProfit) p = 'board';
+      if (p === 'after' && !this.canAfter) p = 'board';
+      if (p === 'staff' && !this.canStaff) p = 'board';
       if (p === 'product' && !this.canProduct) p = 'board';
       if (p === 'replenish' && !this.canReplenish) p = 'product';
       if (p === 'market' && !this.canMarket) p = 'board';
@@ -4412,9 +4745,10 @@ const vm = new Vue({
       this.page = p;
       if (p === 'admin') { this.loadConfigUI(); this.loadUsers(); this.loadBuildStatus(); this.loadAgentVersions(); }
       if (p === 'users') { this.loadUsers(); }
+      if (p === 'staff') { this.loadStaff(); }
       if (p === 'mapping') this.loadMapping();
       if (p === 'audit') this.loadOpLog();
-      if (p === 'profit' || p === 'refund' || p === 'pdd' || p === 'qnhcfg' || p === 'refundalert') {
+      if (p === 'profit' || p === 'refund' || p === 'after' || p === 'pdd' || p === 'qnhcfg' || p === 'refundalert') {
         if (p === 'refund') this.reportOp('qnh.view');
         this.enterQnhPage(p);
       }
@@ -5069,6 +5403,7 @@ const vm = new Vue({
       if (this.page === 'sdc') { this.loadSdcStatus(); this.loadSdcOrders(); return; }
       this.loadRefundStatus();
       if (this.page === 'refund') { this.loadRefunds(); this.loadRefundTrend(); }
+      if (this.page === 'after') { this.loadAfterSales(); }
       if (this.page === 'profit') { this.loadProfit(); }
     },
     async loadRefundStatus() {
@@ -5133,6 +5468,119 @@ const vm = new Vue({
     onRefundPage(p) { this.rq.page = p; this.loadRefunds(); },
     onRefundSize(s) { this.rq.size = s; this.rq.page = 1; this.loadRefunds(); },
     refundRowClass({ row }) { return row && row.picked ? 'row-picked' : ''; },
+
+    // ── 退款原因（退单列表与售后管理共用同一个弹窗）──
+    /** 打开编辑框：value 取人工值（没有就空），raw 展示平台原值 */
+    openReason(row, from) {
+      if (this.readonly) { this.$message.warning('只读模式下不能修改'); return; }
+      this.reasonDlg = {
+        visible: true, refundNo: row.refundNo || '', from: from || 'refund',
+        value: row.refundReason || '', raw: row.applyReason || '', saving: false,
+      };
+    },
+    async saveReason() {
+      const d0 = this.reasonDlg;
+      if (!d0.refundNo || d0.saving) return;
+      d0.saving = true;
+      try {
+        const d = await this.qnhApi('/api/qnh/refunds/reason', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ refundNo: d0.refundNo, reason: d0.value }),
+        });
+        if (!d || d.error) { this.$message.error((d && d.error) || '保存失败'); return; }
+        // 本地同步：两个列表都可能持有这条退单
+        const patch = (row) => {
+          if (!row) return;
+          row.refundReason = d.refundReason || '';
+          row.reasonText = row.refundReason || row.applyReason || '';
+        };
+        patch((this.rq.rows || []).find((r) => r.refundNo === d0.refundNo));
+        patch((this.af.rows || []).find((r) => r.refundNo === d0.refundNo));
+        this.$message.success('退款原因已保存');
+        d0.visible = false;
+      } catch (e) {
+        this.$message.error('保存失败：' + e.message);
+      } finally {
+        d0.saving = false;
+      }
+    },
+
+    // ── 售后管理（v0.2.104）──
+    /** 列表「商品名称」列：多商品时显示「首个 等 N 种」，完整内容在 title 里 */
+    afGoodsText(row) {
+      const items = (row && row.items) || [];
+      if (!items.length) return '（明细未同步）';
+      const first = items[0].skuName || items[0].sku || '—';
+      return items.length > 1 ? first + ' 等 ' + items.length + ' 种' : first;
+    },
+    afStatusTag(s) {
+      const hit = (this.af.statuses || []).find((x) => Number(x.value) === Number(s));
+      return hit ? hit.tag : 'info';
+    },
+    toggleAfStatus(key) {
+      this.af.status = this.af.status === key ? '' : key;
+      this.af.page = 1;
+      this.loadAfterSales();
+    },
+    onAfFilter() { this.af.page = 1; this.loadAfterSales(); },
+    onAfPage(p) { this.af.page = p; this.loadAfterSales(); },
+    onAfSize(s) { this.af.size = s; this.af.page = 1; this.loadAfterSales(); },
+    async loadAfterSales() {
+      if (this.qnhNeedPick) return;   // 超管还没选定账号，等 picker 选完再拉
+      this.af.loading = true;
+      try {
+        const q = new URLSearchParams();
+        if (this.af.status !== '') q.set('status', this.af.status);
+        if (this.af.keyword) q.set('keyword', this.af.keyword);
+        q.set('page', this.af.page);
+        q.set('size', this.af.size);
+        const d = await this.qnhApi('/api/qnh/after-sales?' + q.toString());
+        if (d.error) { this.$message.error(d.error); return; }
+        this.af.rows = d.rows || [];
+        this.af.total = d.total || 0;
+        this.af.counts = d.counts || { all: 0, 0: 0, 1: 0, 2: 0, 3: 0 };
+        if (Array.isArray(d.statuses) && d.statuses.length) this.af.statuses = d.statuses;
+      } catch (e) {
+        this.$message.error('加载售后列表失败：' + e.message);
+      } finally {
+        this.af.loading = false;
+      }
+    },
+    openAfStatus(row) {
+      if (this.readonly) { this.$message.warning('只读模式下不能修改'); return; }
+      this.afDlg = {
+        visible: true, refundNo: row.refundNo || '', status: Number(row.status) || 0,
+        note: row.note || '', goodsText: this.afGoodsText(row), applyReason: row.reasonText || '',
+        saving: false,
+      };
+    },
+    async saveAfStatus() {
+      const d0 = this.afDlg;
+      if (!d0.refundNo || d0.saving) return;
+      d0.saving = true;
+      try {
+        const d = await this.qnhApi('/api/qnh/after-sales/status', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ refundNo: d0.refundNo, status: d0.status, note: d0.note }),
+        });
+        if (!d || d.error) { this.$message.error((d && d.error) || '保存失败'); return; }
+        const row = (this.af.rows || []).find((r) => r.refundNo === d0.refundNo);
+        if (row) {
+          row.status = Number(d0.status);
+          row.statusLabel = d.statusLabel || '';
+          row.note = d0.note || '';
+          row.handledBy = (this.me && this.me.username) || '';
+        }
+        this.$message.success('已标记为「' + (d.statusLabel || '') + '」');
+        d0.visible = false;
+        // 统计卡要跟着变（状态数变了）
+        this.loadAfterSales();
+      } catch (e) {
+        this.$message.error('保存失败：' + e.message);
+      } finally {
+        d0.saving = false;
+      }
+    },
 
     async loadRefundTrend() {
       try {
@@ -6700,20 +7148,21 @@ const vm = new Vue({
       } catch (e) { this.$message.error('加载失败: ' + e.message); }
     },
     // 开关某个账号的「退单列表」权限
-    /** 打开「菜单权限」弹窗（逐用户开放退单列表 / 实时毛利监控 / 商品列表 / 交易市场；拼多多发票全量开放不需要配） */
-    openMenuPermit(row) {
+    /** 打开「菜单权限」弹窗（超管给主体账号配；主体账号给员工配 —— scope 决定提交到哪个接口） */
+    openMenuPermit(row, scope) {
+      const sc = scope === 'staff' ? 'staff' : 'admin';
       this.menuPermit = {
-        visible: true, id: row.id, username: row.username,
+        visible: true, id: row.id, username: row.username, scope: sc,
         refund: !!row.qnhRefundEnabled, profit: !!row.qnhProfitEnabled,
         product: !!row.productEnabled, market: !!row.marketEnabled,
         billing: !!row.billingEnabled, replenish: !!row.replenishEnabled,
-        price: !!row.priceEnabled,
+        price: !!row.priceEnabled, after: !!row.afterSaleEnabled,
         saving: false,
         origin: {
           refund: !!row.qnhRefundEnabled, profit: !!row.qnhProfitEnabled,
           product: !!row.productEnabled, market: !!row.marketEnabled,
           billing: !!row.billingEnabled, replenish: !!row.replenishEnabled,
-          price: !!row.priceEnabled,
+          price: !!row.priceEnabled, after: !!row.afterSaleEnabled,
         },
       };
     },
@@ -6729,12 +7178,15 @@ const vm = new Vue({
       if (m.billing !== m.origin.billing) changes.push({ menu: 'billing', enabled: m.billing, field: 'billingEnabled', label: '账单' });
       if (m.replenish !== m.origin.replenish) changes.push({ menu: 'replenish', enabled: m.replenish, field: 'replenishEnabled', label: '补货' });
       if (m.price !== m.origin.price) changes.push({ menu: 'price', enabled: m.price, field: 'priceEnabled', label: '平台取价' });
+      if (m.after !== m.origin.after) changes.push({ menu: 'after', enabled: m.after, field: 'afterSaleEnabled', label: '售后管理' });
       if (!changes.length) { m.visible = false; return; }
       m.saving = true;
-      const row = (this.users || []).find((u) => u.id === m.id);
+      const list = m.scope === 'staff' ? this.staff.rows : this.users;
+      const row = (list || []).find((u) => u.id === m.id);
+      const url = m.scope === 'staff' ? '/api/staff/users/menu' : '/api/admin/users/qnh-refund';
       try {
         for (const c of changes) {
-          const d = await this.api('/api/admin/users/qnh-refund', {
+          const d = await this.api(url, {
             method: 'POST', headers: { 'content-type': 'application/json' },
             body: JSON.stringify({ id: m.id, menu: c.menu, enabled: c.enabled }),
           });
@@ -6748,6 +7200,106 @@ const vm = new Vue({
       } finally {
         m.saving = false;
       }
+    },
+    // ── 员工管理（v0.2.104，仅主体账号）──
+    staffMenuTags(row) {
+      return (this.staffMenus || []).map((m) => ({ key: m.key, label: m.label, on: !!row[m.field] }));
+    },
+    async loadStaff() {
+      this.staff.loading = true;
+      try {
+        const d = await this.api('/api/staff/users');
+        if (d && d.error) { this.$message.error(d.error); return; }
+        this.staff.rows = (d && d.staff) || [];
+        this.staffOwner = (d && d.owner) || null;
+      } catch (e) {
+        this.$message.error('加载员工失败：' + e.message);
+      } finally {
+        this.staff.loading = false;
+      }
+    },
+    openStaffCreate() {
+      const menus = {};
+      for (const m of (this.staffMenus || [])) menus[m.key] = false;
+      this.staffDlg = { visible: true, id: null, username: '', password: '', displayName: '', note: '', saving: false, menus };
+    },
+    openStaffEdit(row) {
+      const menus = {};
+      for (const m of (this.staffMenus || [])) menus[m.key] = !!row[m.field];
+      this.staffDlg = {
+        visible: true, id: row.id, username: row.username, password: '',
+        displayName: row.displayName || '', note: row.note || '', saving: false, menus,
+      };
+    },
+    async saveStaff() {
+      const d0 = this.staffDlg;
+      if (d0.saving) return;
+      if (!String(d0.username || '').trim()) { this.$message.warning('请填写登录账号'); return; }
+      if (!d0.id && !String(d0.password || '')) { this.$message.warning('请填写初始密码'); return; }
+      d0.saving = true;
+      try {
+        const body = { username: d0.username, displayName: d0.displayName, note: d0.note };
+        let d;
+        if (d0.id) {
+          d = await this.api('/api/staff/users/update', {
+            method: 'POST', headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(Object.assign({ id: d0.id }, body)),
+          });
+        } else {
+          d = await this.api('/api/staff/users/create', {
+            method: 'POST', headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(Object.assign({ password: d0.password, menus: d0.menus }, body)),
+          });
+        }
+        if (!d || d.error) { this.$message.error((d && d.error) || '保存失败'); return; }
+        this.$message.success(d0.id ? '员工信息已保存' : '员工账号已创建');
+        d0.visible = false;
+        await this.loadStaff();
+      } catch (e) {
+        this.$message.error('保存失败：' + e.message);
+      } finally {
+        d0.saving = false;
+      }
+    },
+    /** 员工菜单权限：复用超管那套弹窗，只把提交地址换成 /api/staff/users/menu */
+    openStaffPermit(row) { this.openMenuPermit(row, 'staff'); },
+    async resetStaffPwd(row) {
+      let pw;
+      try {
+        const r = await this.$prompt(`为员工「${row.username}」设置新密码（至少 4 位）：`, '重置员工密码',
+          { inputType: 'password', inputValidator: (v) => (v && v.length >= 4) || '至少 4 位' });
+        pw = r.value;
+      } catch (e) { return; }
+      const d = await this.api('/api/staff/users/password', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ id: row.id, password: pw }),
+      });
+      if (d && d.error) this.$message.error('重置失败：' + d.error);
+      else this.$message.success('已重置「' + row.username + '」的密码，其原有登录会话已失效');
+    },
+    async toggleStaffStatus(row, status) {
+      const tip = status === 'disabled'
+        ? `确认禁用员工「${row.username}」？禁用后无法登录，已登录的会话立即失效。`
+        : `确认启用员工「${row.username}」？`;
+      try { await this.$confirm(tip, '确认操作', { type: 'warning' }); } catch (e) { return; }
+      const d = await this.api('/api/staff/users/status', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ id: row.id, status }),
+      });
+      if (d && d.error) this.$message.error('操作失败：' + d.error);
+      else { this.$message.success(status === 'disabled' ? '已禁用' : '已启用'); this.loadStaff(); }
+    },
+    async deleteStaff(row) {
+      try {
+        await this.$confirm(`删除员工账号「${row.username}」？\n\n只删账号本身，你的业务数据不受任何影响（员工本来就没有自己的数据）。`,
+          '删除员工', { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' });
+      } catch (e) { return; }
+      const d = await this.api('/api/staff/users/delete', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ id: row.id }),
+      });
+      if (d && d.error) this.$message.error('删除失败：' + d.error);
+      else { this.$message.success('已删除「' + row.username + '」'); this.loadStaff(); }
     },
     async createUser() {
       const payload = {

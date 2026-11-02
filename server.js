@@ -317,6 +317,11 @@ function isExpiredUser(u) {
 /** 到期统一提示（带上具体到期日，方便用户找管理员报时间） */
 function expiredMessage(u) {
   const at = u && u.expires_at_text;
+  if (u && Number(u.owner_expired) === 1) {
+    return at
+      ? `所属账号已到期（有效期至 ${at}），请联系主体账号持有人或超级管理员续期`
+      : '所属账号已到期，请联系主体账号持有人或超级管理员续期';
+  }
   return at ? `账号已到期（有效期至 ${at}），请联系超级管理员续期` : '账号已到期，请联系超级管理员续期';
 }
 
@@ -346,20 +351,35 @@ function parseExpiry(v) {
   return { ok: true, value: `${y}-${p(mo)}-${p(d)} ${p(hh)}:${p(mi)}:${p(ss)}` };
 }
 
-/** 取当前登录用户（校验会话签名 + token_version + 账号状态） */
+/** 取当前登录用户（校验会话签名 + token_version + 账号状态；员工号额外校验所属主体账号） */
 async function currentUser(req) {
   const sess = auth.sessionFromRequest(req);
   if (!sess) return null;
   // 带上品牌方名称：前端要展示当前账号所属品牌（商品数据按品牌共享）
+  // 员工号连带取出所属主体账号（o.*）：主体被禁用或到期时，员工一并不许登录/调用接口
   const rows = await db.query(
-    `SELECT u.*, b.name AS brand_name, ${EXPIRY_COLS}
-       FROM app_user u LEFT JOIN brand b ON b.id = u.brand_id
+    `SELECT u.*, b.name AS brand_name, ${EXPIRY_COLS},
+            o.status AS owner_status, o.username AS owner_username,
+            (o.expires_at IS NOT NULL AND o.expires_at <= NOW())   AS owner_expired_flag,
+            DATE_FORMAT(o.expires_at, '%Y-%m-%d %H:%i')            AS owner_expires_text
+       FROM app_user u
+       LEFT JOIN brand b ON b.id = u.brand_id
+       LEFT JOIN app_user o ON o.id = u.owner_id
       WHERE u.id = ?`, [sess.u]
   );
   const u = rows[0];
   if (!u) return null;
   if (u.status !== 'active') return null;
   if ((Number(u.token_version) || 1) !== Number(sess.v)) return null;
+  // 员工号：主体账号停用 → 视为未登录；主体到期 → 走统一的「已到期」分支（提示里说清是谁到期）
+  if (Number(u.owner_id) > 0) {
+    if (u.owner_status && u.owner_status !== 'active') return null;
+    if (Number(u.owner_expired_flag) === 1 && Number(u.expired_flag) !== 1) {
+      u.expired_flag = 1;
+      u.owner_expired = 1;
+      u.expires_at_text = u.owner_expires_text;
+    }
+  }
   return u;
 }
 
@@ -392,11 +412,18 @@ function publicUser(u) {
     billingEnabled: u.role === 'admin' ? true : !!Number(u.billing_enabled),
     // 补货页权限（独立菜单，默认所有用户不授权；含导入补货参考文件、齐货通/阿发取价加购）
     replenishEnabled: u.role === 'admin' ? true : !!Number(u.replenish_enabled),
+    // 售后管理页权限（v0.2.104，独立菜单，默认关闭）
+    afterSaleEnabled: u.role === 'admin' ? true : !!Number(u.after_sale_enabled),
     // 平台取价权限（v0.2.95）：齐货通登录/重新取价、阿发Token/自动匹配/取价、选购加购
     priceEnabled: u.role === 'admin' ? true : !!Number(u.price_enabled),
     // 所属品牌方（商品数据按品牌方共享：同品牌下所有用户看到同一套商品）
     brandId: Number(u.brand_id) || 1,
     brandName: u.brand_name || '',
+    // 员工身份（v0.2.104）：ownerId 有值 = 员工号（数据归属主体账号），canStaff 决定「员工管理」菜单
+    ownerId: Number(u.owner_id) || null,
+    isStaff: Number(u.owner_id) > 0,
+    ownerUsername: u.owner_username || '',
+    canStaff: u.role !== 'admin' && !(Number(u.owner_id) > 0),
     // 使用期限（v0.2.97）：expiresAt=null 表示永久；expired=true 时前端提示并回登录页
     expiresAt: u.role === 'admin' ? null : (u.expires_at_text || null),
     expired: u.role === 'admin' ? false : Number(u.expired_flag) === 1,
@@ -408,6 +435,7 @@ function publicUser(u) {
 
 /**
  * 解析本次请求操作的目标租户：
+ *   · 员工账号（owner_id 有值）→ 永远是所属主体账号的 id（员工只是菜单受限的操作员）
  *   · 普通用户 → 只能是自己（忽略 tenant 参数）
  *   · 管理员 → 可用 ?tenant=<id> 或请求头 x-tenant-id 查看他人数据
  */
@@ -419,6 +447,8 @@ function tenantOf(req, url, user) {
       if (Number.isInteger(n) && n > 0) return n;
     }
   }
+  const ownerId = Number(user.owner_id) || 0;
+  if (ownerId > 0) return ownerId;
   return user.id;
 }
 
@@ -548,9 +578,45 @@ const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
 /** 自动匹配阿发单次上限：每个商品要真搜一次阿发（限速 250ms），再大就会把对方接口打挂 */
 const MATCH_MAX_PER_RUN = 500;
 
-/** 写操作只允许作用于自己的数据（管理员查看他人为只读） */
+/**
+ * 菜单权限表（v0.2.104 收拢成一份）：'menu' 参数 → app_user 列名 + 下发字段 + 中文名。
+ * 超管在「用户管理 → 菜单权限」里给主体账号配；主体账号在「员工管理 → 菜单权限」里给员工配。
+ * 新增菜单时只改这里 + 前端弹窗，两处入口同时生效。
+ */
+const MENU_PERMS = {
+  refund: { col: 'qnh_refund_enabled', label: '退单列表', field: 'qnhRefundEnabled' },
+  profit: { col: 'qnh_profit_enabled', label: '实时毛利监控', field: 'qnhProfitEnabled' },
+  product: { col: 'product_enabled', label: '商品列表', field: 'productEnabled' },
+  market: { col: 'market_enabled', label: '交易市场', field: 'marketEnabled' },
+  billing: { col: 'billing_enabled', label: '账单', field: 'billingEnabled' },
+  replenish: { col: 'replenish_enabled', label: '补货', field: 'replenishEnabled' },
+  price: { col: 'price_enabled', label: '平台取价', field: 'priceEnabled' },
+  after: { col: 'after_sale_enabled', label: '售后管理', field: 'afterSaleEnabled' },
+};
+
+/**
+ * 设置某个账号的某个菜单权限。调用方负责校验「这个账号归不归你管」。
+ * @returns {{code:number, body:object}}
+ */
+async function setMenuPermit(actor, id, menu, enabled) {
+  const m = MENU_PERMS[menu];
+  if (!m) return { code: 400, body: { error: '未知的菜单：' + menu } };
+  const rows = await db.query('SELECT id, username, role, owner_id FROM app_user WHERE id = ?', [id]);
+  if (!rows.length) return { code: 404, body: { error: '用户不存在' } };
+  if (rows[0].role === 'admin') {
+    return { code: 400, body: { error: `超级管理员默认拥有${m.label}权限，无需开启` } };
+  }
+  await db.exec(`UPDATE app_user SET ${m.col} = ? WHERE id = ?`, [enabled ? 1 : 0, id]);
+  await logOp(actor, 'qnh.permit', { username: rows[0].username, menu, enabled });
+  return { code: 200, body: { ok: true, id, menu, enabled, [m.field]: enabled } };
+}
+
+/** 写操作只允许作用于自己的数据（管理员查看他人为只读，员工可写所属主体的数据） */
 function assertWritable(user, tenantId) {
-  if (Number(tenantId) !== Number(user.id)) {
+  const me = Number(user && user.id) || 0;
+  const ownerId = Number(user && user.owner_id) || 0;
+  const t = Number(tenantId);
+  if (t !== me && !(ownerId > 0 && t === ownerId)) {
     const err = new Error('查看他人数据为只读模式，无法修改');
     err.code = 403;
     throw err;
@@ -1443,8 +1509,10 @@ function logoutAgentNote(agent, name) {
  */
 function agentUidFor(user, tenantId) {
   const t = Number(tenantId);
-  if (agentHub.isOnline(t)) return t;
   const me = Number(user && user.id);
+  // 员工号优先用自己这台电脑上的助手：否则点「登录牵牛花」会弹在老板的电脑上
+  if (user && Number(user.owner_id) > 0 && me && agentHub.isOnline(me)) return me;
+  if (agentHub.isOnline(t)) return t;
   if (me && me !== t && agentHub.isOnline(me)) return me;
   return null;
 }
@@ -2654,14 +2722,16 @@ async function listUsers() {
     SELECT u.id, u.username, u.role, u.status, u.company_name, u.tax_no, u.email, u.display_name, u.note,
            u.must_change_password, u.last_login_at, u.created_at, u.updated_at,
            u.qnh_refund_enabled, u.qnh_profit_enabled, u.product_enabled, u.market_enabled, u.billing_enabled,
-           u.replenish_enabled, u.price_enabled, u.brand_id, b.name AS brand_name, ${EXPIRY_COLS},
+           u.replenish_enabled, u.price_enabled, u.after_sale_enabled, u.brand_id, b.name AS brand_name,
+           u.owner_id, ow.username AS owner_username, ${EXPIRY_COLS},
            (SELECT COUNT(*) FROM invoice_order o WHERE o.user_id = u.id)              AS order_count,
            (SELECT COUNT(DISTINCT o.seller_company) FROM invoice_order o WHERE o.user_id = u.id) AS company_count,
            (SELECT COUNT(*) FROM issued_invoice i WHERE i.user_id = u.id)             AS invoice_rows,
            (SELECT COUNT(*) FROM seller_name_mapping m WHERE m.user_id = u.id)        AS mapping_count,
            (SELECT COUNT(*) FROM send_log s WHERE s.user_id = u.id AND s.result='ok') AS send_ok_count
     FROM app_user u LEFT JOIN brand b ON b.id = u.brand_id
-    ORDER BY u.role = 'admin' DESC, u.id ASC
+         LEFT JOIN app_user ow ON ow.id = u.owner_id
+    ORDER BY u.role = 'admin' DESC, u.owner_id IS NOT NULL, u.id ASC
   `);
   return users.map((u) => ({
     id: u.id, username: u.username, role: u.role, status: u.status,
@@ -2678,6 +2748,11 @@ async function listUsers() {
     replenishEnabled: u.role === 'admin' ? true : !!Number(u.replenish_enabled),
     // 平台取价权限（v0.2.95）：齐货通登录/重新取价、阿发Token/自动匹配/取价、选购加购
     priceEnabled: u.role === 'admin' ? true : !!Number(u.price_enabled),
+    // 售后管理权限（v0.2.104）
+    afterSaleEnabled: u.role === 'admin' ? true : !!Number(u.after_sale_enabled),
+    // 员工号标记（v0.2.104）：ownerId 非空表示数据归属主体账号，自己名下没有业务数据
+    ownerId: Number(u.owner_id) || null,
+    ownerUsername: u.owner_username || '',
     // 所属品牌方（商品数据按品牌方共享）
     brandId: Number(u.brand_id) || 1,
     brandName: u.brand_name || '',
@@ -4801,13 +4876,22 @@ const server = http.createServer(async (req, res) => {
     if (p.startsWith('/api/qnh/')) {
       const canRefund = isAdmin || !!Number(user.qnh_refund_enabled);
       const canProfit = isAdmin || !!Number(user.qnh_profit_enabled);
+      // 售后管理（v0.2.104）：独立菜单权限，与退单列表互不覆盖
+      const canAfterSale = isAdmin || !!Number(user.after_sale_enabled);
       const qnhUid = tenantId;   // 本块所有读写的「数据归属用户」
       const profitApi = p === '/api/qnh/profit' || p === '/api/qnh/profit/pull' || p === '/api/qnh/profit/trend';
-      if (profitApi) {
+      const afterApi = p.startsWith('/api/qnh/after-sales');
+      // 退款原因两个页面都能改（退单列表 + 售后管理的「改原因」），任一菜单权限即可
+      const reasonApi = p === '/api/qnh/refunds/reason';
+      if (afterApi) {
+        if (!canAfterSale) return sendJson(res, 403, { error: '未开启售后管理权限，请联系超级管理员' });
+      } else if (reasonApi) {
+        if (!canRefund && !canAfterSale) return sendJson(res, 403, { error: '未开启退单列表或售后管理权限，请联系超级管理员' });
+      } else if (profitApi) {
         if (!canProfit) return sendJson(res, 403, { error: '未开启毛利监控权限，请联系超级管理员' });
       } else if (p === '/api/qnh/status' || p === '/api/qnh/logout') {
         // 两个面板都要用它拿配置 / 退出登录，任一权限即可
-        if (!canRefund && !canProfit) return sendJson(res, 403, { error: '未开启菜单权限，请联系超级管理员' });
+        if (!canRefund && !canProfit && !canAfterSale) return sendJson(res, 403, { error: '未开启菜单权限，请联系超级管理员' });
       } else if (!canRefund) {
         return sendJson(res, 403, { error: '未开启退单列表权限，请联系超级管理员' });
       }
@@ -4862,6 +4946,46 @@ const server = http.createServer(async (req, res) => {
 
       if (method === 'GET' && p === '/api/qnh/trend') {
         return sendJson(res, 200, { days: await qnh.refundTrend(url.searchParams.get('days') || 30, qnhUid) });
+      }
+
+      // ── 售后管理（v0.2.104）────────────────────────────────────────────
+      //   一行一个退单（商品名称/SKU/数量取明细），处理状态与退款原因都是本系统人工维护的：
+      //   同步只更新平台字段，不会把它们冲掉。状态语义：0待处理 1已申请 2已退货 3已退款。
+      if (method === 'GET' && p === '/api/qnh/after-sales') {
+        const q = url.searchParams;
+        const [list, counts] = await Promise.all([
+          qnh.listAfterSales({
+            status: q.get('status') == null ? '' : q.get('status'),
+            from: q.get('from') || '',
+            to: q.get('to') || '',
+            keyword: q.get('keyword') || '',
+            page: q.get('page'),
+            size: q.get('size'),
+            userId: qnhUid,
+          }),
+          qnh.afterSaleCounts(qnhUid),
+        ]);
+        return sendJson(res, 200, Object.assign(list, { counts, statuses: qnh.AFTER_SALE_STATUSES }));
+      }
+
+      if (method === 'POST' && p === '/api/qnh/after-sales/status') {
+        const body = await readBody(req);
+        writeGuard();
+        const out = await qnh.setAfterSaleStatus({
+          refundNo: body.refundNo, status: body.status, note: body.note,
+          userId: qnhUid, operator: user.username,
+        });
+        if (out.ok) await logOp(user, 'qnh.after_status', { tenantId: qnhUid, refundNo: out.refundNo, status: out.status });
+        return sendJson(res, out.ok ? 200 : 400, out);
+      }
+
+      // 退单列表的「退款原因」：人工列，写 refund_reason；传空 = 清空（页面回落到平台原值）
+      if (method === 'POST' && p === '/api/qnh/refunds/reason') {
+        const body = await readBody(req);
+        writeGuard();
+        const out = await qnh.setRefundReason({ refundNo: body.refundNo, reason: body.reason, userId: qnhUid });
+        if (out.ok) await logOp(user, 'qnh.refund_reason', { tenantId: qnhUid, refundNo: out.refundNo });
+        return sendJson(res, out.ok ? 200 : 400, out);
       }
 
       if (method === 'GET' && p === '/api/qnh/logs') {
@@ -5916,6 +6040,166 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 404, { error: '未知闪电帮帮接口' });
     }
 
+    // ── 员工管理（v0.2.104）────────────────────────────────────────────────
+    //   只有「主体账号」（role=user 且 owner_id=NULL）能用；员工自己的账号 owner_id 有值，
+    //   看不到也调不了这组接口。超管走「用户管理」，不在这里给客户配员工。
+    //   员工号的数据归属由 tenantOf() 解析到主体账号，这里只管账号本身与菜单开关。
+    if (p.startsWith('/api/staff/')) {
+      const ownerId = Number(user.id);
+      const canStaff = user.role !== 'admin' && !(Number(user.owner_id) > 0);
+      if (!canStaff) {
+        return sendJson(res, 403, {
+          error: user.role === 'admin' ? '超级管理员请在「用户管理」里维护账号' : '员工账号不能再管理员工',
+        });
+      }
+      const STAFF_NAME_RULE = '员工账号需 2~64 位，可用中文、字母、数字、下划线、点、中划线、括号';
+
+      /** 取一个属于自己的员工；别人的员工一律当不存在（不暴露账号是否存在） */
+      const myStaff = async (id) => {
+        const n = Number(id) || 0;
+        if (!n) return null;
+        const rows = await db.query(
+          `SELECT id, username, status, display_name, note, last_login_at, created_at,
+                  qnh_refund_enabled, qnh_profit_enabled, product_enabled, market_enabled,
+                  billing_enabled, replenish_enabled, price_enabled, after_sale_enabled
+             FROM app_user WHERE id = ? AND owner_id = ?`, [n, ownerId]
+        );
+        return rows[0] || null;
+      };
+      const staffRow = (u) => ({
+        id: u.id, username: u.username, status: u.status,
+        displayName: u.display_name || '', note: u.note || '',
+        lastLoginAt: u.last_login_at, createdAt: u.created_at,
+        qnhRefundEnabled: !!Number(u.qnh_refund_enabled),
+        qnhProfitEnabled: !!Number(u.qnh_profit_enabled),
+        productEnabled: !!Number(u.product_enabled),
+        marketEnabled: !!Number(u.market_enabled),
+        billingEnabled: !!Number(u.billing_enabled),
+        replenishEnabled: !!Number(u.replenish_enabled),
+        priceEnabled: !!Number(u.price_enabled),
+        afterSaleEnabled: !!Number(u.after_sale_enabled),
+      });
+
+      if (method === 'GET' && p === '/api/staff/users') {
+        const rows = await db.query(
+          `SELECT id, username, status, display_name, note, last_login_at, created_at,
+                  qnh_refund_enabled, qnh_profit_enabled, product_enabled, market_enabled,
+                  billing_enabled, replenish_enabled, price_enabled, after_sale_enabled
+             FROM app_user WHERE owner_id = ? ORDER BY id ASC`, [ownerId]
+        );
+        return sendJson(res, 200, {
+          staff: rows.map(staffRow),
+          owner: {
+            id: ownerId, username: user.username,
+            brandId: Number(user.brand_id) || 1, brandName: user.brand_name || '',
+            expiresAt: user.expires_at_text || null,
+          },
+          menus: Object.keys(MENU_PERMS).map((k) => ({ key: k, label: MENU_PERMS[k].label })),
+        });
+      }
+
+      if (method === 'POST' && p === '/api/staff/users/create') {
+        const b = await readBody(req);
+        const uname = String(b.username || '').trim();
+        if (!validUsername(uname)) return sendJson(res, 400, { error: STAFF_NAME_RULE });
+        const pwd = String(b.password || '');
+        if (pwd.length < 4) return sendJson(res, 400, { error: '密码至少 4 位' });
+        const dup = await db.query('SELECT id FROM app_user WHERE username = ?', [uname]);
+        if (dup.length) return sendJson(res, 400, { error: '账号已存在: ' + uname });
+        // 员工不单独设使用期限：跟着主体账号走（currentUser 会校验主体是否到期/停用）
+        const r = await db.exec(
+          `INSERT INTO app_user (username, password_hash, role, status, company_name, display_name, note,
+                                 created_by, owner_id, brand_id)
+           VALUES (?, ?, 'user', 'active', ?, ?, ?, ?, ?, ?)`,
+          [uname, auth.hashPassword(pwd), user.company_name || null,
+            String(b.displayName || '').trim().slice(0, 64) || null,
+            String(b.note || '').trim().slice(0, 255) || null,
+            ownerId, ownerId, Number(user.brand_id) || 1]
+        );
+        const menus = (b.menus && typeof b.menus === 'object') ? b.menus : null;
+        if (menus) {
+          const sets = Object.keys(MENU_PERMS).filter((k) => !!menus[k]).map((k) => `${MENU_PERMS[k].col} = 1`);
+          if (sets.length) await db.exec(`UPDATE app_user SET ${sets.join(', ')} WHERE id = ?`, [r.insertId]);
+        }
+        await logOp(user, 'staff.create', { username: uname, staffId: r.insertId });
+        const fresh = await myStaff(r.insertId);
+        return sendJson(res, 200, { ok: true, staff: fresh ? staffRow(fresh) : null });
+      }
+
+      if (method === 'POST' && p === '/api/staff/users/update') {
+        const b = await readBody(req);
+        const u = await myStaff(b.id);
+        if (!u) return sendJson(res, 404, { error: '员工不存在' });
+        const sets = [];
+        const args = [];
+        const wantName = b.username === undefined ? '' : String(b.username).trim();
+        if (wantName && wantName !== u.username) {
+          if (!validUsername(wantName)) return sendJson(res, 400, { error: STAFF_NAME_RULE });
+          const dup = await db.query('SELECT id FROM app_user WHERE username = ? AND id <> ?', [wantName, u.id]);
+          if (dup.length) return sendJson(res, 400, { error: '账号已存在: ' + wantName });
+          sets.push('username = ?'); args.push(wantName);
+        }
+        if (b.displayName !== undefined) {
+          sets.push('display_name = ?'); args.push(String(b.displayName || '').trim().slice(0, 64) || null);
+        }
+        if (b.note !== undefined) {
+          sets.push('note = ?'); args.push(String(b.note || '').trim().slice(0, 255) || null);
+        }
+        if (!sets.length) return sendJson(res, 200, { ok: true, staff: staffRow(u) });
+        await db.exec(`UPDATE app_user SET ${sets.join(', ')} WHERE id = ?`, [...args, u.id]);
+        await logOp(user, 'staff.update', { username: u.username, staffId: u.id });
+        const fresh = await myStaff(u.id);
+        return sendJson(res, 200, { ok: true, staff: fresh ? staffRow(fresh) : null });
+      }
+
+      if (method === 'POST' && p === '/api/staff/users/password') {
+        const b = await readBody(req);
+        const u = await myStaff(b.id);
+        if (!u) return sendJson(res, 404, { error: '员工不存在' });
+        const pwd = String(b.password || '');
+        if (pwd.length < 4) return sendJson(res, 400, { error: '密码至少 4 位' });
+        await db.exec(
+          'UPDATE app_user SET password_hash = ?, token_version = token_version + 1 WHERE id = ?',
+          [auth.hashPassword(pwd), u.id]
+        );
+        await logOp(user, 'staff.password', { username: u.username, staffId: u.id });
+        return sendJson(res, 200, { ok: true, message: '已重置「' + u.username + '」的密码' });
+      }
+
+      if (method === 'POST' && p === '/api/staff/users/status') {
+        const b = await readBody(req);
+        const u = await myStaff(b.id);
+        if (!u) return sendJson(res, 404, { error: '员工不存在' });
+        const st = b.status === 'disabled' ? 'disabled' : 'active';
+        await db.exec(
+          'UPDATE app_user SET status = ?, token_version = token_version + IF(status <> ?, 1, 0) WHERE id = ?',
+          [st, st, u.id]
+        );
+        await logOp(user, 'staff.status', { username: u.username, staffId: u.id, status: st });
+        return sendJson(res, 200, { ok: true, id: u.id, status: st });
+      }
+
+      if (method === 'POST' && p === '/api/staff/users/delete') {
+        const b = await readBody(req);
+        const u = await myStaff(b.id);
+        if (!u) return sendJson(res, 404, { error: '员工不存在' });
+        await db.exec('DELETE FROM app_user WHERE id = ? AND owner_id = ?', [u.id, ownerId]);
+        await logOp(user, 'staff.delete', { username: u.username, staffId: u.id });
+        return sendJson(res, 200, { ok: true, id: u.id });
+      }
+
+      // 员工菜单权限：校验归属后复用统一的 setMenuPermit
+      if (method === 'POST' && p === '/api/staff/users/menu') {
+        const b = await readBody(req);
+        const u = await myStaff(b.id);
+        if (!u) return sendJson(res, 404, { error: '员工不存在' });
+        const r = await setMenuPermit(user, u.id, String(b.menu || '').trim().toLowerCase(), !!b.enabled);
+        return sendJson(res, r.code, r.body);
+      }
+
+      return sendJson(res, 404, { error: '未知的员工管理接口' });
+    }
+
     // ── 系统管理（仅超级管理员） ──
     if (p.startsWith('/api/admin/')) {
       if (!isAdmin) return sendJson(res, 403, { error: '仅超级管理员可访问' });
@@ -5968,33 +6252,14 @@ const server = http.createServer(async (req, res) => {
       if (method === 'POST' && p === '/api/admin/users/delete') {
         return sendJson(res, 200, await deleteUser(await readBody(req), user));
       }
-      // 菜单权限：逐个账号开启/关闭（menu=refund|profit|product|market，缺省 refund 向后兼容；
-      // 拼多多发票对所有用户开放，不再走这里）
+      // 菜单权限：逐个账号开启/关闭（menu=refund|profit|product|market|billing|replenish|price|after，
+      // 缺省 refund 向后兼容；表在 MENU_PERMS）
       if (method === 'POST' && p === '/api/admin/users/qnh-refund') {
         const b = await readBody(req);
         const id = Number(b.id);
-        const enabled = !!b.enabled;
-        const menu = String(b.menu || 'refund').trim().toLowerCase();
-        const MENU = {
-          refund: { col: 'qnh_refund_enabled', label: '退单列表', field: 'qnhRefundEnabled' },
-          profit: { col: 'qnh_profit_enabled', label: '实时毛利监控', field: 'qnhProfitEnabled' },
-          product: { col: 'product_enabled', label: '商品列表', field: 'productEnabled' },
-          market: { col: 'market_enabled', label: '交易市场', field: 'marketEnabled' },
-          billing: { col: 'billing_enabled', label: '账单', field: 'billingEnabled' },
-          replenish: { col: 'replenish_enabled', label: '补货', field: 'replenishEnabled' },
-          price: { col: 'price_enabled', label: '平台取价', field: 'priceEnabled' },
-        };
-        const m = MENU[menu];
-        if (!m) return sendJson(res, 400, { error: '未知的菜单：' + menu });
         if (!id) return sendJson(res, 400, { error: '缺少用户ID' });
-        const rows = await db.query('SELECT id, username, role FROM app_user WHERE id = ?', [id]);
-        if (!rows.length) return sendJson(res, 404, { error: '用户不存在' });
-        if (rows[0].role === 'admin') {
-          return sendJson(res, 400, { error: `超级管理员默认拥有${m.label}权限，无需开启` });
-        }
-        await db.exec(`UPDATE app_user SET ${m.col} = ? WHERE id = ?`, [enabled ? 1 : 0, id]);
-        await logOp(user, 'qnh.permit', { username: rows[0].username, menu, enabled });
-        return sendJson(res, 200, { ok: true, id, menu, enabled, [m.field]: enabled });
+        const r = await setMenuPermit(user, id, String(b.menu || 'refund').trim().toLowerCase(), !!b.enabled);
+        return sendJson(res, r.code, r.body);
       }
       // 按用户名/ID 查用户概况（配合 ?tenant= 查看其看板）
       if (method === 'GET' && p === '/api/admin/user-lookup') {

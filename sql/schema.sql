@@ -45,9 +45,11 @@ CREATE TABLE IF NOT EXISTS `app_user` (
   `display_name`         VARCHAR(64)   DEFAULT NULL            COMMENT '显示名（可选，看板右上角展示）',
   `note`                 VARCHAR(255)  DEFAULT NULL            COMMENT '备注（管理员填写，如所属业务线）',
   `brand_id`             INT           NOT NULL DEFAULT 1      COMMENT '所属品牌方（brand.id，默认 1=优购哆）',
+  `owner_id`             INT           DEFAULT NULL            COMMENT '归属主体账号（员工号指向老板的 app_user.id；NULL=自主账号）',
   `qht_token`            VARCHAR(128)  DEFAULT NULL            COMMENT '齐货通接口登录态 x-token（用户自行粘贴，过期需重贴）',
   `qht_x_user`           VARCHAR(64)   DEFAULT NULL            COMMENT '齐货通接口登录态 x-user（一般是登录手机号）',
   `product_enabled`      TINYINT(1)    NOT NULL DEFAULT 0      COMMENT '是否允许查看商品列表页（含补货/齐货通；1=开启，超级管理员始终可见）',
+  `after_sale_enabled`   TINYINT(1)    NOT NULL DEFAULT 0      COMMENT '是否允许查看售后管理页（1=开启，超级管理员始终可见）',
   `market_enabled`       TINYINT(1)    NOT NULL DEFAULT 0      COMMENT '是否允许查看交易市场页（1=开启，超级管理员始终可见）',
   `billing_enabled`      TINYINT(1)    NOT NULL DEFAULT 0      COMMENT '是否允许查看账单页（1=开启，超级管理员始终可见）',
   `token_version`        INT           NOT NULL DEFAULT 1      COMMENT '会话版本：改密/禁用时 +1，旧登录态立即失效',
@@ -59,7 +61,8 @@ CREATE TABLE IF NOT EXISTS `app_user` (
   PRIMARY KEY (`id`),
   UNIQUE KEY `uk_app_user_username` (`username`),
   KEY `idx_app_user_role` (`role`),
-  KEY `idx_app_user_brand` (`brand_id`)
+  KEY `idx_app_user_brand` (`brand_id`),
+  KEY `idx_app_user_owner` (`owner_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   COMMENT='账号表（多用户登录；role=admin 为超级管理员）';
 
