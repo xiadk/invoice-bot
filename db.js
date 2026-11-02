@@ -1415,6 +1415,36 @@ async function migrate(conn, dbName) {
     );
   }
 
+  // ── 供应商售后台账（v0.3.2）──
+  //   售后管理菜单整页替换为「针对供应商的售后」，不再读牵牛花退单。
+  //   凭证图继续存 qnh_after_attach（row_key 用 sup:<id>），那张表 v0.2.108 就有，不用动。
+  //   旧的 qnh_refund_order 售后列 / qnh_after_manual 保留在库，只是界面不再展示。
+  if (!(await tableExists('supplier_after'))) {
+    await q(
+      'CREATE TABLE `supplier_after` (' +
+      '  `id`            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,' +
+      "  `user_id`       INT           NOT NULL DEFAULT 1   COMMENT '数据归属用户（员工录入时是所属主体账号）'," +
+      "  `supplier_id`   INT           NOT NULL DEFAULT 0   COMMENT '供应商（supplier.id，0=供应商已被删）'," +
+      "  `supplier_name` VARCHAR(64)   NOT NULL DEFAULT ''  COMMENT '登记时的供应商名称快照（兜底展示）'," +
+      "  `goods_desc`    VARCHAR(512)  NOT NULL DEFAULT ''  COMMENT '售后内容（商品/事由文字描述）'," +
+      "  `amount`        DECIMAL(12,2) NOT NULL DEFAULT 0.00 COMMENT '售后金额（元）'," +
+      "  `after_date`    DATE          NOT NULL             COMMENT '售后日期（按此列查询与排序）'," +
+      "  `status`        TINYINT       NOT NULL DEFAULT 0   COMMENT '处理状态：0待处理 1已申请 2已退货 3已退款（人工推进，一键下一档）'," +
+      "  `note`          VARCHAR(255)  DEFAULT NULL         COMMENT '备注'," +
+      "  `handled_by`    VARCHAR(64)   DEFAULT NULL         COMMENT '最后处理人（登录账号）'," +
+      '  `handled_at`    DATETIME      DEFAULT NULL         COMMENT \'最后处理时间\',' +
+      "  `created_by`    VARCHAR(64)   DEFAULT NULL         COMMENT '录入人（登录账号）'," +
+      "  `created_at`    DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '新建日期'," +
+      '  `updated_at`    DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,' +
+      '  PRIMARY KEY (`id`),' +
+      '  KEY `idx_sa_user_date`   (`user_id`, `after_date`),' +
+      '  KEY `idx_sa_user_sup`    (`user_id`, `supplier_id`),' +
+      '  KEY `idx_sa_user_status` (`user_id`, `status`)' +
+      ') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci' +
+      "  COMMENT='供应商售后台账（供应商 + 内容 + 金额 + 售后日期 + 凭证）'"
+    );
+  }
+
   // ── 「员工有的菜单，主体默认也有」（v0.3.0 用户要求）──
   //   老板给员工开了某个菜单、自己却因为没开而看不见，是最容易被投诉的形态。
   //   规则**只加不减**：只把员工的 1 并到主体，从不把主体的 1 改回 0 —— 所以每次启动都跑也安全，
