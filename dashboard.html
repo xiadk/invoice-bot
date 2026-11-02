@@ -2483,38 +2483,11 @@
 
           <el-table :data="af.rows" size="small" border style="width:100%" v-loading="af.loading"
                     empty-text="没有符合条件的售后记录">
-            <!-- 展开：该退单的全部商品明细 -->
-            <el-table-column type="expand" width="36">
-              <template slot-scope="p">
-                <div class="rf-detail" style="padding:8px 12px">
-                  <el-table :data="p.row.items" size="mini" border style="width:100%"
-                            empty-text="商品明细还没同步（下次同步会补拉）">
-                    <el-table-column label="SKU" width="200"><template slot-scope="q"><span class="loginid">{{ q.row.sku || '—' }}</span></template></el-table-column>
-                    <el-table-column label="商品名称" min-width="300" show-overflow-tooltip><template slot-scope="q">{{ q.row.skuName || '—' }}</template></el-table-column>
-                    <el-table-column label="规格" width="140"><template slot-scope="q">{{ q.row.spec || '—' }}</template></el-table-column>
-                    <el-table-column label="数量" width="80" align="right"><template slot-scope="q">{{ q.row.qty == null ? '—' : q.row.qty }}</template></el-table-column>
-                  </el-table>
-                  <div class="loginid" style="margin-top:6px">
-                    <template v-if="p.row.src === 'manual'">
-                      来源：手工新增{{ p.row.createdBy ? ' · 录入人 ' + p.row.createdBy : '' }}
-                    </template>
-                    <template v-else>
-                      平台退单状态：{{ p.row.refundStatus || '—' }} · 退单类型：{{ p.row.refundType || '—' }}
-                      · 平台原始原因：{{ p.row.applyReason || '—' }}
-                    </template>
-                    <span v-if="p.row.note"> · 备注：{{ p.row.note }}</span>
-                    <span v-if="p.row.handledBy"> · 最后处理：{{ p.row.handledBy }} {{ p.row.handledAt || '' }}</span>
-                  </div>
-                </div>
-              </template>
-            </el-table-column>
-
             <el-table-column label="商品名称" min-width="260">
               <template slot-scope="p">
                 <span :title="p.row.nameText">{{ afGoodsText(p.row) }}</span>
                 <el-tag v-if="p.row.src === 'manual'" size="mini" type="warning"
                         style="margin-left:6px">手工</el-tag>
-                <div v-if="p.row.itemKinds > 1" class="loginid">共 {{ p.row.itemKinds }} 种商品，展开看明细</div>
               </template>
             </el-table-column>
             <el-table-column label="商品SKU" width="190">
