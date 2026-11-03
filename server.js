@@ -1524,6 +1524,15 @@ const PDD_APPLY_MIN_AGENT = '0.2.21';   // 0.2.21 起：CDP 抓包判成败 + �
 const PDD_SEND_MIN_AGENT = '0.2.23';
 // 支持「解析店铺 ID（mall_sn→mall_id）」的最低助手版本（0.3.16 起才有 pdd_mall 内核）
 const PDD_MALL_MIN_AGENT = '0.3.16';
+// 「解析店铺 ID」的分段下发：一次点击要解析 100+ 个店铺，而助手单个任务的 items 上限是 80
+// （老版本硬截断到 80，新版本 500），所以服务端按 60 一段下发，收一份回执就发下一份 ——
+// 用户只点一次，手感是「一次跑完」，但每段都在助手能力范围内。
+const PDD_MALL_BATCH = 60;
+// 单店超时：会话页首屏 JS 重，实测成功多在 3~6s，但偶发慢到 10s+；
+// 原来 15s 会把「只是慢」的店误判成失败（0.3.20 前 9/40 失败全是这个原因）。
+const PDD_MALL_ITEM_TIMEOUT_MS = 22000;
+// 任务保留时长：131 个店 × 约 2.5s + 失败重试一轮，真实耗时 8~15 分钟
+const PDD_MALL_TASK_TTL_MS = 60 * 60 * 1000;
 
 // ── 闪电帮帮任务：登录 / 拉订单 / 批量催收（三项都必须在本机助手的浏览器里跑）──
 //    原因：该站点网关要 mtgsig 签名，服务器直连 403；只有页面上下文的 fetch 会自动被签名。
@@ -1954,20 +1963,75 @@ function onPddSendDone(uid, msg) {
 }
 
 /**
+ * 下发一段「解析店铺 ID」给本机助手。
+ *
+ * 为什么要分段：一次点击要解析 100+ 个店铺（0.3.20 起不再 20 个一批），而助手单个任务的
+ * items 上限是 80（老版本直接 slice(0,80) 硬截断，新版本 500）。服务端按 PDD_MALL_BATCH
+ * 一段一段下发，收到回执就接着发下一段 —— 用户只点一次，体验上是「一次跑完」。
+ *
+ * @returns {boolean} 是否成功下发（false 表示助手连接已断，任务已标 failed）
+ */
+function dispatchMallBatch(ctx) {
+  if (!ctx || ctx.status !== 'pending' || !ctx.queue || !ctx.queue.length) return false;
+  const batch = ctx.queue.splice(0, PDD_MALL_BATCH);
+  ctx.batchSize = batch.length;
+  ctx.batchSentAt = Date.now();
+  // 本段进度基线：助手回报的 okCount 是「本段内」的累计，跨段要加上基线才是全局数
+  ctx.batchOkBase = Number(ctx.okCount) || 0;
+  ctx.batchFailBase = Number(ctx.failCount) || 0;
+  const sent = agentHub.send(ctx.agentUid, {
+    type: 'pdd_mall',
+    taskId: ctx.taskId,
+    items: batch.map((t) => ({ mallSn: t.mallSn, mallName: t.mallName })),
+    timeoutMs: PDD_MALL_ITEM_TIMEOUT_MS,
+    gapMs: 700,
+  });
+  if (!sent) {
+    ctx.status = 'failed';
+    ctx.message = '下发解析任务失败：本机助手连接已断开，请确认助手正在运行。';
+    ctx.message += ctx.done ? `（已完成的 ${ctx.done} 个店铺结果已入库）` : '';
+    ctx.finishedAt = Date.now();
+    return false;
+  }
+  ctx.expiresAt = Date.now() + PDD_MALL_TASK_TTL_MS;
+  return true;
+}
+
+/**
  * 助手回报「解析店铺 ID」结果（v0.3.16）：写 pdd_mall 缓存，并把同一 mall_sn 名下的
  * 订单 mall_id 一次性回填。写库是异步的，所以任务状态等写库完成后再标 done ——
  * 否则前端看到「已完成」时订单里还是空的，催收按钮仍旧点不亮。
+ *
+ * v0.3.20：分段下发（dispatchMallBatch）+ 首轮失败的自动重试一轮。
+ * 一份回执只代表「本段跑完」，队列还有就接着发下一段，全部跑完才收尾。
  */
 async function onPddMallDone(uid, msg) {
   const ctx = PDD_TASKS.get(String((msg && msg.taskId) || ''));
   if (!ctx || ctx.kind !== 'mall' || ctx.userId !== Number(uid) || ctx.status !== 'pending') return;
   const results = Array.isArray(msg.results) ? msg.results : [];
-  ctx.results = results.map((r) => ({
-    mallName: String((r && r.mallName) || '').slice(0, 64),
-    mallId: Number((r && r.mallId) || 0) || 0,
-    ok: !!(r && Number(r.mallId)),
-    error: String((r && r.error) || '').slice(0, 260),
-  }));
+  const pushLog = (text) => {
+    ctx.progressLog = ctx.progressLog || [];
+    ctx.progressLog.push({ t: new Date().toLocaleTimeString('zh-CN', { hour12: false }), text });
+    if (ctx.progressLog.length > 600) ctx.progressLog.splice(0, ctx.progressLog.length - 600);
+  };
+
+  // 助手整段失败（一条结果都没有）且前面也没成功过 → 直接收尾，别继续下发
+  if (!msg.ok && !results.length && !ctx.done) {
+    ctx.status = 'failed';
+    ctx.message = String(msg.error || '助手解析店铺 ID 失败').slice(0, 300);
+    ctx.finishedAt = Date.now();
+    logOp(Number(uid), 'pdd.mall.resolve', { ok: false, tenantId: ctx.userId, reason: ctx.message });
+    return;
+  }
+
+  if (results.length) {
+    ctx.results = (ctx.results || []).concat(results.map((r) => ({
+      mallName: String((r && r.mallName) || '').slice(0, 64),
+      mallId: Number((r && r.mallId) || 0) || 0,
+      ok: !!(r && Number(r.mallId)),
+      error: String((r && r.error) || '').slice(0, 260),
+    })));
+  }
   let saved = { ok: 0, fail: 0, filled: 0 };
   try {
     saved = await pdd.saveMallResults(ctx.userId, results.map((r) => ({
@@ -1977,46 +2041,86 @@ async function onPddMallDone(uid, msg) {
   } catch (e) {
     console.warn('[pdd] 店铺 ID 结果写库失败：' + ((e && e.message) || e));
   }
-  ctx.okCount = saved.ok;
-  ctx.failCount = saved.fail;
-  ctx.filled = saved.filled;
+  ctx.filled = (Number(ctx.filled) || 0) + saved.filled;
+  // 成功/失败按「店铺」去重计数（Set<mallSn>），不按「尝试次数」累加：
+  // 重试轮会把首轮失败的店再跑一遍，累加的话「成功129 + 失败7」就跟总数 131 对不上了。
+  ctx.okSet = ctx.okSet || new Set();
+  ctx.failSet = ctx.failSet || new Set();
+  for (const r of results) {
+    const sn = String((r && (r.mallSn || r.mall_sn)) || '').trim();
+    if (!sn) continue;
+    if (Number(r && r.mallId)) { ctx.okSet.add(sn); ctx.failSet.delete(sn); }
+    else if (!ctx.okSet.has(sn)) { ctx.failSet.add(sn); }
+  }
+  ctx.okCount = ctx.okSet.size;
+  ctx.failCount = ctx.failSet.size;
+  // 「已处理」按本段实际回报条数推进（老助手可能被截断，用批大小兜底）
+  ctx.done = Math.min(ctx.total, (Number(ctx.done) || 0) + (results.length || Number(ctx.batchSize) || 0));
 
-  if (!msg.ok && !results.length) {
-    ctx.status = 'failed';
-    ctx.message = String(msg.error || '助手解析店铺 ID 失败').slice(0, 300);
-    ctx.finishedAt = Date.now();
-    logOp(Number(uid), 'pdd.mall.resolve', { ok: false, tenantId: ctx.userId, reason: ctx.message });
+  // 首轮的失败项攒起来，整轮跑完再统一重试一次：
+  // 这 9 个失败全是「会话页首屏慢，没在超时内发出 chat/list」的瞬时问题，重试多半就过了。
+  if (!ctx.retryRound) {
+    for (const r of results) {
+      const sn = String((r && (r.mallSn || r.mall_sn)) || '').trim();
+      if (sn && !Number(r && r.mallId)) ctx.retry.push({ mallSn: sn, mallName: String((r && r.mallName) || '') });
+    }
+  }
+
+  if (msg.stopped) {
+    ctx.stopped = true;
+    ctx.queue.length = 0;
+    ctx.retry.length = 0;
+  }
+
+  // 还有下一段 → 继续（保持 pending，前端进度条一直往前走）
+  if (ctx.queue.length && dispatchMallBatch(ctx)) {
+    pushLog(`本段完成（成功 ${ctx.okCount} / 失败 ${ctx.failCount}），继续解析剩余 ${ctx.queue.length} 个店铺…`);
     return;
   }
+
+  // 队列空了但首轮有失败 → 再跑一轮（查库时的 10 分钟冷却只影响「下次点击」挑选目标，不影响本次重试）
+  if (!ctx.retryRound && ctx.retry.length && !ctx.stopped) {
+    ctx.retryRound = 1;
+    ctx.queue = ctx.retry.slice();
+    ctx.retry.length = 0;
+    if (dispatchMallBatch(ctx)) {
+      pushLog(`首轮完成：成功 ${ctx.okCount} / 失败 ${ctx.failCount}，对失败的 ${ctx.queue.length} 个再试一轮…`);
+      return;
+    }
+  }
+
   ctx.status = 'done';
   ctx.finishedAt = Date.now();
-  ctx.message = `店铺 ID 解析完成：成功 ${saved.ok} 家、失败 ${saved.fail} 家`
-    + (saved.filled ? `，回填订单 ${saved.filled} 条` : '')
-    + (msg.stopped ? '（中途停止）' : '');
+  ctx.message = `店铺 ID 解析完成：成功 ${ctx.okCount} 家、失败 ${ctx.failCount} 家`
+    + (ctx.filled ? `，回填订单 ${ctx.filled} 条` : '')
+    + (ctx.retryRound ? '（含一轮自动重试）' : '')
+    + (ctx.stopped ? '（中途停止）' : '');
+  ctx.progress = Object.assign({}, ctx.progress, { index: ctx.total, total: ctx.total });
   logOp(Number(uid), 'pdd.mall.resolve.done', {
-    ok: saved.ok > 0, okCount: saved.ok, failCount: saved.fail, filled: saved.filled, tenantId: ctx.userId,
+    ok: ctx.okCount > 0, okCount: ctx.okCount, failCount: ctx.failCount, filled: ctx.filled, tenantId: ctx.userId,
   });
 }
 
-/** 助手逐店上报「解析店铺 ID」进度 */
+/** 助手逐店上报「解析店铺 ID」进度（分段下发后要换算成「全局第几个」） */
 function onPddMallProgress(uid, msg) {
   const ctx = PDD_TASKS.get(String((msg && msg.taskId) || ''));
   if (!ctx || ctx.kind !== 'mall' || ctx.userId !== Number(uid) || ctx.status !== 'pending') return;
-  const idx = Number(msg.index) || 0;
-  const total = Number(msg.total) || ctx.total;
-  ctx.progress = {
-    index: idx, total,
-    current: String(msg.current || ''),
-    okCount: Number(msg.okCount) || 0,
-    failCount: Number(msg.failCount) || 0,
-    updatedAt: Date.now(),
-  };
+  const inBatch = Number(msg.index) || 0;
+  const total = Number(ctx.total) || Number(msg.total) || 0;
+  // 重试轮不推进总进度（同一批店重跑），只换文案，避免进度条 100% 后回退
+  const idx = ctx.retryRound
+    ? total
+    : Math.min(total || inBatch, (Number(ctx.done) || 0) + inBatch);
+  const okCount = (Number(ctx.batchOkBase) || 0) + (Number(msg.okCount) || 0);
+  const failCount = (Number(ctx.batchFailBase) || 0) + (Number(msg.failCount) || 0);
+  const current = (ctx.retryRound ? '重试 · ' : '') + String(msg.current || '');
+  ctx.progress = { index: idx, total, current, okCount, failCount, updatedAt: Date.now() };
   ctx.progressLog = ctx.progressLog || [];
   ctx.progressLog.push({
     t: new Date().toLocaleTimeString('zh-CN', { hour12: false }),
-    text: `[${idx}/${total}] ${msg.current || ''}（成功 ${ctx.progress.okCount} / 失败 ${ctx.progress.failCount}）`,
+    text: `[${idx}/${total}] ${current}（成功 ${okCount} / 失败 ${failCount}）`,
   });
-  if (ctx.progressLog.length > 300) ctx.progressLog.splice(0, ctx.progressLog.length - 300);
+  if (ctx.progressLog.length > 600) ctx.progressLog.splice(0, ctx.progressLog.length - 600);
 }
 
 /**
@@ -6017,7 +6121,8 @@ const server = http.createServer(async (req, res) => {
             total: running.total, message: '店铺 ID 解析正在运行中，继续展示进度…',
           });
         }
-        const limit = Math.min(80, Math.max(1, Number(b.limit) || 20));
+        // limit 不传 / 传 0 = 全部解析（0.3.20 起默认一次点完全部，不再 20 个一批）
+        const limit = Number(b.limit) > 0 ? Math.min(500, Math.floor(Number(b.limit))) : 0;
         const targets = await pdd.mallResolveTargets(pddUid, limit);
         if (!targets.length) {
           const st = await pdd.mallResolveStats(pddUid);
@@ -6031,25 +6136,29 @@ const server = http.createServer(async (req, res) => {
         const taskId = 'pddmall-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
         const ctx = {
           taskId, kind: 'mall', userId: Number(pddUid), status: 'pending', message: '',
-          total: targets.length, results: [], okCount: 0, failCount: 0,
-          progress: null, progressLog: [],
-          createdAt: Date.now(), expiresAt: Date.now() + PDD_APPLY_TTL_MS,
+          agentUid: aUid,
+          total: targets.length,
+          done: 0,                      // 已处理数（跨段累计，用于进度换算）
+          queue: targets.slice(),       // 待下发的店铺队列（每段 PDD_MALL_BATCH 个）
+          retry: [],                    // 首轮失败、等整轮跑完再试一次的店铺
+          retryRound: 0,
+          results: [], okCount: 0, failCount: 0, filled: 0,
+          okSet: new Set(), failSet: new Set(),   // 按店铺去重计数（重试轮不重复计）
+          progress: { index: 0, total: targets.length, current: '', okCount: 0, failCount: 0 },
+          progressLog: [],
+          createdAt: Date.now(), expiresAt: Date.now() + PDD_MALL_TASK_TTL_MS,
         };
-        const sent = agentHub.send(aUid, {
-          type: 'pdd_mall',
-          taskId,
-          items: targets.map((t) => ({ mallSn: t.mallSn, mallName: t.mallName })),
-          timeoutMs: 15000,   // 单店超时：首屏 JS 重，正常 5~10s；超时按失败记，别让 30 个店跑成半小时
-          gapMs: 800,
-        });
-        if (!sent) {
+        PDD_TASKS.set(taskId, ctx);
+        // 先注册任务再下发：助手回执可能比 send() 返回还快，先 set 再 send 才不会丢第一段结果
+        if (!dispatchMallBatch(ctx)) {
+          PDD_TASKS.delete(taskId);
           return sendJson(res, 200, { ok: false, needAgent: true, message: '下发解析任务失败：本机助手连接已断开，请确认助手正在运行。' });
         }
-        PDD_TASKS.set(taskId, ctx);
         await logOp(user, 'pdd.mall.resolve', { tenantId: pddUid, total: targets.length, agentUid: aUid });
         return sendJson(res, 200, {
           ok: true, pending: true, taskId, total: targets.length,
-          message: `已下发解析任务（${targets.length} 个店铺），正在本机助手里逐个打开商家会话页取 mall_id…`,
+          message: `已下发解析任务（共 ${targets.length} 个店铺，分 ${Math.ceil(targets.length / PDD_MALL_BATCH)} 段自动续跑），`
+            + '正在本机助手里逐个打开商家会话页取 mall_id…',
         });
       }
 

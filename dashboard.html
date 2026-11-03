@@ -3784,7 +3784,7 @@
             <template slot="actions">
               <el-button v-if="pd.mallId && pd.mallId.pending > 0" size="small" type="warning" plain
                          :loading="pd.mallResolving" @click="resolveMallIds"
-                         :title="'订单接口只给加密的店铺串（mall_sn），密钥在拼多多服务端，只能在本机助手已登录的窗口里跑一次解出数字店铺 ID'">
+                         :title="'订单接口只给加密的店铺串（mall_sn），密钥在拼多多服务端，只能在本机助手已登录的窗口里跑一次解出数字店铺 ID。点一次会把全部待解析店铺跑完（服务端自动分段续跑，失败的还会自动重试一轮）'">
                 解析店铺 ID（{{ pd.mallId.pending }}）
               </el-button>
               <el-tag v-else-if="pd.mallId && pd.mallId.resolved > 0" size="small" type="success"
@@ -7164,7 +7164,7 @@ const vm = new Vue({
         const d = await this.pddApi('/api/pdd/mall-id/resolve', {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ limit: 20 }),
+          body: JSON.stringify({ limit: 0 }),   // 0 = 全部（服务端按 60 个一段自动续跑，一次点完）
         });
         if (d.error) { this.$message.error(d.error); return; }
         if (d.needAgent) {
