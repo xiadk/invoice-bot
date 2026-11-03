@@ -1340,11 +1340,12 @@ async function migrate(conn, dbName) {
   // ── 供应商 / 货单管理（v0.3.0）──
   //   两个新菜单沿用 app_user 逐列开关；supplier / waybill / waybill_image / waybill_upload_token
   //   是普通业务表。下面的 DDL 与 sql/schema.sql 必须同源（改一处就要改另一处）。
-  const NEW_MENU_COLS = ['supplier_enabled', 'waybill_enabled', 'replenish_order_enabled'];
+  const NEW_MENU_COLS = ['supplier_enabled', 'waybill_enabled', 'replenish_order_enabled', 'staff_enabled'];
   const MENU_COL_LABEL = {
     supplier_enabled: '供应商管理页',
     waybill_enabled: '货单管理页',
     replenish_order_enabled: '补货单管理页',
+    staff_enabled: '员工管理页',
   };
   for (const col of NEW_MENU_COLS) {
     if (!(await colExists('app_user', col))) {
@@ -1356,6 +1357,17 @@ async function migrate(conn, dbName) {
       // 只在这一刻跑一次，之后完全尊重用户手工调整。
       if (col === 'replenish_order_enabled') {
         await q('UPDATE `app_user` SET `replenish_order_enabled` = `waybill_enabled` WHERE `owner_id` IS NULL');
+      }
+      // 员工管理（v0.3.13）：默认 0，但「名下已经有员工」的主体账号必须置 1，
+      // 否则升级那一刻老板就找不到员工管理，还得等超管逐个来开。
+      // 同样只在加列这一刻跑一次；之后超管关掉也不会被重新打开。
+      if (col === 'staff_enabled') {
+        const owners = await q(
+          'SELECT DISTINCT `owner_id` AS `id` FROM `app_user` WHERE `owner_id` IS NOT NULL AND `owner_id` > 0');
+        const ids = (owners || []).map((r) => Number(r.id)).filter((n) => n > 0);
+        if (ids.length) {
+          await q(`UPDATE \`app_user\` SET \`staff_enabled\` = 1 WHERE \`id\` IN (${ids.join(',')})`);
+        }
       }
     }
   }
@@ -1588,6 +1600,8 @@ async function migrate(conn, dbName) {
   //   也能把历史上「员工有、主体没有」的账号一次性补齐。
   //   ⚠ 列名在这里硬编码一份：不能 require server.js 的 MENU_PERMS（那边反过来依赖本文件，会循环）。
   //     新增菜单时这里要同步加列名。
+  //   ⚠ staff_enabled（员工管理，v0.3.13）**刻意不在**这个列表里：员工本身就不能管员工，
+  //     这一列只属于主体账号，不能靠「员工有→主体也有」传播过去。
   const MENU_COLS = [
     'qnh_refund_enabled', 'qnh_profit_enabled', 'product_enabled', 'market_enabled',
     'billing_enabled', 'replenish_enabled', 'price_enabled', 'after_sale_enabled',

@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS `app_user` (
   `supplier_enabled`     TINYINT(1)    NOT NULL DEFAULT 0      COMMENT '是否允许查看供应商管理页（1=开启，超级管理员始终可见）',
   `waybill_enabled`      TINYINT(1)    NOT NULL DEFAULT 0      COMMENT '是否允许查看货单管理页（1=开启，超级管理员始终可见）',
   `replenish_order_enabled` TINYINT(1) NOT NULL DEFAULT 0      COMMENT '是否允许查看补货单管理页（1=开启，超级管理员始终可见；v0.3.12）',
+  `staff_enabled`        TINYINT(1)    NOT NULL DEFAULT 0      COMMENT '是否允许查看员工管理页（1=开启，超级管理员走用户管理；v0.3.13）',
   `market_enabled`       TINYINT(1)    NOT NULL DEFAULT 0      COMMENT '是否允许查看交易市场页（1=开启，超级管理员始终可见）',
   `billing_enabled`      TINYINT(1)    NOT NULL DEFAULT 0      COMMENT '是否允许查看账单页（1=开启，超级管理员始终可见）',
   `token_version`        INT           NOT NULL DEFAULT 1      COMMENT '会话版本：改密/禁用时 +1，旧登录态立即失效',

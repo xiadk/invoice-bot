@@ -439,7 +439,10 @@ function publicUser(u) {
     ownerId: Number(u.owner_id) || null,
     isStaff: Number(u.owner_id) > 0,
     ownerUsername: u.owner_username || '',
-    canStaff: u.role !== 'admin' && !(Number(u.owner_id) > 0),
+    // 员工管理（v0.3.13）：改成按菜单权限（staff_enabled）开放，超管走「用户管理」不看这个开关；
+    // 员工本身永远不能管员工
+    staffEnabled: u.role === 'admin' ? true : !!Number(u.staff_enabled),
+    canStaff: u.role !== 'admin' && !(Number(u.owner_id) > 0) && !!Number(u.staff_enabled),
     // 使用期限（v0.2.97）：expiresAt=null 表示永久；expired=true 时前端提示并回登录页
     expiresAt: u.role === 'admin' ? null : (u.expires_at_text || null),
     expired: u.role === 'admin' ? false : Number(u.expired_flag) === 1,
@@ -661,7 +664,21 @@ const MENU_PERMS = {
   supplier: { col: 'supplier_enabled', label: '供应商管理', field: 'supplierEnabled' },
   waybill: { col: 'waybill_enabled', label: '货单管理', field: 'waybillEnabled' },
   replenishOrder: { col: 'replenish_order_enabled', label: '补货单管理', field: 'replenishOrderEnabled' },
+  // 员工管理（v0.3.13）：只有主体账号能开，超管走「用户管理」；员工账号永远没有这一项。
+  // ⚠ 员工配菜单时这张表要排除本项（见 staffMenuKeys()），否则会出现「员工管理里再管员工」。
+  staff: { col: 'staff_enabled', label: '员工管理', field: 'staffEnabled' },
 };
+
+/**
+ * 主体账号可以勾给员工的菜单项（v0.3.13）：排除 staff（员工不能管员工），
+ * 再按主体自己**已开启**的菜单过滤 —— 用户要求「用户角色新建员工给菜单权限，只能给他自己能看到的菜单」。
+ * @param ownerRow app_user 原始行（含各 *_enabled 列）
+ * @returns {string[]} MENU_PERMS 的 key 列表
+ */
+function staffMenuKeys(ownerRow) {
+  const row = ownerRow || {};
+  return Object.keys(MENU_PERMS).filter((k) => k !== 'staff' && !!Number(row[MENU_PERMS[k].col]));
+}
 
 /**
  * 设置某个账号的某个菜单权限。调用方负责校验「这个账号归不归你管」。
@@ -675,9 +692,21 @@ async function setMenuPermit(actor, id, menu, enabled) {
   if (rows[0].role === 'admin') {
     return { code: 400, body: { error: `超级管理员默认拥有${m.label}权限，无需开启` } };
   }
+  const actorIsAdmin = !!(actor && actor.role === 'admin');
+  // 员工管理只能超管给主体开：主体不能自我提权，员工更不能管员工（v0.3.13）
+  if (menu === 'staff' && !actorIsAdmin) {
+    return { code: 403, body: { error: '只有超级管理员能开通「员工管理」权限，请联系管理员' } };
+  }
+  // 主体给员工勾菜单时，只能勾自己已经开通的（v0.3.13 用户要求）：
+  // 前端弹窗已经过滤过，这里再拦一次，防有人直接调接口把自己的权限范围放大。
+  // 「关闭」一律放行 —— 历史残留的越权项得能关掉。
+  if (!actorIsAdmin && enabled && !Number(actor && actor[m.col])) {
+    return { code: 403, body: { error: `你自己的账号还没有开通「${m.label}」，不能把这个菜单授权给员工` } };
+  }
   await db.exec(`UPDATE app_user SET ${m.col} = ? WHERE id = ?`, [enabled ? 1 : 0, id]);
   // 「员工有的菜单，主体默认也有」（v0.3.0 用户要求）：给员工开启时连带把主体账号同名列置 1，
   // 免得老板给员工开了权限、自己反而看不见。只加不减 —— 关掉员工的不会连带关掉主体的。
+  // v0.3.13 之后主体只能开自己有的菜单，这条只在超管替客户配置时真正生效。
   let ownerSynced = false;
   if (enabled && Number(rows[0].owner_id) > 0) {
     await db.exec(`UPDATE app_user SET ${m.col} = 1 WHERE id = ?`, [Number(rows[0].owner_id)]);
@@ -1160,7 +1189,11 @@ const OP_ACTIONS = {
     + (d.ownerSynced ? '（同步开启了所属主体账号的同名菜单）' : ''),
   'waybill.supplier_create': (d) => `新增供应商「${d.name || ''}」`,
   'waybill.supplier_update': (d) => `修改供应商「${d.name || ''}」`,
-  'waybill.supplier_delete': (d) => `删除供应商「${d.name || ''}」`,
+  'waybill.supplier_delete': (d) => `删除供应商「${d.name || ''}」`
+    + (d.localCleared ? `（顺带清空了 ${d.localCleared} 个商品的本地价供应商标记）` : ''),
+  'waybill.supplier_merge': (d) => `迁移供应商「${d.fromName || ''}」→「${d.toName || ''}」`
+    + `（货单 ${d.waybillN || 0} 张、供应商售后 ${d.afterN || 0} 条、补货单 ${d.orderN || 0} 张、`
+    + `商品本地价 ${(Number(d.brandLocalN) || 0) + (Number(d.itemLocalN) || 0)} 个${d.deleted ? '，旧供应商已删除' : ''}）`,
   'waybill.create': (d) => `新增货单（供应商「${d.supplierName || ''}」，金额 ${d.amount == null ? '' : d.amount}，${d.billDate || ''}，${d.images || 0} 张图）`,
   'waybill.delete': (d) => `删除货单（供应商「${d.supplierName || ''}」，${d.billDate || ''}）`,
   'waybill.upload_token': (d) => `生成了货单图片的手机上传链接（5 分钟有效）`,
@@ -2809,6 +2842,7 @@ async function listUsers() {
            u.must_change_password, u.last_login_at, u.created_at, u.updated_at,
            u.qnh_refund_enabled, u.qnh_profit_enabled, u.product_enabled, u.market_enabled, u.billing_enabled,
            u.replenish_enabled, u.price_enabled, u.after_sale_enabled, u.brand_id, b.name AS brand_name,
+           u.supplier_enabled, u.waybill_enabled, u.replenish_order_enabled, u.staff_enabled,
            u.owner_id, ow.username AS owner_username, ${EXPIRY_COLS},
            (SELECT COUNT(*) FROM invoice_order o WHERE o.user_id = u.id)              AS order_count,
            (SELECT COUNT(DISTINCT o.seller_company) FROM invoice_order o WHERE o.user_id = u.id) AS company_count,
@@ -2840,6 +2874,8 @@ async function listUsers() {
     supplierEnabled: u.role === 'admin' ? true : !!Number(u.supplier_enabled),
     waybillEnabled: u.role === 'admin' ? true : !!Number(u.waybill_enabled),
     replenishOrderEnabled: u.role === 'admin' ? true : !!Number(u.replenish_order_enabled),
+    // 员工管理（v0.3.13）：超管恒为 true（走用户管理），主体账号按列开关
+    staffEnabled: u.role === 'admin' ? true : !!Number(u.staff_enabled),
     // 员工号标记（v0.2.104）：ownerId 非空表示数据归属主体账号，自己名下没有业务数据
     ownerId: Number(u.owner_id) || null,
     ownerUsername: u.owner_username || '',
@@ -5165,7 +5201,31 @@ const server = http.createServer(async (req, res) => {
         const body = await readBody(req);
         writeGuard();
         const out = await waybill.deleteSupplier({ userId: wbUid, id: body.id });
-        if (out.ok) await logOp(user, 'waybill.supplier_delete', { tenantId: wbUid, id: out.id });
+        if (out.ok) await logOp(user, 'waybill.supplier_delete', { tenantId: wbUid, id: out.id, name: out.name, localCleared: out.localCleared });
+        return sendJson(res, out.ok ? 200 : 400, out);
+      }
+
+      // 供应商被引用的情况（v0.3.13）：迁移弹窗预览、删除被拦时告诉用户还差什么
+      if (method === 'GET' && p === '/api/waybill/suppliers/usage') {
+        if (!canSupplier) return denySupplier();
+        const sid = Number(url.searchParams.get('id')) || 0;
+        if (!sid) return sendJson(res, 400, { error: '缺少供应商 id' });
+        return sendJson(res, 200, await waybill.supplierUsage({ userId: wbUid, id: sid }));
+      }
+
+      // 供应商迁移（v0.3.13）：把旧供应商名下所有台账与本地价引用改挂到新供应商
+      if (method === 'POST' && p === '/api/waybill/suppliers/merge') {
+        if (!canSupplier) return denySupplier();
+        const body = await readBody(req);
+        writeGuard();
+        const out = await waybill.mergeSupplier({
+          userId: wbUid, fromId: body.fromId, toId: body.toId, removeOld: body.removeOld !== false,
+        });
+        if (out.ok) await logOp(user, 'waybill.supplier_merge', {
+          tenantId: wbUid, fromName: out.fromName, toName: out.toName,
+          waybillN: out.waybillN, afterN: out.afterN, orderN: out.orderN,
+          brandLocalN: out.brandLocalN, itemLocalN: out.itemLocalN, deleted: out.deleted,
+        });
         return sendJson(res, out.ok ? 200 : 400, out);
       }
 
@@ -6590,16 +6650,18 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 404, { error: '未知闪电帮帮接口' });
     }
 
-    // ── 员工管理（v0.2.104）────────────────────────────────────────────────
-    //   只有「主体账号」（role=user 且 owner_id=NULL）能用；员工自己的账号 owner_id 有值，
-    //   看不到也调不了这组接口。超管走「用户管理」，不在这里给客户配员工。
+    // ── 员工管理（v0.2.104，v0.3.13 起按菜单权限开放）──────────────────────
+    //   只有「主体账号」（role=user 且 owner_id=NULL 且 staff_enabled=1）能用；
+    //   员工自己的账号 owner_id 有值，看不到也调不了这组接口。超管走「用户管理」，不在这里给客户配员工。
     //   员工号的数据归属由 tenantOf() 解析到主体账号，这里只管账号本身与菜单开关。
     if (p.startsWith('/api/staff/')) {
       const ownerId = Number(user.id);
-      const canStaff = user.role !== 'admin' && !(Number(user.owner_id) > 0);
+      const isOwner = user.role !== 'admin' && !(Number(user.owner_id) > 0);
+      const canStaff = isOwner && !!Number(user.staff_enabled);
       if (!canStaff) {
         return sendJson(res, 403, {
-          error: user.role === 'admin' ? '超级管理员请在「用户管理」里维护账号' : '员工账号不能再管理员工',
+          error: user.role === 'admin' ? '超级管理员请在「用户管理」里维护账号'
+            : (isOwner ? '未开通「员工管理」权限，请联系超级管理员开通' : '员工账号不能再管理员工'),
         });
       }
       const STAFF_NAME_RULE = '员工账号需 2~64 位，可用中文、字母、数字、下划线、点、中划线、括号';
@@ -6649,7 +6711,9 @@ const server = http.createServer(async (req, res) => {
             brandId: Number(user.brand_id) || 1, brandName: user.brand_name || '',
             expiresAt: user.expires_at_text || null,
           },
-          menus: Object.keys(MENU_PERMS).map((k) => ({ key: k, label: MENU_PERMS[k].label })),
+          // v0.3.13：只下发「主体自己已开通、且允许授给员工」的菜单（不含员工管理），
+          // 前端新建/授权弹窗直接按这份列表渲染 —— 这就是「只能给他自己能看到的菜单」。
+          menus: staffMenuKeys(user).map((k) => ({ key: k, label: MENU_PERMS[k].label })),
         });
       }
 
@@ -6673,11 +6737,14 @@ const server = http.createServer(async (req, res) => {
         );
         const menus = (b.menus && typeof b.menus === 'object') ? b.menus : null;
         if (menus) {
-          const on = Object.keys(MENU_PERMS).filter((k) => !!menus[k]);
+          // v0.3.13：只认「主体自己已开通」的菜单，超范围的一律忽略（不报错，前端本来也不会显示）
+          const allowed = new Set(staffMenuKeys(user));
+          const on = Object.keys(MENU_PERMS).filter((k) => allowed.has(k) && !!menus[k]);
           const sets = on.map((k) => `${MENU_PERMS[k].col} = 1`);
           if (sets.length) await db.exec(`UPDATE app_user SET ${sets.join(', ')} WHERE id = ?`, [r.insertId]);
           // 「员工有的菜单，主体默认也有」（v0.3.0）：建员工时勾上的菜单，顺手给主体也开上，
           // 否则老板给新员工配了菜单、自己反倒看不见。只加不减。
+          // （v0.3.13 之后勾选项必然是主体已有的，这段基本空跑，留着兜超管代配的情况）
           if (on.length) {
             const ownerSets = on.map((k) => `${MENU_PERMS[k].col} = 1`);
             await db.exec(`UPDATE app_user SET ${ownerSets.join(', ')} WHERE id = ?`, [ownerId]);

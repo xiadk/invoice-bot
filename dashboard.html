@@ -2490,10 +2490,13 @@
             </el-row>
             <el-form-item label="菜单权限（创建后可随时改）">
               <div class="staff-menu-grid">
-                <div class="menu-perm-row" v-for="m in staffMenus" :key="m.key">
+                <div class="menu-perm-row" v-for="m in staffMenuRows" :key="m.key">
                   <div><b>{{ m.label }}</b></div>
                   <el-switch v-model="staffDlg.menus[m.key]"></el-switch>
                 </div>
+              </div>
+              <div v-if="!staffMenuRows.length" class="loginid" style="color:#e6a23c">
+                你自己的账号还没开通任何菜单，暂时没有可以授给员工的权限。需要开请找超级管理员。
               </div>
             </el-form-item>
           </el-form>
@@ -2997,9 +3000,10 @@
             <el-table-column label="操作人" width="110">
               <template slot-scope="p"><span class="loginid">{{ p.row.createdBy || '—' }}</span></template>
             </el-table-column>
-            <el-table-column label="操作" width="120">
+            <el-table-column label="操作" width="180">
               <template slot-scope="p">
                 <el-button type="text" size="mini" @click="openSpEdit(p.row)">改名</el-button>
+                <el-button type="text" size="mini" @click="openSpMerge(p.row)">迁移</el-button>
                 <el-button type="text" size="mini" style="color:#f56c6c" @click="deleteSp(p.row)">删除</el-button>
               </template>
             </el-table-column>
@@ -3031,6 +3035,45 @@
           <span slot="footer">
             <el-button size="small" @click="spDlg.visible = false">取消</el-button>
             <el-button size="small" type="primary" :loading="spDlg.saving" @click="saveSp">保存</el-button>
+          </span>
+        </el-dialog>
+
+        <!-- 供应商迁移（v0.3.13）：旧供应商名下的货单 / 售后 / 补货单 / 本地价全部改挂到新供应商 -->
+        <el-dialog :title="'迁移供应商 · ' + (spMerge.fromName || '')" :visible.sync="spMerge.visible"
+                   width="520px" top="8vh" append-to-body>
+          <div v-loading="spMerge.loading">
+            <el-alert v-if="spMerge.usage" type="warning" :closable="false" show-icon
+                      :title="'「' + spMerge.fromName + '」名下有 ' + (spMerge.usage.ledger + spMerge.usage.localRefs) + ' 条数据要迁走'">
+              <div style="line-height:1.9;font-size:13px">
+                货单 <b>{{ spMerge.usage.waybill }}</b> 张 ·
+                供应商售后 <b>{{ spMerge.usage.after }}</b> 条 ·
+                补货单 <b>{{ spMerge.usage.replenishOrder }}</b> 张 ·
+                商品本地价供应商 <b>{{ spMerge.usage.localRefs }}</b> 个
+                <div class="loginid" style="margin-top:4px">
+                  迁移后这些数据全部改挂到目标供应商，货单/售后/补货单上的供应商名称也一起改成新名字。
+                </div>
+              </div>
+            </el-alert>
+            <el-form label-position="top" size="small" style="margin-top:14px">
+              <el-form-item label="迁往哪个供应商（必选）">
+                <el-select v-model="spMerge.toId" filterable placeholder="选择目标供应商" style="width:100%">
+                  <el-option v-for="o in spMerge.options" :key="o.id" :label="o.name" :value="o.id"></el-option>
+                </el-select>
+                <div v-if="!spMerge.options.length" class="loginid" style="color:#e6a23c;margin-top:4px">
+                  除它之外没有别的供应商，先新建一个再回来迁移。
+                </div>
+              </el-form-item>
+              <el-form-item>
+                <el-checkbox v-model="spMerge.deleteOld">迁移完成后删除旧供应商「{{ spMerge.fromName }}」</el-checkbox>
+                <div class="loginid">不勾选的话，旧供应商会作为一个空壳留在列表里，需要你自己再删一次。</div>
+              </el-form-item>
+            </el-form>
+            <div v-if="spMerge.error" style="color:#f56c6c;font-size:12px">{{ spMerge.error }}</div>
+          </div>
+          <span slot="footer">
+            <el-button size="small" @click="spMerge.visible = false">取消</el-button>
+            <el-button size="small" type="primary" :loading="spMerge.saving" :disabled="!spMerge.toId"
+                       @click="doSpMerge">确认迁移</el-button>
           </span>
         </el-dialog>
       </div>
@@ -4325,85 +4368,24 @@
   <el-dialog :title="'菜单权限 · ' + (menuPermit.username || '')" :visible.sync="menuPermit.visible"
              width="460px" append-to-body>
     <div class="form-tip" style="margin-bottom:12px">
-      勾选后该账号登录即可看到对应菜单；超管默认拥有全部菜单，无需设置。
+      <template v-if="menuPermit.scope === 'staff'">
+        员工能看到的菜单<b>只能是你自己已经开通的</b>（未开通的不会出现在这里，需要开请找超级管理员）。
+        勾选后该员工登录即可看到对应菜单。
+      </template>
+      <template v-else>
+        勾选后该账号登录即可看到对应菜单；超管默认拥有全部菜单，无需设置。
+      </template>
     </div>
-    <div class="menu-perm-row">
+    <div class="menu-perm-row" v-for="m in menuPermitRows" :key="m.key">
       <div>
-        <b>退单列表</b>
-        <div class="loginid">查看退单数据、订单/配送日志、发送提醒</div>
+        <b>{{ m.label }}</b>
+        <div class="loginid">{{ m.tip }}</div>
       </div>
-      <el-switch v-model="menuPermit.refund"></el-switch>
+      <el-switch v-model="menuPermit[m.key]"></el-switch>
     </div>
-    <div class="menu-perm-row">
-      <div>
-        <b>实时毛利监控</b>
-        <div class="loginid">查看订单毛利/预计收入，手动拉取当天毛利数据</div>
-      </div>
-      <el-switch v-model="menuPermit.profit"></el-switch>
-    </div>
-    <div class="menu-perm-row">
-      <div>
-        <b>商品列表</b>
-        <div class="loginid">导入补货参考文件、补货、关联齐货通/阿发商品（默认关闭）</div>
-      </div>
-      <el-switch v-model="menuPermit.product"></el-switch>
-    </div>
-    <div class="menu-perm-row">
-      <div>
-        <b>交易市场</b>
-        <div class="loginid">查看别人的商品报价、发布自己的 SKU（默认关闭）</div>
-      </div>
-      <el-switch v-model="menuPermit.market"></el-switch>
-    </div>
-    <div class="menu-perm-row">
-      <div>
-        <b>账单</b>
-        <div class="loginid">按月统计总收入/总支出/净利润（默认关闭）</div>
-      </div>
-      <el-switch v-model="menuPermit.billing"></el-switch>
-    </div>
-    <div class="menu-perm-row">
-      <div>
-        <b>补货</b>
-        <div class="loginid">导入补货参考文件、查看品牌方商品与价格（默认关闭，与商品列表相互独立）</div>
-      </div>
-      <el-switch v-model="menuPermit.replenish"></el-switch>
-    </div>
-    <div class="menu-perm-row">
-      <div>
-        <b>平台取价</b>
-        <div class="loginid">登录齐货通、重新取价、配置阿发Token、自动匹配阿发、阿发取价、选购加购（默认关闭）</div>
-      </div>
-      <el-switch v-model="menuPermit.price"></el-switch>
-    </div>
-    <div class="menu-perm-row">
-      <div>
-        <b>供应商售后</b>
-        <div class="loginid">退单商品的售后台账：处理状态（待处理 / 已申请 / 已退货 / 已退款）与售后原因（默认关闭）</div>
-      </div>
-      <el-switch v-model="menuPermit.after"></el-switch>
-    </div>
-    <div class="menu-perm-row">
-      <div>
-        <b>供应商管理</b>
-        <div class="loginid">维护供应商字典（名称 / 备注），货单里的供应商从这里选（默认关闭）</div>
-      </div>
-      <el-switch v-model="menuPermit.supplier"></el-switch>
-    </div>
-    <div class="menu-perm-row">
-      <div>
-        <b>货单管理</b>
-        <div class="loginid">新增/查看/删除采购货单，手机扫码上传货单图片（默认关闭）</div>
-      </div>
-      <el-switch v-model="menuPermit.waybill"></el-switch>
-    </div>
-    <div class="menu-perm-row">
-      <div>
-        <b>补货单管理</b>
-        <div class="loginid">采用补货建议后生成的采购单在这里对账，关联同供应商货单看金额差异（默认关闭）</div>
-      </div>
-      <el-switch v-model="menuPermit.replenishOrder"></el-switch>
-    </div>
+    <!-- 主体账号给员工配权限时，自己没开通的菜单不会出现在上面；这里明确说一句，免得以为界面少了东西 -->
+    <el-alert v-if="menuPermit.scope === 'staff' && !menuPermitRows.length" type="warning" :closable="false"
+              show-icon title="你还没有开通任何菜单，暂时没有可以给员工勾的权限"></el-alert>
     <div slot="footer">
       <el-button @click="menuPermit.visible = false">取消</el-button>
       <el-button type="primary" :loading="menuPermit.saving" @click="saveMenuPermit">保存</el-button>
@@ -4822,24 +4804,29 @@ const vm = new Vue({
       creatingUser: false, createOk: false,
       userEdit: { visible: false, id: null, title: '', company: '', taxNo: '', email: '', note: '', brandId: 1, hint: '', lockCompany: false, saving: false, expiryMode: 'permanent', expiresAt: '' },
       // 菜单权限弹窗（退单列表 / 实时毛利监控）
-      menuPermit: { visible: false, id: null, username: '', scope: 'admin', refund: false, profit: false, product: false, market: false, billing: false, replenish: false, price: false, after: false, supplier: false, waybill: false, replenishOrder: false, saving: false,
-                    origin: { refund: false, profit: false, product: false, market: false, billing: false, replenish: false, price: false, after: false, supplier: false, waybill: false, replenishOrder: false } },
-      // ── 员工管理（v0.2.104，仅主体账号）──
+      menuPermit: { visible: false, id: null, username: '', scope: 'admin', refund: false, profit: false, product: false, market: false, billing: false, replenish: false, price: false, after: false, supplier: false, waybill: false, replenishOrder: false, staff: false, saving: false,
+                    origin: { refund: false, profit: false, product: false, market: false, billing: false, replenish: false, price: false, after: false, supplier: false, waybill: false, replenishOrder: false, staff: false } },
+      // ── 员工管理（v0.2.104，仅主体账号；v0.3.13 起按 staff_enabled 权限开放）──
       staff: { rows: [], loading: false },
       staffOwner: null,
+      // 菜单元数据（与 server.js 的 MENU_PERMS 同源）：label / tip 给弹窗，field 读员工行上的开关。
+      // v0.3.13：弹窗不再硬编码，超管用全量、主体只用 staffAllowed 过滤后的一份。
       staffMenus: [
-        { key: 'refund', label: '退单列表', field: 'qnhRefundEnabled' },
-        { key: 'after', label: '供应商售后', field: 'afterSaleEnabled' },
-        { key: 'profit', label: '实时毛利监控', field: 'qnhProfitEnabled' },
-        { key: 'product', label: '商品列表', field: 'productEnabled' },
-        { key: 'replenish', label: '补货', field: 'replenishEnabled' },
-        { key: 'market', label: '交易市场', field: 'marketEnabled' },
-        { key: 'billing', label: '账单', field: 'billingEnabled' },
-        { key: 'price', label: '平台取价', field: 'priceEnabled' },
-        { key: 'supplier', label: '供应商管理', field: 'supplierEnabled' },
-        { key: 'waybill', label: '货单管理', field: 'waybillEnabled' },
-        { key: 'replenishOrder', label: '补货单管理', field: 'replenishOrderEnabled' },
+        { key: 'refund', label: '退单列表', field: 'qnhRefundEnabled', tip: '查看退单数据、订单/配送日志、发送提醒' },
+        { key: 'after', label: '供应商售后', field: 'afterSaleEnabled', tip: '退单商品的售后台账：处理状态与售后原因' },
+        { key: 'profit', label: '实时毛利监控', field: 'qnhProfitEnabled', tip: '查看订单毛利/预计收入，手动拉取当天毛利数据' },
+        { key: 'product', label: '商品列表', field: 'productEnabled', tip: '导入补货参考文件、补货、关联齐货通/阿发商品' },
+        { key: 'replenish', label: '补货', field: 'replenishEnabled', tip: '导入补货参考文件、查看品牌方商品与价格' },
+        { key: 'market', label: '交易市场', field: 'marketEnabled', tip: '查看别人的商品报价、发布自己的 SKU' },
+        { key: 'billing', label: '账单', field: 'billingEnabled', tip: '按月统计总收入/总支出/净利润' },
+        { key: 'price', label: '平台取价', field: 'priceEnabled', tip: '登录齐货通、重新取价、配置阿发Token、选购加购' },
+        { key: 'supplier', label: '供应商管理', field: 'supplierEnabled', tip: '维护供应商字典（名称/备注），货单里的供应商从这里选' },
+        { key: 'waybill', label: '货单管理', field: 'waybillEnabled', tip: '新增/查看/删除采购货单，手机扫码上传货单图片' },
+        { key: 'replenishOrder', label: '补货单管理', field: 'replenishOrderEnabled', tip: '补货建议生成的采购单在这里对账，关联同供应商货单看金额差异' },
+        { key: 'staff', label: '员工管理', field: 'staffEnabled', tip: '给本账号建员工、分配菜单（只有超级管理员能给主体账号开通）' },
       ],
+      // 主体自己已开通、可以授给员工的菜单 key（/api/staff/users 下发；员工管理永远不在里面）
+      staffAllowed: [],
       staffDlg: { visible: false, id: null, username: '', password: '', displayName: '', note: '', saving: false, menus: {} },
       // ── 供应商售后（v0.3.2 起整页替换旧售后管理，不再读退单）──
       af: {
@@ -4860,6 +4847,11 @@ const vm = new Vue({
       // ── 供应商管理（v0.3.0）──
       sp: { loading: false, rows: [], total: 0, page: 1, size: 20, keyword: '' },
       spDlg: { visible: false, mode: 'create', id: 0, name: '', note: '', saving: false, error: '' },
+      // 供应商迁移（v0.3.13）：把旧供应商名下所有台账改挂到新供应商，可选迁完删旧
+      spMerge: {
+        visible: false, fromId: 0, fromName: '', toId: 0,
+        usage: null, options: [], loading: false, saving: false, deleteOld: true, error: '',
+      },
       // ── 货单管理（v0.3.0）──
       wb: {
         loading: false, rows: [], total: 0, sumAmount: 0, page: 1, size: 20,
@@ -5034,8 +5026,21 @@ const vm = new Vue({
     },
     /** 一张货单最多传几张图（与 lib/waybill.js 的 MAX_IMAGES 保持一致） */
     wbImgMax() { return 9; },
-    // 员工管理（v0.2.104）：只有「主体账号」能用（员工账号 owner_id 非空，看不到该菜单）
+    // 员工管理（v0.2.104）：只有「主体账号」且已开通「员工管理」权限才看得到（v0.3.13）
     canStaff() { return !!(this.me && this.me.canStaff); },
+    /**
+     * 主体能授给员工的菜单（v0.3.13）：只留自己已开通的，且不含「员工管理」。
+     * staffAllowed 由 /api/staff/users 下发 —— 服务端按 MENU_PERMS 与主体自身的 *_enabled 算，
+     * 前端不自己猜，两边口径不会走偏。
+     */
+    staffMenuRows() {
+      const allow = this.staffAllowed || [];
+      return (this.staffMenus || []).filter((m) => m.key !== 'staff' && allow.indexOf(m.key) >= 0);
+    },
+    /** 菜单权限弹窗显示哪些行：超管给全量（含员工管理），主体只给自己已开通的那些 */
+    menuPermitRows() {
+      return this.menuPermit.scope === 'staff' ? this.staffMenuRows : (this.staffMenus || []);
+    },
     /** 售后状态统计卡（点卡片按该状态筛选，再点一次取消） */
     afStatCards() {
       const c = this.af.counts || {};
@@ -8319,41 +8324,26 @@ const vm = new Vue({
     /** 打开「菜单权限」弹窗（超管给主体账号配；主体账号给员工配 —— scope 决定提交到哪个接口） */
     openMenuPermit(row, scope) {
       const sc = scope === 'staff' ? 'staff' : 'admin';
-      this.menuPermit = {
-        visible: true, id: row.id, username: row.username, scope: sc,
-        refund: !!row.qnhRefundEnabled, profit: !!row.qnhProfitEnabled,
-        product: !!row.productEnabled, market: !!row.marketEnabled,
-        billing: !!row.billingEnabled, replenish: !!row.replenishEnabled,
-        price: !!row.priceEnabled, after: !!row.afterSaleEnabled,
-        supplier: !!row.supplierEnabled, waybill: !!row.waybillEnabled,
-        replenishOrder: !!row.replenishOrderEnabled,
-        saving: false,
-        origin: {
-          refund: !!row.qnhRefundEnabled, profit: !!row.qnhProfitEnabled,
-          product: !!row.productEnabled, market: !!row.marketEnabled,
-          billing: !!row.billingEnabled, replenish: !!row.replenishEnabled,
-          price: !!row.priceEnabled, after: !!row.afterSaleEnabled,
-          supplier: !!row.supplierEnabled, waybill: !!row.waybillEnabled,
-          replenishOrder: !!row.replenishOrderEnabled,
-        },
-      };
+      // v0.3.13：不再逐项手写，按 staffMenus 元数据铺一遍；scope='staff' 时模板只渲染
+      // menuPermitRows（主体自己已开通的那些），所以这里全量初始化也没关系。
+      const flags = {};
+      for (const m of (this.staffMenus || [])) flags[m.key] = !!(row && row[m.field]);
+      this.menuPermit = Object.assign({
+        visible: true, id: row.id, username: row.username, scope: sc, saving: false,
+      }, flags, { origin: Object.assign({}, flags) });
     },
     /** 保存菜单权限：只提交发生变化的项，逐项调用（任一项失败即提示） */
     async saveMenuPermit() {
       const m = this.menuPermit;
       if (!m.id) return;
+      // 只比弹窗上真正显示出来的那几行：主体看不到的菜单既不显示也不会被误改
       const changes = [];
-      if (m.refund !== m.origin.refund) changes.push({ menu: 'refund', enabled: m.refund, field: 'qnhRefundEnabled', label: '退单列表' });
-      if (m.profit !== m.origin.profit) changes.push({ menu: 'profit', enabled: m.profit, field: 'qnhProfitEnabled', label: '实时毛利监控' });
-      if (m.product !== m.origin.product) changes.push({ menu: 'product', enabled: m.product, field: 'productEnabled', label: '商品列表' });
-      if (m.market !== m.origin.market) changes.push({ menu: 'market', enabled: m.market, field: 'marketEnabled', label: '交易市场' });
-      if (m.billing !== m.origin.billing) changes.push({ menu: 'billing', enabled: m.billing, field: 'billingEnabled', label: '账单' });
-      if (m.replenish !== m.origin.replenish) changes.push({ menu: 'replenish', enabled: m.replenish, field: 'replenishEnabled', label: '补货' });
-      if (m.price !== m.origin.price) changes.push({ menu: 'price', enabled: m.price, field: 'priceEnabled', label: '平台取价' });
-      if (m.after !== m.origin.after) changes.push({ menu: 'after', enabled: m.after, field: 'afterSaleEnabled', label: '供应商售后' });
-      if (m.supplier !== m.origin.supplier) changes.push({ menu: 'supplier', enabled: m.supplier, field: 'supplierEnabled', label: '供应商管理' });
-      if (m.waybill !== m.origin.waybill) changes.push({ menu: 'waybill', enabled: m.waybill, field: 'waybillEnabled', label: '货单管理' });
-      if (m.replenishOrder !== m.origin.replenishOrder) changes.push({ menu: 'replenishOrder', enabled: m.replenishOrder, field: 'replenishOrderEnabled', label: '补货单管理' });
+      for (const row of this.menuPermitRows) {
+        const on = !!m[row.key];
+        if (on !== !!m.origin[row.key]) {
+          changes.push({ menu: row.key, enabled: on, field: row.field, label: row.label });
+        }
+      }
       if (!changes.length) { m.visible = false; return; }
       m.saving = true;
       const list = m.scope === 'staff' ? this.staff.rows : this.users;
@@ -8378,7 +8368,9 @@ const vm = new Vue({
     },
     // ── 员工管理（v0.2.104，仅主体账号）──
     staffMenuTags(row) {
-      return (this.staffMenus || []).map((m) => ({ key: m.key, label: m.label, on: !!row[m.field] }));
+      // 「员工管理」不在员工身上生效，标签里也不出现，避免显示成「已开/未开」让人误解
+      return (this.staffMenus || []).filter((m) => m.key !== 'staff')
+        .map((m) => ({ key: m.key, label: m.label, on: !!row[m.field] }));
     },
     async loadStaff() {
       this.staff.loading = true;
@@ -8387,6 +8379,8 @@ const vm = new Vue({
         if (d && d.error) { this.$message.error(d.error); return; }
         this.staff.rows = (d && d.staff) || [];
         this.staffOwner = (d && d.owner) || null;
+        // v0.3.13：能授给员工的菜单由服务端按「主体自己已开通」算好后下发
+        this.staffAllowed = ((d && d.menus) || []).map((m) => m.key);
       } catch (e) {
         this.$message.error('加载员工失败：' + e.message);
       } finally {
@@ -8395,12 +8389,12 @@ const vm = new Vue({
     },
     openStaffCreate() {
       const menus = {};
-      for (const m of (this.staffMenus || [])) menus[m.key] = false;
+      for (const m of this.staffMenuRows) menus[m.key] = false;
       this.staffDlg = { visible: true, id: null, username: '', password: '', displayName: '', note: '', saving: false, menus };
     },
     openStaffEdit(row) {
       const menus = {};
-      for (const m of (this.staffMenus || [])) menus[m.key] = !!row[m.field];
+      for (const m of this.staffMenuRows) menus[m.key] = !!row[m.field];
       this.staffDlg = {
         visible: true, id: row.id, username: row.username, password: '',
         displayName: row.displayName || '', note: row.note || '', saving: false, menus,
@@ -9373,10 +9367,23 @@ const vm = new Vue({
       } finally { this.spDlg.saving = false; }
     },
     async deleteSp(row) {
+      // v0.3.13：删之前先问服务端「这家还被谁引用」，有台账就直说不能删（别等点了确认才报错）
+      let u = null;
+      try { u = await this.api('/api/waybill/suppliers/usage?id=' + row.id); } catch (e) { u = null; }
+      const parts = [];
+      if (u && u.waybill) parts.push(`${u.waybill} 张货单`);
+      if (u && u.after) parts.push(`${u.after} 条供应商售后`);
+      if (u && u.replenishOrder) parts.push(`${u.replenishOrder} 张补货单`);
+      if (parts.length) {
+        this.$message.warning(`「${row.name}」下面还有${parts.join('、')}，不能删除。请先用「迁移」转到其他供应商。`, 6000);
+        return;
+      }
+      const extra = (u && u.localRefs)
+        ? `\n有 ${u.localRefs} 个商品把它设为本地价供应商，删除后这些商品的供应商标记会被清空（价格保留）。`
+        : '';
       try {
-        await this.$confirm('删除供应商「' + row.name + '」？'
-          + (row.waybillCount ? `\n它下面还有 ${row.waybillCount} 张货单，需要先把货单删掉。` : ''),
-        '删除供应商', { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' });
+        await this.$confirm('删除供应商「' + row.name + '」？' + extra,
+          '删除供应商', { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' });
       } catch (e) { return; }
       try {
         const d = await this.api('/api/waybill/suppliers/delete', {
@@ -9384,9 +9391,63 @@ const vm = new Vue({
           body: JSON.stringify({ id: row.id }),
         });
         if (!d.ok) return this.$message.error(d.error || '删除失败');
-        this.$message.success('已删除');
+        this.$message.success('已删除' + (d.localCleared ? `（顺带清空 ${d.localCleared} 个商品的本地价供应商）` : ''));
         this.loadSuppliers();
       } catch (e) { this.$message.error('删除失败：' + (e.message || e)); }
+    },
+    /** 打开迁移弹窗：拉这家供应商的引用统计 + 可迁往的目标列表（排除自己） */
+    async openSpMerge(row) {
+      this.spMerge = {
+        visible: true, fromId: row.id, fromName: row.name, toId: 0,
+        usage: null, options: [], loading: true, saving: false, deleteOld: true, error: '',
+      };
+      try {
+        const [u, o] = await Promise.all([
+          this.api('/api/waybill/suppliers/usage?id=' + row.id),
+          this.api('/api/waybill/suppliers/all'),
+        ]);
+        if (u && !u.error) this.spMerge.usage = u;
+        this.spMerge.options = ((o && o.rows) || []).filter((x) => Number(x.id) !== Number(row.id));
+      } catch (e) {
+        this.spMerge.error = '加载失败：' + (e.message || e);
+      } finally {
+        this.spMerge.loading = false;
+      }
+    },
+    async doSpMerge() {
+      const m = this.spMerge;
+      if (m.saving) return;
+      if (!m.toId) { m.error = '请选择要迁往的供应商'; return; }
+      const target = (m.options.find((o) => Number(o.id) === Number(m.toId)) || {}).name || '';
+      try {
+        await this.$confirm(
+          `把「${m.fromName}」名下 ${(m.usage ? m.usage.ledger : 0)} 条台账数据迁移到「${target}」？`
+          + (m.deleteOld ? `\n迁移完成后「${m.fromName}」会被删除，此操作不可撤销。` : ''),
+          '确认迁移', { type: 'warning', confirmButtonText: '确认迁移', cancelButtonText: '取消' });
+      } catch (e) { return; }
+      m.saving = true;
+      m.error = '';
+      try {
+        const d = await this.api('/api/waybill/suppliers/merge', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ fromId: m.fromId, toId: m.toId, removeOld: !!m.deleteOld }),
+        });
+        if (!d.ok) { m.error = d.error || '迁移失败'; return; }
+        const bits = [];
+        if (d.waybillN) bits.push(`${d.waybillN} 张货单`);
+        if (d.afterN) bits.push(`${d.afterN} 条售后`);
+        if (d.orderN) bits.push(`${d.orderN} 张补货单`);
+        if (d.brandLocalN + d.itemLocalN) bits.push(`${d.brandLocalN + d.itemLocalN} 个商品本地价`);
+        m.visible = false;
+        this.$message.success(`已迁移${bits.length ? '：' + bits.join('、') : '（没有需要迁移的数据）'}`
+          + (d.deleted ? `，并删除「${d.fromName}」` : ''), 6000);
+        this.loadSuppliers();
+        if (this.wbNew.visible) this.loadSpOptions();
+      } catch (e) {
+        m.error = '迁移失败：' + (e.message || e);
+      } finally {
+        m.saving = false;
+      }
     },
     /** 供应商列表里点「货单数」→ 跳到货单页并按这家供应商筛 */
     goWaybillOf(name) {
