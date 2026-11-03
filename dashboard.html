@@ -183,6 +183,10 @@
   .af-new-dlg .el-dialog__body { max-height: calc(88vh - 150px); overflow-y: auto; }
   /* 处理售后弹窗（v0.2.108）：只做「上传凭证 + 备注」，矮屏时同样内部滚动 */
   .af-up-dlg .el-dialog__body { max-height: calc(90vh - 160px); overflow-y: auto; }
+  /* 导入数据上传弹框：说明/文件名/导入结果叠起来会超过一屏，把按钮挤出视口。
+     弹框整体上移 + body 内部滚动，保证「关闭 / 开始导入」永远可见可点 */
+  .up-dlg { margin-top: 6vh !important; }
+  .up-dlg .el-dialog__body { max-height: calc(84vh - 160px); overflow-y: auto; }
   .af-up-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
   /* 上传区：点击 / 拖拽 / 粘贴三合一，虚线框；拖拽悬停与校验失败各有状态色 */
   .af-up-drop { display: flex; flex-direction: column; align-items: center; justify-content: center;
@@ -3918,7 +3922,7 @@
        安装步骤见 /download 下载页。 -->
 
   <!-- ══════════ 导入数据（拖拽上传） ══════════ -->
-  <el-dialog :title="up.title" :visible.sync="up.visible" width="640px" append-to-body :close-on-click-modal="!up.busy">
+  <el-dialog :title="up.title" :visible.sync="up.visible" width="640px" append-to-body custom-class="up-dlg" :close-on-click-modal="!up.busy">
     <div class="up-guide" v-if="up.guide" v-html="up.guide"></div>
     <el-upload drag action="#" :auto-upload="false" :show-file-list="false" :accept="up.accept"
                :on-change="onUpChange" :disabled="up.busy">
