@@ -545,12 +545,12 @@ async function ensureQnhSchema(q) {
       "  `exp_rent` DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT '支出：房租（手工）'," +
       "  `exp_utility` DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT '支出：水电（手工）'," +
       "  `exp_labor` DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT '支出：人工（手工）'," +
-      "  `exp_warehouse` DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT '支出：中心仓（手工）'," +
+      "  `exp_warehouse` DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT '支出：中心仓（v0.3.8 起停用，保留历史值）'," +
       "  `exp_delivery` DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT '支出：配送费（手工）'," +
       "  `exp_promo` DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT '支出：推广费（手工）'," +
-      "  `exp_liquor` DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT '支出：自采酒水（手工）'," +
-      "  `exp_ice` DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT '支出：雪糕（手工）'," +
-      "  `exp_produce` DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT '支出：果蔬（手工）'," +
+      "  `exp_liquor` DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT '支出：自采酒水（v0.3.8 起停用，保留历史值）'," +
+      "  `exp_ice` DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT '支出：雪糕（v0.3.8 起停用，保留历史值）'," +
+      "  `exp_produce` DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT '支出：果蔬（v0.3.8 起停用，保留历史值）'," +
       "  `exp_vat` DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT '支出：增值税（手工）'," +
       "  `exp_cit` DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT '支出：企业所得税（手工）'," +
       "  `exp_other` DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT '支出：其它（手工）'," +
@@ -1365,14 +1365,17 @@ async function migrate(conn, dbName) {
       "  `supplier_name` VARCHAR(64)   NOT NULL DEFAULT ''  COMMENT '建单时的供应商名称快照（供应商被删时兜底展示）'," +
       "  `amount`        DECIMAL(12,2) NOT NULL DEFAULT 0.00 COMMENT '货单金额（元）'," +
       "  `bill_date`     DATE          NOT NULL             COMMENT '货单日期（按此列查询与排序）'," +
-      "  `note`          VARCHAR(255)  DEFAULT NULL         COMMENT '备注'," +
+      "  `invoice_status` TINYINT      NOT NULL DEFAULT 0   COMMENT '开票状态：0未开票 1已开票（v0.3.6）'," +
+      "  `note`          VARCHAR(255)  DEFAULT NULL         COMMENT '备注（列表不再展示；历史导入时用来记原始行来源）'," +
       "  `created_by`    VARCHAR(64)   DEFAULT NULL         COMMENT '录入人（登录账号）'," +
       "  `created_at`    DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '新建日期'," +
+      "  `deleted_at`    DATETIME      DEFAULT NULL         COMMENT '软删除时间（NULL=有效；删除只在库里打标记，列表/统计一律过滤）'," +
       '  `updated_at`    DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,' +
       '  PRIMARY KEY (`id`),' +
       '  KEY `idx_waybill_user_date`  (`user_id`, `bill_date`),' +
       '  KEY `idx_waybill_user_sup`   (`user_id`, `supplier_id`),' +
-      '  KEY `idx_waybill_user_ctime` (`user_id`, `created_at`)' +
+      '  KEY `idx_waybill_user_ctime` (`user_id`, `created_at`),' +
+      '  KEY `idx_waybill_alive`      (`user_id`, `deleted_at`)' +
       ') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci' +
       "  COMMENT='货单（供应商 + 金额 + 货单日期 + 图片）'"
     );
@@ -1413,6 +1416,32 @@ async function migrate(conn, dbName) {
       ') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci' +
       "  COMMENT='货单图片的手机上传临时令牌（5 分钟有效）'"
     );
+  }
+
+  // ── 货单开票状态（v0.3.6）──
+  //   列表页「图片」右边展示，点击可切换。历史数据一律默认 0（未开票）。
+  if (await tableExists('waybill')) {
+    if (!(await colExists('waybill', 'invoice_status'))) {
+      await q(
+        "ALTER TABLE `waybill` ADD COLUMN `invoice_status` TINYINT NOT NULL DEFAULT 0 " +
+        "COMMENT '开票状态：0未开票 1已开票（v0.3.6）' AFTER `bill_date`"
+      );
+    }
+  }
+
+  // ── 货单软删除（v0.3.7）──
+  //   删除按钮改成打标记：deleted_at 有值即视为已删。列表 / 统计 / 供应商引用计数全部过滤，
+  //   图片记录与七牛对象都不动，误删改回 NULL 即可恢复。
+  if (await tableExists('waybill')) {
+    if (!(await colExists('waybill', 'deleted_at'))) {
+      await q(
+        "ALTER TABLE `waybill` ADD COLUMN `deleted_at` DATETIME DEFAULT NULL " +
+        "COMMENT '软删除时间（NULL=有效；删除只在库里打标记，列表/统计一律过滤）' AFTER `created_at`"
+      );
+    }
+    if (!(await idxExists('waybill', 'idx_waybill_alive'))) {
+      await q('ALTER TABLE `waybill` ADD KEY `idx_waybill_alive` (`user_id`, `deleted_at`)');
+    }
   }
 
   // ── 供应商售后台账（v0.3.2）──

@@ -183,6 +183,10 @@
   .af-new-dlg .el-dialog__body { max-height: calc(88vh - 150px); overflow-y: auto; }
   /* 处理售后弹窗（v0.2.108）：只做「上传凭证 + 备注」，矮屏时同样内部滚动 */
   .af-up-dlg .el-dialog__body { max-height: calc(90vh - 160px); overflow-y: auto; }
+  /* 导入数据上传弹框：说明/文件名/导入结果叠起来会超过一屏，把按钮挤出视口。
+     弹框整体上移 + body 内部滚动，保证「关闭 / 开始导入」永远可见可点 */
+  .up-dlg { margin-top: 6vh !important; }
+  .up-dlg .el-dialog__body { max-height: calc(84vh - 160px); overflow-y: auto; }
   .af-up-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
   /* 上传区：点击 / 拖拽 / 粘贴三合一，虚线框；拖拽悬停与校验失败各有状态色 */
   .af-up-drop { display: flex; flex-direction: column; align-items: center; justify-content: center;
@@ -370,6 +374,19 @@
   .bill-auto .amt { color: var(--primary); border-bottom: 1px dashed transparent; transition: border-color .15s; }
   .bill-auto:hover .amt { border-bottom-color: var(--primary); }
   .bill-auto .cnt { color: var(--text-3); font-size: 11px; font-variant-numeric: tabular-nums; }
+  /* v0.3.9 两口径核对：平台自动项与同名供应商货单金额不一致 → 金额标红并放大一号，提示去点开对比 */
+  .bill-auto.bill-mismatch .amt { color: #e5453a; font-weight: 700; font-size: 15px; }
+  .bill-auto.bill-mismatch .cnt { color: #e5453a; }
+  .bill-detail .bd-row .v.bill-mismatch-v { color: #e5453a; font-weight: 700; font-size: 15px; }
+  /* 两口径对比弹窗：左右各一张表，等高滚动 */
+  .cmp-wrap { display: flex; gap: 12px; align-items: flex-start; }
+  .cmp-col { flex: 1 1 0; min-width: 0; }
+  .cmp-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px; font-size: 13px; }
+  .cmp-head b { font-weight: 600; }
+  .cmp-head .cmp-sum { margin-left: auto; font-variant-numeric: tabular-nums; }
+  .cmp-head.bad .cmp-sum { color: #e5453a; font-weight: 700; }
+  .bill-cmp-bad { color: #e5453a; font-weight: 700; }
+  @media (max-width: 900px) { .cmp-wrap { flex-direction: column; } }
   .bill-detail .bd-row .v.bill-auto-v { cursor: pointer; }
   .bill-detail .bd-row .v.bill-auto-v:hover { color: var(--primary); }
   .bill-detail .bd-row .v .cnt { color: var(--text-3); font-style: normal; margin-left: 4px; }
@@ -1674,8 +1691,8 @@
                     <div class="bd-row" v-for="it in billExpenseItems" :key="it.key">
                       <span class="k">{{ it.label }}<el-tag v-if="it.source === 'auto'" size="mini" type="info"
                                               style="margin-left:4px">系统</el-tag></span>
-                      <span class="v" :class="{ 'bill-auto-v': it.source === 'auto' }"
-                            @click="it.source === 'auto' && openBillOrders(p.row, it)">{{ yuan(it.source === 'auto' ? p.row.auto[it.key] : p.row.cells[it.key]) }}<em
+                      <span class="v" :class="{ 'bill-auto-v': it.source === 'auto', 'bill-mismatch-v': billCmpBad(p.row, it) }"
+                            @click="it.source === 'auto' && openAutoDetail(p.row, it)">{{ yuan(it.source === 'auto' ? p.row.auto[it.key] : p.row.cells[it.key]) }}<em
                             v-if="it.source === 'auto'" class="cnt">{{ (p.row.autoCount && p.row.autoCount[it.key]) || 0 }} 单</em></span>
                     </div>
                     <div class="bd-row bd-sum"><span class="k">支出合计</span><span class="v">{{ yuan(p.row.totals.expense) }}</span></div>
@@ -1714,8 +1731,9 @@
 
             <!-- 一级列 3：支出（二级 = 三个系统统计项 + 手工项 + 支出合计） -->
             <el-table-column label="支出" label-class-name="bill-grp">
+              <!-- 系统项列宽 208（金额 + N 单 + 「系统」标签）；供应商货单项列更多，收窄到 176 以免整表过宽 -->
               <el-table-column v-for="it in billExpenseItems" :key="it.key" :label="it.label"
-                               :width="it.source === 'auto' ? 208 : 132">
+                               :width="it.supplierId ? 176 : (it.source === 'auto' ? 208 : 132)">
                 <template slot="header">
                   <span>{{ it.label }}</span>
                   <el-tag v-if="it.source === 'auto'" size="mini" type="info" style="margin-left:4px">系统</el-tag>
@@ -1724,9 +1742,10 @@
                   <el-input-number v-if="it.source === 'manual'" :value="p.row.cells[it.key]" :min="0" :precision="2"
                                    :controls="false" size="mini" style="width:104px"
                                    @change="v => saveBillCell(p.row, it.key, v)"></el-input-number>
-                  <!-- 系统项：金额 + 参与统计的订单数（点金额看明细核对） -->
-                  <span v-else class="bill-auto" title="点击查看参与统计的全部订单明细"
-                        @click="openBillOrders(p.row, it)">
+                  <!-- 系统项：金额 + 参与统计的订单数（点金额看明细核对）；两口径不一致时标红放大 -->
+                  <span v-else class="bill-auto" :class="{ 'bill-mismatch': billCmpBad(p.row, it) }"
+                        :title="billCmpBad(p.row, it) ? '平台自动项与同名供应商货单金额不一致，点击看两边明细对比' : '点击查看参与统计的全部订单明细'"
+                        @click="openAutoDetail(p.row, it)">
                     <span class="amt">{{ yuan(p.row.auto[it.key]) }}</span>
                     <span class="cnt">{{ (p.row.autoCount && p.row.autoCount[it.key]) || 0 }} 单</span>
                   </span>
@@ -1777,16 +1796,16 @@
           </div>
           <el-table :data="billOrders.rows" size="mini" border max-height="420" v-loading="billOrders.loading"
                     empty-text="该月没有符合条件的订单">
-            <el-table-column label="单号" min-width="170">
+            <el-table-column :label="billOrders.cols.no || '单号'" min-width="170">
               <template slot-scope="p"><span class="loginid">{{ p.row.no }}</span></template>
             </el-table-column>
-            <el-table-column prop="who" label="卖家 / 店铺" min-width="150" show-overflow-tooltip></el-table-column>
-            <el-table-column prop="goods" label="商品" min-width="200" show-overflow-tooltip></el-table-column>
+            <el-table-column prop="who" :label="billOrders.cols.who || '卖家 / 店铺'" min-width="150" show-overflow-tooltip></el-table-column>
+            <el-table-column prop="goods" :label="billOrders.cols.goods || '商品'" min-width="200" show-overflow-tooltip></el-table-column>
             <el-table-column prop="t" label="时间" width="140"></el-table-column>
             <el-table-column label="金额" width="110" align="right">
               <template slot-scope="p"><span class="amount plain">{{ yuan(p.row.amount) }}</span></template>
             </el-table-column>
-            <el-table-column prop="status" label="状态" width="110" show-overflow-tooltip></el-table-column>
+            <el-table-column prop="status" :label="billOrders.cols.status || '状态'" width="110" show-overflow-tooltip></el-table-column>
           </el-table>
           <div slot="footer" style="display:flex;align-items:center;gap:12px">
             <span class="loginid">合计 {{ yuan(billOrders.sum) }}（{{ billOrders.total }} 单）</span>
@@ -1795,6 +1814,51 @@
                            :current-page="billOrders.page" :total="billOrders.total"
                            @current-change="loadBillOrders"></el-pagination>
             <el-button size="small" @click="billOrders.visible = false">关闭</el-button>
+          </div>
+        </el-dialog>
+
+        <!-- 两口径对比（v0.3.9）：平台自动项 vs 同名供应商货单，左右各一张当月明细 -->
+        <el-dialog :title="billCmp.title || '两口径对比'" :visible.sync="billCmp.visible" width="1060px" append-to-body>
+          <div class="form-tip" style="margin-bottom:10px">
+            同名供应商的货单与平台自动项应属同一批采购。下面是两边<b>当月明细</b>，逐行核对差额来源；
+            <b :class="billCmp.same ? '' : 'bill-cmp-bad'">差额 {{ yuan(billCmp.diff) }}</b>
+          </div>
+          <div class="cmp-wrap" v-loading="billCmp.loading">
+            <div class="cmp-col">
+              <div class="cmp-head" :class="{ bad: !billCmp.same }">
+                <b>{{ billCmp.platformLabel || '平台自动项' }}</b>
+                <span class="loginid">{{ billCmp.platformCount }} 单</span>
+                <span class="cmp-sum">{{ yuan(billCmp.platformSum) }}</span>
+              </div>
+              <el-table :data="billCmp.platformRows" size="mini" border max-height="380" empty-text="该月没有订单">
+                <el-table-column prop="no" label="单号" min-width="140" show-overflow-tooltip></el-table-column>
+                <el-table-column prop="t" label="时间" width="118"></el-table-column>
+                <el-table-column label="金额" width="96" align="right">
+                  <template slot-scope="p"><span class="amount plain">{{ yuan(p.row.amount) }}</span></template>
+                </el-table-column>
+              </el-table>
+            </div>
+            <div class="cmp-col">
+              <div class="cmp-head" :class="{ bad: !billCmp.same }">
+                <b>{{ billCmp.supplierLabel || '供应商货单' }}</b>
+                <span class="loginid">{{ billCmp.supplierCount }} 张</span>
+                <span class="cmp-sum">{{ yuan(billCmp.supplierSum) }}</span>
+              </div>
+              <el-table :data="billCmp.supplierRows" size="mini" border max-height="380" empty-text="该月没有货单">
+                <el-table-column prop="no" label="货单" min-width="140" show-overflow-tooltip></el-table-column>
+                <el-table-column prop="t" label="时间" width="118"></el-table-column>
+                <el-table-column label="金额" width="96" align="right">
+                  <template slot-scope="p"><span class="amount plain">{{ yuan(p.row.amount) }}</span></template>
+                </el-table-column>
+              </el-table>
+            </div>
+          </div>
+          <div slot="footer" style="display:flex;align-items:center;gap:12px">
+            <span class="loginid">
+              {{ billCmp.same ? '两边金额一致' : '两边金额不一致，请核对上面两组明细' }}
+            </span>
+            <span style="flex:1"></span>
+            <el-button size="small" @click="billCmp.visible = false">关闭</el-button>
           </div>
         </el-dialog>
       </div>
@@ -2754,10 +2818,21 @@
                             value-format="yyyy-MM-dd" range-separator="至"
                             start-placeholder="货单开始日期" end-placeholder="结束日期"
                             @change="onWbFilter"></el-date-picker>
+            <!-- 开票状态筛选（v0.3.7）：全部 / 未开票 / 已开票，与列表列同一口径 -->
+            <el-select v-model="wb.invoiceStatus" size="small" style="width:130px" @change="onWbFilter">
+              <el-option label="全部开票状态" value=""></el-option>
+              <el-option label="未开票" value="0"></el-option>
+              <el-option label="已开票" value="1"></el-option>
+            </el-select>
             <el-button size="small" type="primary" plain @click="onWbFilter">查询</el-button>
             <el-button size="small" type="primary" icon="el-icon-plus" @click="openWbNew">新建货单</el-button>
+            <!-- 员工可见性（v0.3.10）：员工只看最近 7 天录入的货单，右上角合计整块不渲染 -->
+            <span v-if="isStaff" class="loginid" style="margin-left:10px"
+                  title="员工账号只能查看最近 7 天录入的货单，更早的请让老板账号查看">
+              仅显示近 7 天录入的货单
+            </span>
             <span class="fb-spacer"></span>
-            <span class="loginid">共 {{ wb.total }} 张 · 合计 <b style="color:#f56c6c">{{ wbMoney(wb.sumAmount) }}</b></span>
+            <span v-if="!isStaff" class="loginid">共 {{ wb.total }} 张 · 合计 <b style="color:#f56c6c">{{ wbMoney(wb.sumAmount) }}</b></span>
           </div>
 
           <el-table :data="wb.rows" size="small" border style="width:100%" v-loading="wb.loading"
@@ -2776,8 +2851,13 @@
                 <span class="loginid">{{ p.row.imageCount ? p.row.imageCount + ' 张' : '—' }}</span>
               </template>
             </el-table-column>
-            <el-table-column label="备注" min-width="160">
-              <template slot-scope="p"><span class="loginid" :title="p.row.note">{{ p.row.note || '—' }}</span></template>
+            <!-- 开票状态（v0.3.6）：两档，点一下就切（未开票 ⇄ 已开票） -->
+            <el-table-column label="开票状态" width="100" align="center">
+              <template slot-scope="p">
+                <el-tag size="mini" :type="p.row.invoiceStatus ? 'success' : 'info'"
+                        style="cursor:pointer" title="点击切换开票状态"
+                        @click="toggleWbInvoice(p.row)">{{ p.row.invoiceStatus ? '已开票' : '未开票' }}</el-tag>
+              </template>
             </el-table-column>
             <el-table-column label="新建日期" width="145">
               <template slot-scope="p"><span class="loginid">{{ p.row.createdAt || '—' }}</span></template>
@@ -2828,6 +2908,14 @@
                 <el-form-item label="货单日期">
                   <el-date-picker v-model="wbNew.billDate" type="date" value-format="yyyy-MM-dd"
                                   placeholder="选择日期" style="width:100%"></el-date-picker>
+                </el-form-item>
+              </el-col>
+              <el-col :xs="12" :sm="6">
+                <el-form-item label="开票状态">
+                  <el-radio-group v-model="wbNew.invoiceStatus" size="mini">
+                    <el-radio :label="0">未开票</el-radio>
+                    <el-radio :label="1">已开票</el-radio>
+                  </el-radio-group>
                 </el-form-item>
               </el-col>
             </el-row>
@@ -2901,7 +2989,11 @@
               <el-descriptions-item label="货单日期">{{ wbView.waybill.billDate || '—' }}</el-descriptions-item>
               <el-descriptions-item label="新建日期">{{ wbView.waybill.createdAt || '—' }}</el-descriptions-item>
               <el-descriptions-item label="操作人">{{ wbView.waybill.createdBy || '—' }}</el-descriptions-item>
-              <el-descriptions-item label="备注">{{ wbView.waybill.note || '—' }}</el-descriptions-item>
+              <el-descriptions-item label="开票状态">
+                <el-tag size="mini" :type="wbView.waybill.invoiceStatus ? 'success' : 'info'">
+                  {{ wbView.waybill.invoiceStatus ? '已开票' : '未开票' }}
+                </el-tag>
+              </el-descriptions-item>
             </el-descriptions>
             <div class="wb-sec-title" style="margin-top:14px">
               货单图片 <span class="loginid">（{{ wbView.images.length }} 张，点击看大图）</span>
@@ -3918,7 +4010,7 @@
        安装步骤见 /download 下载页。 -->
 
   <!-- ══════════ 导入数据（拖拽上传） ══════════ -->
-  <el-dialog :title="up.title" :visible.sync="up.visible" width="640px" append-to-body :close-on-click-modal="!up.busy">
+  <el-dialog :title="up.title" :visible.sync="up.visible" width="640px" append-to-body custom-class="up-dlg" :close-on-click-modal="!up.busy">
     <div class="up-guide" v-if="up.guide" v-html="up.guide"></div>
     <el-upload drag action="#" :auto-upload="false" :show-file-list="false" :accept="up.accept"
                :on-change="onUpChange" :disabled="up.busy">
@@ -4248,7 +4340,13 @@ const vm = new Vue({
       bill: { loading: false, syncing: false, items: [], cols: [] },
       billAdd: { visible: false, month: '', copyFrom: '', saving: false },
       // 账单「系统」支出项的订单明细弹窗（点金额打开，用于核对条数与合计）
-      billOrders: { visible: false, loading: false, platform: '', month: '', title: '', rows: [], total: 0, sum: 0, page: 1, size: 50 },
+      billOrders: { visible: false, loading: false, platform: '', month: '', title: '', rows: [], cols: {}, total: 0, sum: 0, page: 1, size: 50 },
+      // 两口径对比（v0.3.9）：平台自动项 vs 同名供应商货单
+      billCmp: {
+        visible: false, loading: false, title: '', month: '', platformKey: '', supplierKey: '',
+        platformLabel: '', supplierLabel: '', platformRows: [], supplierRows: [],
+        platformSum: 0, supplierSum: 0, platformCount: 0, supplierCount: 0, diff: 0, same: true,
+      },
       quotes: { visible: false, loading: false, sku: '', goodsName: '', rows: [] },
       meta: '', tenantLabel: '', copyright: '',
       // 筛选（草稿 vs 生效）
@@ -4346,10 +4444,12 @@ const vm = new Vue({
       wb: {
         loading: false, rows: [], total: 0, sumAmount: 0, page: 1, size: 20,
         supplier: '', range: [],   // range = [开始日期, 结束日期]，空 = 不限
+        invoiceStatus: '',         // 开票状态筛选：'' 全部 / '0' 未开票 / '1' 已开票
       },
-      // 新建货单：供应商下拉（远程搜）+ 金额 + 货单日期 + 备注 + 图片（电脑端本地上传 / 手机扫码传）
+      // 新建货单：供应商下拉（远程搜）+ 金额 + 货单日期 + 开票状态 + 图片（电脑端本地上传 / 手机扫码传）
       wbNew: {
         visible: false, suppliers: [], supplierId: '', amount: '', billDate: '',
+        invoiceStatus: 0,
         note: '', saving: false, error: '', loadingSupplier: false,
         token: '', link: '', qr: '', leftSec: 0, images: [], uploading: false,
         imgError: '', polling: null, qrLoading: false,
@@ -4543,8 +4643,11 @@ const vm = new Vue({
         mom = '较上月 ' + (diff >= 0 ? '+' : '') + diff.toFixed(1) + '%';
       }
       const auto = cur.auto || {};
-      const plat = (Number(auto.auto_1688) || 0) + (Number(auto.auto_pdd) || 0)
-        + (Number(auto.auto_sdc) || 0) + (Number(auto.auto_qht) || 0);
+      // 平台采购合计：所有系统统计项（平台订单 + 各供应商货单）之和，不写死 key
+      let plat = 0;
+      for (const it of (this.bill.items || [])) {
+        if (it.source === 'auto') plat += Number(auto[it.key]) || 0;
+      }
       return [
         { key: 'net', num: this.yuan(t.net), label: '本月净利润 · ' + this.monthText(cur.month), sub: mom },
         { key: 'income', num: this.yuan(t.income), label: '本月总收入', sub: '美团 / 淘宝 / 京东' },
@@ -8874,6 +8977,7 @@ const vm = new Vue({
           'supplier=' + encodeURIComponent(this.wb.supplier || ''),
           'from=' + encodeURIComponent(r[0] || ''),
           'to=' + encodeURIComponent(r[1] || ''),
+          'invoiceStatus=' + encodeURIComponent(this.wb.invoiceStatus || ''),
           'page=' + this.wb.page,
           'size=' + this.wb.size,
         ].join('&');
@@ -8898,6 +9002,7 @@ const vm = new Vue({
       this.wbNew.supplierId = '';
       this.wbNew.amount = '';
       this.wbNew.billDate = this.todayStr();
+      this.wbNew.invoiceStatus = 0;
       this.wbNew.note = '';
       this.wbNew.error = '';
       this.wbNew.imgError = '';
@@ -9071,6 +9176,7 @@ const vm = new Vue({
             supplierId: this.wbNew.supplierId,
             amount: amt,
             billDate: this.wbNew.billDate,
+            invoiceStatus: this.wbNew.invoiceStatus ? 1 : 0,
             note: this.wbNew.note,
             token: this.wbNew.token,
             supplierName: sup ? sup.name : '',
@@ -9083,6 +9189,21 @@ const vm = new Vue({
       } catch (e) {
         this.wbNew.error = '保存失败：' + (e.message || e);
       } finally { this.wbNew.saving = false; }
+    },
+    /** 切换开票状态（v0.3.6）：列表上点一下 tag 就在未开票/已开票之间切 */
+    async toggleWbInvoice(row) {
+      const next = row.invoiceStatus ? 0 : 1;
+      try {
+        const d = await this.api('/api/waybill/status', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ id: row.id, status: next }),
+        });
+        if (!d.ok) return this.$message.error(d.error || '修改失败');
+        row.invoiceStatus = next;
+        this.$message.success(next ? '已标记为已开票' : '已改回未开票');
+      } catch (e) {
+        this.$message.error('修改失败：' + (e.message || e));
+      }
     },
     async openWbView(row) {
       this.wbView.visible = true;
@@ -9103,7 +9224,7 @@ const vm = new Vue({
       try {
         await this.$confirm('删除这张货单？\n供应商：' + (row.supplierName || '—')
           + '\n金额：' + this.wbMoney(row.amount) + '　货单日期：' + (row.billDate || '—')
-          + '\n图片记录会一起删掉（七牛上的原图仍保留）。',
+          + '\n图片记录会一起隐藏（七牛上的原图仍保留，需要在库里把 deleted_at 清空才能恢复）。',
         '删除货单', { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' });
       } catch (e) { return; }
       try {
@@ -9649,12 +9770,62 @@ const vm = new Vue({
       await this.loadBilling(true);
     },
     /** 打开某月某平台的订单明细（账单里「系统」支出项点金额触发，用于核对条数与合计） */
+    /** 自动项是否「两口径不一致」（平台订单金额 ≠ 同名供应商货单金额）→ 金额标红放大 */
+    billCmpBad(row, it) {
+      if (!it || it.source !== 'auto' || !row || !row.cmp) return false;
+      const c = row.cmp[it.key];
+      return !!(c && !c.same);
+    },
+    /** 系统项点击入口：有同名供应商对照 → 两口径对比；否则 → 普通订单明细 */
+    openAutoDetail(row, it) {
+      if (!row || !it || it.source !== 'auto') return;
+      if (row.cmp && row.cmp[it.key]) return this.openBillCompare(row, it);
+      return this.openBillOrders(row, it);
+    },
+    /** 两口径对比：左边平台自动项明细，右边同名供应商货单明细 */
+    openBillCompare(row, it) {
+      const c = row.cmp[it.key];
+      this.billCmp = {
+        visible: true, loading: true,
+        title: c.label + ' · 两口径对比 · ' + this.monthText(row.month),
+        month: row.month, platformKey: it.key, supplierKey: c.supplierKey,
+        platformLabel: it.label, supplierLabel: c.label + '（供应商货单）',
+        platformRows: [], supplierRows: [],
+        platformSum: c.platform, supplierSum: c.supplier,
+        platformCount: c.platformCount, supplierCount: c.supplierCount,
+        diff: c.diff, same: c.same,
+      };
+      this.loadBillCompare();
+    },
+    async loadBillCompare() {
+      const b = this.billCmp;
+      if (!b || !b.platformKey || !b.supplierKey) return;
+      b.loading = true;
+      try {
+        const base = '/api/billing/orders?month=' + encodeURIComponent(b.month) + '&page=1&size=200&platform=';
+        const [p, s] = await Promise.all([
+          this.api(base + encodeURIComponent(b.platformKey)),
+          this.api(base + encodeURIComponent(b.supplierKey)),
+        ]);
+        b.platformRows = (p && p.rows) || [];
+        b.supplierRows = (s && s.rows) || [];
+        // 以接口实际返回为准（防止缓存或口径漂移导致弹窗与账单不一致）
+        b.platformSum = (p && p.sum) || 0;
+        b.supplierSum = (s && s.sum) || 0;
+        b.platformCount = (p && p.total) || 0;
+        b.supplierCount = (s && s.total) || 0;
+        b.diff = Math.round((Number(b.platformSum) - Number(b.supplierSum)) * 100) / 100;
+        b.same = Math.abs(b.diff) < 0.005;
+      } catch (e) {
+        this.$message.error('两边明细加载失败: ' + e.message);
+      } finally { b.loading = false; }
+    },
     openBillOrders(row, it) {
       if (!row || !it || it.source !== 'auto') return;
       this.billOrders = {
         visible: true, loading: true, platform: it.key, month: row.month,
         title: it.label + ' · ' + this.monthText(row.month),
-        rows: [], total: 0, sum: 0, page: 1, size: 50,
+        rows: [], cols: {}, total: 0, sum: 0, page: 1, size: 50,
       };
       this.loadBillOrders(1);
     },
@@ -9674,6 +9845,7 @@ const vm = new Vue({
           return;
         }
         b.rows = (d && d.rows) || [];
+        b.cols = (d && d.cols) || {};
         b.total = (d && d.total) || 0;
         b.sum = (d && d.sum) || 0;
       } catch (e) {

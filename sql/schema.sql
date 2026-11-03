@@ -505,12 +505,12 @@ CREATE TABLE IF NOT EXISTS `billing_month` (
   `exp_rent`       DECIMAL(14,2) NOT NULL DEFAULT 0     COMMENT '支出：房租（手工）',
   `exp_utility`    DECIMAL(14,2) NOT NULL DEFAULT 0     COMMENT '支出：水电（手工）',
   `exp_labor`      DECIMAL(14,2) NOT NULL DEFAULT 0     COMMENT '支出：人工（手工）',
-  `exp_warehouse`  DECIMAL(14,2) NOT NULL DEFAULT 0     COMMENT '支出：中心仓（手工）',
+  `exp_warehouse`  DECIMAL(14,2) NOT NULL DEFAULT 0     COMMENT '支出：中心仓（v0.3.8 起停用，保留历史值；采购改由供应商货单项统计）',
   `exp_delivery`   DECIMAL(14,2) NOT NULL DEFAULT 0     COMMENT '支出：配送费（手工）',
   `exp_promo`      DECIMAL(14,2) NOT NULL DEFAULT 0     COMMENT '支出：推广费（手工）',
-  `exp_liquor`     DECIMAL(14,2) NOT NULL DEFAULT 0     COMMENT '支出：自采酒水（手工）',
-  `exp_ice`        DECIMAL(14,2) NOT NULL DEFAULT 0     COMMENT '支出：雪糕（手工）',
-  `exp_produce`    DECIMAL(14,2) NOT NULL DEFAULT 0     COMMENT '支出：果蔬（手工）',
+  `exp_liquor`     DECIMAL(14,2) NOT NULL DEFAULT 0     COMMENT '支出：自采酒水（v0.3.8 起停用，保留历史值）',
+  `exp_ice`        DECIMAL(14,2) NOT NULL DEFAULT 0     COMMENT '支出：雪糕（v0.3.8 起停用，保留历史值）',
+  `exp_produce`    DECIMAL(14,2) NOT NULL DEFAULT 0     COMMENT '支出：果蔬（v0.3.8 起停用，保留历史值）',
   `exp_vat`        DECIMAL(14,2) NOT NULL DEFAULT 0     COMMENT '支出：增值税（手工）',
   `exp_cit`        DECIMAL(14,2) NOT NULL DEFAULT 0     COMMENT '支出：企业所得税（手工）',
   `exp_other`      DECIMAL(14,2) NOT NULL DEFAULT 0     COMMENT '支出：其它（手工）',
@@ -626,14 +626,17 @@ CREATE TABLE IF NOT EXISTS `waybill` (
   `supplier_name` VARCHAR(64)   NOT NULL DEFAULT ''  COMMENT '建单时的供应商名称快照（供应商被删时兜底展示）',
   `amount`        DECIMAL(12,2) NOT NULL DEFAULT 0.00 COMMENT '货单金额（元）',
   `bill_date`     DATE          NOT NULL             COMMENT '货单日期（按此列查询与排序）',
-  `note`          VARCHAR(255)  DEFAULT NULL         COMMENT '备注',
+  `invoice_status` TINYINT      NOT NULL DEFAULT 0   COMMENT '开票状态：0未开票 1已开票（v0.3.6）',
+  `note`          VARCHAR(255)  DEFAULT NULL         COMMENT '备注（列表不再展示；历史导入时用来记原始行来源）',
   `created_by`    VARCHAR(64)   DEFAULT NULL         COMMENT '录入人（登录账号）',
   `created_at`    DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '新建日期',
+  `deleted_at`    DATETIME      DEFAULT NULL         COMMENT '软删除时间（NULL=有效；删除只在库里打标记，列表/统计一律过滤）',
   `updated_at`    DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
   KEY `idx_waybill_user_date`  (`user_id`, `bill_date`),
   KEY `idx_waybill_user_sup`   (`user_id`, `supplier_id`),
-  KEY `idx_waybill_user_ctime` (`user_id`, `created_at`)
+  KEY `idx_waybill_user_ctime` (`user_id`, `created_at`),
+  KEY `idx_waybill_alive`      (`user_id`, `deleted_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   COMMENT='货单（供应商 + 金额 + 货单日期 + 图片）';
 
