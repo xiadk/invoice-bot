@@ -1531,6 +1531,13 @@ const PDD_MALL_BATCH = 60;
 // 单店超时：会话页首屏 JS 重，实测成功多在 3~6s，但偶发慢到 10s+；
 // 原来 15s 会把「只是慢」的店误判成失败（0.3.20 前 9/40 失败全是这个原因）。
 const PDD_MALL_ITEM_TIMEOUT_MS = 22000;
+// 店铺之间的人工间隔：实测 700ms 连跑 40 个就把平台限流触发了 ——
+// 之后所有 update_chat_info 一律返回 40004「请稍后重试」，页面显示「网络异常」。
+// 降到 4s（132 个约 13 分钟），再快就是拿账号换速度。
+const PDD_MALL_GAP_MS = 4000;
+// 连续 N 个店铺一个都没成功 → 判定平台限流，立刻停手（否则会把剩下 100 多个全刷成失败，
+// 限流窗口还会越拉越长）。停掉后失败的店铺没写 mall_id，冷却后重新点击会自动重跑。
+const PDD_MALL_BREAK_STREAK = 6;
 // 任务保留时长：131 个店 × 约 2.5s + 失败重试一轮，真实耗时 8~15 分钟
 const PDD_MALL_TASK_TTL_MS = 60 * 60 * 1000;
 
@@ -1984,7 +1991,7 @@ function dispatchMallBatch(ctx) {
     taskId: ctx.taskId,
     items: batch.map((t) => ({ mallSn: t.mallSn, mallName: t.mallName })),
     timeoutMs: PDD_MALL_ITEM_TIMEOUT_MS,
-    gapMs: 700,
+    gapMs: PDD_MALL_GAP_MS,
   });
   if (!sent) {
     ctx.status = 'failed';
@@ -2066,7 +2073,7 @@ async function onPddMallDone(uid, msg) {
     }
   }
 
-  if (msg.stopped) {
+  if (msg.stopped || ctx.aborted) {
     ctx.stopped = true;
     ctx.queue.length = 0;
     ctx.retry.length = 0;
@@ -2089,12 +2096,15 @@ async function onPddMallDone(uid, msg) {
     }
   }
 
-  ctx.status = 'done';
+  // 被限流打断时用 failed：前端会弹红色提示，用户才会去看「等冷却再点」，而不是以为跑完了
+  ctx.status = ctx.aborted ? 'failed' : 'done';
   ctx.finishedAt = Date.now();
-  ctx.message = `店铺 ID 解析完成：成功 ${ctx.okCount} 家、失败 ${ctx.failCount} 家`
+  ctx.message = (ctx.aborted ? '店铺 ID 解析被平台限流打断' : '店铺 ID 解析完成')
+    + `：成功 ${ctx.okCount} 家、失败 ${ctx.failCount} 家`
     + (ctx.filled ? `，回填订单 ${ctx.filled} 条` : '')
     + (ctx.retryRound ? '（含一轮自动重试）' : '')
-    + (ctx.stopped ? '（中途停止）' : '');
+    + (ctx.aborted ? `。${ctx.abortReason}，已自动停止；剩余店铺等 1~2 小时后再点一次（已成功的不用重跑）` : '')
+    + (ctx.stopped && !ctx.aborted ? '（中途停止）' : '');
   ctx.progress = Object.assign({}, ctx.progress, { index: ctx.total, total: ctx.total });
   logOp(Number(uid), 'pdd.mall.resolve.done', {
     ok: ctx.okCount > 0, okCount: ctx.okCount, failCount: ctx.failCount, filled: ctx.filled, tenantId: ctx.userId,
@@ -2121,6 +2131,24 @@ function onPddMallProgress(uid, msg) {
     text: `[${idx}/${total}] ${current}（成功 ${okCount} / 失败 ${failCount}）`,
   });
   if (ctx.progressLog.length > 600) ctx.progressLog.splice(0, ctx.progressLog.length - 600);
+
+  // ── 限流熔断 ──
+  // 实测：并发/高频打开会话页后，拼多多 update_chat_info 会统一返回 40004「请稍后重试」，
+  // 页面显示「网络异常」，此后每个店都失败。继续刷只会让限流窗口更长，所以连续
+  // PDD_MALL_BREAK_STREAK 个店没有任何成功就立刻发停止指令。
+  if (ctx.aborted) return;
+  if (ctx.lastOkSeen == null) ctx.lastOkSeen = 0;
+  if (okCount > ctx.lastOkSeen) { ctx.lastOkSeen = okCount; ctx.stall = 0; }
+  else { ctx.stall = (Number(ctx.stall) || 0) + 1; }
+  if (ctx.stall >= PDD_MALL_BREAK_STREAK) {
+    ctx.aborted = true;
+    ctx.abortReason = `连续 ${ctx.stall} 个店铺都解析失败（平台返回 40004 请稍后重试，说明已被限流）`;
+    agentHub.send(ctx.agentUid, { type: 'stop' });
+    ctx.progressLog.push({
+      t: new Date().toLocaleTimeString('zh-CN', { hour12: false }),
+      text: `⚠ ${ctx.abortReason}，已自动停手（等 1~2 小时后再点，未解析的会自动重跑）`,
+    });
+  }
 }
 
 /**
