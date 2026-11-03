@@ -545,12 +545,12 @@ async function ensureQnhSchema(q) {
       "  `exp_rent` DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT '支出：房租（手工）'," +
       "  `exp_utility` DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT '支出：水电（手工）'," +
       "  `exp_labor` DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT '支出：人工（手工）'," +
-      "  `exp_warehouse` DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT '支出：中心仓（手工）'," +
+      "  `exp_warehouse` DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT '支出：中心仓（v0.3.8 起停用，保留历史值）'," +
       "  `exp_delivery` DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT '支出：配送费（手工）'," +
       "  `exp_promo` DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT '支出：推广费（手工）'," +
-      "  `exp_liquor` DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT '支出：自采酒水（手工）'," +
-      "  `exp_ice` DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT '支出：雪糕（手工）'," +
-      "  `exp_produce` DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT '支出：果蔬（手工）'," +
+      "  `exp_liquor` DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT '支出：自采酒水（v0.3.8 起停用，保留历史值）'," +
+      "  `exp_ice` DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT '支出：雪糕（v0.3.8 起停用，保留历史值）'," +
+      "  `exp_produce` DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT '支出：果蔬（v0.3.8 起停用，保留历史值）'," +
       "  `exp_vat` DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT '支出：增值税（手工）'," +
       "  `exp_cit` DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT '支出：企业所得税（手工）'," +
       "  `exp_other` DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT '支出：其它（手工）'," +

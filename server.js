@@ -4700,13 +4700,14 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, await products.publishToMarket(user.id, body.skus, body.discount, await brandIdOfUser(tenantId)));
     }
 
-    // ── 账单（按月收支；1688 / 拼多多金额由系统实时统计，其余手工录入）──
+    // ── 账单（按月收支；平台金额 + 各供应商货单金额由系统实时统计，其余手工录入）──
     if (method === 'GET' && p === '/api/billing') {
       if (!canBilling) return denyBilling();
       const months = url.searchParams.get('months');
       return sendJson(res, 200, await billing.overview(tenantId, { months }));
     }
-    // 账单里三个系统统计项（1688 / 拼多多 / 闪电帮帮）的订单明细：用于核对金额，口径与账单完全一致
+    // 账单里系统统计项（1688 / 拼多多 / 闪电帮帮 / 齐货通 / 每个供应商）的明细：
+    // 用于核对金额，口径与账单完全一致；供应商项的 platform = sup:<supplier_id>
     if (method === 'GET' && p === '/api/billing/orders') {
       if (!canBilling) return denyBilling();
       try {

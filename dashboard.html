@@ -1718,8 +1718,9 @@
 
             <!-- 一级列 3：支出（二级 = 三个系统统计项 + 手工项 + 支出合计） -->
             <el-table-column label="支出" label-class-name="bill-grp">
+              <!-- 系统项列宽 208（金额 + N 单 + 「系统」标签）；供应商货单项列更多，收窄到 176 以免整表过宽 -->
               <el-table-column v-for="it in billExpenseItems" :key="it.key" :label="it.label"
-                               :width="it.source === 'auto' ? 208 : 132">
+                               :width="it.supplierId ? 176 : (it.source === 'auto' ? 208 : 132)">
                 <template slot="header">
                   <span>{{ it.label }}</span>
                   <el-tag v-if="it.source === 'auto'" size="mini" type="info" style="margin-left:4px">系统</el-tag>
@@ -1781,16 +1782,16 @@
           </div>
           <el-table :data="billOrders.rows" size="mini" border max-height="420" v-loading="billOrders.loading"
                     empty-text="该月没有符合条件的订单">
-            <el-table-column label="单号" min-width="170">
+            <el-table-column :label="billOrders.cols.no || '单号'" min-width="170">
               <template slot-scope="p"><span class="loginid">{{ p.row.no }}</span></template>
             </el-table-column>
-            <el-table-column prop="who" label="卖家 / 店铺" min-width="150" show-overflow-tooltip></el-table-column>
-            <el-table-column prop="goods" label="商品" min-width="200" show-overflow-tooltip></el-table-column>
+            <el-table-column prop="who" :label="billOrders.cols.who || '卖家 / 店铺'" min-width="150" show-overflow-tooltip></el-table-column>
+            <el-table-column prop="goods" :label="billOrders.cols.goods || '商品'" min-width="200" show-overflow-tooltip></el-table-column>
             <el-table-column prop="t" label="时间" width="140"></el-table-column>
             <el-table-column label="金额" width="110" align="right">
               <template slot-scope="p"><span class="amount plain">{{ yuan(p.row.amount) }}</span></template>
             </el-table-column>
-            <el-table-column prop="status" label="状态" width="110" show-overflow-tooltip></el-table-column>
+            <el-table-column prop="status" :label="billOrders.cols.status || '状态'" width="110" show-overflow-tooltip></el-table-column>
           </el-table>
           <div slot="footer" style="display:flex;align-items:center;gap:12px">
             <span class="loginid">合计 {{ yuan(billOrders.sum) }}（{{ billOrders.total }} 单）</span>
@@ -4275,7 +4276,7 @@ const vm = new Vue({
       bill: { loading: false, syncing: false, items: [], cols: [] },
       billAdd: { visible: false, month: '', copyFrom: '', saving: false },
       // 账单「系统」支出项的订单明细弹窗（点金额打开，用于核对条数与合计）
-      billOrders: { visible: false, loading: false, platform: '', month: '', title: '', rows: [], total: 0, sum: 0, page: 1, size: 50 },
+      billOrders: { visible: false, loading: false, platform: '', month: '', title: '', rows: [], cols: {}, total: 0, sum: 0, page: 1, size: 50 },
       quotes: { visible: false, loading: false, sku: '', goodsName: '', rows: [] },
       meta: '', tenantLabel: '', copyright: '',
       // 筛选（草稿 vs 生效）
@@ -4572,8 +4573,11 @@ const vm = new Vue({
         mom = '较上月 ' + (diff >= 0 ? '+' : '') + diff.toFixed(1) + '%';
       }
       const auto = cur.auto || {};
-      const plat = (Number(auto.auto_1688) || 0) + (Number(auto.auto_pdd) || 0)
-        + (Number(auto.auto_sdc) || 0) + (Number(auto.auto_qht) || 0);
+      // 平台采购合计：所有系统统计项（平台订单 + 各供应商货单）之和，不写死 key
+      let plat = 0;
+      for (const it of (this.bill.items || [])) {
+        if (it.source === 'auto') plat += Number(auto[it.key]) || 0;
+      }
       return [
         { key: 'net', num: this.yuan(t.net), label: '本月净利润 · ' + this.monthText(cur.month), sub: mom },
         { key: 'income', num: this.yuan(t.income), label: '本月总收入', sub: '美团 / 淘宝 / 京东' },
@@ -9701,7 +9705,7 @@ const vm = new Vue({
       this.billOrders = {
         visible: true, loading: true, platform: it.key, month: row.month,
         title: it.label + ' · ' + this.monthText(row.month),
-        rows: [], total: 0, sum: 0, page: 1, size: 50,
+        rows: [], cols: {}, total: 0, sum: 0, page: 1, size: 50,
       };
       this.loadBillOrders(1);
     },
@@ -9721,6 +9725,7 @@ const vm = new Vue({
           return;
         }
         b.rows = (d && d.rows) || [];
+        b.cols = (d && d.cols) || {};
         b.total = (d && d.total) || 0;
         b.sum = (d && d.sum) || 0;
       } catch (e) {
