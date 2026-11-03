@@ -1522,6 +1522,8 @@ const PDD_APPLY_TTL_MS = PDD_APPLY_TIMEOUT_MS + 5 * 60 * 1000;
 const PDD_APPLY_MIN_AGENT = '0.2.21';   // 0.2.21 起：CDP 抓包判成败 + 页面就绪再点（修「等待结果超时」）
 // 支持「催商家开票」的最低助手版本（0.2.23 起才有 pdd_send 内核）
 const PDD_SEND_MIN_AGENT = '0.2.23';
+// 支持「解析店铺 ID（mall_sn→mall_id）」的最低助手版本（0.3.16 起才有 pdd_mall 内核）
+const PDD_MALL_MIN_AGENT = '0.3.16';
 
 // ── 闪电帮帮任务：登录 / 拉订单 / 批量催收（三项都必须在本机助手的浏览器里跑）──
 //    原因：该站点网关要 mtgsig 签名，服务器直连 403；只有页面上下文的 fetch 会自动被签名。
@@ -1952,6 +1954,72 @@ function onPddSendDone(uid, msg) {
 }
 
 /**
+ * 助手回报「解析店铺 ID」结果（v0.3.16）：写 pdd_mall 缓存，并把同一 mall_sn 名下的
+ * 订单 mall_id 一次性回填。写库是异步的，所以任务状态等写库完成后再标 done ——
+ * 否则前端看到「已完成」时订单里还是空的，催收按钮仍旧点不亮。
+ */
+async function onPddMallDone(uid, msg) {
+  const ctx = PDD_TASKS.get(String((msg && msg.taskId) || ''));
+  if (!ctx || ctx.kind !== 'mall' || ctx.userId !== Number(uid) || ctx.status !== 'pending') return;
+  const results = Array.isArray(msg.results) ? msg.results : [];
+  ctx.results = results.map((r) => ({
+    mallName: String((r && r.mallName) || '').slice(0, 64),
+    mallId: Number((r && r.mallId) || 0) || 0,
+    ok: !!(r && Number(r.mallId)),
+    error: String((r && r.error) || '').slice(0, 160),
+  }));
+  let saved = { ok: 0, fail: 0, filled: 0 };
+  try {
+    saved = await pdd.saveMallResults(ctx.userId, results.map((r) => ({
+      mallSn: r && r.mallSn, mallId: r && r.mallId, mallName: r && r.mallName,
+      ok: !!(r && r.mallId), error: r && r.error,
+    })), msg.agentVer || '');
+  } catch (e) {
+    console.warn('[pdd] 店铺 ID 结果写库失败：' + ((e && e.message) || e));
+  }
+  ctx.okCount = saved.ok;
+  ctx.failCount = saved.fail;
+  ctx.filled = saved.filled;
+
+  if (!msg.ok && !results.length) {
+    ctx.status = 'failed';
+    ctx.message = String(msg.error || '助手解析店铺 ID 失败').slice(0, 300);
+    ctx.finishedAt = Date.now();
+    logOp(Number(uid), 'pdd.mall.resolve', { ok: false, tenantId: ctx.userId, reason: ctx.message });
+    return;
+  }
+  ctx.status = 'done';
+  ctx.finishedAt = Date.now();
+  ctx.message = `店铺 ID 解析完成：成功 ${saved.ok} 家、失败 ${saved.fail} 家`
+    + (saved.filled ? `，回填订单 ${saved.filled} 条` : '')
+    + (msg.stopped ? '（中途停止）' : '');
+  logOp(Number(uid), 'pdd.mall.resolve.done', {
+    ok: saved.ok > 0, okCount: saved.ok, failCount: saved.fail, filled: saved.filled, tenantId: ctx.userId,
+  });
+}
+
+/** 助手逐店上报「解析店铺 ID」进度 */
+function onPddMallProgress(uid, msg) {
+  const ctx = PDD_TASKS.get(String((msg && msg.taskId) || ''));
+  if (!ctx || ctx.kind !== 'mall' || ctx.userId !== Number(uid) || ctx.status !== 'pending') return;
+  const idx = Number(msg.index) || 0;
+  const total = Number(msg.total) || ctx.total;
+  ctx.progress = {
+    index: idx, total,
+    current: String(msg.current || ''),
+    okCount: Number(msg.okCount) || 0,
+    failCount: Number(msg.failCount) || 0,
+    updatedAt: Date.now(),
+  };
+  ctx.progressLog = ctx.progressLog || [];
+  ctx.progressLog.push({
+    t: new Date().toLocaleTimeString('zh-CN', { hour12: false }),
+    text: `[${idx}/${total}] ${msg.current || ''}（成功 ${ctx.progress.okCount} / 失败 ${ctx.progress.failCount}）`,
+  });
+  if (ctx.progressLog.length > 300) ctx.progressLog.splice(0, ctx.progressLog.length - 300);
+}
+
+/**
  * 助手回报「登录闪电帮帮」结果：写台账（不写 Cookie，登录态始终留在本机浏览器分区里）。
  */
 function onSdcLoginDone(uid, msg) {
@@ -2111,6 +2179,8 @@ function handleAgentMessage(uid, msg) {
   if (msg.type === 'pdd_apply_progress') { onPddApplyProgress(uid, msg); return; }
   if (msg.type === 'pdd_send_done') { onPddSendDone(uid, msg); return; }
   if (msg.type === 'pdd_send_progress') { onPddApplyProgress(uid, msg); return; }
+  if (msg.type === 'pdd_mall_done') { onPddMallDone(uid, msg).catch((e) => console.warn('[pdd] 解析店铺结果处理失败：' + ((e && e.message) || e))); return; }
+  if (msg.type === 'pdd_mall_progress') { onPddMallProgress(uid, msg); return; }
   // ── 闪电帮帮：登录 / 取数（分批回传）/ 批量催收 ──
   if (msg.type === 'sdc_login_done') { onSdcLoginDone(uid, msg); return; }
   if (msg.type === 'sdc_fetch_page') { onSdcFetchPage(uid, msg); return; }
@@ -5836,15 +5906,26 @@ const server = http.createServer(async (req, res) => {
 
       // 概况：登录态 + 状态汇总 + 状态字典；管理员额外拿到账号列表以便「代入」
       if (method === 'GET' && p === '/api/pdd/status') {
-        const [cookie, sum, orderSync] = await Promise.all([
+        const [cookie, sum, orderSync, mallStat] = await Promise.all([
           pdd.cookieStatus(pddUid).catch(() => ({ ok: false, logined: false, message: '登录态读取失败' })),
           pdd.summary(pddUid).catch(() => null),
           pddOrders.orderSyncSummary(pddUid).catch(() => null),
+          pdd.mallResolveStats(pddUid).catch(() => ({ pending: 0, resolved: 0 })),
         ]);
+        const aUid = agentUidFor(user, pddUid);
+        const mallAgentVer = aUid ? (agentHub.status(aUid).agentVer || '') : '';
         const out = {
           cookie,
           summary: sum,
           orderSync,
+          // 店铺 ID 解析进度：pending>0 时页面显示「解析店铺 ID」按钮（v0.3.16）
+          mallId: {
+            pending: mallStat.pending,
+            resolved: mallStat.resolved,
+            minVer: PDD_MALL_MIN_AGENT,
+            agentVer: mallAgentVer,
+            agentOutdated: !!(mallAgentVer && !verGte(mallAgentVer, PDD_MALL_MIN_AGENT)),
+          },
           // 「获取订单数据」首次全量不再限时间，一直翻到空页；这里给页面用的翻页上限（系统管理可改）
           maxPages: psync.getMaxPages(),
           statusText: pdd.STATUS_TEXT,
@@ -5887,6 +5968,89 @@ const server = http.createServer(async (req, res) => {
         const out = await pdd.sync({ userId: pddUid, trigger: 'manual' });
         await logOp(user, 'pdd.sync', { ok: !!out.ok, total: out.total, tenantId: pddUid });
         return sendJson(res, 200, out);
+      }
+
+      // 店铺 ID 解析进度：多少家店还没解析出来（催收按钮能否点亮就看这个）
+      if (method === 'GET' && p === '/api/pdd/mall-id/stats') {
+        const st = await pdd.mallResolveStats(pddUid);
+        const aUid = agentUidFor(user, pddUid);
+        const agentVer = aUid ? (agentHub.status(aUid).agentVer || '') : '';
+        return sendJson(res, 200, {
+          ok: true,
+          pending: st.pending,
+          resolved: st.resolved,
+          agentOnline: !!(aUid && agentHub.isOnline(aUid)),
+          agentVer,
+          minVer: PDD_MALL_MIN_AGENT,
+          agentOutdated: !!(agentVer && !verGte(agentVer, PDD_MALL_MIN_AGENT)),
+        });
+      }
+
+      // 「解析店铺 ID」：订单列表接口只给加密 mall_sn（protobuf + AES 密文），
+      // 解密密钥在拼多多服务端；服务器直连 /api/turing/mall/gr_st 一律 40002（风控 isIntercept），
+      // 静态抓 mall_page.html 又是空壳。唯一可行：让本机助手在已登录的真实页面里打开店铺页，
+      // 把页面自己解出来的 mall_id 抓回来 → 写 pdd_mall 缓存 + 回填 pdd_order.mall_id。
+      // 解析成功一次永久有效（mall_sn 与店铺一一对应），之后催收全走 mall_id，不用再开页面。
+      if (method === 'POST' && p === '/api/pdd/mall-id/resolve') {
+        const b = await readBody(req).catch(() => ({}));
+        const aUid = agentUidFor(user, pddUid);
+        if (!aUid) {
+          return sendJson(res, 200, {
+            ok: false, needAgent: true,
+            message: '本机助手未连接：解析店铺 ID 必须在本机已登录的助手窗口里跑。请先启动「催收小助手」并绑定本机助手。',
+          });
+        }
+        if (!agentVersionGate(res, aUid, '解析店铺 ID')) return;
+        const agentVer = agentHub.status(aUid).agentVer || '';
+        if (agentVer && !verGte(agentVer, PDD_MALL_MIN_AGENT)) {
+          return sendJson(res, 200, {
+            ok: false, needAgent: true, agentOutdated: true,
+            message: `这台电脑上的催收小助手是 v${agentVer}，还不支持解析店铺 ID。请升级到 v${PDD_MALL_MIN_AGENT} 及以上。`,
+          });
+        }
+        const running = [...PDD_TASKS.values()].find(
+          (c) => c.kind === 'mall' && c.userId === Number(pddUid) && c.status === 'pending'
+        );
+        if (running) {
+          return sendJson(res, 200, {
+            ok: true, pending: true, taskId: running.taskId, already: true,
+            total: running.total, message: '店铺 ID 解析正在运行中，继续展示进度…',
+          });
+        }
+        const limit = Math.min(80, Math.max(1, Number(b.limit) || 20));
+        const targets = await pdd.mallResolveTargets(pddUid, limit);
+        if (!targets.length) {
+          const st = await pdd.mallResolveStats(pddUid);
+          return sendJson(res, 200, {
+            ok: true, total: 0,
+            message: st.pending
+              ? '暂无可解析的店铺：刚解析失败过的店 10 分钟内不重复尝试，请稍后再点。'
+              : '所有店铺 ID 都已解析完成，催收可以直接用了。',
+          });
+        }
+        const taskId = 'pddmall-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+        const ctx = {
+          taskId, kind: 'mall', userId: Number(pddUid), status: 'pending', message: '',
+          total: targets.length, results: [], okCount: 0, failCount: 0,
+          progress: null, progressLog: [],
+          createdAt: Date.now(), expiresAt: Date.now() + PDD_APPLY_TTL_MS,
+        };
+        const sent = agentHub.send(aUid, {
+          type: 'pdd_mall',
+          taskId,
+          items: targets.map((t) => ({ mallSn: t.mallSn, mallName: t.mallName })),
+          timeoutMs: 15000,   // 单店超时：首屏 JS 重，正常 5~10s；超时按失败记，别让 30 个店跑成半小时
+          gapMs: 800,
+        });
+        if (!sent) {
+          return sendJson(res, 200, { ok: false, needAgent: true, message: '下发解析任务失败：本机助手连接已断开，请确认助手正在运行。' });
+        }
+        PDD_TASKS.set(taskId, ctx);
+        await logOp(user, 'pdd.mall.resolve', { tenantId: pddUid, total: targets.length, agentUid: aUid });
+        return sendJson(res, 200, {
+          ok: true, pending: true, taskId, total: targets.length,
+          message: `已下发解析任务（${targets.length} 个店铺），正在本机助手里逐个打开店铺页取 mall_id…`,
+        });
       }
 
       // 「获取订单数据」：拉「我的订单」全部订单（待付款/待发货/待收货/已完成/已退款）
@@ -6205,9 +6369,12 @@ const server = http.createServer(async (req, res) => {
             order_sn: o.order_sn, invoice_amount: o.invoice_amount,
           });
           if (!content.trim()) continue;   // 模板为空绝不发空消息（1688 已经踩过这个坑）
-          if (!perOrder && seenMall.has(String(o.mall_id))) continue;
-          seenMall.add(String(o.mall_id));
-          items.push({ order_sn: o.order_sn, mall_id: o.mall_id, content });
+          // 去重键：优先 mall_id（同一商家会话唯一）；没有 mall_id 时用 mall_sn 兜底，
+          // 否则全部落在 'null' 上，会把不同商家合并成一条，只发给第一个商家。
+          const mallKey = o.mall_id ? 'm' + o.mall_id : 's' + String(o.mall_sn || '');
+          if (!perOrder && seenMall.has(mallKey)) continue;
+          seenMall.add(mallKey);
+          items.push({ order_sn: o.order_sn, mall_id: o.mall_id, mall_sn: o.mall_sn || '', content });
         }
         if (!items.length) {
           return sendJson(res, 200, { ok: false, message: '催收消息内容为空：请到「系统管理 → 拼多多催收消息」配置模板' });

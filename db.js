@@ -325,6 +325,7 @@ async function ensureQnhSchema(q) {
       "  `user_id` INT NOT NULL DEFAULT 1 COMMENT '数据归属用户'," +
       "  `order_sn` VARCHAR(64) NOT NULL COMMENT '订单号'," +
       "  `mall_id` BIGINT DEFAULT NULL COMMENT '店铺 ID'," +
+      "  `mall_sn` VARCHAR(128) DEFAULT NULL COMMENT '店铺加密串（mall_url 里的 mall_sn，用于反解 mall_id）'," +
       "  `goods_name` VARCHAR(255) DEFAULT NULL COMMENT '商品名'," +
       "  `spec` VARCHAR(255) DEFAULT NULL COMMENT '规格'," +
       "  `thumb_url` VARCHAR(512) DEFAULT NULL COMMENT '商品图'," +
@@ -356,8 +357,28 @@ async function ensureQnhSchema(q) {
       "  PRIMARY KEY (`user_id`,`order_sn`)," +
       "  KEY `idx_pdo_status` (`user_id`,`invoice_status`)," +
       "  KEY `idx_pdo_ostatus` (`user_id`,`order_status`)," +
+      "  KEY `idx_pdo_msn` (`user_id`,`mall_sn`)," +
       "  KEY `idx_pdo_time` (`order_time`)" +
       ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='拼多多订单与开票状态'",
+
+    // 拼多多「店铺加密串 → 数字 mall_id」解析缓存（v0.3.16）
+    // 为什么要有它：订单列表接口只给加密的 mall_sn（protobuf + AES 密文），密钥在拼多多服务端，
+    // 服务端直连解密接口 /api/turing/mall/gr_st 会被风控拦（40002 isIntercept）。
+    // 唯一可行的是让本机助手在已登录的真实页面里跑一次，把页面自己解出来的 mall_id 抓回来存这里。
+    // 解析成功一次就永久可用（mall_sn 与店铺一一对应、不随时间变），之后催收全走 mall_id。
+    'CREATE TABLE IF NOT EXISTS `pdd_mall` (' +
+      "  `user_id` INT NOT NULL DEFAULT 1 COMMENT '数据归属用户'," +
+      "  `mall_sn` VARCHAR(128) NOT NULL COMMENT '店铺加密串（订单 mall_url 里的 mall_sn）'," +
+      "  `mall_id` BIGINT DEFAULT NULL COMMENT '解析出的数字店铺 ID（NULL=还没解析成功）'," +
+      "  `mall_name` VARCHAR(128) DEFAULT NULL COMMENT '店铺名（订单接口的 mall_name，便于人工核对）'," +
+      "  `fail_reason` VARCHAR(255) DEFAULT NULL COMMENT '最近一次解析失败原因'," +
+      "  `tried_at` DATETIME DEFAULT NULL COMMENT '最近一次解析尝试时间'," +
+      "  `agent_ver` VARCHAR(32) DEFAULT NULL COMMENT '执行解析的助手版本'," +
+      "  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP," +
+      "  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP," +
+      "  PRIMARY KEY (`user_id`,`mall_sn`)," +
+      "  KEY `idx_pm_mallid` (`user_id`,`mall_id`)" +
+      ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='拼多多店铺 mall_sn→mall_id 解析缓存'",
 
     // 拼多多登录态（Cookie 串）。与 qnh_session 同样的思路：入库不落盘。
     // 只需要 Cookie 头，不需要 Playwright storageState（接口是纯 HTTP 调用）。
@@ -951,6 +972,8 @@ async function migrate(conn, dbName) {
       ['tabs_belong', "VARCHAR(64) DEFAULT NULL COMMENT '平台分类标签 all/unreceived/unrated 等'"],
       ['parent_order_sn', "VARCHAR(64) DEFAULT NULL COMMENT '组合单父单号（多多买菜 PO-）'"],
       ['order_source', "TINYINT NOT NULL DEFAULT 1 COMMENT '来源：1=发票助手接口 2=订单列表接口'"],
+      // v0.3.16：加密店铺串，用于让本机助手反解 mall_id（接口只给加密串，密钥在拼多多服务端）
+      ['mall_sn', "VARCHAR(128) DEFAULT NULL COMMENT '店铺加密串（mall_url 里的 mall_sn）'"],
     ]) {
       if (!(await colExists('pdd_order', col))) {
         await q(`ALTER TABLE \`pdd_order\` ADD COLUMN \`${col}\` ${decl}`);
@@ -958,6 +981,25 @@ async function migrate(conn, dbName) {
     }
     if (!(await idxExists('pdd_order', 'idx_pdo_ostatus'))) {
       await q('ALTER TABLE `pdd_order` ADD KEY `idx_pdo_ostatus` (`user_id`,`order_status`)');
+    }
+    if (!(await idxExists('pdd_order', 'idx_pdo_msn'))) {
+      await q('ALTER TABLE `pdd_order` ADD KEY `idx_pdo_msn` (`user_id`,`mall_sn`)');
+    }
+    // 回填存量 mall_sn：老数据只有 raw_json，里面 mall_url 的 mall_sn 是百分号编码的 base64，
+    // 这里做同样的解码（%2B→+、%2F→/、%3D→=），只补空值，反复执行安全。
+    // 不补这段的话，老订单必须重新全量同步才会带上 mall_sn（1000 页，很慢）。
+    // ⚠ 必须先 REPLACE 掉 decrypt_mall_sn=：它同样包含 "mall_sn=" 子串，且排在后面，
+    //   不处理的话 SUBSTRING_INDEX(..., -1) 取到的是 "1"（decrypt_mall_sn=1 的 1）。
+    if (await colExists('pdd_order', 'mall_sn')) {
+      const filled = await q(
+        "UPDATE `pdd_order` SET `mall_sn` = REPLACE(REPLACE(REPLACE(" +
+        "SUBSTRING_INDEX(SUBSTRING_INDEX(SUBSTRING_INDEX(REPLACE(`raw_json`, 'decrypt_mall_sn=', 'DEMSNX'), 'mall_sn=', -1), '&', 1), '\"', 1)," +
+        " '%2B', '+'), '%2F', '/'), '%3D', '=')" +
+        " WHERE `mall_sn` IS NULL AND `raw_json` LIKE '%mall_sn=%'"
+      ).catch(() => null);
+      if (filled && filled.affectedRows) {
+        console.log(`[db] 回填 pdd_order.mall_sn：${filled.affectedRows} 行`);
+      }
     }
   }
 

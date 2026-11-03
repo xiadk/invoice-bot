@@ -3782,6 +3782,15 @@
                          :action-loading="pd.orderSyncing" :can-logout="true"
                          @login="onPddLoginBtn" @logout="logoutPdd" @action="syncPddOrders">
             <template slot="actions">
+              <el-button v-if="pd.mallId && pd.mallId.pending > 0" size="small" type="warning" plain
+                         :loading="pd.mallResolving" @click="resolveMallIds"
+                         :title="'订单接口只给加密的店铺串（mall_sn），密钥在拼多多服务端，只能在本机助手已登录的窗口里跑一次解出数字店铺 ID'">
+                解析店铺 ID（{{ pd.mallId.pending }}）
+              </el-button>
+              <el-tag v-else-if="pd.mallId && pd.mallId.resolved > 0" size="small" type="success"
+                      title="已解析的店铺都缓存了数字 mall_id，之后催收直接用，不用再开页面">
+                店铺 ID 已解析 {{ pd.mallId.resolved }}
+              </el-tag>
               <el-tag v-if="pd.orderSync && pd.orderSync.lastAt" size="small" type="info"
                       title="最近一次订单同步时间（取数来自拼多多「我的订单」）">
                 订单同步 {{ String(pd.orderSync.lastAt).slice(0, 16) }}
@@ -3821,15 +3830,19 @@
                     :title="'任务失败：' + (pd.applyDialog.message || '未知原因')"
                     :description="pd.applyDialog.kind === 'orders'
                       ? '拉取订单失败，发票状态也未刷新。常见原因：拼多多登录态过期（重新登录后再试）、接口风控限流（过几分钟再试）。已入库的部分不受影响。'
-                      : (pd.applyDialog.kind === 'send'
+                      : (pd.applyDialog.kind === 'mall'
+                        ? '店铺 ID 一个都没解出来。常见原因：拼多多登录态过期（先在助手里重新登录）、店铺页被风控拦（过几分钟再试）。没解出来的店铺，其订单暂时只能人工去平台催。'
+                        : (pd.applyDialog.kind === 'send'
                         ? '未发出任何催收消息。可按提示处理后重试（等待上一个任务结束 / 重新登录拼多多 / 升级助手）；已发出去的部分不受影响。'
-                        : '未提交开票申请。可按提示处理后重试（等待上一个任务结束 / 重新登录拼多多 / 升级助手）；已提交成功的部分不受影响。')"></el-alert>
+                        : '未提交开票申请。可按提示处理后重试（等待上一个任务结束 / 重新登录拼多多 / 升级助手）；已提交成功的部分不受影响。'))"></el-alert>
           <el-alert v-else-if="!pd.applyDialog.running && pd.applyDialog.status === 'timeout'" type="warning"
                     :closable="false" show-icon style="margin-top:10px"
                     :title="pd.applyDialog.message"></el-alert>
           <el-alert v-else-if="!pd.applyDialog.running && pd.applyDialog.status === 'done'" type="success"
                     :closable="false" show-icon style="margin-top:10px"
-                    :title="pd.applyDialog.message || (pd.applyDialog.kind === 'orders' ? '同步完成' : '申请提交完成')"></el-alert>
+                    :title="pd.applyDialog.message || (pd.applyDialog.kind === 'orders'
+                      ? '同步完成'
+                      : (pd.applyDialog.kind === 'mall' ? '解析完成' : '申请提交完成'))"></el-alert>
         </el-card>
 
         <!-- 筛选 + 列表 -->
@@ -3952,10 +3965,9 @@
                 <el-button v-if="p.row.chatable" type="text" size="mini" :disabled="pd.applying"
                            style="color:#e6a23c" @click="sendPddMsgRows([p.row])"
                            title="发送话术里的抬头/税号/邮箱取本账号默认抬头">发送催收消息</el-button>
-                <!-- 已完成 + 未同步开票：平台已关闭开票入口、且订单接口拿不到数字 mall_id（聊天页必须要它），
-                     自动催收发不出去 → 给「去平台催」，在平台订单页里点「联系商家」走线下开票 -->
+                <!-- 已完成 + 未同步开票：平台已关闭开票入口（自动催收只对「商家处理中」开放）→ 给「去平台催」 -->
                 <el-tooltip v-if="!p.row.applyable && !p.row.chatable && p.row.manualChat" placement="top"
-                            content="这单已超过平台开票期限（入口已关闭），且订单接口拿不到商家会话 ID，无法自动发送。点这里打开平台订单页，在页面里点「联系商家」催其线下开票。">
+                            content="这单已超过平台开票期限（入口已关闭），自动催收只对「商家处理中」的订单开放。点这里打开平台订单页，在页面里点「联系商家」催其线下开票。">
                   <el-button type="text" size="mini" style="color:#e6a23c"
                              @click="openPddOrder(p.row)">去平台催</el-button>
                 </el-tooltip>
@@ -4651,6 +4663,10 @@ const vm = new Vue({
         // 「同步订单与发票」：一次点击 = 后台拉订单（首次全量、之后增量）+ 拉完接着刷发票状态
         // orderSync 来自 /api/pdd/status；maxPages = 翻页上限（两段共用，系统管理可配，默认 1000）
         orderSyncing: false, orderTaskId: '', orderSync: null, maxPages: 1000,
+        // 「解析店铺 ID」：订单接口只给加密 mall_sn，得靠本机助手在已登录页面里跑一次解出 mall_id
+        // pending = 还有多少家店没解出来；resolved = 已缓存成功的店铺数
+        mallId: { pending: 0, resolved: 0, minVer: '', agentVer: '', agentOutdated: false },
+        mallResolving: false, mallTaskId: '',
         // 批量申请发票
         // selected = 跨页累计的已勾选行（翻页不清空）；picked 是它的 {orderSn: row} 索引，
         // 用来在 data 整页替换（后端分页）时把「本页取消勾选」的行摘掉、其余页的保留
@@ -5170,7 +5186,8 @@ const vm = new Vue({
       const p = ad.progress;
       const isSend = ad.kind === 'send';
       const isOrders = ad.kind === 'orders';
-      const name = isOrders ? '同步订单与发票' : (isSend ? '批量催商家开票' : '批量申请发票');
+      const name = isOrders ? '同步订单与发票'
+        : (ad.kind === 'mall' ? '解析店铺 ID' : (isSend ? '批量催商家开票' : '批量申请发票'));
       const done = p ? (Number(p.index) || 0) : 0;
       const total = p ? (Number(p.total) || 0) : 0;
       let s;
@@ -7054,6 +7071,15 @@ const vm = new Vue({
         };
         this.pd.summary = d.summary || null;
         this.pd.orderSync = d.orderSync || null;
+        if (d.mallId) {
+          this.pd.mallId = {
+            pending: Number(d.mallId.pending) || 0,
+            resolved: Number(d.mallId.resolved) || 0,
+            minVer: d.mallId.minVer || '',
+            agentVer: d.mallId.agentVer || '',
+            agentOutdated: !!d.mallId.agentOutdated,
+          };
+        }
         this.pd.maxPages = Number(d.maxPages) > 0 ? Number(d.maxPages) : 1000;
         if (Array.isArray(d.sessions)) this.pddSessions = d.sessions.map(Number);
         if (Array.isArray(d.users)) {
@@ -7120,6 +7146,80 @@ const vm = new Vue({
     },
     onPddPage(p) { this.pd.page = p; this.loadPddOrders(); },
     onPddSize(s) { this.pd.size = s; this.pd.page = 1; this.loadPddOrders(); },
+
+    // ── 「解析店铺 ID」：订单接口只给加密 mall_sn（protobuf + AES，密钥在拼多多服务端），
+    //   服务器直连解密接口一律被风控拦（40002），只能让本机助手在已登录页面里跑一次，
+    //   把页面自己解出来的 mall_id 抓回服务端缓存。解一次永久有效。
+    async resolveMallIds() {
+      if (this.pd.mallResolving) { this.$message.info('正在解析中，请稍候…'); return; }
+      const st = this.pd.mallId || {};
+      if (st.agentOutdated) {
+        this.$message.warning(`本机助手是 v${st.agentVer || '未知'}，解析店铺 ID 需要 v${st.minVer} 及以上，请先更新助手`);
+        return;
+      }
+      if (!st.pending) { this.$message.success('所有店铺 ID 都已解析完成'); return; }
+      this.pd.mallResolving = true;
+      try {
+        const d = await this.pddApi('/api/pdd/mall-id/resolve', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ limit: 20 }),
+        });
+        if (d.error) { this.$message.error(d.error); return; }
+        if (d.needAgent) {
+          this.$message.warning(d.message || '本机助手未连接');
+          return;
+        }
+        if (!d.ok) { this.$message.error(d.message || '发起解析失败'); return; }
+        if (!d.pending) { this.$message.success(d.message || '所有店铺 ID 都已解析完成'); return; }
+        this.pd.mallTaskId = d.taskId;
+        this.pd.applyDialog = {
+          visible: true, running: true, kind: 'mall', status: '', message: d.message || '',
+          progress: { index: 0, total: Number(d.total) || 0 }, log: [], startedAt: Date.now(),
+        };
+        this.$nextTick(() => {
+          const card = this.$refs.applyCard;
+          const el = card && (card.$el || card);
+          if (el && el.scrollIntoView) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        });
+        this.pollPddMallResolve().catch(() => {});
+      } catch (e) {
+        this.$message.error('发起解析失败：' + (e.message || e));
+      } finally {
+        this.pd.mallResolving = false;
+      }
+    },
+    // 轮询解析进度：跑完刷新订单列表（mall_id 已回填，催收按钮会跟着亮起来）
+    async pollPddMallResolve() {
+      const taskId = this.pd.mallTaskId;
+      if (!taskId) return;
+      const started = Date.now();
+      for (;;) {
+        if (Date.now() - started > 30 * 60 * 1000) {
+          this.pd.applyDialog.running = false;
+          this.pd.applyDialog.status = 'timeout';
+          this.pd.applyDialog.message = '等待超时（30 分钟）。解析可能仍在后台进行，稍后刷新本页看结果。';
+          return;
+        }
+        await new Promise((r) => setTimeout(r, 1500));
+        let d = null;
+        try {
+          d = await this.pddApi('/api/pdd/task-status?taskId=' + encodeURIComponent(taskId));
+        } catch (e) { d = null; }
+        if (!d || d.error) continue;
+        if (d.progress) this.pd.applyDialog.progress = d.progress;
+        if (Array.isArray(d.progressLog)) this.pd.applyDialog.log = d.progressLog;
+        if (d.status === 'pending') continue;
+        this.pd.applyDialog.running = false;
+        this.pd.applyDialog.status = d.ok ? 'done' : 'failed';
+        this.pd.applyDialog.message = d.message || '';
+        if (d.ok) this.$message.success(d.message || '店铺 ID 解析完成');
+        else this.$message.error(d.message || '店铺 ID 解析失败');
+        await this.loadPddStatus();
+        await this.loadPddOrders();
+        return;
+      }
+    },
 
     // ── 「同步订单与发票」：一次点击跑两段（0.2.99 合并）──
     //   ① 拉「我的订单」订单（首次全量、之后增量追平）

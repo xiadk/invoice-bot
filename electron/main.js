@@ -28,6 +28,7 @@ const pddLogin = require('./agent/pdd-login');
 const aliLogin = require('./agent/ali-login');
 const pddApply = require('./agent/pdd-apply');
 const pddSend = require('./agent/pdd-send');
+const pddMall = require('./agent/pdd-mall');
 const sdc = require('./agent/sdc');
 const logoutKernel = require('./agent/logout');
 
@@ -104,7 +105,7 @@ function hasTray() { return !!tray && !tray.isDestroyed(); }
 // 看板点「退出账号」时服务器会下发 logout 指令，把这里的分区一起清掉 ——
 // 否则库里删了 Cookie、用户本机还留着，下次点「登录」会直接免登录进去（换号换不了）。
 const LOGOUT_WINDOWS = {
-  pdd: [() => pddLogin.peekWindow(), () => pddApply.peekWindow(), () => pddSend.peekWindow()],
+  pdd: [() => pddLogin.peekWindow(), () => pddApply.peekWindow(), () => pddSend.peekWindow(), () => pddMall.peekWindow()],
   qnh: [() => qnhLogin.peekWindow()],
   // 1688 的发送窗没有 peek（getSendWindow 会懒创建），直接调 closeSendWindow 关掉；
   // 登录窗（ali-login 内核）有自己的 peek
@@ -320,6 +321,11 @@ function startAgent() {
   }));
   // 「拼多多催商家开票」内核：加载真实聊天页逐单发消息，anti-content 由页面自己生成。
   client.setPddSendHandler(pddSend.createSendHandler({
+    log: (m) => { log(m); pushState(); },
+  }));
+  // 「拼多多解析店铺 ID」内核：订单接口只给加密 mall_sn，密钥在拼多多服务端，
+  // 服务器直连解密接口一律被风控拦（40002），只能在本机已登录页面里跑一次把 mall_id 抓回来。
+  client.setPddMallHandler(pddMall.createResolveHandler({
     log: (m) => { log(m); pushState(); },
   }));
   // 「闪电帮帮」三个内核：该站点网关要求 mtgsig 签名，服务器直连一律 403，
