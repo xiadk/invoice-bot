@@ -2826,8 +2826,13 @@
             </el-select>
             <el-button size="small" type="primary" plain @click="onWbFilter">查询</el-button>
             <el-button size="small" type="primary" icon="el-icon-plus" @click="openWbNew">新建货单</el-button>
+            <!-- 员工可见性（v0.3.10）：员工只看最近 7 天录入的货单，右上角合计整块不渲染 -->
+            <span v-if="isStaff" class="loginid" style="margin-left:10px"
+                  title="员工账号只能查看最近 7 天录入的货单，更早的请让老板账号查看">
+              仅显示近 7 天录入的货单
+            </span>
             <span class="fb-spacer"></span>
-            <span class="loginid">共 {{ wb.total }} 张 · 合计 <b style="color:#f56c6c">{{ wbMoney(wb.sumAmount) }}</b></span>
+            <span v-if="!isStaff" class="loginid">共 {{ wb.total }} 张 · 合计 <b style="color:#f56c6c">{{ wbMoney(wb.sumAmount) }}</b></span>
           </div>
 
           <el-table :data="wb.rows" size="small" border style="width:100%" v-loading="wb.loading"

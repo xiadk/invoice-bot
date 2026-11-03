@@ -4952,6 +4952,11 @@ const server = http.createServer(async (req, res) => {
       const denySupplier = () => sendJson(res, 403, { error: '未开启供应商管理权限，请联系超级管理员' });
       const denyWaybill = () => sendJson(res, 403, { error: '未开启货单管理权限，请联系超级管理员' });
       const wbUid = tenantId;
+      // 员工可见性（v0.3.10）：员工账号在货单页只看得到最近 7 天「录入」的货单，且不给合计金额。
+      // 判定只看 owner_id（员工身份），不看 role —— 员工一律受限，老板/主体账号不受影响。
+      // ⚠ 限制放在 SQL 层（restrictDays），前端隐藏只是不显示；这里不算合计就不下发。
+      const staffWaybillLimited = Number(user.owner_id) > 0;
+      const wbRestrictDays = staffWaybillLimited ? waybill.STAFF_VISIBLE_DAYS : 0;
 
       // —— 供应商 ——
       if (method === 'GET' && p === '/api/waybill/suppliers') {
@@ -4998,17 +5003,28 @@ const server = http.createServer(async (req, res) => {
       if (method === 'GET' && p === '/api/waybill/list') {
         if (!canWaybill) return denyWaybill();
         const q = url.searchParams;
-        return sendJson(res, 200, await waybill.listWaybills({
+        const out = await waybill.listWaybills({
           userId: wbUid,
           supplier: q.get('supplier') || '',
           from: q.get('from') || '', to: q.get('to') || '',
           invoiceStatus: q.get('invoiceStatus') || '',
           page: q.get('page'), size: q.get('size'),
-        }));
+          restrictDays: wbRestrictDays,
+          withSum: !staffWaybillLimited,
+        });
+        // 员工视角：明确告诉前端「被限制了几天、合计不给」，页面据此整块隐藏合计
+        if (staffWaybillLimited) {
+          out.staffLimited = true;
+          out.restrictedDays = waybill.STAFF_VISIBLE_DAYS;
+          out.sumAmount = null;
+        }
+        return sendJson(res, 200, out);
       }
       if (method === 'GET' && p === '/api/waybill/detail') {
         if (!canWaybill) return denyWaybill();
-        const out = await waybill.getWaybill({ userId: wbUid, id: url.searchParams.get('id') });
+        const out = await waybill.getWaybill({
+          userId: wbUid, id: url.searchParams.get('id'), restrictDays: wbRestrictDays,
+        });
         return sendJson(res, out.ok ? 200 : 404, out);
       }
       if (method === 'POST' && p === '/api/waybill/create') {

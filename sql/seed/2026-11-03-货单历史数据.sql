@@ -12,6 +12,9 @@
 --   开票状态   → waybill.invoice_status，历史数据一律 1（已开票，v0.3.7 按用户要求统一）
 --   来源行号   → waybill.note，格式「Excel导入 <工作表>!r<行号>」
 --                这一列同时是幂等键与图片回填的锚点（图片脚本按它找货单），请勿手工改
+--   录入时间   → waybill.created_at 回填为货单日期（时分 12:00，v0.3.10）
+--                历史数据没有真实录入时刻；而员工账号按 created_at 看「近 7 天录入」的货单，
+--                若留数据库默认 CURRENT_TIMESTAMP，导入当天员工会一次看到全部 357 张
 --
 -- 归属账号：user_id = 4（中山仕赫贸易有限公司）
 --
@@ -422,8 +425,12 @@ INSERT INTO `_seed_waybill` (`uid`, `sup`, `amount`, `bill_date`, `inv`, `note`)
   (4, '仟仟闪购', 204.00, '2026-05-19', 1, 'Excel导入 零散进货!r42'),
   (4, '广州同超贸易有限公司', 419.80, '2026-10-29', 1, 'Excel导入 零散进货!r125');
 
-INSERT INTO `waybill` (`user_id`, `supplier_id`, `supplier_name`, `amount`, `bill_date`, `invoice_status`, `note`, `created_by`)
-SELECT s.`uid`, IFNULL(sp.`id`, 0), s.`sup`, s.`amount`, s.`bill_date`, s.`inv`, s.`note`, 'admin'
+INSERT INTO `waybill` (`user_id`, `supplier_id`, `supplier_name`, `amount`, `bill_date`, `invoice_status`, `note`, `created_by`, `created_at`)
+SELECT s.`uid`, IFNULL(sp.`id`, 0), s.`sup`, s.`amount`, s.`bill_date`, s.`inv`, s.`note`, 'admin',
+       -- v0.3.10：历史数据没有真实「录入时刻」，created_at 取货单日期（时分 12:00）。
+       -- 员工账号按 created_at 只看近 7 天货单（见 lib/waybill.js STAFF_VISIBLE_DAYS），
+       -- 若留默认 CURRENT_TIMESTAMP，导入当天员工会一次看到全部 357 张。
+       TIMESTAMP(s.`bill_date`, '12:00:00')
   FROM `_seed_waybill` s
   LEFT JOIN `supplier` sp ON sp.`user_id` = s.`uid` AND sp.`name` = s.`sup`
  WHERE NOT EXISTS (
@@ -431,6 +438,13 @@ SELECT s.`uid`, IFNULL(sp.`id`, 0), s.`sup`, s.`amount`, s.`bill_date`, s.`inv`,
  );
 
 DROP TEMPORARY TABLE IF EXISTS `_seed_waybill`;
+
+-- v0.3.10：对「已经用旧版脚本导过」的库，重跑本脚本时把 created_at 对齐到货单日期。
+-- 幂等条件 DATE(created_at) <> bill_date，重复执行不会反复改写；手工新建的货单不受影响。
+UPDATE `waybill`
+   SET `created_at` = TIMESTAMP(`bill_date`, '12:00:00')
+ WHERE `note` LIKE 'Excel导入%'
+   AND DATE(`created_at`) <> `bill_date`;
 
 -- ── 3. 核对（跑完看这里：条数 357、合计 822756.23、全部已开票）────────
 SELECT COALESCE(s.`name`, w.`supplier_name`) AS 供应商,
