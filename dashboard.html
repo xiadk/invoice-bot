@@ -2780,8 +2780,13 @@
                 <span class="loginid">{{ p.row.imageCount ? p.row.imageCount + ' 张' : '—' }}</span>
               </template>
             </el-table-column>
-            <el-table-column label="备注" min-width="160">
-              <template slot-scope="p"><span class="loginid" :title="p.row.note">{{ p.row.note || '—' }}</span></template>
+            <!-- 开票状态（v0.3.6）：两档，点一下就切（未开票 ⇄ 已开票） -->
+            <el-table-column label="开票状态" width="100" align="center">
+              <template slot-scope="p">
+                <el-tag size="mini" :type="p.row.invoiceStatus ? 'success' : 'info'"
+                        style="cursor:pointer" title="点击切换开票状态"
+                        @click="toggleWbInvoice(p.row)">{{ p.row.invoiceStatus ? '已开票' : '未开票' }}</el-tag>
+              </template>
             </el-table-column>
             <el-table-column label="新建日期" width="145">
               <template slot-scope="p"><span class="loginid">{{ p.row.createdAt || '—' }}</span></template>
@@ -2832,6 +2837,14 @@
                 <el-form-item label="货单日期">
                   <el-date-picker v-model="wbNew.billDate" type="date" value-format="yyyy-MM-dd"
                                   placeholder="选择日期" style="width:100%"></el-date-picker>
+                </el-form-item>
+              </el-col>
+              <el-col :xs="12" :sm="6">
+                <el-form-item label="开票状态">
+                  <el-radio-group v-model="wbNew.invoiceStatus" size="mini">
+                    <el-radio :label="0">未开票</el-radio>
+                    <el-radio :label="1">已开票</el-radio>
+                  </el-radio-group>
                 </el-form-item>
               </el-col>
             </el-row>
@@ -2905,7 +2918,11 @@
               <el-descriptions-item label="货单日期">{{ wbView.waybill.billDate || '—' }}</el-descriptions-item>
               <el-descriptions-item label="新建日期">{{ wbView.waybill.createdAt || '—' }}</el-descriptions-item>
               <el-descriptions-item label="操作人">{{ wbView.waybill.createdBy || '—' }}</el-descriptions-item>
-              <el-descriptions-item label="备注">{{ wbView.waybill.note || '—' }}</el-descriptions-item>
+              <el-descriptions-item label="开票状态">
+                <el-tag size="mini" :type="wbView.waybill.invoiceStatus ? 'success' : 'info'">
+                  {{ wbView.waybill.invoiceStatus ? '已开票' : '未开票' }}
+                </el-tag>
+              </el-descriptions-item>
             </el-descriptions>
             <div class="wb-sec-title" style="margin-top:14px">
               货单图片 <span class="loginid">（{{ wbView.images.length }} 张，点击看大图）</span>
@@ -4351,9 +4368,10 @@ const vm = new Vue({
         loading: false, rows: [], total: 0, sumAmount: 0, page: 1, size: 20,
         supplier: '', range: [],   // range = [开始日期, 结束日期]，空 = 不限
       },
-      // 新建货单：供应商下拉（远程搜）+ 金额 + 货单日期 + 备注 + 图片（电脑端本地上传 / 手机扫码传）
+      // 新建货单：供应商下拉（远程搜）+ 金额 + 货单日期 + 开票状态 + 图片（电脑端本地上传 / 手机扫码传）
       wbNew: {
         visible: false, suppliers: [], supplierId: '', amount: '', billDate: '',
+        invoiceStatus: 0,
         note: '', saving: false, error: '', loadingSupplier: false,
         token: '', link: '', qr: '', leftSec: 0, images: [], uploading: false,
         imgError: '', polling: null, qrLoading: false,
@@ -8902,6 +8920,7 @@ const vm = new Vue({
       this.wbNew.supplierId = '';
       this.wbNew.amount = '';
       this.wbNew.billDate = this.todayStr();
+      this.wbNew.invoiceStatus = 0;
       this.wbNew.note = '';
       this.wbNew.error = '';
       this.wbNew.imgError = '';
@@ -9075,6 +9094,7 @@ const vm = new Vue({
             supplierId: this.wbNew.supplierId,
             amount: amt,
             billDate: this.wbNew.billDate,
+            invoiceStatus: this.wbNew.invoiceStatus ? 1 : 0,
             note: this.wbNew.note,
             token: this.wbNew.token,
             supplierName: sup ? sup.name : '',
@@ -9087,6 +9107,21 @@ const vm = new Vue({
       } catch (e) {
         this.wbNew.error = '保存失败：' + (e.message || e);
       } finally { this.wbNew.saving = false; }
+    },
+    /** 切换开票状态（v0.3.6）：列表上点一下 tag 就在未开票/已开票之间切 */
+    async toggleWbInvoice(row) {
+      const next = row.invoiceStatus ? 0 : 1;
+      try {
+        const d = await this.api('/api/waybill/status', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ id: row.id, status: next }),
+        });
+        if (!d.ok) return this.$message.error(d.error || '修改失败');
+        row.invoiceStatus = next;
+        this.$message.success(next ? '已标记为已开票' : '已改回未开票');
+      } catch (e) {
+        this.$message.error('修改失败：' + (e.message || e));
+      }
     },
     async openWbView(row) {
       this.wbView.visible = true;

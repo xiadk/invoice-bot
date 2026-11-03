@@ -1365,7 +1365,8 @@ async function migrate(conn, dbName) {
       "  `supplier_name` VARCHAR(64)   NOT NULL DEFAULT ''  COMMENT '建单时的供应商名称快照（供应商被删时兜底展示）'," +
       "  `amount`        DECIMAL(12,2) NOT NULL DEFAULT 0.00 COMMENT '货单金额（元）'," +
       "  `bill_date`     DATE          NOT NULL             COMMENT '货单日期（按此列查询与排序）'," +
-      "  `note`          VARCHAR(255)  DEFAULT NULL         COMMENT '备注'," +
+      "  `invoice_status` TINYINT      NOT NULL DEFAULT 0   COMMENT '开票状态：0未开票 1已开票（v0.3.6）'," +
+      "  `note`          VARCHAR(255)  DEFAULT NULL         COMMENT '备注（列表不再展示；历史导入时用来记原始行来源）'," +
       "  `created_by`    VARCHAR(64)   DEFAULT NULL         COMMENT '录入人（登录账号）'," +
       "  `created_at`    DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '新建日期'," +
       '  `updated_at`    DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,' +
@@ -1413,6 +1414,17 @@ async function migrate(conn, dbName) {
       ') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci' +
       "  COMMENT='货单图片的手机上传临时令牌（5 分钟有效）'"
     );
+  }
+
+  // ── 货单开票状态（v0.3.6）──
+  //   列表页「图片」右边展示，点击可切换。历史数据一律默认 0（未开票）。
+  if (await tableExists('waybill')) {
+    if (!(await colExists('waybill', 'invoice_status'))) {
+      await q(
+        "ALTER TABLE `waybill` ADD COLUMN `invoice_status` TINYINT NOT NULL DEFAULT 0 " +
+        "COMMENT '开票状态：0未开票 1已开票（v0.3.6）' AFTER `bill_date`"
+      );
+    }
   }
 
   // ── 供应商售后台账（v0.3.2）──

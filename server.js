@@ -5016,6 +5016,7 @@ const server = http.createServer(async (req, res) => {
         const out = await waybill.createWaybill({
           userId: wbUid, supplierId: body.supplierId, amount: body.amount,
           billDate: body.billDate, note: body.note, operator: user.username, token: body.token,
+          invoiceStatus: body.invoiceStatus,
         });
         if (out.ok) {
           await logOp(user, 'waybill.create', {
@@ -5023,6 +5024,14 @@ const server = http.createServer(async (req, res) => {
             amount: body.amount, billDate: body.billDate, images: out.imageCount,
           });
         }
+        return sendJson(res, out.ok ? 200 : 400, out);
+      }
+      if (method === 'POST' && p === '/api/waybill/status') {
+        if (!canWaybill) return denyWaybill();
+        const body = await readBody(req);
+        writeGuard();
+        const out = await waybill.setInvoiceStatus({ userId: wbUid, id: body.id, status: body.status });
+        if (out.ok) await logOp(user, 'waybill.invoice_status', { tenantId: wbUid, id: out.id, status: out.invoiceStatus });
         return sendJson(res, out.ok ? 200 : 400, out);
       }
       if (method === 'POST' && p === '/api/waybill/delete') {
