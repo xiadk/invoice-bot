@@ -630,11 +630,13 @@ CREATE TABLE IF NOT EXISTS `waybill` (
   `note`          VARCHAR(255)  DEFAULT NULL         COMMENT '备注（列表不再展示；历史导入时用来记原始行来源）',
   `created_by`    VARCHAR(64)   DEFAULT NULL         COMMENT '录入人（登录账号）',
   `created_at`    DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '新建日期',
+  `deleted_at`    DATETIME      DEFAULT NULL         COMMENT '软删除时间（NULL=有效；删除只在库里打标记，列表/统计一律过滤）',
   `updated_at`    DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
   KEY `idx_waybill_user_date`  (`user_id`, `bill_date`),
   KEY `idx_waybill_user_sup`   (`user_id`, `supplier_id`),
-  KEY `idx_waybill_user_ctime` (`user_id`, `created_at`)
+  KEY `idx_waybill_user_ctime` (`user_id`, `created_at`),
+  KEY `idx_waybill_alive`      (`user_id`, `deleted_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   COMMENT='货单（供应商 + 金额 + 货单日期 + 图片）';
 

@@ -1369,11 +1369,13 @@ async function migrate(conn, dbName) {
       "  `note`          VARCHAR(255)  DEFAULT NULL         COMMENT '备注（列表不再展示；历史导入时用来记原始行来源）'," +
       "  `created_by`    VARCHAR(64)   DEFAULT NULL         COMMENT '录入人（登录账号）'," +
       "  `created_at`    DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '新建日期'," +
+      "  `deleted_at`    DATETIME      DEFAULT NULL         COMMENT '软删除时间（NULL=有效；删除只在库里打标记，列表/统计一律过滤）'," +
       '  `updated_at`    DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,' +
       '  PRIMARY KEY (`id`),' +
       '  KEY `idx_waybill_user_date`  (`user_id`, `bill_date`),' +
       '  KEY `idx_waybill_user_sup`   (`user_id`, `supplier_id`),' +
-      '  KEY `idx_waybill_user_ctime` (`user_id`, `created_at`)' +
+      '  KEY `idx_waybill_user_ctime` (`user_id`, `created_at`),' +
+      '  KEY `idx_waybill_alive`      (`user_id`, `deleted_at`)' +
       ') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci' +
       "  COMMENT='货单（供应商 + 金额 + 货单日期 + 图片）'"
     );
@@ -1424,6 +1426,21 @@ async function migrate(conn, dbName) {
         "ALTER TABLE `waybill` ADD COLUMN `invoice_status` TINYINT NOT NULL DEFAULT 0 " +
         "COMMENT '开票状态：0未开票 1已开票（v0.3.6）' AFTER `bill_date`"
       );
+    }
+  }
+
+  // ── 货单软删除（v0.3.7）──
+  //   删除按钮改成打标记：deleted_at 有值即视为已删。列表 / 统计 / 供应商引用计数全部过滤，
+  //   图片记录与七牛对象都不动，误删改回 NULL 即可恢复。
+  if (await tableExists('waybill')) {
+    if (!(await colExists('waybill', 'deleted_at'))) {
+      await q(
+        "ALTER TABLE `waybill` ADD COLUMN `deleted_at` DATETIME DEFAULT NULL " +
+        "COMMENT '软删除时间（NULL=有效；删除只在库里打标记，列表/统计一律过滤）' AFTER `created_at`"
+      );
+    }
+    if (!(await idxExists('waybill', 'idx_waybill_alive'))) {
+      await q('ALTER TABLE `waybill` ADD KEY `idx_waybill_alive` (`user_id`, `deleted_at`)');
     }
   }
 

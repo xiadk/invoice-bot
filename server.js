@@ -5001,6 +5001,7 @@ const server = http.createServer(async (req, res) => {
           userId: wbUid,
           supplier: q.get('supplier') || '',
           from: q.get('from') || '', to: q.get('to') || '',
+          invoiceStatus: q.get('invoiceStatus') || '',
           page: q.get('page'), size: q.get('size'),
         }));
       }

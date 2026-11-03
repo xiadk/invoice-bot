@@ -2758,6 +2758,12 @@
                             value-format="yyyy-MM-dd" range-separator="至"
                             start-placeholder="货单开始日期" end-placeholder="结束日期"
                             @change="onWbFilter"></el-date-picker>
+            <!-- 开票状态筛选（v0.3.7）：全部 / 未开票 / 已开票，与列表列同一口径 -->
+            <el-select v-model="wb.invoiceStatus" size="small" style="width:130px" @change="onWbFilter">
+              <el-option label="全部开票状态" value=""></el-option>
+              <el-option label="未开票" value="0"></el-option>
+              <el-option label="已开票" value="1"></el-option>
+            </el-select>
             <el-button size="small" type="primary" plain @click="onWbFilter">查询</el-button>
             <el-button size="small" type="primary" icon="el-icon-plus" @click="openWbNew">新建货单</el-button>
             <span class="fb-spacer"></span>
@@ -4367,6 +4373,7 @@ const vm = new Vue({
       wb: {
         loading: false, rows: [], total: 0, sumAmount: 0, page: 1, size: 20,
         supplier: '', range: [],   // range = [开始日期, 结束日期]，空 = 不限
+        invoiceStatus: '',         // 开票状态筛选：'' 全部 / '0' 未开票 / '1' 已开票
       },
       // 新建货单：供应商下拉（远程搜）+ 金额 + 货单日期 + 开票状态 + 图片（电脑端本地上传 / 手机扫码传）
       wbNew: {
@@ -8896,6 +8903,7 @@ const vm = new Vue({
           'supplier=' + encodeURIComponent(this.wb.supplier || ''),
           'from=' + encodeURIComponent(r[0] || ''),
           'to=' + encodeURIComponent(r[1] || ''),
+          'invoiceStatus=' + encodeURIComponent(this.wb.invoiceStatus || ''),
           'page=' + this.wb.page,
           'size=' + this.wb.size,
         ].join('&');
@@ -9142,7 +9150,7 @@ const vm = new Vue({
       try {
         await this.$confirm('删除这张货单？\n供应商：' + (row.supplierName || '—')
           + '\n金额：' + this.wbMoney(row.amount) + '　货单日期：' + (row.billDate || '—')
-          + '\n图片记录会一起删掉（七牛上的原图仍保留）。',
+          + '\n图片记录会一起隐藏（七牛上的原图仍保留，需要在库里把 deleted_at 清空才能恢复）。',
         '删除货单', { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' });
       } catch (e) { return; }
       try {
