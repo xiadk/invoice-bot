@@ -2251,7 +2251,7 @@
               </el-col>
             </el-row>
             <div class="form-tip">
-              默认 <b>300</b> 页。发票刷新一页 20 条（约 6000 单）、拉订单一页 50 条（约 15000 单），
+              默认 <b>1000</b> 页。发票刷新一页 20 条（约 2 万单）、拉订单一页 50 条（约 5 万单），
               两者都是<b>翻到空页才停</b>，这个上限只用于防止接口异常时无限翻页。<br>
               撞到上限时页面会明确提示「已到翻页上限」，不会静默少拉；若确认还有更早的订单没拉到，把这里调大即可。<br>
               保存后<b>立即生效</b>（下一次同步就读新值），不需要重启服务。
@@ -4649,8 +4649,8 @@ const vm = new Vue({
         summary: null, lastRun: null,
         cookie: { logined: false, loading: false, message: '', accountName: '', pdduid: '', writtenAt: null },
         // 「同步订单与发票」：一次点击 = 后台拉订单（首次全量、之后增量）+ 拉完接着刷发票状态
-        // orderSync 来自 /api/pdd/status；maxPages = 翻页上限（两段共用，系统管理可配，默认 300）
-        orderSyncing: false, orderTaskId: '', orderSync: null, maxPages: 300,
+        // orderSync 来自 /api/pdd/status；maxPages = 翻页上限（两段共用，系统管理可配，默认 1000）
+        orderSyncing: false, orderTaskId: '', orderSync: null, maxPages: 1000,
         // 批量申请发票
         // selected = 跨页累计的已勾选行（翻页不清空）；picked 是它的 {orderSn: row} 索引，
         // 用来在 data 整页替换（后端分页）时把「本页取消勾选」的行摘掉、其余页的保留
@@ -4779,8 +4779,8 @@ const vm = new Vue({
         gapMin: 15, gapMax: 30, chunkMax: 450, orderItem: '', reminder: '', serverUrl: '',
         // 拼多多催收话术（与 1688 的 templates 完全分开，只有一条）
         pddChat: '', pddGapSec: 4,
-        // 拼多多翻页上限（发票刷新与订单同步共用，默认 300 页）
-        pddMaxPages: 300,
+        // 拼多多翻页上限（发票刷新与订单同步共用，默认 1000 页）
+        pddMaxPages: 1000,
         // 发完一家后，是否在上家的间隔等待里提前加载下一家的会话（默认开）
         prefetch: true,
         // ── 助手版本治理 ──
@@ -5185,7 +5185,7 @@ const vm = new Vue({
           s = (ad.running ? name + '：① 拉取订单 ' : name + '（已结束）：① 拉取订单 ')
             + '第 ' + (Number(p && p.page) || 0) + ' 页 · ' + orderPart;
           // 全量不再限时间：进度标题上写清翻页上限，撞上限时用户能看到原因
-          if (ad.full) s += ' · 全量（翻到空页为止，上限 ' + (this.pd.maxPages || 300) + ' 页）';
+          if (ad.full) s += ' · 全量（翻到空页为止，上限 ' + (this.pd.maxPages || 1000) + ' 页）';
           else if (ad.running) s += ' · 增量（追平即停）';
         }
       } else {
@@ -7054,7 +7054,7 @@ const vm = new Vue({
         };
         this.pd.summary = d.summary || null;
         this.pd.orderSync = d.orderSync || null;
-        this.pd.maxPages = Number(d.maxPages) > 0 ? Number(d.maxPages) : 300;
+        this.pd.maxPages = Number(d.maxPages) > 0 ? Number(d.maxPages) : 1000;
         if (Array.isArray(d.sessions)) this.pddSessions = d.sessions.map(Number);
         if (Array.isArray(d.users)) {
           this.pddUsers = d.users;
@@ -8189,8 +8189,8 @@ const vm = new Vue({
           // 拼多多话术：同样做字段级回退，避免把空值存回去
           pddChat: (typeof pm.chat === 'string' && pm.chat.trim()) ? pm.chat : (dpm.chat || this.defaultPddChat),
           pddGapSec: Math.max(2, Math.round((Number(pm.gapMs) || Number(dpm.gapMs) || 4000) / 1000)),
-          // 拼多多翻页上限（发票刷新与订单同步共用；空/非法 → 回退 300）
-          pddMaxPages: Math.min(2000, Math.max(20, Number(rt.pddMaxPages) || 300)),
+          // 拼多多翻页上限（发票刷新与订单同步共用；空/非法 → 回退 1000）
+          pddMaxPages: Math.min(2000, Math.max(20, Number(rt.pddMaxPages) || 1000)),
           // 「提前加载下一家会话」：缺省 true（没配过就是开）
           prefetch: String(rt.prefetchNextSeller) !== 'false',
           // 助手版本治理：最低要求留空=跟随服务端；宽限天数默认 3 天
@@ -8223,7 +8223,7 @@ const vm = new Vue({
             sendGapMinSec: Number(this.cfg.gapMin) || 15,
             sendGapMaxSec: Number(this.cfg.gapMax) || 30,
             // 拼多多翻页上限（发票刷新与订单同步共用，保存后下次同步即生效，无需重启）
-            pddMaxPages: Math.min(2000, Math.max(20, Number(this.cfg.pddMaxPages) || 300)),
+            pddMaxPages: Math.min(2000, Math.max(20, Number(this.cfg.pddMaxPages) || 1000)),
             // 「提前加载下一家会话」开关（下次发送任务生效，无需重启）
             prefetchNextSeller: this.cfg.prefetch !== false,
             // 助手版本治理：最低要求留空=跟随服务端版本；宽限天数 0~30；外部直链兜底

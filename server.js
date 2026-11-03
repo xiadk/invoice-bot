@@ -3879,7 +3879,7 @@ const server = http.createServer(async (req, res) => {
       const old = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
       const merged = { ...old };
       merged.runtime = { ...(old.runtime || {}), ...(config.runtime || {}) };
-      // 拼多多翻页上限（发票刷新与订单同步共用）：夹在 20~2000，非法值回默认 300（改完下次同步即生效）
+      // 拼多多翻页上限（发票刷新与订单同步共用）：夹在 20~2000，非法值回默认值（v0.3.14 起 1000，改完下次同步即生效）
       if (config.runtime && config.runtime.pddMaxPages !== undefined) {
         const n = Number(config.runtime.pddMaxPages);
         merged.runtime.pddMaxPages = Number.isFinite(n) && n > 0
