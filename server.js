@@ -73,6 +73,7 @@ const qagent = require('./lib/qnh-agent');
 const jagent = require('./lib/jd-agent');
 const qiniu = require('./lib/qiniu');
 const waybill = require('./lib/waybill');
+const replenishOrder = require('./lib/replenish-order');
 const afterSales = require('./lib/supplier-after');
 const pdd = require('./lib/pdd');
 const pddOrders = require('./lib/pdd-orders');
@@ -427,6 +428,8 @@ function publicUser(u) {
     // 供应商管理 / 货单管理（v0.3.0，两个独立菜单，默认关闭）
     supplierEnabled: u.role === 'admin' ? true : !!Number(u.supplier_enabled),
     waybillEnabled: u.role === 'admin' ? true : !!Number(u.waybill_enabled),
+    // 补货单管理（v0.3.12，独立菜单，默认关闭；老板升级时按其货单管理权限对齐过）
+    replenishOrderEnabled: u.role === 'admin' ? true : !!Number(u.replenish_order_enabled),
     // 平台取价权限（v0.2.95）：齐货通登录/重新取价、阿发Token/自动匹配/取价、选购加购
     priceEnabled: u.role === 'admin' ? true : !!Number(u.price_enabled),
     // 所属品牌方（商品数据按品牌方共享：同品牌下所有用户看到同一套商品）
@@ -536,6 +539,8 @@ function productScope(o) {
       localExpr: 'COALESCE(pi.local_price, bp.local_price)',
       localPackExpr: 'COALESCE(pi.local_pack_price, bp.local_pack_price)',
       localQtyExpr: 'COALESCE(pi.local_spec_qty, bp.local_spec_qty)',
+      // 供应商 0 表示「没填」，不能直接 COALESCE（否则个人行没填时永远盖掉品牌行的值）
+      localSupExpr: 'COALESCE(NULLIF(pi.local_supplier_id, 0), bp.local_supplier_id, 0)',
       bpIdExpr: 'bp.id', suggestExpr: 'pi.suggest_qty', fileExpr: 'pi.source_file', batchExpr: 'pi.batch_id',
     };
   }
@@ -560,6 +565,7 @@ function productScope(o) {
     localExpr: 'bp.local_price',
     localPackExpr: 'bp.local_pack_price',
     localQtyExpr: 'bp.local_spec_qty',
+    localSupExpr: 'bp.local_supplier_id',
     bpIdExpr: 'bp.id', suggestExpr: 'NULL', fileExpr: 'NULL', batchExpr: 'NULL',
   };
 }
@@ -587,19 +593,42 @@ async function writeProductLink(col, value, { brandId, userId, sku }) {
  * 否则「改单价不改整件价」会出现两个数对不上。scope 规则与 writeProductLink 完全一致。
  * @returns {{scope:'brand'|'item', affected:number}}
  */
-async function writeProductLocal({ brandId, userId, sku, unitPrice, packPrice, specQty }) {
-  const args = [unitPrice, packPrice, specQty];
+async function writeProductLocal({ brandId, userId, sku, unitPrice, packPrice, specQty, supplierId }) {
+  // v0.3.12：多带一个「本地价供应商」（supplier.id，0=没指定）
+  const sup = Number(supplierId) > 0 ? Number(supplierId) : 0;
+  const args = [unitPrice, packPrice, specQty, sup];
   const ex = await db.query('SELECT id FROM brand_product WHERE brand_id = ? AND sku = ? LIMIT 1', [brandId, sku]);
   if (ex.length) {
     await db.exec(
-      'UPDATE brand_product SET local_price = ?, local_pack_price = ?, local_spec_qty = ? WHERE brand_id = ? AND sku = ?',
+      'UPDATE brand_product SET local_price = ?, local_pack_price = ?, local_spec_qty = ?, local_supplier_id = ?'
+      + ' WHERE brand_id = ? AND sku = ?',
       args.concat([brandId, sku]));
     return { scope: 'brand', affected: 1 };
   }
   const r = await db.exec(
-    'UPDATE product_item SET local_price = ?, local_pack_price = ?, local_spec_qty = ? WHERE user_id = ? AND sku = ?',
+    'UPDATE product_item SET local_price = ?, local_pack_price = ?, local_spec_qty = ?, local_supplier_id = ?'
+    + ' WHERE user_id = ? AND sku = ?',
     args.concat([userId, sku]));
   return { scope: 'item', affected: r.affectedRows || 0 };
+}
+
+/**
+ * 把行上的 local_supplier_id 补成名字（列表与比价共用）。
+ * 一次 IN 查询搞定，不 JOIN：供应商名可能来自个人补货行也可能来自品牌商品行，JOIN 条件会变得很难读。
+ */
+async function fillLocalSupplier(rows) {
+  const ids = [...new Set((rows || []).map((r) => Number(r.local_supplier_id) || 0).filter((x) => x > 0))];
+  const nameOf = {};
+  if (ids.length) {
+    const ss = await db.query('SELECT id, name FROM supplier WHERE id IN (?)', [ids]).catch(() => []);
+    for (const s of ss) nameOf[s.id] = s.name;
+  }
+  for (const r of rows || []) {
+    const id = Number(r.local_supplier_id) || 0;
+    r.local_supplier_id = id;
+    r.local_supplier_name = id > 0 ? (nameOf[id] || '') : '';
+  }
+  return rows;
 }
 
 /** 关联写进哪个品牌：管理员可用 body.brandId 指定，其他人只能写自己品牌 */
@@ -631,6 +660,7 @@ const MENU_PERMS = {
   after: { col: 'after_sale_enabled', label: '供应商售后', field: 'afterSaleEnabled' },
   supplier: { col: 'supplier_enabled', label: '供应商管理', field: 'supplierEnabled' },
   waybill: { col: 'waybill_enabled', label: '货单管理', field: 'waybillEnabled' },
+  replenishOrder: { col: 'replenish_order_enabled', label: '补货单管理', field: 'replenishOrderEnabled' },
 };
 
 /**
@@ -2809,6 +2839,7 @@ async function listUsers() {
     // 供应商管理 / 货单管理（v0.3.0）
     supplierEnabled: u.role === 'admin' ? true : !!Number(u.supplier_enabled),
     waybillEnabled: u.role === 'admin' ? true : !!Number(u.waybill_enabled),
+    replenishOrderEnabled: u.role === 'admin' ? true : !!Number(u.replenish_order_enabled),
     // 员工号标记（v0.2.104）：ownerId 非空表示数据归属主体账号，自己名下没有业务数据
     ownerId: Number(u.owner_id) || null,
     ownerUsername: u.owner_username || '',
@@ -4003,6 +4034,7 @@ const server = http.createServer(async (req, res) => {
                ${sc.fileExpr} AS source_file, ${sc.imageExpr} AS image_url,
                ${sc.qhtExpr} AS qht_goods_id, ${sc.afaExpr} AS afa_goods_id, ${sc.localExpr} AS local_price,
                ${sc.localPackExpr} AS local_pack_price, ${sc.localQtyExpr} AS local_spec_qty,
+               ${sc.localSupExpr} AS local_supplier_id,
                ${sc.jdExpr} AS jd_sku_id,
                ${sc.file ? 'NULL' : 'b.name'} AS brand_name,
                ${sc.file ? 'pi.updated_at' : 'bp.updated_at'} AS updated_at,
@@ -4012,6 +4044,7 @@ const server = http.createServer(async (req, res) => {
         ORDER BY ${orderSql}
         LIMIT ${size} OFFSET ${(page - 1) * size}
       `, sc.args);
+      await fillLocalSupplier(rows);
       const valueR = await db.query(`
         SELECT ROUND(SUM((${sc.availExpr} + ${sc.transitExpr}) * ${sc.priceExpr}), 2) AS v
         FROM ${sc.from} ${sc.where}`, sc.args);
@@ -4458,11 +4491,12 @@ const server = http.createServer(async (req, res) => {
       const w = await writeProductLink('qht_goods_id', goodsId || null, { brandId: bid, userId: tenantId, sku });
       return sendJson(res, 200, { ok: true, sku, goodsId: goodsId || null, scope: w.scope, affected: w.affected });
     }
-    // 本地价（v0.3.11）：整件价 / 单价 / 规格数量三件套
-    //   入参 { sku, mode:'unit'|'pack', unitPrice, packPrice, specQty, brandId }
+    // 本地价（v0.3.11；v0.3.12 加供应商）：整件价 / 单价 / 规格数量 + 供应商
+    //   入参 { sku, mode:'unit'|'pack', unitPrice, packPrice, specQty, supplierId, brandId }
     //   · mode = 这次改的是哪个价格，另一个按规格数量折算（四舍五入 2 位）
     //   · 规格数量为空 → 只存单价，整件价存 NULL（用户确认：没数量就没有整件价）
-    //   · 三个都空 → 清空本地价；兼容老入参 localPrice（按单价理解）
+    //   · supplierId 空/0 → 供应商清空（只有价格的本地价，不参与按供应商归集）
+    //   · 三个价格都空 → 清空本地价；兼容老入参 localPrice（按单价理解）
     if (method === 'POST' && p === '/api/products/local-price') {
       if (!canProduct) return denyProduct();
       writeGuard();
@@ -4476,15 +4510,35 @@ const server = http.createServer(async (req, res) => {
         specQty: b.specQty,
       });
       if (!calc.ok) return sendJson(res, 200, { error: calc.error });
+      // 供应商必须是自己台账里的（否则列表会显示别人的供应商名）
+      let supId = Number(b.supplierId) || 0;
+      if (supId > 0) {
+        const sp = await db.query('SELECT id, name FROM supplier WHERE id = ? AND user_id = ?', [supId, tenantId]);
+        if (!sp.length) return sendJson(res, 200, { error: '供应商不存在（可能已被删除），请重新选择' });
+        supId = Number(sp[0].id);
+      }
       const bid = linkBrandId(user, b);
       const w = await writeProductLocal({
         brandId: bid, userId: tenantId, sku,
-        unitPrice: calc.unitPrice, packPrice: calc.packPrice, specQty: calc.specQty,
+        unitPrice: calc.unitPrice, packPrice: calc.packPrice, specQty: calc.specQty, supplierId: supId,
       });
+      const supName = supId > 0
+        ? (await db.query('SELECT name FROM supplier WHERE id = ?', [supId]))[0].name : '';
       return sendJson(res, 200, {
         ok: true, sku, scope: w.scope, affected: w.affected,
         localPrice: calc.unitPrice, localPackPrice: calc.packPrice, localSpecQty: calc.specQty,
+        localSupplierId: supId, localSupplierName: supName || '',
       });
+    }
+
+    // ── 供应商下拉（v0.3.12）────────────────────────────────────────────
+    // 本地价要选供应商，但补货页用户不一定有「供应商管理 / 货单管理」权限，
+    // 所以单开一个只读接口：有商品或补货权限就能拿到自己的供应商名单（只读，不能增删改）。
+    if (method === 'GET' && p === '/api/products/suppliers') {
+      if (!canProduct) return denyProduct();
+      const rows = await db.query(
+        'SELECT id, name FROM supplier WHERE user_id = ? ORDER BY name ASC, id ASC', [tenantId]);
+      return sendJson(res, 200, { rows: rows.map((r) => ({ id: Number(r.id), name: r.name })) });
     }
 
     // ── 比价分析（v0.3.11）──────────────────────────────────────────────
@@ -4509,7 +4563,7 @@ const server = http.createServer(async (req, res) => {
                  ${sc.imageExpr} AS image_url,
                  ${sc.qhtExpr} AS qht_goods_id, ${sc.afaExpr} AS afa_goods_id, ${sc.jdExpr} AS jd_sku_id,
                  ${sc.localExpr} AS local_price, ${sc.localPackExpr} AS local_pack_price,
-                 ${sc.localQtyExpr} AS local_spec_qty
+                 ${sc.localQtyExpr} AS local_spec_qty, ${sc.localSupExpr} AS local_supplier_id
           FROM ${sc.from} ${sc.where}
           ORDER BY ${sc.order} LIMIT ${CAP + 1}`, sc.args);
       } catch (e) {
@@ -4558,7 +4612,12 @@ const server = http.createServer(async (req, res) => {
       } catch (e) {
         return sendJson(res, 500, { error: '价格缓存查询失败：' + e.message });
       }
-      const out = products.comparePrices({ rows: use, priceMap });
+      // 供应商台账：本地价挂的供应商名要展示，平台渠道要映射到同名供应商（齐货通/永源顺/京东万商）
+      const supRows = await db.query('SELECT id, name FROM supplier WHERE user_id = ?', [tenantId]).catch(() => []);
+      const supNameById = {};
+      const supIdByName = {};
+      for (const r of supRows) { supNameById[r.id] = r.name; supIdByName[r.name] = r.id; }
+      const out = products.comparePrices({ rows: use, priceMap, supNameById, supIdByName });
       return sendJson(res, 200, Object.assign({ truncated, batch: batch || null }, out));
     }
     // ── 自动匹配阿发商品（v0.2.92）────────────────────────────────────────
@@ -5218,6 +5277,88 @@ const server = http.createServer(async (req, res) => {
       }
 
       return sendJson(res, 404, { error: '未知的货单管理接口' });
+    }
+
+    // ── 补货单管理（v0.3.12）──────────────────────────────────────────────
+    //    「采用补货建议」把比价结果按供应商归集生成补货单，之后在这里对账：
+    //    关联同一供应商的货单 → 显示货单金额 → 一致 / 相差多少。
+    //    权限：独立的 replenish_order_enabled 列（超管恒可用），数据归属同货单（tenantOf）。
+    if (p.startsWith('/api/replenish-order/')) {
+      const canRO = isAdmin || !!Number(user.replenish_order_enabled);
+      if (!canRO) return sendJson(res, 403, { error: '未开启补货单管理权限，请联系超级管理员' });
+      const roUid = tenantId;
+
+      if (method === 'GET' && p === '/api/replenish-order/list') {
+        const q = url.searchParams;
+        const [list, suppliers] = await Promise.all([
+          replenishOrder.listOrders({
+            userId: roUid,
+            supplier: q.get('supplier') || '',
+            from: q.get('from') || '', to: q.get('to') || '',
+            linked: q.get('linked') || '',
+            page: q.get('page'), size: q.get('size'),
+          }),
+          db.query('SELECT id, name FROM supplier WHERE user_id = ? ORDER BY name ASC, id ASC', [roUid])
+            .catch(() => []),
+        ]);
+        return sendJson(res, 200, Object.assign(list, {
+          suppliers: suppliers.map((r) => ({ id: Number(r.id), name: r.name })),
+        }));
+      }
+
+      if (method === 'GET' && p === '/api/replenish-order/detail') {
+        const out = await replenishOrder.getOrder({ userId: roUid, id: url.searchParams.get('id') });
+        return sendJson(res, out.ok ? 200 : 404, out);
+      }
+
+      // 关联弹窗的数据：该补货单所属供应商的货单（只列同供应商，避免张冠李戴）
+      if (method === 'GET' && p === '/api/replenish-order/waybills') {
+        const out = await replenishOrder.waybillCandidates({ userId: roUid, orderId: url.searchParams.get('orderId') });
+        return sendJson(res, out.ok ? 200 : 404, out);
+      }
+
+      // 生成补货单：入参 groups 由前端按供应商归集好，金额一律服务端重算（不信前端总额）
+      if (method === 'POST' && p === '/api/replenish-order/create') {
+        writeGuard();
+        const body = await readBody(req);
+        const out = await replenishOrder.createOrders({
+          userId: roUid, operator: user.username,
+          batchId: body.batch || body.batchId, groups: body.groups,
+        });
+        if (out.ok) {
+          await logOp(user, 'replenish.order_create', {
+            tenantId: roUid, batch: body.batch || null,
+            orders: out.orders.map((o) => ({ id: o.id, supplier: o.supplierName, amount: o.amount })),
+            totalAmount: out.totalAmount,
+          });
+        }
+        return sendJson(res, out.ok ? 200 : 400, out);
+      }
+
+      if (method === 'POST' && p === '/api/replenish-order/link') {
+        writeGuard();
+        const body = await readBody(req);
+        const out = await replenishOrder.linkWaybill({
+          userId: roUid, id: body.id, waybillId: body.waybillId,
+        });
+        if (out.ok) {
+          await logOp(user, 'replenish.order_link', {
+            tenantId: roUid, id: out.id, waybillId: out.waybillId,
+            waybillAmount: out.waybillAmount, diff: out.diff,
+          });
+        }
+        return sendJson(res, out.ok ? 200 : 400, out);
+      }
+
+      if (method === 'POST' && p === '/api/replenish-order/delete') {
+        writeGuard();
+        const body = await readBody(req);
+        const out = await replenishOrder.deleteOrder({ userId: roUid, id: body.id });
+        if (out.ok) await logOp(user, 'replenish.order_delete', { tenantId: roUid, id: out.id });
+        return sendJson(res, out.ok ? 200 : 400, out);
+      }
+
+      return sendJson(res, 404, { error: '未知的补货单接口' });
     }
 
     // ── 供应商售后（v0.3.2）────────────────────────────────────────────────
@@ -6471,7 +6612,7 @@ const server = http.createServer(async (req, res) => {
           `SELECT id, username, status, display_name, note, last_login_at, created_at,
                   qnh_refund_enabled, qnh_profit_enabled, product_enabled, market_enabled,
                   billing_enabled, replenish_enabled, price_enabled, after_sale_enabled,
-                  supplier_enabled, waybill_enabled
+                  supplier_enabled, waybill_enabled, replenish_order_enabled
              FROM app_user WHERE id = ? AND owner_id = ?`, [n, ownerId]
         );
         return rows[0] || null;
@@ -6490,6 +6631,7 @@ const server = http.createServer(async (req, res) => {
         afterSaleEnabled: !!Number(u.after_sale_enabled),
         supplierEnabled: !!Number(u.supplier_enabled),
         waybillEnabled: !!Number(u.waybill_enabled),
+        replenishOrderEnabled: !!Number(u.replenish_order_enabled),
       });
 
       if (method === 'GET' && p === '/api/staff/users') {
@@ -6497,7 +6639,7 @@ const server = http.createServer(async (req, res) => {
           `SELECT id, username, status, display_name, note, last_login_at, created_at,
                   qnh_refund_enabled, qnh_profit_enabled, product_enabled, market_enabled,
                   billing_enabled, replenish_enabled, price_enabled, after_sale_enabled,
-                  supplier_enabled, waybill_enabled
+                  supplier_enabled, waybill_enabled, replenish_order_enabled
              FROM app_user WHERE owner_id = ? ORDER BY id ASC`, [ownerId]
         );
         return sendJson(res, 200, {

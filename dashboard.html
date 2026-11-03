@@ -424,11 +424,25 @@
   .cmp-card.ok { border-color: #d6e9d8; background: #f5fbf6; }
   .cmp-card.ok .cmp-v { color: #2e9e4f; }
   .cmp-verdict { font-size: 12px; }
-  .cmp-verdict.v-cheaper { color: #e5453a; font-weight: 600; }
-  .cmp-verdict.v-higher { color: #2e9e4f; }
+  /* v0.3.12 口径：over = 买贵了（现有价更高），under = 建议价更便宜 */
+  .cmp-verdict.v-over { color: #e5453a; font-weight: 600; }
+  .cmp-verdict.v-under { color: #2e9e4f; }
   .cmp-verdict.v-same { color: var(--text-2); }
   .cmp-verdict.v-no-price, .cmp-verdict.v-no-purchase { color: #c0c4cc; }
   .el-table .cmp-row-cheaper td { background: #fef8f8 !important; }
+  /* 供应商归集卡：一张卡 = 将来一张补货单 */
+  .cmp-groups { display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0 4px; }
+  .cmp-group { border: 1px solid #e8eaee; border-radius: 6px; padding: 6px 10px; min-width: 150px;
+               background: #fafbfc; display: flex; flex-direction: column; gap: 2px; }
+  .cmp-group .cg-name { font-size: 13px; font-weight: 600; color: var(--text-1);
+                        max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cmp-group .cg-meta { font-size: 12px; color: var(--text-2); }
+  .cmp-group .cg-amt { font-size: 14px; font-weight: 600; color: #f56c6c; font-variant-numeric: tabular-nums; }
+  .cmp-group .cg-over { font-size: 12px; color: #e5453a; }
+  .cmp-card.total { border-color: #ffd9b3; background: #fffaf3; }
+  /* 补货单 vs 货单的金额对比 */
+  .ro-diff-ok { color: #2e9e4f; font-weight: 600; }
+  .ro-diff-bad { color: #e5453a; font-weight: 600; }
 </style>
 </head>
 <body>
@@ -1246,10 +1260,10 @@
                 <el-button v-else size="mini" type="warning" plain @click="openJdLinkDlg(p.row)">关联</el-button>
               </template>
             </el-table-column>
-            <!-- 本地价（v0.3.11）：整件价 / 单价 / 规格数量三件套，点「填写」在弹框里互算 -->
-            <el-table-column label="本地价" width="150">
+            <!-- 本地价（v0.3.11；v0.3.12 加供应商）：整件价 / 单价 / 规格数量 + 供应商，点「填写」在弹框里互算 -->
+            <el-table-column label="本地价" width="172">
               <template slot-scope="p">
-                <div style="display:flex;flex-direction:column;gap:2px;font-size:12px;line-height:18px;min-width:118px">
+                <div style="display:flex;flex-direction:column;gap:2px;font-size:12px;line-height:18px;min-width:140px">
                   <div style="display:flex;justify-content:space-between;gap:8px">
                     <span class="loginid">单价</span>
                     <b v-if="p.row.local_price != null" class="amount ok">{{ yuan(p.row.local_price) }}</b>
@@ -1263,6 +1277,13 @@
                   <div style="display:flex;justify-content:space-between;gap:8px">
                     <span class="loginid">规格</span>
                     <span class="loginid">{{ p.row.local_spec_qty != null ? p.row.local_spec_qty + '/件' : '—' }}</span>
+                  </div>
+                  <div style="display:flex;justify-content:space-between;gap:8px">
+                    <span class="loginid">供应商</span>
+                    <span class="loginid" :title="p.row.local_supplier_name || ''"
+                          style="max-width:96px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
+                      {{ p.row.local_supplier_name || '—' }}
+                    </span>
                   </div>
                   <el-button type="text" size="mini" style="align-self:flex-start;padding:0"
                              @click="openLocalPrice(p.row)">{{ p.row.local_price != null ? '修改' : '填写' }}</el-button>
@@ -1286,6 +1307,15 @@
             {{ localDlg.sku }}<span v-if="localDlg.goodsName"> · {{ localDlg.goodsName }}</span>
           </div>
           <el-form label-position="top" size="small" :inline="false">
+            <el-form-item label="供应商（选填，用于按供应商统计补货建议）">
+              <el-select v-model="localDlg.supplierId" filterable clearable style="width:100%"
+                         :loading="spOpts.loading" placeholder="从供应商管理里选，可留空">
+                <el-option v-for="sp in spOpts.rows" :key="sp.id" :label="sp.name" :value="sp.id"></el-option>
+              </el-select>
+              <div class="loginid" style="margin-top:4px">
+                留空表示只有价格、不归属任何供应商（比价里归到「本地价」）。
+              </div>
+            </el-form-item>
             <el-form-item label="规格数量（一件含多少个基础单位，可留空）">
               <el-input v-model="localDlg.specQty" type="number" min="0" placeholder="如 12（1 件 = 12 瓶）；留空表示只有单价"
                         @input="onLocalCalc('qty')"></el-input>
@@ -1314,84 +1344,112 @@
           </div>
         </el-dialog>
 
-        <!-- 比价分析（v0.3.11）：已有供应商价取最低 → 补货建议；只对「买贵了」标红 -->
-        <el-dialog title="补货比价分析" :visible.sync="cmp.visible" width="1120px" top="4vh" append-to-body>
+        <!-- 比价分析（v0.3.12）：最低价 vs 建议采购价 → 买贵了；按供应商归集生成补货单 -->
+        <el-dialog title="补货比价分析" :visible.sync="cmp.visible" width="1340px" top="3vh" append-to-body>
           <el-alert v-if="cmp.error" type="error" :closable="false" show-icon :title="cmp.error" style="margin-bottom:10px"></el-alert>
           <div class="cmp-cards">
             <div class="cmp-card"><div class="cmp-k">参比商品</div><div class="cmp-v">{{ cmp.summary.total || 0 }}</div></div>
             <div class="cmp-card"><div class="cmp-k">有可比价</div><div class="cmp-v">{{ cmp.summary.priced || 0 }}</div></div>
             <div class="cmp-card danger">
-              <div class="cmp-k">买贵了（可换渠道）</div>
-              <div class="cmp-v">{{ cmp.summary.cheaper || 0 }}
-                <small v-if="cmp.summary.saveTotal">可省 {{ wbMoney(cmp.summary.saveTotal) }}</small>
+              <div class="cmp-k">买贵了（现有价更高）</div>
+              <div class="cmp-v">{{ cmp.summary.over || 0 }}
+                <small v-if="cmp.summary.overpayTotal">多花 {{ wbMoney(cmp.summary.overpayTotal) }}</small>
               </div>
             </div>
-            <div class="cmp-card ok"><div class="cmp-k">现采购价已最优</div><div class="cmp-v">{{ cmp.summary.higher || 0 }}</div></div>
+            <div class="cmp-card ok"><div class="cmp-k">建议价更便宜</div><div class="cmp-v">{{ cmp.summary.under || 0 }}</div></div>
             <div class="cmp-card"><div class="cmp-k">无任何可比价</div><div class="cmp-v">{{ cmp.summary.noPrice || 0 }}</div></div>
+            <div class="cmp-card"><div class="cmp-k">缺建议采购价</div><div class="cmp-v">{{ cmp.summary.noPurchase || 0 }}</div></div>
+            <div class="cmp-card total">
+              <div class="cmp-k">整单总价 · {{ cmp.summary.qtyTotal || 0 }} 件</div>
+              <div class="cmp-v">{{ wbMoney(cmp.summary.amountTotal || 0) }}</div>
+            </div>
           </div>
+
+          <!-- 按供应商归集：一张卡片 = 将来一张补货单，点「采用补货建议」按这个分组落库 -->
+          <div class="cmp-groups" v-if="(cmp.groups || []).length">
+            <div class="cmp-group" v-for="g in cmp.groups" :key="g.key">
+              <div class="cg-name" :title="g.supplierName">{{ g.supplierName }}</div>
+              <div class="cg-meta">{{ g.itemCount }} 个商品 · {{ g.qtyTotal }} 件</div>
+              <div class="cg-amt">{{ wbMoney(g.amount) }}</div>
+              <div v-if="g.overpay" class="cg-over">多花 {{ wbMoney(g.overpay) }}</div>
+            </div>
+          </div>
+
           <div style="display:flex;align-items:center;gap:12px;margin:6px 0 10px">
             <el-checkbox v-model="cmp.onlyCheaper">只看买贵了的</el-checkbox>
-            <el-input v-model="cmp.q" size="small" clearable placeholder="搜 SKU / 商品名称" style="width:220px"></el-input>
+            <el-input v-model="cmp.q" size="small" clearable placeholder="搜 SKU / 商品名称" style="width:200px"></el-input>
             <span class="fb-spacer"></span>
-            <span class="loginid">价源：齐货通 / 城配速达 / 京东万商（缓存）+ 本地价，取最低单价；差额按建议量估算</span>
+            <span class="loginid">价源：齐货通 / 永源顺 / 京东万商（缓存）+ 本地价，取最低单价；
+              补货数量 = 建议量 ÷ 规格（不足一件进一件），总价 = 补货数量 × 规格 × 最低单价</span>
           </div>
+
           <el-table :data="cmpRows" size="small" border :max-height="tblH.cmp" style="width:100%" v-loading="cmp.loading"
                     :row-class-name="cmpRowClass" empty-text="没有可比的商品">
-            <el-table-column label="图片" width="54">
+            <el-table-column label="图片" width="50">
               <template slot-scope="p">
-                <img v-if="p.row.image_url" :src="imgThumb(p.row.image_url, 80)" width="34" height="34" loading="lazy"
-                     style="width:34px;height:34px;object-fit:cover;border-radius:4px;display:block"
+                <img v-if="p.row.image_url" :src="imgThumb(p.row.image_url, 80)" width="32" height="32" loading="lazy"
+                     style="width:32px;height:32px;object-fit:cover;border-radius:4px;display:block"
                      @error="imgError($event, p.row.image_url)" />
                 <span v-else class="loginid">—</span>
               </template>
             </el-table-column>
-            <el-table-column label="商品SKU" width="140">
+            <el-table-column label="商品SKU" width="132">
               <template slot-scope="p"><span class="loginid" style="font-family:Consolas,monospace">{{ p.row.sku }}</span></template>
             </el-table-column>
-            <el-table-column label="商品名称" min-width="180">
+            <el-table-column label="商品名称" min-width="150">
               <template slot-scope="p"><span :title="p.row.goods_name">{{ p.row.goods_name }}</span></template>
             </el-table-column>
-            <el-table-column label="采购价" width="82" align="right">
+            <el-table-column label="建议采购价" width="94" align="right">
               <template slot-scope="p"><span class="amount">{{ p.row.purchase_price == null ? '—' : yuan(p.row.purchase_price) }}</span></template>
             </el-table-column>
-            <el-table-column label="齐货通" width="76" align="right">
+            <el-table-column label="齐货通" width="72" align="right">
               <template slot-scope="p"><span class="loginid">{{ cmpPrice(p.row, 'qht') }}</span></template>
             </el-table-column>
-            <el-table-column label="城配速达" width="82" align="right">
+            <el-table-column label="永源顺" width="72" align="right">
               <template slot-scope="p"><span class="loginid">{{ cmpPrice(p.row, 'afa') }}</span></template>
             </el-table-column>
-            <el-table-column label="京东万商" width="82" align="right">
+            <el-table-column label="京东万商" width="78" align="right">
               <template slot-scope="p"><span class="loginid">{{ cmpPrice(p.row, 'jd') }}</span></template>
             </el-table-column>
             <el-table-column label="本地价" width="72" align="right">
-              <template slot-scope="p"><span class="loginid">{{ cmpPrice(p.row, 'local') }}</span></template>
-            </el-table-column>
-            <el-table-column label="最低价来源" width="100" align="center">
               <template slot-scope="p">
-                <el-tag v-if="p.row.best" size="mini" :type="p.row.best.kind === 'local' ? 'warning' : 'success'">{{ p.row.best.label }}</el-tag>
+                <span class="loginid" :title="cmpLocalSup(p.row)">{{ cmpPrice(p.row, 'local') }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="最低价来源" width="104" align="center">
+              <template slot-scope="p">
+                <el-tag v-if="p.row.best" size="mini" :type="p.row.best.kind === 'local' ? 'warning' : 'success'">
+                  {{ p.row.best.label }}
+                </el-tag>
                 <span v-else class="loginid">—</span>
               </template>
             </el-table-column>
-            <el-table-column label="最低单价" width="88" align="right">
+            <el-table-column label="最低单价" width="82" align="right">
               <template slot-scope="p"><b v-if="p.row.best" class="amount ok">{{ yuan(p.row.best.unitPrice) }}</b><span v-else class="loginid">—</span></template>
             </el-table-column>
-            <el-table-column label="差额" width="86" align="right">
+            <el-table-column label="规格" width="62" align="right">
+              <template slot-scope="p"><span class="loginid">{{ p.row.spec_qty ? p.row.spec_qty + '/件' : '1' }}</span></template>
+            </el-table-column>
+            <el-table-column label="建议量" width="86" align="center">
               <template slot-scope="p">
-                <b v-if="p.row.verdict === 'cheaper'" style="color:#e5453a">+{{ Number(p.row.diff).toFixed(2) }}</b>
+                <el-input :value="p.row.suggest_qty" size="mini" type="number" min="0" style="width:72px"
+                          @input="onCmpQty(p.row, $event)"></el-input>
+              </template>
+            </el-table-column>
+            <el-table-column label="补货数量" width="80" align="right">
+              <template slot-scope="p"><b v-if="p.row.qty_pack">{{ p.row.qty_pack }}</b><span v-else class="loginid">—</span></template>
+            </el-table-column>
+            <el-table-column label="总价" width="92" align="right">
+              <template slot-scope="p"><b v-if="p.row.amount != null" class="amount">{{ wbMoney(p.row.amount) }}</b><span v-else class="loginid">—</span></template>
+            </el-table-column>
+            <el-table-column label="差额" width="80" align="right">
+              <template slot-scope="p">
+                <b v-if="p.row.verdict === 'over'" style="color:#e5453a">+{{ Number(p.row.diff).toFixed(2) }}</b>
                 <span v-else-if="p.row.diff != null" class="loginid">{{ Number(p.row.diff).toFixed(2) }}</span>
                 <span v-else class="loginid">—</span>
               </template>
             </el-table-column>
-            <el-table-column label="建议量" width="72" align="right">
-              <template slot-scope="p"><span class="loginid">{{ p.row.suggest_qty || '—' }}</span></template>
-            </el-table-column>
-            <el-table-column label="可省" width="86" align="right">
-              <template slot-scope="p">
-                <b v-if="p.row.save_total != null" style="color:#e5453a">{{ yuan(p.row.save_total) }}</b>
-                <span v-else class="loginid">—</span>
-              </template>
-            </el-table-column>
-            <el-table-column label="结论" width="132">
+            <el-table-column label="结论" width="126">
               <template slot-scope="p">
                 <span class="cmp-verdict" :class="'v-' + p.row.verdict">{{ cmpVerdict(p.row) }}</span>
               </template>
@@ -1399,9 +1457,12 @@
           </el-table>
           <div slot="footer">
             <span class="loginid" style="float:left;line-height:32px">
-              {{ cmp.truncated ? '商品超过 2000 个，只比对了前 2000 个（可先筛选再比）' : '价格来自「取价」缓存，未取价的商品会算作无价' }}
+              {{ cmp.truncated ? '商品超过 2000 个，只比对了前 2000 个（可先筛选再比）' : '价格来自「取价」缓存，未取价的商品会算作无价；改建议量会即时重算总价' }}
             </span>
             <el-button size="small" @click="cmp.visible = false">关闭</el-button>
+            <el-button size="small" type="primary" icon="el-icon-s-check" :loading="cmp.adopting"
+                       :disabled="!canReplenishOrder || !(cmp.groups || []).length"
+                       @click="adoptCmp">采用补货建议</el-button>
           </div>
         </el-dialog>
 
@@ -3075,18 +3136,10 @@
                                   placeholder="选择日期" style="width:100%"></el-date-picker>
                 </el-form-item>
               </el-col>
-              <el-col :xs="12" :sm="6">
-                <el-form-item label="开票状态">
-                  <el-radio-group v-model="wbNew.invoiceStatus" size="mini">
-                    <el-radio :label="0">未开票</el-radio>
-                    <el-radio :label="1">已开票</el-radio>
-                  </el-radio-group>
-                </el-form-item>
-              </el-col>
             </el-row>
-            <el-form-item label="备注（选填）">
-              <el-input v-model="wbNew.note" maxlength="255" show-word-limit placeholder="如：10月第二批到货"></el-input>
-            </el-form-item>
+            <!-- v0.3.12：新建货单只收「供应商 + 金额 + 日期 + 图片」，备注与开票状态不再让填，
+                 开票状态一律从未开票开始，保存后到列表里点 tag 切换 -->
+            <div class="loginid" style="margin-top:-6px">新货单默认「未开票」，保存后可在列表里点开票状态切换。</div>
           </el-form>
 
           <div class="wb-sec-title">
@@ -3174,6 +3227,183 @@
           <span slot="footer">
             <el-button size="small" @click="wbView.visible = false">关闭</el-button>
           </span>
+        </el-dialog>
+      </div>
+
+      <!-- ══════════ 补货单管理（v0.3.12，按「菜单权限」开放） ══════════ -->
+      <div v-show="page === 'replenishOrder'" id="page-replenishOrder">
+        <el-card shadow="never" class="section-card">
+          <div class="filter-bar">
+            <span class="fb-label">筛选</span>
+            <el-input v-model="ro.supplier" size="small" style="width:180px" clearable
+                      placeholder="供应商名称"
+                      @keyup.enter.native="onRoFilter" @clear="onRoFilter"></el-input>
+            <el-date-picker v-model="ro.range" type="daterange" size="small" style="width:240px"
+                            value-format="yyyy-MM-dd" range-separator="至"
+                            start-placeholder="生成开始日期" end-placeholder="结束日期"
+                            @change="onRoFilter"></el-date-picker>
+            <el-select v-model="ro.linked" size="small" style="width:130px" @change="onRoFilter">
+              <el-option label="全部关联状态" value=""></el-option>
+              <el-option label="未关联货单" value="0"></el-option>
+              <el-option label="已关联货单" value="1"></el-option>
+            </el-select>
+            <el-button size="small" type="primary" plain @click="onRoFilter">查询</el-button>
+            <el-button size="small" icon="el-icon-refresh" @click="loadReplenishOrders">刷新</el-button>
+            <span class="fb-spacer"></span>
+            <span class="loginid">共 {{ ro.total }} 张 · 合计 <b style="color:#f56c6c">{{ wbMoney(ro.sumAmount) }}</b></span>
+          </div>
+
+          <el-table :data="ro.rows" size="small" border style="width:100%" v-loading="ro.loading"
+                    empty-text="还没有补货单：到「补货」页点「比价分析」，确认建议量后点「采用补货建议」生成">
+            <el-table-column label="补货单号" width="92" align="center">
+              <template slot-scope="p"><span class="loginid" style="font-family:Consolas,monospace">#{{ p.row.id }}</span></template>
+            </el-table-column>
+            <el-table-column label="供应商" min-width="170">
+              <template slot-scope="p">
+                <span :title="p.row.supplierName">{{ p.row.supplierName || '—' }}</span>
+                <el-tag v-if="!p.row.supplierId" size="mini" type="info" style="margin-left:6px">未指定供应商</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="商品数" width="76" align="right">
+              <template slot-scope="p"><span class="loginid">{{ p.row.itemCount }}</span></template>
+            </el-table-column>
+            <el-table-column label="补货件数" width="88" align="right">
+              <template slot-scope="p"><span class="loginid">{{ p.row.qtyTotal }}</span></template>
+            </el-table-column>
+            <el-table-column label="补货金额" width="118" align="right">
+              <template slot-scope="p"><b class="amount">{{ wbMoney(p.row.amount) }}</b></template>
+            </el-table-column>
+            <el-table-column label="生成日期" width="140">
+              <template slot-scope="p"><span class="loginid">{{ p.row.createdAt || '—' }}</span></template>
+            </el-table-column>
+            <el-table-column label="操作人" width="96">
+              <template slot-scope="p"><span class="loginid">{{ p.row.createdBy || '—' }}</span></template>
+            </el-table-column>
+            <!-- 关联货单：未关联给按钮；已关联显示货单日期 + 金额 + 对比结论 -->
+            <el-table-column label="关联货单" min-width="230">
+              <template slot-scope="p">
+                <div v-if="!p.row.waybillId" style="display:flex;align-items:center;gap:8px">
+                  <el-button type="text" size="mini" @click="openRoLink(p.row)">关联货单</el-button>
+                  <span class="loginid">未关联</span>
+                </div>
+                <div v-else style="display:flex;flex-direction:column;gap:2px;font-size:12px;line-height:18px">
+                  <div>
+                    <span class="loginid">{{ p.row.waybillDate || '—' }} 货单</span>
+                    <b class="amount" style="margin-left:6px">{{ wbMoney(p.row.waybillAmount) }}</b>
+                  </div>
+                  <div :class="p.row.matched ? 'ro-diff-ok' : 'ro-diff-bad'">
+                    {{ p.row.matched ? '✓ 金额一致' : ('相差 ' + wbMoney(p.row.diff)) }}
+                  </div>
+                </div>
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" width="176">
+              <template slot-scope="p">
+                <el-button type="text" size="mini" @click="openRoView(p.row)">详情</el-button>
+                <el-button v-if="p.row.waybillId" type="text" size="mini" @click="unlinkRo(p.row)">取消关联</el-button>
+                <el-button type="text" size="mini" style="color:#f56c6c" @click="deleteRo(p.row)">删除</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+
+          <div class="pager-wrap">
+            <el-pagination background layout="total, sizes, prev, pager, next"
+                           :current-page="ro.page" :page-size="ro.size"
+                           :page-sizes="[20, 50, 100]" :total="ro.total"
+                           @current-change="onRoPage" @size-change="onRoSize"></el-pagination>
+            <span class="total">共 {{ ro.total }} 条</span>
+          </div>
+        </el-card>
+
+        <!-- 关联货单：只列该供应商的货单，选一张 → 显示金额差异 -->
+        <el-dialog title="关联货单" :visible.sync="roLink.visible" width="840px" top="6vh" append-to-body>
+          <el-alert v-if="roLink.error" type="error" :closable="false" show-icon :title="roLink.error" style="margin-bottom:10px"></el-alert>
+          <div class="loginid" style="margin-bottom:8px">
+            补货单 #{{ roLink.orderId }} · {{ roLink.order.supplierName }} · 补货金额
+            <b style="color:#e6a23c">{{ wbMoney(roLink.order.amount) }}</b>
+            <span v-if="!roLink.rows.length"> —— 该供应商还没有货单，先到「货单管理」里新建</span>
+          </div>
+          <el-table :data="roLink.rows" size="small" border highlight-current-row
+                    :max-height="tblH.cmp" style="width:100%" v-loading="roLink.loading"
+                    empty-text="该供应商还没有货单" @current-change="onRoLinkPick">
+            <el-table-column width="46" align="center">
+              <template slot-scope="p">
+                <i v-if="roLink.picked && roLink.picked.id === p.row.id" class="el-icon-success" style="color:#409eff"></i>
+              </template>
+            </el-table-column>
+            <el-table-column label="货单日期" width="120">
+              <template slot-scope="p"><span class="loginid">{{ p.row.billDate || '—' }}</span></template>
+            </el-table-column>
+            <el-table-column label="货单金额" width="120" align="right">
+              <template slot-scope="p"><span class="amount">{{ wbMoney(p.row.amount) }}</span></template>
+            </el-table-column>
+            <el-table-column label="与补货单差额" width="140" align="right">
+              <template slot-scope="p">
+                <b v-if="Math.abs(p.row.diff) < 0.005" class="ro-diff-ok">一致</b>
+                <b v-else class="ro-diff-bad">{{ wbMoney(p.row.diff) }}</b>
+              </template>
+            </el-table-column>
+            <el-table-column label="图片" width="72" align="center">
+              <template slot-scope="p"><span class="loginid">{{ p.row.imageCount ? p.row.imageCount + ' 张' : '—' }}</span></template>
+            </el-table-column>
+            <el-table-column label="录入时间" width="140">
+              <template slot-scope="p"><span class="loginid">{{ p.row.createdAt || '—' }}</span></template>
+            </el-table-column>
+          </el-table>
+          <div slot="footer">
+            <el-button size="small" @click="roLink.visible = false">取消</el-button>
+            <el-button size="small" type="primary" :loading="roLink.saving" :disabled="!roLink.picked"
+                       @click="confirmRoLink">确认关联</el-button>
+          </div>
+        </el-dialog>
+
+        <!-- 补货单详情：明细每行都留了折算依据（建议量 / 规格 / 件数 / 单价） -->
+        <el-dialog title="补货单详情" :visible.sync="roView.visible" width="1080px" top="5vh" append-to-body>
+          <div v-if="roView.order" class="loginid" style="display:flex;gap:18px;flex-wrap:wrap;margin-bottom:10px">
+            <span>补货单 <b>#{{ roView.order.id }}</b></span>
+            <span>供应商 <b>{{ roView.order.supplierName }}</b></span>
+            <span>金额 <b style="color:#f56c6c">{{ wbMoney(roView.order.amount) }}</b></span>
+            <span>商品 {{ roView.order.itemCount }} 个 · {{ roView.order.qtyTotal }} 件</span>
+            <span>生成 {{ roView.order.createdAt }}</span>
+            <span v-if="roView.order.waybillId">
+              关联货单 {{ roView.order.waybillDate }} · {{ wbMoney(roView.order.waybillAmount) }}
+              <b v-if="Math.abs(roView.order.diff) < 0.005" class="ro-diff-ok">（一致）</b>
+              <b v-else class="ro-diff-bad">（相差 {{ wbMoney(roView.order.diff) }}）</b>
+            </span>
+          </div>
+          <el-table :data="roView.items" size="small" border :max-height="tblH.cmp"
+                    style="width:100%" v-loading="roView.loading" empty-text="没有明细">
+            <el-table-column label="商品SKU" width="140">
+              <template slot-scope="p"><span class="loginid" style="font-family:Consolas,monospace">{{ p.row.sku }}</span></template>
+            </el-table-column>
+            <el-table-column label="商品名称" min-width="200">
+              <template slot-scope="p"><span :title="p.row.goodsName">{{ p.row.goodsName || '—' }}</span></template>
+            </el-table-column>
+            <el-table-column label="价源" width="104" align="center">
+              <template slot-scope="p"><el-tag size="mini" type="success">{{ p.row.channelLabel }}</el-tag></template>
+            </el-table-column>
+            <el-table-column label="建议量" width="80" align="right">
+              <template slot-scope="p"><span class="loginid">{{ p.row.suggestQty }}</span></template>
+            </el-table-column>
+            <el-table-column label="规格" width="76" align="right">
+              <template slot-scope="p"><span class="loginid">{{ p.row.specQty }}/件</span></template>
+            </el-table-column>
+            <el-table-column label="补货数量" width="88" align="right">
+              <template slot-scope="p"><b>{{ p.row.qtyPack }}</b> 件</template>
+            </el-table-column>
+            <el-table-column label="最低单价" width="90" align="right">
+              <template slot-scope="p"><span class="amount">{{ yuan(p.row.unitPrice) }}</span></template>
+            </el-table-column>
+            <el-table-column label="整件价" width="90" align="right">
+              <template slot-scope="p"><span class="loginid">{{ p.row.packPrice == null ? '—' : yuan(p.row.packPrice) }}</span></template>
+            </el-table-column>
+            <el-table-column label="行总额" width="100" align="right">
+              <template slot-scope="p"><b class="amount">{{ wbMoney(p.row.amount) }}</b></template>
+            </el-table-column>
+          </el-table>
+          <div slot="footer">
+            <el-button size="small" @click="roView.visible = false">关闭</el-button>
+          </div>
         </el-dialog>
       </div>
 
@@ -4164,6 +4394,13 @@
       </div>
       <el-switch v-model="menuPermit.waybill"></el-switch>
     </div>
+    <div class="menu-perm-row">
+      <div>
+        <b>补货单管理</b>
+        <div class="loginid">采用补货建议后生成的采购单在这里对账，关联同供应商货单看金额差异（默认关闭）</div>
+      </div>
+      <el-switch v-model="menuPermit.replenishOrder"></el-switch>
+    </div>
     <div slot="footer">
       <el-button @click="menuPermit.visible = false">取消</el-button>
       <el-button type="primary" :loading="menuPermit.saving" @click="saveMenuPermit">保存</el-button>
@@ -4487,9 +4724,18 @@ const vm = new Vue({
       tblH: { rp: 500, link: 320, cmp: 460 },
       // 本地价（v0.3.11）：弹框里整件价 / 单价 / 规格数量互算，mode 记住最后改的是哪个价格
       localDlg: { visible: false, saving: false, row: null, sku: '', goodsName: '', brandId: 0,
-                  specQty: '', unitPrice: '', packPrice: '', mode: 'unit', hint: '' },
-      // 比价分析（v0.3.11）：rows 由 /api/products/compare 返回，前端只做「只看买贵了」与关键词过滤
-      cmp: { visible: false, loading: false, rows: [], summary: {}, onlyCheaper: false, q: '', error: '', truncated: false },
+                  specQty: '', unitPrice: '', packPrice: '', supplierId: '', mode: 'unit', hint: '' },
+      // 本地价弹框的供应商下拉（/api/products/suppliers 只读，避免要求供应商管理权限）
+      spOpts: { rows: [], loading: false, loaded: false },
+      // 比价分析（v0.3.12）：rows 由 /api/products/compare 返回；改建议量后 recalcCmp() 就地重算件数/总价/供应商分组
+      cmp: { visible: false, loading: false, adopting: false, rows: [], summary: {}, groups: [],
+             onlyCheaper: false, q: '', error: '', truncated: false },
+      // 补货单管理（v0.3.12）
+      ro: { loading: false, rows: [], total: 0, sumAmount: 0, page: 1, size: 20,
+            supplier: '', range: null, linked: '' },
+      roLink: { visible: false, loading: false, saving: false, error: '',
+                orderId: 0, order: {}, rows: [], picked: null },
+      roView: { visible: false, loading: false, order: null, items: [] },
       rpLink: { visible: false, sku: '', keyword: '', rows: [], loading: false, error: '', picked: null, total: 0, page: 1, size: 20 },
       rpBuy: { visible: false, sku: '', goodsId: null, goodsName: '', qty: 1, saving: false },
       qhtDlg: { visible: false, account: '', password: '', saving: false },
@@ -4573,8 +4819,8 @@ const vm = new Vue({
       creatingUser: false, createOk: false,
       userEdit: { visible: false, id: null, title: '', company: '', taxNo: '', email: '', note: '', brandId: 1, hint: '', lockCompany: false, saving: false, expiryMode: 'permanent', expiresAt: '' },
       // 菜单权限弹窗（退单列表 / 实时毛利监控）
-      menuPermit: { visible: false, id: null, username: '', scope: 'admin', refund: false, profit: false, product: false, market: false, billing: false, replenish: false, price: false, after: false, supplier: false, waybill: false, saving: false,
-                    origin: { refund: false, profit: false, product: false, market: false, billing: false, replenish: false, price: false, after: false, supplier: false, waybill: false } },
+      menuPermit: { visible: false, id: null, username: '', scope: 'admin', refund: false, profit: false, product: false, market: false, billing: false, replenish: false, price: false, after: false, supplier: false, waybill: false, replenishOrder: false, saving: false,
+                    origin: { refund: false, profit: false, product: false, market: false, billing: false, replenish: false, price: false, after: false, supplier: false, waybill: false, replenishOrder: false } },
       // ── 员工管理（v0.2.104，仅主体账号）──
       staff: { rows: [], loading: false },
       staffOwner: null,
@@ -4589,6 +4835,7 @@ const vm = new Vue({
         { key: 'price', label: '平台取价', field: 'priceEnabled' },
         { key: 'supplier', label: '供应商管理', field: 'supplierEnabled' },
         { key: 'waybill', label: '货单管理', field: 'waybillEnabled' },
+        { key: 'replenishOrder', label: '补货单管理', field: 'replenishOrderEnabled' },
       ],
       staffDlg: { visible: false, id: null, username: '', password: '', displayName: '', note: '', saving: false, menus: {} },
       // ── 供应商售后（v0.3.2 起整页替换旧售后管理，不再读退单）──
@@ -4696,6 +4943,7 @@ const vm = new Vue({
         { title: '采购', items: [
           this.canSupplier ? { key: 'supplier', label: '供应商管理', icon: 'el-icon-office-building' } : null,
           this.canWaybill ? { key: 'waybill', label: '货单管理', icon: 'el-icon-tickets' } : null,
+          this.canReplenishOrder ? { key: 'replenishOrder', label: '补货单管理', icon: 'el-icon-s-check' } : null,
         ].filter(Boolean) },
         { title: '牵牛花监控', items: [
           this.canRefund ? { key: 'refund', label: '退单列表', icon: 'el-icon-s-claim' } : null,
@@ -4770,6 +5018,7 @@ const vm = new Vue({
     // 供应商管理 / 货单管理（v0.3.0）：两个独立菜单开关，超管始终可见
     canSupplier() { return !!(this.me && (this.me.role === 'admin' || this.me.supplierEnabled)); },
     canWaybill() { return !!(this.me && (this.me.role === 'admin' || this.me.waybillEnabled)); },
+    canReplenishOrder() { return !!(this.me && (this.me.role === 'admin' || this.me.replenishOrderEnabled)); },
     /** 比价弹窗里实际显示的行（只看买贵了 + 关键词），服务端已把买贵的排在最前 */
     cmpRows() {
       const kw = String(this.cmp.q || '').trim().toLowerCase();
@@ -5449,6 +5698,7 @@ const vm = new Vue({
       if (p === 'billing' && !this.canBilling) p = 'board';
       if (p === 'supplier' && !this.canSupplier) p = 'board';
       if (p === 'waybill' && !this.canWaybill) p = 'board';
+      if (p === 'replenishOrder' && !this.canReplenishOrder) p = 'board';
       // 员工账号兜底：上面各条回落到 'board'（1688发票）的规则对员工不适用，
       // 员工只允许导航里出现的页面（外加从毛利/退单页进来的「告警配置」「退单提醒」）
       if (this.isStaff) {
@@ -5465,6 +5715,7 @@ const vm = new Vue({
       if (p === 'mapping') this.loadMapping();
       if (p === 'supplier') this.loadSuppliers();
       if (p === 'waybill') this.loadWaybills();
+      if (p === 'replenishOrder') this.loadReplenishOrders();
       if (p === 'audit') this.loadOpLog();
       if (p === 'profit' || p === 'refund' || p === 'after' || p === 'pdd' || p === 'qnhcfg' || p === 'refundalert') {
         if (p === 'refund') this.reportOp('qnh.view');
@@ -8072,6 +8323,7 @@ const vm = new Vue({
         billing: !!row.billingEnabled, replenish: !!row.replenishEnabled,
         price: !!row.priceEnabled, after: !!row.afterSaleEnabled,
         supplier: !!row.supplierEnabled, waybill: !!row.waybillEnabled,
+        replenishOrder: !!row.replenishOrderEnabled,
         saving: false,
         origin: {
           refund: !!row.qnhRefundEnabled, profit: !!row.qnhProfitEnabled,
@@ -8079,6 +8331,7 @@ const vm = new Vue({
           billing: !!row.billingEnabled, replenish: !!row.replenishEnabled,
           price: !!row.priceEnabled, after: !!row.afterSaleEnabled,
           supplier: !!row.supplierEnabled, waybill: !!row.waybillEnabled,
+          replenishOrder: !!row.replenishOrderEnabled,
         },
       };
     },
@@ -8097,6 +8350,7 @@ const vm = new Vue({
       if (m.after !== m.origin.after) changes.push({ menu: 'after', enabled: m.after, field: 'afterSaleEnabled', label: '供应商售后' });
       if (m.supplier !== m.origin.supplier) changes.push({ menu: 'supplier', enabled: m.supplier, field: 'supplierEnabled', label: '供应商管理' });
       if (m.waybill !== m.origin.waybill) changes.push({ menu: 'waybill', enabled: m.waybill, field: 'waybillEnabled', label: '货单管理' });
+      if (m.replenishOrder !== m.origin.replenishOrder) changes.push({ menu: 'replenishOrder', enabled: m.replenishOrder, field: 'replenishOrderEnabled', label: '补货单管理' });
       if (!changes.length) { m.visible = false; return; }
       m.saving = true;
       const list = m.scope === 'staff' ? this.staff.rows : this.users;
@@ -9182,7 +9436,7 @@ const vm = new Vue({
       this.wbNew.supplierId = '';
       this.wbNew.amount = '';
       this.wbNew.billDate = this.todayStr();
-      this.wbNew.invoiceStatus = 0;
+      this.wbNew.invoiceStatus = 0;   // 新建一律未开票（弹框里已不给选）
       this.wbNew.note = '';
       this.wbNew.error = '';
       this.wbNew.imgError = '';
@@ -9356,8 +9610,8 @@ const vm = new Vue({
             supplierId: this.wbNew.supplierId,
             amount: amt,
             billDate: this.wbNew.billDate,
-            invoiceStatus: this.wbNew.invoiceStatus ? 1 : 0,
-            note: this.wbNew.note,
+            invoiceStatus: 0,   // v0.3.12：新建默认未开票（弹框已去掉该字段）
+            note: '',
             token: this.wbNew.token,
             supplierName: sup ? sup.name : '',
           }),
@@ -9416,6 +9670,109 @@ const vm = new Vue({
         this.$message.success('已删除');
         this.loadWaybills();
       } catch (e) { this.$message.error('删除失败：' + (e.message || e)); }
+    },
+
+    // ══════════ 补货单管理（v0.3.12）══════════
+    roFilterParams(withPage) {
+      const p = new URLSearchParams();
+      if (this.ro.supplier) p.set('supplier', this.ro.supplier);
+      if (this.ro.linked !== '') p.set('linked', this.ro.linked);
+      if (this.ro.range && this.ro.range.length === 2) {
+        p.set('from', this.ro.range[0]); p.set('to', this.ro.range[1]);
+      }
+      if (withPage) { p.set('page', String(this.ro.page)); p.set('size', String(this.ro.size)); }
+      return p;
+    },
+    async loadReplenishOrders() {
+      if (this.ro.loading) return;
+      this.ro.loading = true;
+      try {
+        const d = await this.api('/api/replenish-order/list?' + this.roFilterParams(true).toString());
+        if (d && d.error) { this.$message.error(d.error); return; }
+        this.ro.rows = (d && d.rows) || [];
+        this.ro.total = Number(d && d.total) || 0;
+        this.ro.sumAmount = Number(d && d.sumAmount) || 0;
+        const maxPage = Math.max(1, Math.ceil(this.ro.total / this.ro.size));
+        if (this.ro.page > maxPage) { this.ro.page = maxPage; await this.loadReplenishOrders(); }
+      } catch (e) { this.$message.error('补货单加载失败: ' + e.message); }
+      finally { this.ro.loading = false; }
+    },
+    onRoFilter() { this.ro.page = 1; this.loadReplenishOrders(); },
+    onRoPage(p) { this.ro.page = p; this.loadReplenishOrders(); },
+    onRoSize(s) { this.ro.size = s; this.ro.page = 1; this.loadReplenishOrders(); },
+    /** 关联货单弹窗：只列该补货单所属供应商的货单 */
+    async openRoLink(row) {
+      this.roLink = { visible: true, loading: true, saving: false, error: '',
+                      orderId: row.id, order: row, rows: [], picked: null };
+      try {
+        const d = await this.api('/api/replenish-order/waybills?orderId=' + row.id);
+        if (!d.ok) { this.roLink.error = d.error || '加载货单失败'; return; }
+        this.roLink.order = d.order || row;
+        this.roLink.rows = d.rows || [];
+      } catch (e) { this.roLink.error = '加载货单失败：' + e.message; }
+      finally { this.roLink.loading = false; }
+    },
+    onRoLinkPick(row) { this.roLink.picked = row || null; },
+    async confirmRoLink() {
+      const pick = this.roLink.picked;
+      if (!pick) return this.$message.warning('先选一张货单');
+      this.roLink.saving = true;
+      try {
+        const d = await this.api('/api/replenish-order/link', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ id: this.roLink.orderId, waybillId: pick.id }),
+        });
+        if (!d.ok) { this.roLink.error = d.error || '关联失败'; return; }
+        this.$message.success(d.matched
+          ? '已关联，金额一致'
+          : '已关联，与货单相差 ' + this.wbMoney(d.diff));
+        this.roLink.visible = false;
+        this.loadReplenishOrders();
+      } catch (e) { this.roLink.error = '关联失败：' + e.message; }
+      finally { this.roLink.saving = false; }
+    },
+    async unlinkRo(row) {
+      try {
+        await this.$confirm('取消补货单 #' + row.id + ' 与货单的关联？（补货单本身不删除）',
+          '取消关联', { type: 'warning', confirmButtonText: '取消关联', cancelButtonText: '返回' });
+      } catch (e) { return; }
+      try {
+        const d = await this.api('/api/replenish-order/link', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ id: row.id, waybillId: 0 }),
+        });
+        if (!d.ok) return this.$message.error(d.error || '取消关联失败');
+        this.$message.success('已取消关联');
+        this.loadReplenishOrders();
+      } catch (e) { this.$message.error('取消关联失败：' + e.message); }
+    },
+    async openRoView(row) {
+      this.roView = { visible: true, loading: true, order: null, items: [] };
+      try {
+        const d = await this.api('/api/replenish-order/detail?id=' + row.id);
+        if (!d.ok) { this.$message.error(d.error || '加载详情失败'); this.roView.visible = false; return; }
+        this.roView.order = d.order;
+        this.roView.items = d.items || [];
+      } catch (e) { this.$message.error('加载详情失败：' + e.message); }
+      finally { this.roView.loading = false; }
+    },
+    async deleteRo(row) {
+      try {
+        await this.$confirm('删除补货单 #' + row.id + '？'
+          + '\n供应商：' + (row.supplierName || '—')
+          + '\n金额：' + this.wbMoney(row.amount) + '　商品：' + row.itemCount + ' 个'
+          + '\n（软删除，明细留在库里可追溯；已关联的货单不受影响）',
+        '删除补货单', { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' });
+      } catch (e) { return; }
+      try {
+        const d = await this.api('/api/replenish-order/delete', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ id: row.id }),
+        });
+        if (!d.ok) return this.$message.error(d.error || '删除失败');
+        this.$message.success('已删除');
+        this.loadReplenishOrders();
+      } catch (e) { this.$message.error('删除失败：' + e.message); }
     },
 
     /**
@@ -9587,8 +9944,21 @@ const vm = new Vue({
         specQty: row.local_spec_qty == null ? '' : String(row.local_spec_qty),
         unitPrice: row.local_price == null ? '' : String(row.local_price),
         packPrice: row.local_pack_price == null ? '' : String(row.local_pack_price),
+        supplierId: Number(row.local_supplier_id) > 0 ? Number(row.local_supplier_id) : '',
         mode: 'unit', hint: '',
       };
+      this.loadSpOpts();
+    },
+    /** 供应商下拉（只取一次，弹框反复打开不重复请求） */
+    async loadSpOpts() {
+      if (this.spOpts.loaded || this.spOpts.loading) return;
+      this.spOpts.loading = true;
+      try {
+        const d = await this.api('/api/products/suppliers');
+        this.spOpts.rows = (d && d.rows) || [];
+        this.spOpts.loaded = true;
+      } catch (e) { /* 取不到就留空，价格照样能存 */ }
+      finally { this.spOpts.loading = false; }
     },
     /**
      * 互算：src = 用户刚改动的那一项（unit / pack / qty）。
@@ -9628,6 +9998,7 @@ const vm = new Vue({
           body: JSON.stringify({
             sku: d.sku, brandId: d.brandId, mode: d.mode,
             unitPrice: d.unitPrice, packPrice: d.packPrice, specQty: d.specQty,
+            supplierId: d.supplierId || 0,
           }),
         });
         if (r.error) { this.$message.error('本地价保存失败: ' + r.error); return; }
@@ -9636,6 +10007,8 @@ const vm = new Vue({
           d.row.local_price = r.localPrice;
           d.row.local_pack_price = r.localPackPrice;
           d.row.local_spec_qty = r.localSpecQty;
+          d.row.local_supplier_id = r.localSupplierId || 0;
+          d.row.local_supplier_name = r.localSupplierName || '';
         }
         this.$message.success('本地价已保存');
         d.visible = false;
@@ -9648,10 +10021,13 @@ const vm = new Vue({
       try {
         const r = await this.api('/api/products/local-price', {
           method: 'POST', headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ sku: d.sku, brandId: d.brandId, mode: 'unit', unitPrice: '', packPrice: '', specQty: '' }),
+          body: JSON.stringify({ sku: d.sku, brandId: d.brandId, mode: 'unit', unitPrice: '', packPrice: '', specQty: '', supplierId: 0 }),
         });
         if (r.error) { this.$message.error('清空失败: ' + r.error); return; }
-        if (d.row) { d.row.local_price = null; d.row.local_pack_price = null; d.row.local_spec_qty = null; }
+        if (d.row) {
+          d.row.local_price = null; d.row.local_pack_price = null; d.row.local_spec_qty = null;
+          d.row.local_supplier_id = 0; d.row.local_supplier_name = '';
+        }
         this.$message.success('本地价已清空');
         d.visible = false;
       } catch (e) { this.$message.error('清空失败: ' + e.message); }
@@ -9672,7 +10048,10 @@ const vm = new Vue({
         if (d && d.error) { this.cmp.error = d.error; return; }
         this.cmp.rows = (d && d.rows) || [];
         this.cmp.summary = (d && d.summary) || {};
+        this.cmp.groups = (d && d.summary && d.summary.groups) || [];
         this.cmp.truncated = !!(d && d.truncated);
+        // 服务端已算过一遍，这里再走同一套前端规则，保证「改建议量」后的一致口径
+        this.recalcCmp();
       } catch (e) {
         this.cmp.error = '比价失败：' + e.message;
       } finally { this.cmp.loading = false; }
@@ -9683,14 +10062,124 @@ const vm = new Vue({
       return c ? yuan(c.unitPrice) : '—';
     },
     cmpVerdict(row) {
-      if (row.verdict === 'cheaper') return '买贵了 · 换' + (row.best ? row.best.label : '渠道');
+      // v0.3.12 口径：最低价 > 建议采购价 = 买贵了（按现有渠道买更贵）；反过来是建议价更便宜
+      if (row.verdict === 'over') return '买贵了 · 现有价更高';
       if (row.verdict === 'same') return '基本持平';
-      if (row.verdict === 'higher') return '现采购价更低';
-      if (row.verdict === 'no-purchase') return '缺采购价';
+      if (row.verdict === 'under') return '建议价更便宜';
+      if (row.verdict === 'no-purchase') return '缺建议采购价';
       return '无任何可比价';
     },
+    cmpLocalSup(row) {
+      const c = (row.candidates || []).find((x) => x.kind === 'local');
+      return c && c.supplierName ? ('本地价供应商：' + c.supplierName) : '本地价（未指定供应商）';
+    },
     cmpRowClass({ row }) {
-      return row && row.verdict === 'cheaper' ? 'cmp-row-cheaper' : '';
+      return row && row.verdict === 'over' ? 'cmp-row-cheaper' : '';
+    },
+    /** 与后端 calcReplenishLine 同一套规则：有小数就进一件 */
+    calcPack(sug, spec) {
+      const s = Number(sug) || 0;
+      const q = Number(spec) > 0 ? Number(spec) : 1;
+      if (s <= 0) return 0;
+      return Math.ceil(Number((s / q).toFixed(6)) - 1e-9);
+    },
+    /** 改建议量后重算：行件数/行总价 → 供应商分组 → 汇总卡（只动内存，关掉弹窗即复原） */
+    recalcCmp() {
+      const rows = this.cmp.rows || [];
+      let amountTotal = 0;
+      let qtyTotal = 0;
+      let overpayTotal = 0;
+      const gmap = new Map();
+      for (const r of rows) {
+        const spec = Number(r.spec_qty) > 0 ? Number(r.spec_qty) : 1;
+        const unit = r.best ? Number(r.best.unitPrice) : 0;
+        const qty = unit > 0 ? this.calcPack(r.suggest_qty, spec) : 0;
+        r.qty_pack = qty;
+        r.amount = r.best ? Math.round((qty * spec * unit + Number.EPSILON) * 100) / 100 : null;
+        r.overpay = (r.verdict === 'over' && r.diff != null && qty > 0)
+          ? Math.round((qty * spec * Number(r.diff) + Number.EPSILON) * 100) / 100 : null;
+        amountTotal += Number(r.amount) || 0;
+        qtyTotal += qty;
+        if (r.overpay) overpayTotal += r.overpay;
+        if (!r.best) continue;
+        const sid = Number(r.best.supplierId) || 0;
+        const key = sid > 0 ? 'sup:' + sid : 'ch:' + r.best.kind;
+        if (!gmap.has(key)) {
+          gmap.set(key, {
+            key, supplierId: sid, supplierName: r.best.supplierName || r.best.label,
+            channel: r.best.kind, itemCount: 0, qtyTotal: 0, amount: 0, overpay: 0,
+          });
+        }
+        const g = gmap.get(key);
+        g.itemCount += 1;
+        g.qtyTotal += qty;
+        g.amount = Math.round((g.amount + (Number(r.amount) || 0) + Number.EPSILON) * 100) / 100;
+        if (r.overpay) g.overpay = Math.round((g.overpay + r.overpay + Number.EPSILON) * 100) / 100;
+      }
+      this.cmp.summary = Object.assign({}, this.cmp.summary, {
+        amountTotal: Math.round((amountTotal + Number.EPSILON) * 100) / 100,
+        qtyTotal,
+        overpayTotal: Math.round((overpayTotal + Number.EPSILON) * 100) / 100,
+      });
+      this.cmp.groups = [...gmap.values()].sort((a, b) => b.amount - a.amount);
+    },
+    /** 表格里改建议量：写回源行再重算（表格传的是 row 引用，直接改即可） */
+    onCmpQty(row, v) {
+      row.suggest_qty = String(v === '' || v == null ? '' : v).trim() === '' ? 0 : Number(v) || 0;
+      this.recalcCmp();
+    },
+    /** 采用补货建议：按供应商分组生成补货单（金额服务端重算） */
+    async adoptCmp() {
+      if (this.cmp.adopting) return;
+      const rows = (this.cmp.rows || []).filter((r) => r.best && Number(r.qty_pack) > 0);
+      if (!rows.length) { this.$message.warning('没有可生成的商品（先取价，并确认建议量大于 0）'); return; }
+      const gmap = new Map();
+      for (const r of rows) {
+        const sid = Number(r.best.supplierId) || 0;
+        const key = sid > 0 ? 'sup:' + sid : 'ch:' + r.best.kind;
+        if (!gmap.has(key)) {
+          gmap.set(key, {
+            supplierId: sid, supplierName: r.best.supplierName || r.best.label,
+            channel: r.best.kind, items: [],
+          });
+        }
+        gmap.get(key).items.push({
+          sku: r.sku, goodsName: r.goods_name || '',
+          channel: r.best.kind, channelLabel: r.best.label,
+          suggestQty: Number(r.suggest_qty) || 0,
+          specQty: Number(r.spec_qty) || 1,
+          unitPrice: Number(r.best.unitPrice) || 0,
+        });
+      }
+      const groups = [...gmap.values()];
+      const total = groups.reduce((s, g) => s + g.items.reduce((a, it) => {
+        const spec = it.specQty > 0 ? it.specQty : 1;
+        return a + this.calcPack(it.suggestQty, spec) * spec * it.unitPrice;
+      }, 0), 0);
+      let ok = false;
+      try {
+        await this.$confirm(
+          `将按 ${groups.length} 个供应商生成 ${groups.length} 张补货单，合计约 ${this.wbMoney(total)}。生成后到「补货单管理」里关联对应货单对账。`,
+          '采用补货建议', { type: 'warning', confirmButtonText: '生成补货单', cancelButtonText: '取消' });
+        ok = true;
+      } catch (e) { ok = false; }
+      if (!ok) return;
+      this.cmp.adopting = true;
+      try {
+        const d = await this.api('/api/replenish-order/create', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ batch: this.rp.batchId || '', groups }),
+        });
+        if (!d.ok) { this.$message.error(d.error || '生成失败'); return; }
+        this.$message.success(`已生成 ${d.orders.length} 张补货单，合计 ${this.wbMoney(d.totalAmount)}`);
+        this.cmp.visible = false;
+        // ⚠ 关弹窗有 0.3s 离场动画，立刻切页会把弹窗节点在动画中抽掉 →
+        //   Element UI 报 "Cannot read properties of null (reading 'removeChild')"。延后再切。
+        if (this.canReplenishOrder) {
+          setTimeout(() => this.switchPage('replenishOrder'), 350);
+        }
+      } catch (e) { this.$message.error('生成失败：' + e.message); }
+      finally { this.cmp.adopting = false; }
     },
     // ══════ 城配速达（阿发）══════
     async loadAfaSession() {

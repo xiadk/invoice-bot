@@ -776,6 +776,8 @@ async function migrate(conn, dbName) {
       // 三者由接口按「这次改的是哪个」重算，保证自洽；没填规格数量时 pack 为 NULL（只有单价）。
       ['local_spec_qty', "DECIMAL(12,2) DEFAULT NULL COMMENT '本地价规格数量（一件含多少个基础单位；NULL=只填了单价）'"],
       ['local_pack_price', "DECIMAL(12,2) DEFAULT NULL COMMENT '本地价整件价（= 单价 × 规格数量；规格为空时为 NULL）'"],
+      // 本地价供应商（v0.3.12）：线下报价属于哪个供应商，比价时用来归集「按供应商统计总价」
+      ['local_supplier_id', "INT NOT NULL DEFAULT 0 COMMENT '本地价供应商（supplier.id，0=未指定）'"],
       ['image_url', "VARCHAR(512) DEFAULT NULL COMMENT '商品主图（由「商品同步」从牵牛花拉取，按 sku 匹配更新）'"],
     ]) {
       if (!(await colExists('product_item', col))) {
@@ -903,6 +905,7 @@ async function migrate(conn, dbName) {
       // 本地价规格（v0.3.11）：与 product_item 同口径，见上一处注释
       ['local_spec_qty', "DECIMAL(12,2) DEFAULT NULL COMMENT '本地价规格数量（一件含多少个基础单位；NULL=只填了单价）'"],
       ['local_pack_price', "DECIMAL(12,2) DEFAULT NULL COMMENT '本地价整件价（= 单价 × 规格数量；规格为空时为 NULL）'"],
+      ['local_supplier_id', "INT NOT NULL DEFAULT 0 COMMENT '本地价供应商（supplier.id，0=未指定；v0.3.12）'"],
       ['afa_match_score', "SMALLINT DEFAULT NULL COMMENT '阿发自动匹配得分（0-100；手工关联留空）'"],
       ['afa_match_at', "DATETIME DEFAULT NULL COMMENT '阿发自动匹配写入时间（非空=自动匹配结果）'"],
     ]) {
@@ -1337,12 +1340,23 @@ async function migrate(conn, dbName) {
   // ── 供应商 / 货单管理（v0.3.0）──
   //   两个新菜单沿用 app_user 逐列开关；supplier / waybill / waybill_image / waybill_upload_token
   //   是普通业务表。下面的 DDL 与 sql/schema.sql 必须同源（改一处就要改另一处）。
-  const NEW_MENU_COLS = ['supplier_enabled', 'waybill_enabled'];
+  const NEW_MENU_COLS = ['supplier_enabled', 'waybill_enabled', 'replenish_order_enabled'];
+  const MENU_COL_LABEL = {
+    supplier_enabled: '供应商管理页',
+    waybill_enabled: '货单管理页',
+    replenish_order_enabled: '补货单管理页',
+  };
   for (const col of NEW_MENU_COLS) {
     if (!(await colExists('app_user', col))) {
-      const label = col === 'supplier_enabled' ? '供应商管理页' : '货单管理页';
+      const label = MENU_COL_LABEL[col] || '相关页';
       await q(`ALTER TABLE \`app_user\` ADD COLUMN \`${col}\` TINYINT(1) NOT NULL DEFAULT 0 ` +
         `COMMENT '是否允许查看${label}（1=开启，超级管理员始终可见）'`);
+      // 补货单管理（v0.3.12）：新菜单默认 0，老板升级完会看不着，还得找超管去开。
+      // 加列的瞬间把「主体账号」的默认值对齐它自己的货单管理权限（员工一律 0，由老板按需勾）；
+      // 只在这一刻跑一次，之后完全尊重用户手工调整。
+      if (col === 'replenish_order_enabled') {
+        await q('UPDATE `app_user` SET `replenish_order_enabled` = `waybill_enabled` WHERE `owner_id` IS NULL');
+      }
     }
   }
 
@@ -1512,6 +1526,62 @@ async function migrate(conn, dbName) {
     );
   }
 
+  // ── replenish_order / replenish_order_item 补货单（v0.3.12）──
+  //   与 sql/schema.sql 同源：一个供应商一张单，明细一行一个 SKU。
+  if (!(await tableExists('replenish_order'))) {
+    await q(
+      'CREATE TABLE `replenish_order` (' +
+      '  `id`            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,' +
+      "  `user_id`       INT           NOT NULL DEFAULT 1   COMMENT '数据归属用户（员工操作时记所属主体账号）'," +
+      "  `supplier_id`   INT           NOT NULL DEFAULT 0   COMMENT '供应商（supplier.id；0=本地价没指定供应商）'," +
+      "  `supplier_name` VARCHAR(64)   NOT NULL DEFAULT ''  COMMENT '生成时的供应商名称快照'," +
+      "  `channel`       VARCHAR(8)    NOT NULL DEFAULT ''  COMMENT '主要渠道：local/qht/afa/jd/mixed'," +
+      '  `amount`        DECIMAL(12,2) NOT NULL DEFAULT 0.00 COMMENT \'补货单金额（明细行总额之和）\',' +
+      '  `item_count`    INT           NOT NULL DEFAULT 0   COMMENT \'商品行数\',' +
+      '  `qty_total`     INT           NOT NULL DEFAULT 0   COMMENT \'补货数量合计（件）\',' +
+      "  `batch_id`      VARCHAR(64)   DEFAULT NULL         COMMENT '来源补货文件批次（product_import_batch.id）'," +
+      "  `waybill_id`    BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '关联的货单（waybill.id，0=未关联）'," +
+      '  `waybill_amount` DECIMAL(12,2) DEFAULT NULL        COMMENT \'关联时的货单金额快照（用于列表对比）\',' +
+      "  `linked_at`     DATETIME      DEFAULT NULL         COMMENT '关联时间'," +
+      "  `created_by`    VARCHAR(64)   DEFAULT NULL         COMMENT '生成人（登录账号）'," +
+      "  `created_at`    DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '生成日期'," +
+      "  `deleted_at`    DATETIME      DEFAULT NULL         COMMENT '软删除时间（NULL=有效）'," +
+      '  `updated_at`    DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,' +
+      '  PRIMARY KEY (`id`),' +
+      '  KEY `idx_ro_user_time` (`user_id`, `created_at`),' +
+      '  KEY `idx_ro_user_sup`  (`user_id`, `supplier_id`),' +
+      '  KEY `idx_ro_alive`     (`user_id`, `deleted_at`),' +
+      '  KEY `idx_ro_waybill`   (`waybill_id`)' +
+      ') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci' +
+      "  COMMENT='补货单（采用补货建议生成，按供应商归集）'"
+    );
+  }
+  if (!(await tableExists('replenish_order_item'))) {
+    await q(
+      'CREATE TABLE `replenish_order_item` (' +
+      '  `id`            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,' +
+      '  `order_id`      BIGINT UNSIGNED NOT NULL           COMMENT \'所属补货单（replenish_order.id）\',' +
+      '  `user_id`       INT           NOT NULL DEFAULT 1   COMMENT \'数据归属用户\',' +
+      "  `sku`           VARCHAR(64)   NOT NULL             COMMENT '商品SKU'," +
+      "  `goods_name`    VARCHAR(512)  NOT NULL DEFAULT ''  COMMENT '生成时的商品名称快照'," +
+      "  `channel`       VARCHAR(8)    NOT NULL DEFAULT ''  COMMENT '价源：local/qht/afa/jd'," +
+      "  `channel_label` VARCHAR(32)   NOT NULL DEFAULT ''  COMMENT '价源显示名（齐货通/永源顺/京东万商/供应商名）'," +
+      '  `supplier_id`   INT           NOT NULL DEFAULT 0   COMMENT \'该行的供应商（supplier.id，0=未指定）\',' +
+      '  `suggest_qty`   DECIMAL(12,2) NOT NULL DEFAULT 0.00 COMMENT \'建议量（基础单位，可被用户改过）\',' +
+      '  `spec_qty`      DECIMAL(12,2) NOT NULL DEFAULT 1.00 COMMENT \'规格（一件含多少基础单位；无规格按 1）\',' +
+      '  `qty_pack`      INT           NOT NULL DEFAULT 0   COMMENT \'补货数量（件）= 向上取整(建议量 ÷ 规格)\',' +
+      '  `unit_price`    DECIMAL(12,4) NOT NULL DEFAULT 0.0000 COMMENT \'最低单价（元/基础单位）\',' +
+      '  `pack_price`    DECIMAL(12,2) DEFAULT NULL         COMMENT \'整件价（单价 × 规格）\',' +
+      '  `amount`        DECIMAL(12,2) NOT NULL DEFAULT 0.00 COMMENT \'行总额（补货数量 × 规格 × 单价）\',' +
+      '  `created_at`    DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,' +
+      '  PRIMARY KEY (`id`),' +
+      '  KEY `idx_roi_order` (`order_id`, `user_id`),' +
+      '  KEY `idx_roi_sku`   (`user_id`, `sku`)' +
+      ') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci' +
+      "  COMMENT='补货单明细（每个 SKU 一行，含价源与折算依据）'"
+    );
+  }
+
   // ── 「员工有的菜单，主体默认也有」（v0.3.0 用户要求）──
   //   老板给员工开了某个菜单、自己却因为没开而看不见，是最容易被投诉的形态。
   //   规则**只加不减**：只把员工的 1 并到主体，从不把主体的 1 改回 0 —— 所以每次启动都跑也安全，
@@ -1521,7 +1591,7 @@ async function migrate(conn, dbName) {
   const MENU_COLS = [
     'qnh_refund_enabled', 'qnh_profit_enabled', 'product_enabled', 'market_enabled',
     'billing_enabled', 'replenish_enabled', 'price_enabled', 'after_sale_enabled',
-    'supplier_enabled', 'waybill_enabled',
+    'supplier_enabled', 'waybill_enabled', 'replenish_order_enabled',
   ];
   try {
     const usable = [];
