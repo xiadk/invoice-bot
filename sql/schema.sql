@@ -52,6 +52,8 @@ CREATE TABLE IF NOT EXISTS `app_user` (
   `after_sale_enabled`   TINYINT(1)    NOT NULL DEFAULT 0      COMMENT '是否允许查看售后管理页（1=开启，超级管理员始终可见）',
   `supplier_enabled`     TINYINT(1)    NOT NULL DEFAULT 0      COMMENT '是否允许查看供应商管理页（1=开启，超级管理员始终可见）',
   `waybill_enabled`      TINYINT(1)    NOT NULL DEFAULT 0      COMMENT '是否允许查看货单管理页（1=开启，超级管理员始终可见）',
+  `replenish_order_enabled` TINYINT(1) NOT NULL DEFAULT 0      COMMENT '是否允许查看补货单管理页（1=开启，超级管理员始终可见；v0.3.12）',
+  `staff_enabled`        TINYINT(1)    NOT NULL DEFAULT 0      COMMENT '是否允许查看员工管理页（1=开启，超级管理员走用户管理；v0.3.13）',
   `market_enabled`       TINYINT(1)    NOT NULL DEFAULT 0      COMMENT '是否允许查看交易市场页（1=开启，超级管理员始终可见）',
   `billing_enabled`      TINYINT(1)    NOT NULL DEFAULT 0      COMMENT '是否允许查看账单页（1=开启，超级管理员始终可见）',
   `token_version`        INT           NOT NULL DEFAULT 1      COMMENT '会话版本：改密/禁用时 +1，旧登录态立即失效',
@@ -399,6 +401,9 @@ CREATE TABLE IF NOT EXISTS `brand_product` (
   `afa_goods_id`    VARCHAR(64)   DEFAULT NULL          COMMENT '关联的城配速达商品ID（goodsId）',
   `jd_sku_id`       VARCHAR(64)   DEFAULT NULL          COMMENT '关联的京东万商 skuId（b.jd.com 商品ID）',
   `local_price`     DECIMAL(12,2) DEFAULT NULL          COMMENT '本地价（手工填写，仅作比价参考）',
+  `local_spec_qty`  DECIMAL(12,2) DEFAULT NULL          COMMENT '本地价规格数量（一件含多少个基础单位；NULL=只填了单价）',
+  `local_pack_price` DECIMAL(12,2) DEFAULT NULL         COMMENT '本地价整件价（= 单价 × 规格数量；规格为空时为 NULL）',
+  `local_supplier_id` INT         NOT NULL DEFAULT 0     COMMENT '本地价供应商（supplier.id，0=未指定；v0.3.12）',
   `afa_match_score` SMALLINT      DEFAULT NULL          COMMENT '阿发自动匹配得分（0-100；手工关联留空）',
   `afa_match_at`    DATETIME      DEFAULT NULL          COMMENT '阿发自动匹配写入时间（非空=自动匹配结果）',
   `synced_at`       DATETIME      DEFAULT NULL          COMMENT '最近一次同步时间',
@@ -436,6 +441,9 @@ CREATE TABLE IF NOT EXISTS `product_item` (
   `afa_goods_id`    VARCHAR(64)   DEFAULT NULL          COMMENT '关联的城配速达商品ID（goodsId，用于实时取价与加购）',
   `jd_sku_id`       VARCHAR(64)   DEFAULT NULL          COMMENT '关联的京东万商 skuId（b.jd.com 商品ID，用于取万商价）',
   `local_price`    DECIMAL(12,2) DEFAULT NULL           COMMENT '本地价（手工填写并保存，仅作比价参考）',
+  `local_spec_qty` DECIMAL(12,2) DEFAULT NULL           COMMENT '本地价规格数量（一件含多少个基础单位；NULL=只填了单价）',
+  `local_pack_price` DECIMAL(12,2) DEFAULT NULL         COMMENT '本地价整件价（= 单价 × 规格数量；规格为空时为 NULL）',
+  `local_supplier_id` INT         NOT NULL DEFAULT 0     COMMENT '本地价供应商（supplier.id，0=未指定；v0.3.12）',
   `batch_id`        BIGINT UNSIGNED NULL                COMMENT '最近一次导入批次（product_import_batch.id）',
   `source_file`     VARCHAR(255)  DEFAULT NULL          COMMENT '来源文件名',
   `created_at`      DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '首次导入时间',
@@ -737,3 +745,62 @@ CREATE TABLE IF NOT EXISTS `qht_order` (
   KEY `idx_qo_user_time`      (`user_id`, `order_time`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   COMMENT='齐货通订单（账单支出项「齐货通当月订单金额」数据源）';
+
+-- ----------------------------------------------------------------------------
+-- 表 5.6: replenish_order —— 补货单（v0.3.12）
+--   「采用补货建议」时按供应商归集生成：一个供应商一张单，金额 = 各明细行总额之和。
+--   明细行口径：补货数量(件) = 向上取整(建议量 ÷ 规格)，行总额 = 补货数量 × 规格 × 最低单价。
+--   waybill_id/waybill_amount 是「关联货单」的结果快照：货单被软删或改金额后，
+--   补货单页仍能显示当时对账用的金额（对比结论不会突然变成 0）。
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `replenish_order` (
+  `id`            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `user_id`       INT           NOT NULL DEFAULT 1   COMMENT '数据归属用户（员工操作时记所属主体账号）',
+  `supplier_id`   INT           NOT NULL DEFAULT 0   COMMENT '供应商（supplier.id；0=本地价没指定供应商）',
+  `supplier_name` VARCHAR(64)   NOT NULL DEFAULT ''  COMMENT '生成时的供应商名称快照',
+  `channel`       VARCHAR(8)    NOT NULL DEFAULT ''  COMMENT '主要渠道：local/qht/afa/jd/mixed（明细行各有自己的渠道）',
+  `amount`        DECIMAL(12,2) NOT NULL DEFAULT 0.00 COMMENT '补货单金额（明细行总额之和）',
+  `item_count`    INT           NOT NULL DEFAULT 0   COMMENT '商品行数',
+  `qty_total`     INT           NOT NULL DEFAULT 0   COMMENT '补货数量合计（件）',
+  `batch_id`      VARCHAR(64)   DEFAULT NULL         COMMENT '来源补货文件批次（product_import_batch.id）',
+  `waybill_id`    BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '关联的货单（waybill.id，0=未关联）',
+  `waybill_amount` DECIMAL(12,2) DEFAULT NULL        COMMENT '关联时的货单金额快照（用于列表对比）',
+  `linked_at`     DATETIME      DEFAULT NULL         COMMENT '关联时间',
+  `created_by`    VARCHAR(64)   DEFAULT NULL         COMMENT '生成人（登录账号）',
+  `created_at`    DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '生成日期',
+  `deleted_at`    DATETIME      DEFAULT NULL         COMMENT '软删除时间（NULL=有效）',
+  `updated_at`    DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_ro_user_time` (`user_id`, `created_at`),
+  KEY `idx_ro_user_sup`  (`user_id`, `supplier_id`),
+  KEY `idx_ro_alive`     (`user_id`, `deleted_at`),
+  KEY `idx_ro_waybill`   (`waybill_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  COMMENT='补货单（采用补货建议生成，按供应商归集）';
+
+-- ----------------------------------------------------------------------------
+-- 表 5.7: replenish_order_item —— 补货单明细（v0.3.12）
+--   一行 = 一个 SKU 在某个渠道上的补货建议。suggest_qty/spec_qty 都存下来，
+--   是为了事后能复核「当初为什么算成这个件数」，不依赖商品表当前值（会被重新导入覆盖）。
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `replenish_order_item` (
+  `id`            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `order_id`      BIGINT UNSIGNED NOT NULL           COMMENT '所属补货单（replenish_order.id）',
+  `user_id`       INT           NOT NULL DEFAULT 1   COMMENT '数据归属用户',
+  `sku`           VARCHAR(64)   NOT NULL             COMMENT '商品SKU',
+  `goods_name`    VARCHAR(512)  NOT NULL DEFAULT ''  COMMENT '生成时的商品名称快照',
+  `channel`       VARCHAR(8)    NOT NULL DEFAULT ''  COMMENT '价源：local/qht/afa/jd',
+  `channel_label` VARCHAR(32)   NOT NULL DEFAULT ''  COMMENT '价源显示名（齐货通/永源顺/京东万商/供应商名）',
+  `supplier_id`   INT           NOT NULL DEFAULT 0   COMMENT '该行的供应商（supplier.id，0=未指定）',
+  `suggest_qty`   DECIMAL(12,2) NOT NULL DEFAULT 0.00 COMMENT '建议量（基础单位，可被用户改过）',
+  `spec_qty`      DECIMAL(12,2) NOT NULL DEFAULT 1.00 COMMENT '规格（一件含多少基础单位；无规格按 1）',
+  `qty_pack`      INT           NOT NULL DEFAULT 0   COMMENT '补货数量（件）= 向上取整(建议量 ÷ 规格)',
+  `unit_price`    DECIMAL(12,4) NOT NULL DEFAULT 0.0000 COMMENT '最低单价（元/基础单位）',
+  `pack_price`    DECIMAL(12,2) DEFAULT NULL         COMMENT '整件价（单价 × 规格）',
+  `amount`        DECIMAL(12,2) NOT NULL DEFAULT 0.00 COMMENT '行总额（补货数量 × 规格 × 单价）',
+  `created_at`    DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_roi_order` (`order_id`, `user_id`),
+  KEY `idx_roi_sku`   (`user_id`, `sku`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  COMMENT='补货单明细（每个 SKU 一行，含价源与折算依据）';
