@@ -7157,7 +7157,8 @@ const vm = new Vue({
         this.$message.warning(`本机助手是 v${st.agentVer || '未知'}，解析店铺 ID 需要 v${st.minVer} 及以上，请先更新助手`);
         return;
       }
-      if (!st.pending) { this.$message.success('所有店铺 ID 都已解析完成'); return; }
+      // 只解析「超期不可申请（invoice_status=9）+ 交易成功」的单：发票接口拉得到的单自带 mall_id，不必解析
+      if (!st.pending) { this.$message.success('需要解析的店铺 ID 都已完成（仅超期未开票、且交易成功的单）'); return; }
       this.pd.mallResolving = true;
       try {
         const d = await this.pddApi('/api/pdd/mall-id/resolve', {
@@ -7171,7 +7172,7 @@ const vm = new Vue({
           return;
         }
         if (!d.ok) { this.$message.error(d.message || '发起解析失败'); return; }
-        if (!d.pending) { this.$message.success(d.message || '所有店铺 ID 都已解析完成'); return; }
+        if (!d.pending) { this.$message.success(d.message || '需要解析的店铺 ID 都已完成（仅超期未开票、且交易成功的单）'); return; }
         this.pd.mallTaskId = d.taskId;
         this.pd.applyDialog = {
           visible: true, running: true, kind: 'mall', status: '', message: d.message || '',

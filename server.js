@@ -6025,7 +6025,7 @@ const server = http.createServer(async (req, res) => {
             ok: true, total: 0,
             message: st.pending
               ? '暂无可解析的店铺：刚解析失败过的店 10 分钟内不重复尝试，请稍后再点。'
-              : '所有店铺 ID 都已解析完成，催收可以直接用了。',
+              : '需要解析的店铺 ID 都已完成（仅超期未开票、且交易成功的单；退款/取消的单不解析）。',
           });
         }
         const taskId = 'pddmall-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
@@ -6049,7 +6049,7 @@ const server = http.createServer(async (req, res) => {
         await logOp(user, 'pdd.mall.resolve', { tenantId: pddUid, total: targets.length, agentUid: aUid });
         return sendJson(res, 200, {
           ok: true, pending: true, taskId, total: targets.length,
-          message: `已下发解析任务（${targets.length} 个店铺），正在本机助手里逐个打开店铺页取 mall_id…`,
+          message: `已下发解析任务（${targets.length} 个店铺），正在本机助手里逐个打开商家会话页取 mall_id…`,
         });
       }
 
