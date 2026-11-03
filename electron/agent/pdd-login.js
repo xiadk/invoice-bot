@@ -15,7 +15,8 @@
  * 隐私边界：账号密码只在本机窗口里输入，助手不读取、不保存；
  *   回传的只有拼多多站点 Cookie，用途是代替你拉取自己的发票订单数据。
  */
-const { BrowserWindow, session } = require('electron');
+const { session } = require('electron');
+const siteFrame = require('../ui/site-frame');
 
 const PARTITION = 'persist:pdd';
 // 与 lib/pdd-sync.js 保持完全一致：接口按 UA 决定返回哪套结构，桌面 UA 会拿错
@@ -46,8 +47,9 @@ function getWindow() {
   if (win && !win.isDestroyed()) return win;
   const part = session.fromPartition(PARTITION);
   try { part.setUserAgent(MOBILE_UA); } catch (e) { /* 忽略 */ }
-  win = new BrowserWindow({
-    show: false, width: 430, height: 880, title: '拼多多（登录窗口）', autoHideMenuBar: true,
+  // 带顶部工具栏的网站窗口（← 返回 / → 前进 / ⟳ 刷新 + 网址），返回的是兼容 BrowserWindow 的代理
+  win = siteFrame.create({
+    show: false, width: 430, height: 880, title: '拼多多（登录窗口）',
     webPreferences: {
       partition: PARTITION,
       nodeIntegration: false, contextIsolation: true, sandbox: true, webSecurity: true,

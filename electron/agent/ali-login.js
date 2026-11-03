@@ -14,7 +14,8 @@
  * 隐私边界：账号密码只在本机窗口里输入，助手不读取、不保存；
  *   回传的只有 1688 站点 Cookie，用途是代替你拉取自己的订单与发票数据。
  */
-const { BrowserWindow, session } = require('electron');
+const { session } = require('electron');
+const siteFrame = require('../ui/site-frame');
 
 const PARTITION = 'persist:1688';
 const DEFAULT_URL = 'https://login.1688.com/member/signin.htm';
@@ -38,8 +39,9 @@ function peekWindow() { return (win && !win.isDestroyed()) ? win : null; }
 
 function getWindow() {
   if (win && !win.isDestroyed()) return win;
-  win = new BrowserWindow({
-    show: false, width: 1100, height: 800, title: '1688（登录窗口）', autoHideMenuBar: true,
+  // 带顶部工具栏的网站窗口（← 返回 / → 前进 / ⟳ 刷新 + 网址），返回的是兼容 BrowserWindow 的代理
+  win = siteFrame.create({
+    show: false, width: 1100, height: 800, title: '1688（登录窗口）',
     webPreferences: {
       partition: PARTITION,
       nodeIntegration: false, contextIsolation: true, sandbox: true, webSecurity: true,

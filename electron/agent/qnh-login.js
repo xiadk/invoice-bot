@@ -13,7 +13,8 @@
  * 隐私边界：账号密码只在本机窗口里输入，助手不读取、不保存；
  *   回传的只有牵牛花站点 Cookie，用途是代替你调接口拉退单数据。
  */
-const { BrowserWindow, session } = require('electron');
+const { session } = require('electron');
+const siteFrame = require('../ui/site-frame');
 
 const PARTITION = 'persist:qnh';
 const REAL_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
@@ -71,8 +72,9 @@ function getWindow(brandId) {
   const part = session.fromPartition(partition);
   try { part.setUserAgent(REAL_UA); } catch (e) { /* 忽略 */ }
   const brandLabel = Number(brandId) > 1 ? `（品牌#${Number(brandId)}）` : '';
-  const win = new BrowserWindow({
-    show: false, width: 1180, height: 820, title: '牵牛花（登录窗口）' + brandLabel, autoHideMenuBar: true,
+  // 带顶部工具栏的网站窗口（← 返回 / → 前进 / ⟳ 刷新 + 网址），返回的是兼容 BrowserWindow 的代理
+  const win = siteFrame.create({
+    show: false, width: 1180, height: 820, title: '牵牛花（登录窗口）' + brandLabel,
     webPreferences: {
       partition,
       nodeIntegration: false, contextIsolation: true, sandbox: true, webSecurity: true,
