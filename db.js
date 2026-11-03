@@ -771,6 +771,11 @@ async function migrate(conn, dbName) {
       ['afa_goods_id', "VARCHAR(64) DEFAULT NULL COMMENT '关联的城配速达商品ID（goodsId，用于实时取价与加购）'"],
       ['jd_sku_id', "VARCHAR(64) DEFAULT NULL COMMENT '关联的京东万商 skuId（b.jd.com 商品ID，用于取万商价）'"],
       ['local_price', "DECIMAL(12,2) DEFAULT NULL COMMENT '本地价（手工填写并保存，仅作比价参考）'"],
+      // 本地价规格（v0.3.11）：手工报价常常是「一件多少钱」+「一件几个」，
+      // local_price 仍存**单价**，local_pack_price 存整件价，local_spec_qty 存一件含多少个基础单位。
+      // 三者由接口按「这次改的是哪个」重算，保证自洽；没填规格数量时 pack 为 NULL（只有单价）。
+      ['local_spec_qty', "DECIMAL(12,2) DEFAULT NULL COMMENT '本地价规格数量（一件含多少个基础单位；NULL=只填了单价）'"],
+      ['local_pack_price', "DECIMAL(12,2) DEFAULT NULL COMMENT '本地价整件价（= 单价 × 规格数量；规格为空时为 NULL）'"],
       ['image_url', "VARCHAR(512) DEFAULT NULL COMMENT '商品主图（由「商品同步」从牵牛花拉取，按 sku 匹配更新）'"],
     ]) {
       if (!(await colExists('product_item', col))) {
@@ -895,6 +900,9 @@ async function migrate(conn, dbName) {
       ['afa_goods_id', "VARCHAR(64) DEFAULT NULL COMMENT '关联的城配速达商品ID（goodsId，用于实时取价与加购）'"],
       ['jd_sku_id', "VARCHAR(64) DEFAULT NULL COMMENT '关联的京东万商 skuId（b.jd.com 商品ID，用于取万商价）'"],
       ['local_price', "DECIMAL(12,2) DEFAULT NULL COMMENT '本地价（手工填写，仅作比价参考）'"],
+      // 本地价规格（v0.3.11）：与 product_item 同口径，见上一处注释
+      ['local_spec_qty', "DECIMAL(12,2) DEFAULT NULL COMMENT '本地价规格数量（一件含多少个基础单位；NULL=只填了单价）'"],
+      ['local_pack_price', "DECIMAL(12,2) DEFAULT NULL COMMENT '本地价整件价（= 单价 × 规格数量；规格为空时为 NULL）'"],
       ['afa_match_score', "SMALLINT DEFAULT NULL COMMENT '阿发自动匹配得分（0-100；手工关联留空）'"],
       ['afa_match_at', "DATETIME DEFAULT NULL COMMENT '阿发自动匹配写入时间（非空=自动匹配结果）'"],
     ]) {

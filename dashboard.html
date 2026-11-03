@@ -410,6 +410,25 @@
     50%      { opacity: .3; transform: scale(.75); }
   }
   .ali-sync-meta { color: var(--text-3); font-variant-numeric: tabular-nums; }
+
+  /* 补货比价分析（v0.3.11）：汇总卡 + 结论标签；只有「买贵了」标红 */
+  .cmp-cards { display: flex; gap: 10px; flex-wrap: wrap; }
+  .cmp-card { flex: 1 1 150px; min-width: 130px; border: 1px solid #e8eaee; border-radius: 6px;
+              padding: 10px 12px; background: #fafbfc; }
+  .cmp-card .cmp-k { font-size: 12px; color: var(--text-2); line-height: 16px; }
+  .cmp-card .cmp-v { font-size: 22px; font-weight: 600; line-height: 30px; color: var(--text-1);
+                     font-variant-numeric: tabular-nums; }
+  .cmp-card .cmp-v small { font-size: 12px; font-weight: 400; color: #e5453a; margin-left: 6px; }
+  .cmp-card.danger { border-color: #f5c2c0; background: #fef6f5; }
+  .cmp-card.danger .cmp-v { color: #e5453a; }
+  .cmp-card.ok { border-color: #d6e9d8; background: #f5fbf6; }
+  .cmp-card.ok .cmp-v { color: #2e9e4f; }
+  .cmp-verdict { font-size: 12px; }
+  .cmp-verdict.v-cheaper { color: #e5453a; font-weight: 600; }
+  .cmp-verdict.v-higher { color: #2e9e4f; }
+  .cmp-verdict.v-same { color: var(--text-2); }
+  .cmp-verdict.v-no-price, .cmp-verdict.v-no-purchase { color: #c0c4cc; }
+  .el-table .cmp-row-cheaper td { background: #fef8f8 !important; }
 </style>
 </head>
 <body>
@@ -1052,6 +1071,10 @@
           </el-select>
           <el-button size="small" type="primary" plain :loading="rp.loading" @click="searchRp">查询</el-button>
           <el-button size="small" @click="resetRpFilter">重置</el-button>
+          <!-- 比价分析（v0.3.11）：参比价源 = 三平台缓存 + 手工本地价，取最低价出补货建议 -->
+          <el-button size="small" type="success" plain icon="el-icon-data-analysis"
+                     :loading="cmp.loading" @click="openCompare"
+                     title="按当前筛选范围，把已有供应商价（齐货通/城配速达/京东万商/本地价）与本次补货的采购价比一遍">比价分析</el-button>
           <span class="fb-spacer"></span>
           <span class="loginid">共 {{ rp.total }} 个商品 · 当前筛选货值 {{ yuan(rp.filteredValue) }}</span>
         </div>
@@ -1223,10 +1246,27 @@
                 <el-button v-else size="mini" type="warning" plain @click="openJdLinkDlg(p.row)">关联</el-button>
               </template>
             </el-table-column>
-            <el-table-column label="本地价" width="118">
+            <!-- 本地价（v0.3.11）：整件价 / 单价 / 规格数量三件套，点「填写」在弹框里互算 -->
+            <el-table-column label="本地价" width="150">
               <template slot-scope="p">
-                <el-input v-model="p.row.local_price" size="mini" placeholder="可手工填写"
-                          @change="saveLocalPrice(p.row)" style="width:100px"></el-input>
+                <div style="display:flex;flex-direction:column;gap:2px;font-size:12px;line-height:18px;min-width:118px">
+                  <div style="display:flex;justify-content:space-between;gap:8px">
+                    <span class="loginid">单价</span>
+                    <b v-if="p.row.local_price != null" class="amount ok">{{ yuan(p.row.local_price) }}</b>
+                    <span v-else class="loginid">—</span>
+                  </div>
+                  <div style="display:flex;justify-content:space-between;gap:8px">
+                    <span class="loginid">整件价</span>
+                    <b v-if="p.row.local_pack_price != null">{{ yuan(p.row.local_pack_price) }}</b>
+                    <span v-else class="loginid">—</span>
+                  </div>
+                  <div style="display:flex;justify-content:space-between;gap:8px">
+                    <span class="loginid">规格</span>
+                    <span class="loginid">{{ p.row.local_spec_qty != null ? p.row.local_spec_qty + '/件' : '—' }}</span>
+                  </div>
+                  <el-button type="text" size="mini" style="align-self:flex-start;padding:0"
+                             @click="openLocalPrice(p.row)">{{ p.row.local_price != null ? '修改' : '填写' }}</el-button>
+                </div>
               </template>
             </el-table-column>
             <el-table-column prop="available_stock" label="可用库存" width="80"></el-table-column>
@@ -1239,6 +1279,131 @@
                            @size-change="onRpSize" @current-change="onRpPage"></el-pagination>
           </div>
       </div>
+
+        <!-- 填写本地价（v0.3.11）：整件价 / 单价 任填一个即自动折算，规格数量决定一件含多少个 -->
+        <el-dialog title="填写本地价" :visible.sync="localDlg.visible" width="460px" top="8vh" append-to-body>
+          <div class="loginid" style="margin-bottom:10px">
+            {{ localDlg.sku }}<span v-if="localDlg.goodsName"> · {{ localDlg.goodsName }}</span>
+          </div>
+          <el-form label-position="top" size="small" :inline="false">
+            <el-form-item label="规格数量（一件含多少个基础单位，可留空）">
+              <el-input v-model="localDlg.specQty" type="number" min="0" placeholder="如 12（1 件 = 12 瓶）；留空表示只有单价"
+                        @input="onLocalCalc('qty')"></el-input>
+            </el-form-item>
+            <el-row :gutter="12">
+              <el-col :span="12">
+                <el-form-item label="整件价（元/件）">
+                  <el-input v-model="localDlg.packPrice" type="number" min="0" placeholder="如 99.96"
+                            @input="onLocalCalc('pack')"></el-input>
+                </el-form-item>
+              </el-col>
+              <el-col :span="12">
+                <el-form-item label="单价（元/个）">
+                  <el-input v-model="localDlg.unitPrice" type="number" min="0" placeholder="如 8.33"
+                            @input="onLocalCalc('unit')"></el-input>
+                </el-form-item>
+              </el-col>
+            </el-row>
+            <el-alert v-if="localDlg.hint" :title="localDlg.hint" type="info" :closable="false" show-icon></el-alert>
+            <div class="loginid" style="margin-top:8px">两个价格都是四舍五入到分；只填一个也会把另一个算出来。</div>
+          </el-form>
+          <div slot="footer">
+            <el-button size="small" type="danger" plain :disabled="localDlg.saving" @click="clearLocalPrice">清空本地价</el-button>
+            <el-button size="small" @click="localDlg.visible = false">取消</el-button>
+            <el-button size="small" type="primary" :loading="localDlg.saving" @click="saveLocalPriceDlg">保存</el-button>
+          </div>
+        </el-dialog>
+
+        <!-- 比价分析（v0.3.11）：已有供应商价取最低 → 补货建议；只对「买贵了」标红 -->
+        <el-dialog title="补货比价分析" :visible.sync="cmp.visible" width="1120px" top="4vh" append-to-body>
+          <el-alert v-if="cmp.error" type="error" :closable="false" show-icon :title="cmp.error" style="margin-bottom:10px"></el-alert>
+          <div class="cmp-cards">
+            <div class="cmp-card"><div class="cmp-k">参比商品</div><div class="cmp-v">{{ cmp.summary.total || 0 }}</div></div>
+            <div class="cmp-card"><div class="cmp-k">有可比价</div><div class="cmp-v">{{ cmp.summary.priced || 0 }}</div></div>
+            <div class="cmp-card danger">
+              <div class="cmp-k">买贵了（可换渠道）</div>
+              <div class="cmp-v">{{ cmp.summary.cheaper || 0 }}
+                <small v-if="cmp.summary.saveTotal">可省 {{ wbMoney(cmp.summary.saveTotal) }}</small>
+              </div>
+            </div>
+            <div class="cmp-card ok"><div class="cmp-k">现采购价已最优</div><div class="cmp-v">{{ cmp.summary.higher || 0 }}</div></div>
+            <div class="cmp-card"><div class="cmp-k">无任何可比价</div><div class="cmp-v">{{ cmp.summary.noPrice || 0 }}</div></div>
+          </div>
+          <div style="display:flex;align-items:center;gap:12px;margin:6px 0 10px">
+            <el-checkbox v-model="cmp.onlyCheaper">只看买贵了的</el-checkbox>
+            <el-input v-model="cmp.q" size="small" clearable placeholder="搜 SKU / 商品名称" style="width:220px"></el-input>
+            <span class="fb-spacer"></span>
+            <span class="loginid">价源：齐货通 / 城配速达 / 京东万商（缓存）+ 本地价，取最低单价；差额按建议量估算</span>
+          </div>
+          <el-table :data="cmpRows" size="small" border :max-height="tblH.cmp" style="width:100%" v-loading="cmp.loading"
+                    :row-class-name="cmpRowClass" empty-text="没有可比的商品">
+            <el-table-column label="图片" width="54">
+              <template slot-scope="p">
+                <img v-if="p.row.image_url" :src="imgThumb(p.row.image_url, 80)" width="34" height="34" loading="lazy"
+                     style="width:34px;height:34px;object-fit:cover;border-radius:4px;display:block"
+                     @error="imgError($event, p.row.image_url)" />
+                <span v-else class="loginid">—</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="商品SKU" width="140">
+              <template slot-scope="p"><span class="loginid" style="font-family:Consolas,monospace">{{ p.row.sku }}</span></template>
+            </el-table-column>
+            <el-table-column label="商品名称" min-width="180">
+              <template slot-scope="p"><span :title="p.row.goods_name">{{ p.row.goods_name }}</span></template>
+            </el-table-column>
+            <el-table-column label="采购价" width="82" align="right">
+              <template slot-scope="p"><span class="amount">{{ p.row.purchase_price == null ? '—' : yuan(p.row.purchase_price) }}</span></template>
+            </el-table-column>
+            <el-table-column label="齐货通" width="76" align="right">
+              <template slot-scope="p"><span class="loginid">{{ cmpPrice(p.row, 'qht') }}</span></template>
+            </el-table-column>
+            <el-table-column label="城配速达" width="82" align="right">
+              <template slot-scope="p"><span class="loginid">{{ cmpPrice(p.row, 'afa') }}</span></template>
+            </el-table-column>
+            <el-table-column label="京东万商" width="82" align="right">
+              <template slot-scope="p"><span class="loginid">{{ cmpPrice(p.row, 'jd') }}</span></template>
+            </el-table-column>
+            <el-table-column label="本地价" width="72" align="right">
+              <template slot-scope="p"><span class="loginid">{{ cmpPrice(p.row, 'local') }}</span></template>
+            </el-table-column>
+            <el-table-column label="最低价来源" width="100" align="center">
+              <template slot-scope="p">
+                <el-tag v-if="p.row.best" size="mini" :type="p.row.best.kind === 'local' ? 'warning' : 'success'">{{ p.row.best.label }}</el-tag>
+                <span v-else class="loginid">—</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="最低单价" width="88" align="right">
+              <template slot-scope="p"><b v-if="p.row.best" class="amount ok">{{ yuan(p.row.best.unitPrice) }}</b><span v-else class="loginid">—</span></template>
+            </el-table-column>
+            <el-table-column label="差额" width="86" align="right">
+              <template slot-scope="p">
+                <b v-if="p.row.verdict === 'cheaper'" style="color:#e5453a">+{{ Number(p.row.diff).toFixed(2) }}</b>
+                <span v-else-if="p.row.diff != null" class="loginid">{{ Number(p.row.diff).toFixed(2) }}</span>
+                <span v-else class="loginid">—</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="建议量" width="72" align="right">
+              <template slot-scope="p"><span class="loginid">{{ p.row.suggest_qty || '—' }}</span></template>
+            </el-table-column>
+            <el-table-column label="可省" width="86" align="right">
+              <template slot-scope="p">
+                <b v-if="p.row.save_total != null" style="color:#e5453a">{{ yuan(p.row.save_total) }}</b>
+                <span v-else class="loginid">—</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="结论" width="132">
+              <template slot-scope="p">
+                <span class="cmp-verdict" :class="'v-' + p.row.verdict">{{ cmpVerdict(p.row) }}</span>
+              </template>
+            </el-table-column>
+          </el-table>
+          <div slot="footer">
+            <span class="loginid" style="float:left;line-height:32px">
+              {{ cmp.truncated ? '商品超过 2000 个，只比对了前 2000 个（可先筛选再比）' : '价格来自「取价」缓存，未取价的商品会算作无价' }}
+            </span>
+            <el-button size="small" @click="cmp.visible = false">关闭</el-button>
+          </div>
+        </el-dialog>
 
         <!-- 关联齐货通商品：搜关键字 → 选商品 → 确认 -->
         <el-dialog title="关联齐货通商品" :visible.sync="rpLink.visible" width="760px" top="4vh" append-to-body>
@@ -4319,7 +4484,12 @@ const vm = new Vue({
             // 京东万商：登录态按账号隔离（在助手窗口里登录，服务器只存 eid/uuid/收货地址）
             jdSession: { configured: false, shop: '', savedAt: null, agent: { online: false, capable: false, version: '', minVersion: '' } } },
       // 弹窗表格高度按视口动态算（写死 vh 在小屏笔记本上会把弹窗撑出屏幕）
-      tblH: { rp: 500, link: 320 },
+      tblH: { rp: 500, link: 320, cmp: 460 },
+      // 本地价（v0.3.11）：弹框里整件价 / 单价 / 规格数量互算，mode 记住最后改的是哪个价格
+      localDlg: { visible: false, saving: false, row: null, sku: '', goodsName: '', brandId: 0,
+                  specQty: '', unitPrice: '', packPrice: '', mode: 'unit', hint: '' },
+      // 比价分析（v0.3.11）：rows 由 /api/products/compare 返回，前端只做「只看买贵了」与关键词过滤
+      cmp: { visible: false, loading: false, rows: [], summary: {}, onlyCheaper: false, q: '', error: '', truncated: false },
       rpLink: { visible: false, sku: '', keyword: '', rows: [], loading: false, error: '', picked: null, total: 0, page: 1, size: 20 },
       rpBuy: { visible: false, sku: '', goodsId: null, goodsName: '', qty: 1, saving: false },
       qhtDlg: { visible: false, account: '', password: '', saving: false },
@@ -4600,6 +4770,16 @@ const vm = new Vue({
     // 供应商管理 / 货单管理（v0.3.0）：两个独立菜单开关，超管始终可见
     canSupplier() { return !!(this.me && (this.me.role === 'admin' || this.me.supplierEnabled)); },
     canWaybill() { return !!(this.me && (this.me.role === 'admin' || this.me.waybillEnabled)); },
+    /** 比价弹窗里实际显示的行（只看买贵了 + 关键词），服务端已把买贵的排在最前 */
+    cmpRows() {
+      const kw = String(this.cmp.q || '').trim().toLowerCase();
+      return (this.cmp.rows || []).filter((r) => {
+        if (this.cmp.onlyCheaper && r.verdict !== 'cheaper') return false;
+        if (!kw) return true;
+        return String(r.sku || '').toLowerCase().indexOf(kw) >= 0
+          || String(r.goods_name || '').toLowerCase().indexOf(kw) >= 0;
+      });
+    },
     /** 一张货单最多传几张图（与 lib/waybill.js 的 MAX_IMAGES 保持一致） */
     wbImgMax() { return 9; },
     // 员工管理（v0.2.104）：只有「主体账号」能用（员工账号 owner_id 非空，看不到该菜单）
@@ -9398,17 +9578,119 @@ const vm = new Vue({
       } catch (e) { this.$message.error('加入购物车失败: ' + e.message); }
       finally { this.rpBuy.saving = false; }
     },
-    async saveLocalPrice(row) {
-      const raw = String(row.local_price == null ? '' : row.local_price).trim();
+    // ══════ 本地价（v0.3.11）：整件价 / 单价 / 规格数量 ══════
+    /** 打开填写弹框：把库里已有的三个值带出来，mode 默认 unit */
+    openLocalPrice(row) {
+      this.localDlg = {
+        visible: true, saving: false, row,
+        sku: row.sku, goodsName: row.goods_name || '', brandId: row.brand_id,
+        specQty: row.local_spec_qty == null ? '' : String(row.local_spec_qty),
+        unitPrice: row.local_price == null ? '' : String(row.local_price),
+        packPrice: row.local_pack_price == null ? '' : String(row.local_pack_price),
+        mode: 'unit', hint: '',
+      };
+    },
+    /**
+     * 互算：src = 用户刚改动的那一项（unit / pack / qty）。
+     * 改单价 → 整件价 = 单价 × 规格；改整件价 → 单价 = 整件价 ÷ 规格；
+     * 改规格 → 按当前 mode 重算另一侧；没规格数量时整件价留空（只有单价）。
+     * 与后端 products.calcLocalPrice 同一套规则（四舍五入到分），保存以服务端返回为准。
+     */
+    onLocalCalc(src) {
+      const d = this.localDlg;
+      if (src !== 'qty') d.mode = src === 'pack' ? 'pack' : 'unit';
+      const r2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
+      const qtyRaw = String(d.specQty == null ? '' : d.specQty).trim();
+      const qty = qtyRaw === '' ? null : Number(qtyRaw);
+      const hasQty = qty != null && Number.isFinite(qty) && qty > 0;
+
+      if (d.mode === 'pack') {
+        const pack = String(d.packPrice == null ? '' : d.packPrice).trim() === '' ? null : Number(d.packPrice);
+        if (pack == null || !Number.isFinite(pack)) { d.unitPrice = ''; d.hint = ''; return; }
+        if (!hasQty) { d.unitPrice = ''; d.hint = '填整件价需要同时填规格数量（一件多少个），否则算不出单价'; return; }
+        d.unitPrice = String(r2(pack / qty));
+        d.hint = '整件价 ' + r2(pack) + ' ÷ 规格 ' + qty + ' = 单价 ' + r2(pack / qty);
+        return;
+      }
+      const unit = String(d.unitPrice == null ? '' : d.unitPrice).trim() === '' ? null : Number(d.unitPrice);
+      if (unit == null || !Number.isFinite(unit)) { d.packPrice = ''; d.hint = ''; return; }
+      if (!hasQty) { d.packPrice = ''; d.hint = '未填规格数量 → 只保存单价，没有整件价'; return; }
+      d.packPrice = String(r2(unit * qty));
+      d.hint = '单价 ' + r2(unit) + ' × 规格 ' + qty + ' = 整件价 ' + r2(unit * qty);
+    },
+    async saveLocalPriceDlg() {
+      const d = this.localDlg;
+      if (!d.sku) return;
+      d.saving = true;
       try {
-        const d = await this.api('/api/products/local-price', {
+        const r = await this.api('/api/products/local-price', {
           method: 'POST', headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ sku: row.sku, localPrice: raw, brandId: row.brand_id }),
+          body: JSON.stringify({
+            sku: d.sku, brandId: d.brandId, mode: d.mode,
+            unitPrice: d.unitPrice, packPrice: d.packPrice, specQty: d.specQty,
+          }),
         });
-        if (d.error) { this.$message.error('本地价保存失败: ' + d.error); return; }
-        row.local_price = d.localPrice;
+        if (r.error) { this.$message.error('本地价保存失败: ' + r.error); return; }
+        // 以服务端返回为准（四舍五入、清空规则都只认一处），顺手更新行数据，列表不用重拉
+        if (d.row) {
+          d.row.local_price = r.localPrice;
+          d.row.local_pack_price = r.localPackPrice;
+          d.row.local_spec_qty = r.localSpecQty;
+        }
         this.$message.success('本地价已保存');
+        d.visible = false;
       } catch (e) { this.$message.error('本地价保存失败: ' + e.message); }
+      finally { d.saving = false; }
+    },
+    async clearLocalPrice() {
+      const d = this.localDlg;
+      d.saving = true;
+      try {
+        const r = await this.api('/api/products/local-price', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ sku: d.sku, brandId: d.brandId, mode: 'unit', unitPrice: '', packPrice: '', specQty: '' }),
+        });
+        if (r.error) { this.$message.error('清空失败: ' + r.error); return; }
+        if (d.row) { d.row.local_price = null; d.row.local_pack_price = null; d.row.local_spec_qty = null; }
+        this.$message.success('本地价已清空');
+        d.visible = false;
+      } catch (e) { this.$message.error('清空失败: ' + e.message); }
+      finally { d.saving = false; }
+    },
+    // ══════ 比价分析（v0.3.11）══════
+    /** 按当前筛选范围（与列表同一份参数）拉比价结果；跨页，不受分页影响 */
+    async openCompare() {
+      if (this.cmp.loading) return;
+      await this.syncRpKeyword();
+      this.cmp.visible = true;
+      this.cmp.loading = true;
+      this.cmp.error = '';
+      this.cmp.rows = [];
+      this.cmp.summary = {};
+      try {
+        const d = await this.api('/api/products/compare?' + this.rpFilterParams(false).toString());
+        if (d && d.error) { this.cmp.error = d.error; return; }
+        this.cmp.rows = (d && d.rows) || [];
+        this.cmp.summary = (d && d.summary) || {};
+        this.cmp.truncated = !!(d && d.truncated);
+      } catch (e) {
+        this.cmp.error = '比价失败：' + e.message;
+      } finally { this.cmp.loading = false; }
+    },
+    /** 某一渠道的单价（没有该渠道价时显示 —） */
+    cmpPrice(row, kind) {
+      const c = (row.candidates || []).find((x) => x.kind === kind);
+      return c ? yuan(c.unitPrice) : '—';
+    },
+    cmpVerdict(row) {
+      if (row.verdict === 'cheaper') return '买贵了 · 换' + (row.best ? row.best.label : '渠道');
+      if (row.verdict === 'same') return '基本持平';
+      if (row.verdict === 'higher') return '现采购价更低';
+      if (row.verdict === 'no-purchase') return '缺采购价';
+      return '无任何可比价';
+    },
+    cmpRowClass({ row }) {
+      return row && row.verdict === 'cheaper' ? 'cmp-row-cheaper' : '';
     },
     // ══════ 城配速达（阿发）══════
     async loadAfaSession() {

@@ -534,6 +534,8 @@ function productScope(o) {
       afaExpr: 'COALESCE(pi.afa_goods_id, bp.afa_goods_id)',
       jdExpr: 'COALESCE(pi.jd_sku_id, bp.jd_sku_id)',
       localExpr: 'COALESCE(pi.local_price, bp.local_price)',
+      localPackExpr: 'COALESCE(pi.local_pack_price, bp.local_pack_price)',
+      localQtyExpr: 'COALESCE(pi.local_spec_qty, bp.local_spec_qty)',
       bpIdExpr: 'bp.id', suggestExpr: 'pi.suggest_qty', fileExpr: 'pi.source_file', batchExpr: 'pi.batch_id',
     };
   }
@@ -556,6 +558,8 @@ function productScope(o) {
     afaExpr: 'bp.afa_goods_id',
     jdExpr: 'bp.jd_sku_id',
     localExpr: 'bp.local_price',
+    localPackExpr: 'bp.local_pack_price',
+    localQtyExpr: 'bp.local_spec_qty',
     bpIdExpr: 'bp.id', suggestExpr: 'NULL', fileExpr: 'NULL', batchExpr: 'NULL',
   };
 }
@@ -575,6 +579,26 @@ async function writeProductLink(col, value, { brandId, userId, sku }) {
     return { scope: 'brand', affected: 1 };
   }
   const r = await db.exec(`UPDATE product_item SET ${col} = ? WHERE user_id = ? AND sku = ?`, [value, userId, sku]);
+  return { scope: 'item', affected: r.affectedRows || 0 };
+}
+
+/**
+ * 本地价三件套写入（v0.3.11）：单价 / 整件价 / 规格数量必须一起改，
+ * 否则「改单价不改整件价」会出现两个数对不上。scope 规则与 writeProductLink 完全一致。
+ * @returns {{scope:'brand'|'item', affected:number}}
+ */
+async function writeProductLocal({ brandId, userId, sku, unitPrice, packPrice, specQty }) {
+  const args = [unitPrice, packPrice, specQty];
+  const ex = await db.query('SELECT id FROM brand_product WHERE brand_id = ? AND sku = ? LIMIT 1', [brandId, sku]);
+  if (ex.length) {
+    await db.exec(
+      'UPDATE brand_product SET local_price = ?, local_pack_price = ?, local_spec_qty = ? WHERE brand_id = ? AND sku = ?',
+      args.concat([brandId, sku]));
+    return { scope: 'brand', affected: 1 };
+  }
+  const r = await db.exec(
+    'UPDATE product_item SET local_price = ?, local_pack_price = ?, local_spec_qty = ? WHERE user_id = ? AND sku = ?',
+    args.concat([userId, sku]));
   return { scope: 'item', affected: r.affectedRows || 0 };
 }
 
@@ -3978,6 +4002,7 @@ const server = http.createServer(async (req, res) => {
                ${sc.salesExpr} AS sales_30d, ${sc.suggestExpr} AS suggest_qty,
                ${sc.fileExpr} AS source_file, ${sc.imageExpr} AS image_url,
                ${sc.qhtExpr} AS qht_goods_id, ${sc.afaExpr} AS afa_goods_id, ${sc.localExpr} AS local_price,
+               ${sc.localPackExpr} AS local_pack_price, ${sc.localQtyExpr} AS local_spec_qty,
                ${sc.jdExpr} AS jd_sku_id,
                ${sc.file ? 'NULL' : 'b.name'} AS brand_name,
                ${sc.file ? 'pi.updated_at' : 'bp.updated_at'} AS updated_at,
@@ -4433,22 +4458,108 @@ const server = http.createServer(async (req, res) => {
       const w = await writeProductLink('qht_goods_id', goodsId || null, { brandId: bid, userId: tenantId, sku });
       return sendJson(res, 200, { ok: true, sku, goodsId: goodsId || null, scope: w.scope, affected: w.affected });
     }
+    // 本地价（v0.3.11）：整件价 / 单价 / 规格数量三件套
+    //   入参 { sku, mode:'unit'|'pack', unitPrice, packPrice, specQty, brandId }
+    //   · mode = 这次改的是哪个价格，另一个按规格数量折算（四舍五入 2 位）
+    //   · 规格数量为空 → 只存单价，整件价存 NULL（用户确认：没数量就没有整件价）
+    //   · 三个都空 → 清空本地价；兼容老入参 localPrice（按单价理解）
     if (method === 'POST' && p === '/api/products/local-price') {
       if (!canProduct) return denyProduct();
       writeGuard();
       const b = await readBody(req);
       const sku = String(b.sku || '').trim();
       if (!sku) return sendJson(res, 200, { error: '缺少 sku' });
-      const raw = String(b.localPrice == null ? '' : b.localPrice).trim();
-      let v = null;
-      if (raw !== '') {
-        const n = Number(raw);
-        if (!Number.isFinite(n) || n < 0) return sendJson(res, 200, { error: '本地价应为非负数字' });
-        v = Math.round(n * 100) / 100;
-      }
+      const calc = products.calcLocalPrice({
+        mode: b.mode,
+        unitPrice: b.unitPrice !== undefined ? b.unitPrice : b.localPrice,
+        packPrice: b.packPrice,
+        specQty: b.specQty,
+      });
+      if (!calc.ok) return sendJson(res, 200, { error: calc.error });
       const bid = linkBrandId(user, b);
-      const w = await writeProductLink('local_price', v, { brandId: bid, userId: tenantId, sku });
-      return sendJson(res, 200, { ok: true, sku, localPrice: v, scope: w.scope });
+      const w = await writeProductLocal({
+        brandId: bid, userId: tenantId, sku,
+        unitPrice: calc.unitPrice, packPrice: calc.packPrice, specQty: calc.specQty,
+      });
+      return sendJson(res, 200, {
+        ok: true, sku, scope: w.scope, affected: w.affected,
+        localPrice: calc.unitPrice, localPackPrice: calc.packPrice, localSpecQty: calc.specQty,
+      });
+    }
+
+    // ── 比价分析（v0.3.11）──────────────────────────────────────────────
+    // 口径（用户确认）：
+    //   · 参比价源 = 齐货通 / 城配速达 / 京东万商（读 goods_price_cache 缓存）+ 手工本地价
+    //   · 取其中**最低单价**作为补货建议，并说明来自哪个渠道
+    //   · 只提示「买贵了」：采购价 > 已有最低价 → 给出可省差额（×建议量）
+    //   · 与列表共用 productScope（q / status / batch / brand 完全一致），跨页取，上限 2000
+    if (method === 'GET' && p === '/api/products/compare') {
+      if (!canProduct) return denyProduct();
+      const q = (url.searchParams.get('q') || '').trim();
+      const status = (url.searchParams.get('status') || '').trim();
+      const batch = (url.searchParams.get('batch') || '').trim();
+      const bo = brandOf(req, url, user);
+      const sc = productScope({ tenantId, brandId: bo.brandId, all: bo.all, q, status, batch });
+      const CAP = 2000;
+      let rows;
+      try {
+        rows = await db.query(`
+          SELECT ${sc.skuExpr} AS sku, ${sc.nameExpr} AS goods_name, ${sc.brandExpr} AS brand_id,
+                 ${sc.priceExpr} AS purchase_price, ${sc.suggestExpr} AS suggest_qty,
+                 ${sc.imageExpr} AS image_url,
+                 ${sc.qhtExpr} AS qht_goods_id, ${sc.afaExpr} AS afa_goods_id, ${sc.jdExpr} AS jd_sku_id,
+                 ${sc.localExpr} AS local_price, ${sc.localPackExpr} AS local_pack_price,
+                 ${sc.localQtyExpr} AS local_spec_qty
+          FROM ${sc.from} ${sc.where}
+          ORDER BY ${sc.order} LIMIT ${CAP + 1}`, sc.args);
+      } catch (e) {
+        return sendJson(res, 500, { error: '比价数据查询失败：' + e.message });
+      }
+      const truncated = rows.length > CAP;
+      const use = truncated ? rows.slice(0, CAP) : rows;
+      // 价格缓存按 (kind, brand_id, goods_id) 存：按品牌分组批量取，避免 3×N 次单查
+      const ownBrand = Number(user.brand_id) || 1;
+      const byKindBrand = new Map();   // 'qht:1' -> Set(goodsId)
+      const addId = (kind, bid, gid) => {
+        const id = String(gid == null ? '' : gid).trim();
+        if (!id) return;
+        const b = Number(bid) || ownBrand;
+        const k = kind + ':' + b;
+        if (!byKindBrand.has(k)) byKindBrand.set(k, new Set());
+        byKindBrand.get(k).add(id);
+      };
+      for (const r of use) {
+        addId('qht', r.brand_id, r.qht_goods_id);
+        addId('afa', r.brand_id, r.afa_goods_id);
+        addId('jd', r.brand_id, r.jd_sku_id);
+      }
+      const priceMap = {};
+      try {
+        for (const [k, ids] of byKindBrand) {
+          const [kind, bidStr] = k.split(':');
+          const bid = Number(bidStr);
+          const list = [...ids];
+          for (let i = 0; i < list.length; i += 500) {
+            const part = list.slice(i, i + 500);
+            const rs = await db.query(
+              `SELECT goods_id, unit_price, pack_price, pack_qty, spec
+                 FROM goods_price_cache WHERE kind = ? AND brand_id = ? AND goods_id IN (?)`,
+              [kind, bid, part]);
+            for (const p of rs) {
+              priceMap[kind + ':' + bid + ':' + String(p.goods_id)] = {
+                unitPrice: p.unit_price == null ? null : Number(p.unit_price),
+                packPrice: p.pack_price == null ? null : Number(p.pack_price),
+                packQty: p.pack_qty == null ? null : Number(p.pack_qty),
+                spec: p.spec || '',
+              };
+            }
+          }
+        }
+      } catch (e) {
+        return sendJson(res, 500, { error: '价格缓存查询失败：' + e.message });
+      }
+      const out = products.comparePrices({ rows: use, priceMap });
+      return sendJson(res, 200, Object.assign({ truncated, batch: batch || null }, out));
     }
     // ── 自动匹配阿发商品（v0.2.92）────────────────────────────────────────
     // 思路：拿「商品名称」原样去阿发搜，**直接取搜索结果的第一条建立关联**，不做筛选与打分。
