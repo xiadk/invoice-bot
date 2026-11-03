@@ -1457,11 +1457,14 @@
           </el-table>
           <div slot="footer">
             <span class="loginid" style="float:left;line-height:32px">
-              {{ cmp.truncated ? '商品超过 2000 个，只比对了前 2000 个（可先筛选再比）' : '价格来自「取价」缓存，未取价的商品会算作无价；改建议量会即时重算总价' }}
+              {{ !rp.batchId
+                 ? '品牌方全部商品没有「建议量」，只能比价；要看补货数量与总价，请切到「本次导入文件」再比'
+                 : (cmp.truncated ? '商品超过 2000 个，只比对了前 2000 个（可先筛选再比）'
+                                  : '价格来自「取价」缓存，未取价的商品会算作无价；改建议量会即时重算总价') }}
             </span>
             <el-button size="small" @click="cmp.visible = false">关闭</el-button>
             <el-button size="small" type="primary" icon="el-icon-s-check" :loading="cmp.adopting"
-                       :disabled="!canReplenishOrder || !(cmp.groups || []).length"
+                       :disabled="!canReplenishOrder || !rp.batchId || !(cmp.groups || []).length"
                        @click="adoptCmp">采用补货建议</el-button>
           </div>
         </el-dialog>
