@@ -6320,7 +6320,8 @@ const server = http.createServer(async (req, res) => {
         });
       }
 
-      // 「催商家开票」：给「商家处理中」的订单发一条催收消息 → 派给该用户的本机助手
+      // 「催商家开票」：给可催的订单发一条催收消息 → 派给该用户的本机助手
+      // 可催 = 商家处理中(6)，或 v0.3.19 放开的「超期未开票(9) + 交易成功 + 非退款」
       // 助手加载真实聊天页打字点发送（anti-content 必须由页面风控 SDK 生成，服务器无法复刻）
       if (method === 'POST' && p === '/api/pdd/send') {
         const b = await readBody(req);
@@ -6351,7 +6352,7 @@ const server = http.createServer(async (req, res) => {
         if (!orders.length) {
           return sendJson(res, 200, {
             ok: false,
-            message: '没有可催收的订单：只能对「商家处理中」的订单催开票'
+            message: '没有可催收的订单：只能对「商家处理中」或「超期未开票且交易成功」的订单催开票'
               + (invalid.length ? `（跳过：${invalid.slice(0, 3).join('、')}${invalid.length > 3 ? ' 等' : ''}）` : ''),
           });
         }
