@@ -1966,7 +1966,7 @@ async function onPddMallDone(uid, msg) {
     mallName: String((r && r.mallName) || '').slice(0, 64),
     mallId: Number((r && r.mallId) || 0) || 0,
     ok: !!(r && Number(r.mallId)),
-    error: String((r && r.error) || '').slice(0, 160),
+    error: String((r && r.error) || '').slice(0, 260),
   }));
   let saved = { ok: 0, fail: 0, filled: 0 };
   try {
