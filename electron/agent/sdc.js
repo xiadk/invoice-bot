@@ -24,6 +24,7 @@
  *   不回传 Cookie（服务器也用不上）。
  */
 const { BrowserWindow, session } = require('electron');
+const siteFrame = require('../ui/site-frame');
 
 const PARTITION = 'persist:sdc';
 const HOST = 'shandiancang.waimai.meituan.com';
@@ -98,7 +99,7 @@ function wireWindow(w) {
 
 function newBaseWindow(title, opts = {}) {
   try { session.fromPartition(PARTITION).setUserAgent(REAL_UA); } catch (e) { /* 忽略 */ }
-  const w = new BrowserWindow({
+  const base = {
     show: !!opts.show,
     width: opts.width || 1440,
     height: opts.height || 900,
@@ -109,7 +110,10 @@ function newBaseWindow(title, opts = {}) {
       nodeIntegration: false, contextIsolation: true, sandbox: true, webSecurity: true,
       backgroundThrottling: false,   // 后台也要能跑页内 fetch / 打字，不能被节流
     },
-  });
+  };
+  // 登录窗是给用户自己操作的 → 带顶部工具栏（← 返回 / → 前进 / ⟳ 刷新）；
+  // 数据窗与客服会话窗是全自动跑的，不加工具栏（少给人一个误点打断任务的机会）。
+  const w = opts.toolbar === false ? new BrowserWindow(base) : siteFrame.create(base);
   return wireWindow(w);
 }
 
@@ -124,7 +128,7 @@ function getLoginWindow() {
 async function getApiWindow(api) {
   const alive = (apiWin && !apiWin.isDestroyed()) ? apiWin : null;
   const w = alive || (() => {
-    apiWin = newBaseWindow('闪电帮帮（数据窗口）', { show: false });
+    apiWin = newBaseWindow('闪电帮帮（数据窗口）', { show: false, toolbar: false });
     apiWin.on('closed', () => { apiWin = null; });
     return apiWin;
   })();
@@ -144,7 +148,7 @@ async function getApiWindow(api) {
 
 function getChatWindow() {
   if (chatWin && !chatWin.isDestroyed()) return chatWin;
-  chatWin = newBaseWindow('闪电帮帮（客服会话）', { show: true, width: 1200, height: 860 });
+  chatWin = newBaseWindow('闪电帮帮（客服会话）', { show: true, width: 1200, height: 860, toolbar: false });
   chatWin.on('closed', () => { chatWin = null; });
   return chatWin;
 }

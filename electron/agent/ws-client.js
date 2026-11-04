@@ -197,6 +197,7 @@ class AgentClient extends EventEmitter {
     if (m.type === 'ali_login') { this._runAliLogin(m).catch((e) => this.log('1688 登录异常: ' + e.message)); return; }
     if (m.type === 'pdd_apply') { this._runPddApply(m).catch((e) => this.log('拼多多申请异常: ' + e.message)); return; }
     if (m.type === 'pdd_send') { this._runPddSend(m).catch((e) => this.log('拼多多催收异常: ' + e.message)); return; }
+    if (m.type === 'pdd_mall') { this._runPddMall(m).catch((e) => this.log('拼多多解析店铺异常: ' + e.message)); return; }
     if (m.type === 'sdc_login') { this._runSdcLogin(m).catch((e) => this.log('闪电帮帮登录异常: ' + e.message)); return; }
     if (m.type === 'sdc_fetch') { this._runSdcFetch(m).catch((e) => this.log('闪电帮帮取数异常: ' + e.message)); return; }
     if (m.type === 'sdc_send') { this._runSdcSend(m).catch((e) => this.log('闪电帮帮催收异常: ' + e.message)); return; }
@@ -283,6 +284,8 @@ class AgentClient extends EventEmitter {
   setPddApplyHandler(fn) { this._pddApplyHandler = fn; }
   /** 注册「拼多多批量催商家开票」处理器（main.js 注入 pdd-send.createSendHandler） */
   setPddSendHandler(fn) { this._pddSendHandler = fn; }
+  /** 注册「拼多多解析店铺 mall_sn→mall_id」处理器（main.js 注入 pdd-mall.createResolveHandler） */
+  setPddMallHandler(fn) { this._pddMallHandler = fn; }
 
   /** 注册「登录闪电帮帮」处理器（main.js 注入 sdc.createLoginHandler） */
   setSdcLoginHandler(fn) { this._sdcLoginHandler = fn; }
@@ -712,6 +715,48 @@ class AgentClient extends EventEmitter {
     };
     try {
       await this._pddSendHandler(m, api);
+    } catch (e) {
+      done({ ok: false, error: String((e && e.message) || e).slice(0, 200) });
+    } finally {
+      this._pddBusy = false;
+      this.stopFlag = false;
+      this.currentTaskId = null;
+      this._emitState();
+    }
+  }
+
+  /**
+   * 执行一次「解析店铺 mall_sn → mall_id」：在已登录的真实页面里逐个打开店铺页，
+   * 抓页面自己解出来的 mall_id 回传（服务端写 pdd_mall 缓存并回填订单）。
+   * 与申请/催收共用 _pddBusy 互斥（同一拼多多分区，避免多个窗口同时导航互相干扰）。
+   */
+  async _runPddMall(m) {
+    const done = (payload) => this.send(Object.assign({
+      type: 'pdd_mall_done', taskId: m.taskId,
+    }, payload || {}));
+
+    if (this._pddBusy) { done({ ok: false, error: '已有拼多多任务在进行中' }); return; }
+    if (typeof this._pddMallHandler !== 'function') {
+      done({ ok: false, error: '助手版本过旧，不支持解析店铺 ID，请重新下载安装助手' });
+      return;
+    }
+    this._pddBusy = true;
+    this.stopFlag = false;
+    this.currentTaskId = m.taskId;
+    this._emitState();
+    const api = {
+      log: (text) => this.send({ type: 'log', text: String(text == null ? '' : text).slice(0, 200) }),
+      isStopped: () => this.stopFlag,
+      sleep: async (ms) => {
+        for (let waited = 0; waited < ms && !this.stopFlag; waited += 300) {
+          await new Promise((r) => setTimeout(r, Math.min(300, ms - waited)));
+        }
+      },
+      report: done,
+      progress: (p) => this.send(Object.assign({ type: 'pdd_mall_progress', taskId: m.taskId }, p || {})),
+    };
+    try {
+      await this._pddMallHandler(m, api);
     } catch (e) {
       done({ ok: false, error: String((e && e.message) || e).slice(0, 200) });
     } finally {

@@ -225,6 +225,28 @@ async function diagnose(w, mark, extra) {
 }
 
 /**
+ * 拼聊天页地址（v0.3.16）：优先用数字 mall_id；没有就用加密 mall_sn 让页面自己解。
+ * 拼多多官方页面就是这么跳的（react_mall_page 里
+ * uniformForward({mall_sn, decrypt_mall_sn}, 'chat_detail.html')），所以 mall_sn 路线同样是「页面自己带签名」，
+ * 不需要我们复刻 anti-content。
+ * @returns {{url:string, bySn:boolean}|null} 两者都没有时返回 null
+ */
+function buildChatUrl(item) {
+  const sn = String((item && item.order_sn) || '');
+  const mallId = item && item.mall_id;
+  const mallSn = String((item && item.mall_sn) || '');
+  const tail = '&order_sn=' + encodeURIComponent(sn)
+    + '&refer_page_name=transac_invoice&refer_page_sn=24648';
+  if (mallId) {
+    return { url: CHAT_PAGE + '?mall_id=' + encodeURIComponent(mallId) + tail, bySn: false };
+  }
+  if (mallSn) {
+    return { url: CHAT_PAGE + '?mall_sn=' + encodeURIComponent(mallSn) + '&decrypt_mall_sn=1' + tail, bySn: true };
+  }
+  return null;
+}
+
+/**
  * 发送一条消息到某个商家的会话（不同订单同一商家 = 同一会话，由服务端去重）。
  * 返回 { ok, detail, errorish, httpResp, content }
  */
@@ -233,22 +255,25 @@ async function sendOne(w, item, { timeoutMs = 40000 } = {}) {
   const mallId = item.mall_id;
   const text = String(item.content || '');
   if (!text.trim()) return { ok: false, errorish: true, detail: '消息内容为空（模板未配置）' };
-
-  const url = CHAT_PAGE + '?mall_id=' + encodeURIComponent(mallId)
-    + '&order_sn=' + encodeURIComponent(sn)
-    + '&refer_page_name=transac_invoice&refer_page_sn=24648';
+  const built = buildChatUrl(item);
+  if (!built) return { ok: false, errorish: true, detail: '这单既没有 mall_id 也没有 mall_sn，无法打开商家会话' };
+  const { url, bySn } = built;
 
   const attempt = async (isRetry) => {
     const mark = netBuf.length;              // 只看本单开始之后的接口响应
     await w.loadURL(url).catch(() => {});
 
     // ① 等页面就绪：URL 已切到本商家 + 有可见内容（否则会在旧页面上瞎点）
+    //    mall_id 模式认 URL 里的 mall_id；mall_sn 模式页面可能不重写地址栏，
+    //    只要求停在 chat_detail 且有内容即可（真正的失败由下面的登录态/输入框检查兜住）。
     const readyDl = Date.now() + 15000;
     let ready = false;
     while (Date.now() < readyDl) {
       if (w.isDestroyed()) return { ok: false, errorish: true, detail: '窗口被关闭' };
       const u = currentUrl(w);
-      if (u.includes('chat_detail') && (u.includes('mall_id=' + mallId) || u.includes('mall_id%3D' + mallId))) {
+      const onChat = u.includes('chat_detail');
+      const onTarget = bySn ? onChat : (u.includes('mall_id=' + mallId) || u.includes('mall_id%3D' + mallId));
+      if (onChat && onTarget) {
         if (visibleLen(await pageText(w)) > 3) { ready = true; break; }
       }
       await sleep(400);
@@ -437,4 +462,4 @@ function createSendHandler({ log = () => {} } = {}) {
   };
 }
 
-module.exports = { createSendHandler, runSend, getWindow, peekWindow, CHAT_PAGE, PARTITION };
+module.exports = { createSendHandler, runSend, getWindow, peekWindow, buildChatUrl, CHAT_PAGE, PARTITION };

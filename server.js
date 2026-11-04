@@ -64,8 +64,9 @@ const afa = require('./lib/afa');
 const jd = require('./lib/jd-bmall');
 const priceCache = require('./lib/price-cache');
 const products = require('./lib/products');
+const productPrice = require('./lib/product-price');
 const billing = require('./lib/billing');
-const { loadConfig } = require('./lib/config');
+const { loadConfig, CONFIG_PATH } = require('./lib/config');
 const { AgentHub } = require('./lib/agent-hub');
 const { buildMessages } = require('./lib/sender');
 const qnh = require('./lib/qnh');
@@ -74,7 +75,7 @@ const jagent = require('./lib/jd-agent');
 const qiniu = require('./lib/qiniu');
 const waybill = require('./lib/waybill');
 const replenishOrder = require('./lib/replenish-order');
-const afterSales = require('./lib/supplier-after');
+const afterSales = require('./lib/product-after');
 const pdd = require('./lib/pdd');
 const pddOrders = require('./lib/pdd-orders');
 const aliOrders = require('./lib/ali-orders');
@@ -660,7 +661,7 @@ const MENU_PERMS = {
   billing: { col: 'billing_enabled', label: '账单', field: 'billingEnabled' },
   replenish: { col: 'replenish_enabled', label: '补货', field: 'replenishEnabled' },
   price: { col: 'price_enabled', label: '平台取价', field: 'priceEnabled' },
-  after: { col: 'after_sale_enabled', label: '供应商售后', field: 'afterSaleEnabled' },
+  after: { col: 'after_sale_enabled', label: '商品售后', field: 'afterSaleEnabled' },
   supplier: { col: 'supplier_enabled', label: '供应商管理', field: 'supplierEnabled' },
   waybill: { col: 'waybill_enabled', label: '货单管理', field: 'waybillEnabled' },
   replenishOrder: { col: 'replenish_order_enabled', label: '补货单管理', field: 'replenishOrderEnabled' },
@@ -1192,14 +1193,22 @@ const OP_ACTIONS = {
   'waybill.supplier_delete': (d) => `删除供应商「${d.name || ''}」`
     + (d.localCleared ? `（顺带清空了 ${d.localCleared} 个商品的本地价供应商标记）` : ''),
   'waybill.supplier_merge': (d) => `迁移供应商「${d.fromName || ''}」→「${d.toName || ''}」`
-    + `（货单 ${d.waybillN || 0} 张、供应商售后 ${d.afterN || 0} 条、补货单 ${d.orderN || 0} 张、`
+    + `（货单 ${d.waybillN || 0} 张、补货单 ${d.orderN || 0} 张、`
     + `商品本地价 ${(Number(d.brandLocalN) || 0) + (Number(d.itemLocalN) || 0)} 个${d.deleted ? '，旧供应商已删除' : ''}）`,
   'waybill.create': (d) => `新增货单（供应商「${d.supplierName || ''}」，金额 ${d.amount == null ? '' : d.amount}，${d.billDate || ''}，${d.images || 0} 张图）`,
   'waybill.delete': (d) => `删除货单（供应商「${d.supplierName || ''}」，${d.billDate || ''}）`,
   'waybill.upload_token': (d) => `生成了货单图片的手机上传链接（5 分钟有效）`,
-  'after.create': (d) => `新增供应商售后（供应商「${d.supplierName || ''}」，金额 ${d.amount == null ? '' : d.amount}，${d.afterDate || ''}）`,
-  'after.delete': (d) => `删除供应商售后（供应商「${d.supplierName || ''}」，${d.afterDate || ''}）`,
-  'after.status': (d) => `推进了供应商售后状态到「${d.statusLabel || ''}」（供应商「${d.supplierName || ''}」，凭证 ${d.imageKey || ''}）`,
+  'after.create': (d) => `新增商品售后（「${d.goodsName || ''}」SKU ${d.sku || ''}，数量 ${d.qty == null ? '' : d.qty}，${d.afterDate || ''}）`,
+  'after.delete': (d) => `删除商品售后（「${d.goodsName || ''}」SKU ${d.sku || ''}，${d.afterDate || ''}）`,
+  'after.status': (d) => `商品售后状态改为「${d.statusLabel || ''}」（「${d.goodsName || ''}」SKU ${d.sku || ''}${d.waybillNo ? '，运单号 ' + d.waybillNo : ''}）`,
+  'product.manual_price': (d) => `手工改齐货通价（SKU ${d.sku || ''}：单价 ${d.unitPrice == null ? '—' : d.unitPrice}、`
+    + `整件价 ${d.packPrice == null ? '—' : d.packPrice}、规格 ${d.packQty == null ? '—' : d.packQty}）`,
+  'product.manual_price_clear': (d) => `取消了 SKU ${d.sku || ''} 的齐货通手工价（回到平台取价）`,
+  'replenish.item_save': (d) => d.created
+    ? `补货单 #${d.orderId} 新增明细（SKU ${d.sku || ''}，${d.qtyPack || 0} 件）`
+    : `补货单 #${d.orderId} 改明细（SKU ${d.sku || ''}，${d.qtyPack || 0} 件 × ${d.unitPrice == null ? '—' : d.unitPrice}）`,
+  'replenish.item_delete': (d) => `补货单 #${d.orderId} 删明细（SKU ${d.sku || ''}）`,
+  'replenish.supplier': (d) => `补货单 #${d.orderId} 换供应商为「${d.supplierName || ''}」`,
   'qnh.view': () => '打开了退单列表页',
   'pdd.apply.start': (d) => `发起了批量申请发票任务（${d.total || 0} 单${d.invalid ? `，跳过 ${d.invalid} 单` : ''}）`,
   'pdd.apply': (d) => d.ok === false
@@ -1522,6 +1531,24 @@ const PDD_APPLY_TTL_MS = PDD_APPLY_TIMEOUT_MS + 5 * 60 * 1000;
 const PDD_APPLY_MIN_AGENT = '0.2.21';   // 0.2.21 起：CDP 抓包判成败 + 页面就绪再点（修「等待结果超时」）
 // 支持「催商家开票」的最低助手版本（0.2.23 起才有 pdd_send 内核）
 const PDD_SEND_MIN_AGENT = '0.2.23';
+// 支持「解析店铺 ID（mall_sn→mall_id）」的最低助手版本（0.3.16 起才有 pdd_mall 内核）
+const PDD_MALL_MIN_AGENT = '0.3.16';
+// 「解析店铺 ID」的分段下发：一次点击要解析 100+ 个店铺，而助手单个任务的 items 上限是 80
+// （老版本硬截断到 80，新版本 500），所以服务端按 60 一段下发，收一份回执就发下一份 ——
+// 用户只点一次，手感是「一次跑完」，但每段都在助手能力范围内。
+const PDD_MALL_BATCH = 60;
+// 单店超时：会话页首屏 JS 重，实测成功多在 3~6s，但偶发慢到 10s+；
+// 原来 15s 会把「只是慢」的店误判成失败（0.3.20 前 9/40 失败全是这个原因）。
+const PDD_MALL_ITEM_TIMEOUT_MS = 22000;
+// 店铺之间的人工间隔：实测 700ms 连跑 40 个就把平台限流触发了 ——
+// 之后所有 update_chat_info 一律返回 40004「请稍后重试」，页面显示「网络异常」。
+// 降到 4s（132 个约 13 分钟），再快就是拿账号换速度。
+const PDD_MALL_GAP_MS = 4000;
+// 连续 N 个店铺一个都没成功 → 判定平台限流，立刻停手（否则会把剩下 100 多个全刷成失败，
+// 限流窗口还会越拉越长）。停掉后失败的店铺没写 mall_id，冷却后重新点击会自动重跑。
+const PDD_MALL_BREAK_STREAK = 6;
+// 任务保留时长：131 个店 × 约 2.5s + 失败重试一轮，真实耗时 8~15 分钟
+const PDD_MALL_TASK_TTL_MS = 60 * 60 * 1000;
 
 // ── 闪电帮帮任务：登录 / 拉订单 / 批量催收（三项都必须在本机助手的浏览器里跑）──
 //    原因：该站点网关要 mtgsig 签名，服务器直连 403；只有页面上下文的 fetch 会自动被签名。
@@ -1873,6 +1900,13 @@ function onPddApplyDone(uid, msg) {
       if (n) console.log(`[pdd] 已把 ${n} 单标记为「已申请」（user ${ctx.userId}）`);
     });
   }
+  // 提交失败的单 → 商家处理中(6) + 说明备注原因（2026-11-04 用户口径）：
+  // 申请失败说明商家在处理开票，转 6 后「催收消息」入口才出现
+  if (results.some((r) => r && !r.ok && r.order_sn)) {
+    pdd.markApplyFailed(ctx.userId, results).then((n) => {
+      if (n) console.log(`[pdd] 已把 ${n} 单申请失败标记为「商家处理中」（user ${ctx.userId}）`);
+    });
+  }
 
   if (!msg.ok && !results.length) {
     ctx.status = 'failed';
@@ -1923,7 +1957,8 @@ function onPddApplyProgress(uid, msg) {
 
 /**
  * 助手回报「催商家开票」结果：逐条落 pdd_msg_log，并标记任务完成。
- * 与申请的区别：发消息不改变订单状态（只是提醒），所以不写 pdd_order。
+ * 2026-11-04 起：发送失败的单还要改状态（→ 暂不可开票(0)）并在 note 备注原因，
+ * 见 pdd.markSendFailed；发送成功不改订单状态（只是提醒）。
  */
 function onPddSendDone(uid, msg) {
   const ctx = PDD_TASKS.get(String((msg && msg.taskId) || ''));
@@ -1934,6 +1969,14 @@ function onPddSendDone(uid, msg) {
   ctx.failCount = Number(msg.failCount) || (results.length - ctx.okCount);
 
   pdd.logMsg(ctx.userId, results);
+
+  // 发送失败的单 → 暂不可开票(0) + 说明备注原因（2026-11-04 用户口径）；
+  // 聊天页加载超时/页面空白 → 备注「无法开启聊天，线下处理」。归 0 后催收入口自动消失。
+  if (results.some((r) => r && !r.ok && r.order_sn)) {
+    pdd.markSendFailed(ctx.userId, results).then((n) => {
+      if (n) console.log(`[pdd] 已把 ${n} 单发送失败标记为「暂不可开票」（user ${ctx.userId}）`);
+    });
+  }
 
   if (!msg.ok && !results.length) {
     ctx.status = 'failed';
@@ -1949,6 +1992,188 @@ function onPddSendDone(uid, msg) {
   logOp(Number(uid), 'pdd.send', {
     ok: ctx.okCount > 0, okCount: ctx.okCount, failCount: ctx.failCount, tenantId: ctx.userId,
   });
+}
+
+/**
+ * 下发一段「解析店铺 ID」给本机助手。
+ *
+ * 为什么要分段：一次点击要解析 100+ 个店铺（0.3.20 起不再 20 个一批），而助手单个任务的
+ * items 上限是 80（老版本直接 slice(0,80) 硬截断，新版本 500）。服务端按 PDD_MALL_BATCH
+ * 一段一段下发，收到回执就接着发下一段 —— 用户只点一次，体验上是「一次跑完」。
+ *
+ * @returns {boolean} 是否成功下发（false 表示助手连接已断，任务已标 failed）
+ */
+function dispatchMallBatch(ctx) {
+  if (!ctx || ctx.status !== 'pending' || !ctx.queue || !ctx.queue.length) return false;
+  const batch = ctx.queue.splice(0, PDD_MALL_BATCH);
+  ctx.batchSize = batch.length;
+  ctx.batchSentAt = Date.now();
+  // 本段进度基线：助手回报的 okCount 是「本段内」的累计，跨段要加上基线才是全局数
+  ctx.batchOkBase = Number(ctx.okCount) || 0;
+  ctx.batchFailBase = Number(ctx.failCount) || 0;
+  const sent = agentHub.send(ctx.agentUid, {
+    type: 'pdd_mall',
+    taskId: ctx.taskId,
+    items: batch.map((t) => ({ mallSn: t.mallSn, mallName: t.mallName })),
+    timeoutMs: PDD_MALL_ITEM_TIMEOUT_MS,
+    gapMs: PDD_MALL_GAP_MS,
+  });
+  if (!sent) {
+    ctx.status = 'failed';
+    ctx.message = '下发解析任务失败：本机助手连接已断开，请确认助手正在运行。';
+    ctx.message += ctx.done ? `（已完成的 ${ctx.done} 个店铺结果已入库）` : '';
+    ctx.finishedAt = Date.now();
+    return false;
+  }
+  ctx.expiresAt = Date.now() + PDD_MALL_TASK_TTL_MS;
+  return true;
+}
+
+/**
+ * 助手回报「解析店铺 ID」结果（v0.3.16）：写 pdd_mall 缓存，并把同一 mall_sn 名下的
+ * 订单 mall_id 一次性回填。写库是异步的，所以任务状态等写库完成后再标 done ——
+ * 否则前端看到「已完成」时订单里还是空的，催收按钮仍旧点不亮。
+ *
+ * v0.3.20：分段下发（dispatchMallBatch）+ 首轮失败的自动重试一轮。
+ * 一份回执只代表「本段跑完」，队列还有就接着发下一段，全部跑完才收尾。
+ */
+async function onPddMallDone(uid, msg) {
+  const ctx = PDD_TASKS.get(String((msg && msg.taskId) || ''));
+  if (!ctx || ctx.kind !== 'mall' || ctx.userId !== Number(uid) || ctx.status !== 'pending') return;
+  const results = Array.isArray(msg.results) ? msg.results : [];
+  const pushLog = (text) => {
+    ctx.progressLog = ctx.progressLog || [];
+    ctx.progressLog.push({ t: new Date().toLocaleTimeString('zh-CN', { hour12: false }), text });
+    if (ctx.progressLog.length > 600) ctx.progressLog.splice(0, ctx.progressLog.length - 600);
+  };
+
+  // 助手整段失败（一条结果都没有）且前面也没成功过 → 直接收尾，别继续下发
+  if (!msg.ok && !results.length && !ctx.done) {
+    ctx.status = 'failed';
+    ctx.message = String(msg.error || '助手解析店铺 ID 失败').slice(0, 300);
+    ctx.finishedAt = Date.now();
+    logOp(Number(uid), 'pdd.mall.resolve', { ok: false, tenantId: ctx.userId, reason: ctx.message });
+    return;
+  }
+
+  if (results.length) {
+    ctx.results = (ctx.results || []).concat(results.map((r) => ({
+      mallName: String((r && r.mallName) || '').slice(0, 64),
+      mallId: Number((r && r.mallId) || 0) || 0,
+      ok: !!(r && Number(r.mallId)),
+      error: String((r && r.error) || '').slice(0, 260),
+    })));
+  }
+  let saved = { ok: 0, fail: 0, filled: 0 };
+  try {
+    saved = await pdd.saveMallResults(ctx.userId, results.map((r) => ({
+      mallSn: r && r.mallSn, mallId: r && r.mallId, mallName: r && r.mallName,
+      ok: !!(r && r.mallId), error: r && r.error,
+    })), msg.agentVer || '');
+  } catch (e) {
+    console.warn('[pdd] 店铺 ID 结果写库失败：' + ((e && e.message) || e));
+  }
+  ctx.filled = (Number(ctx.filled) || 0) + saved.filled;
+  // 成功/失败按「店铺」去重计数（Set<mallSn>），不按「尝试次数」累加：
+  // 重试轮会把首轮失败的店再跑一遍，累加的话「成功129 + 失败7」就跟总数 131 对不上了。
+  ctx.okSet = ctx.okSet || new Set();
+  ctx.failSet = ctx.failSet || new Set();
+  for (const r of results) {
+    const sn = String((r && (r.mallSn || r.mall_sn)) || '').trim();
+    if (!sn) continue;
+    if (Number(r && r.mallId)) { ctx.okSet.add(sn); ctx.failSet.delete(sn); }
+    else if (!ctx.okSet.has(sn)) { ctx.failSet.add(sn); }
+  }
+  ctx.okCount = ctx.okSet.size;
+  ctx.failCount = ctx.failSet.size;
+  // 「已处理」按本段实际回报条数推进（老助手可能被截断，用批大小兜底）
+  ctx.done = Math.min(ctx.total, (Number(ctx.done) || 0) + (results.length || Number(ctx.batchSize) || 0));
+
+  // 首轮的失败项攒起来，整轮跑完再统一重试一次：
+  // 这 9 个失败全是「会话页首屏慢，没在超时内发出 chat/list」的瞬时问题，重试多半就过了。
+  if (!ctx.retryRound) {
+    for (const r of results) {
+      const sn = String((r && (r.mallSn || r.mall_sn)) || '').trim();
+      if (sn && !Number(r && r.mallId)) ctx.retry.push({ mallSn: sn, mallName: String((r && r.mallName) || '') });
+    }
+  }
+
+  if (msg.stopped || ctx.aborted) {
+    ctx.stopped = true;
+    ctx.queue.length = 0;
+    ctx.retry.length = 0;
+  }
+
+  // 还有下一段 → 继续（保持 pending，前端进度条一直往前走）
+  if (ctx.queue.length && dispatchMallBatch(ctx)) {
+    pushLog(`本段完成（成功 ${ctx.okCount} / 失败 ${ctx.failCount}），继续解析剩余 ${ctx.queue.length} 个店铺…`);
+    return;
+  }
+
+  // 队列空了但首轮有失败 → 再跑一轮（查库时的 10 分钟冷却只影响「下次点击」挑选目标，不影响本次重试）
+  if (!ctx.retryRound && ctx.retry.length && !ctx.stopped) {
+    ctx.retryRound = 1;
+    ctx.queue = ctx.retry.slice();
+    ctx.retry.length = 0;
+    if (dispatchMallBatch(ctx)) {
+      pushLog(`首轮完成：成功 ${ctx.okCount} / 失败 ${ctx.failCount}，对失败的 ${ctx.queue.length} 个再试一轮…`);
+      return;
+    }
+  }
+
+  // 被限流打断时用 failed：前端会弹红色提示，用户才会去看「等冷却再点」，而不是以为跑完了
+  ctx.status = ctx.aborted ? 'failed' : 'done';
+  ctx.finishedAt = Date.now();
+  ctx.message = (ctx.aborted ? '店铺 ID 解析被平台限流打断' : '店铺 ID 解析完成')
+    + `：成功 ${ctx.okCount} 家、失败 ${ctx.failCount} 家`
+    + (ctx.filled ? `，回填订单 ${ctx.filled} 条` : '')
+    + (ctx.retryRound ? '（含一轮自动重试）' : '')
+    + (ctx.aborted ? `。${ctx.abortReason}，已自动停止；剩余店铺等 1~2 小时后再点一次（已成功的不用重跑）` : '')
+    + (ctx.stopped && !ctx.aborted ? '（中途停止）' : '');
+  ctx.progress = Object.assign({}, ctx.progress, { index: ctx.total, total: ctx.total });
+  logOp(Number(uid), 'pdd.mall.resolve.done', {
+    ok: ctx.okCount > 0, okCount: ctx.okCount, failCount: ctx.failCount, filled: ctx.filled, tenantId: ctx.userId,
+  });
+}
+
+/** 助手逐店上报「解析店铺 ID」进度（分段下发后要换算成「全局第几个」） */
+function onPddMallProgress(uid, msg) {
+  const ctx = PDD_TASKS.get(String((msg && msg.taskId) || ''));
+  if (!ctx || ctx.kind !== 'mall' || ctx.userId !== Number(uid) || ctx.status !== 'pending') return;
+  const inBatch = Number(msg.index) || 0;
+  const total = Number(ctx.total) || Number(msg.total) || 0;
+  // 重试轮不推进总进度（同一批店重跑），只换文案，避免进度条 100% 后回退
+  const idx = ctx.retryRound
+    ? total
+    : Math.min(total || inBatch, (Number(ctx.done) || 0) + inBatch);
+  const okCount = (Number(ctx.batchOkBase) || 0) + (Number(msg.okCount) || 0);
+  const failCount = (Number(ctx.batchFailBase) || 0) + (Number(msg.failCount) || 0);
+  const current = (ctx.retryRound ? '重试 · ' : '') + String(msg.current || '');
+  ctx.progress = { index: idx, total, current, okCount, failCount, updatedAt: Date.now() };
+  ctx.progressLog = ctx.progressLog || [];
+  ctx.progressLog.push({
+    t: new Date().toLocaleTimeString('zh-CN', { hour12: false }),
+    text: `[${idx}/${total}] ${current}（成功 ${okCount} / 失败 ${failCount}）`,
+  });
+  if (ctx.progressLog.length > 600) ctx.progressLog.splice(0, ctx.progressLog.length - 600);
+
+  // ── 限流熔断 ──
+  // 实测：并发/高频打开会话页后，拼多多 update_chat_info 会统一返回 40004「请稍后重试」，
+  // 页面显示「网络异常」，此后每个店都失败。继续刷只会让限流窗口更长，所以连续
+  // PDD_MALL_BREAK_STREAK 个店没有任何成功就立刻发停止指令。
+  if (ctx.aborted) return;
+  if (ctx.lastOkSeen == null) ctx.lastOkSeen = 0;
+  if (okCount > ctx.lastOkSeen) { ctx.lastOkSeen = okCount; ctx.stall = 0; }
+  else { ctx.stall = (Number(ctx.stall) || 0) + 1; }
+  if (ctx.stall >= PDD_MALL_BREAK_STREAK) {
+    ctx.aborted = true;
+    ctx.abortReason = `连续 ${ctx.stall} 个店铺都解析失败（平台返回 40004 请稍后重试，说明已被限流）`;
+    agentHub.send(ctx.agentUid, { type: 'stop' });
+    ctx.progressLog.push({
+      t: new Date().toLocaleTimeString('zh-CN', { hour12: false }),
+      text: `⚠ ${ctx.abortReason}，已自动停手（等 1~2 小时后再点，未解析的会自动重跑）`,
+    });
+  }
 }
 
 /**
@@ -2111,6 +2336,8 @@ function handleAgentMessage(uid, msg) {
   if (msg.type === 'pdd_apply_progress') { onPddApplyProgress(uid, msg); return; }
   if (msg.type === 'pdd_send_done') { onPddSendDone(uid, msg); return; }
   if (msg.type === 'pdd_send_progress') { onPddApplyProgress(uid, msg); return; }
+  if (msg.type === 'pdd_mall_done') { onPddMallDone(uid, msg).catch((e) => console.warn('[pdd] 解析店铺结果处理失败：' + ((e && e.message) || e))); return; }
+  if (msg.type === 'pdd_mall_progress') { onPddMallProgress(uid, msg); return; }
   // ── 闪电帮帮：登录 / 取数（分批回传）/ 批量催收 ──
   if (msg.type === 'sdc_login_done') { onSdcLoginDone(uid, msg); return; }
   if (msg.type === 'sdc_fetch_page') { onSdcFetchPage(uid, msg); return; }
@@ -3875,11 +4102,15 @@ const server = http.createServer(async (req, res) => {
       if (!isAdmin) return sendJson(res, 403, { error: '仅超级管理员可修改系统配置' });
       const { config } = await readBody(req);
       if (!config || typeof config !== 'object') throw new Error('缺少 config');
-      const filePath = path.join(ROOT, 'config.json');
-      const old = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+      // 与 lib/config.js 同源：优先 APP_CONFIG_FILE（容器部署把配置挂载到可写目录），
+      // 否则项目根目录。此前写死 path.join(ROOT, 'config.json')，容器里 /app 不可写时保存必挂
+      const filePath = CONFIG_PATH;
+      let old = {};
+      try { old = JSON.parse(fs.readFileSync(filePath, 'utf-8')); }
+      catch (e) { if (e.code !== 'ENOENT') throw e; }
       const merged = { ...old };
       merged.runtime = { ...(old.runtime || {}), ...(config.runtime || {}) };
-      // 拼多多翻页上限（发票刷新与订单同步共用）：夹在 20~2000，非法值回默认 300（改完下次同步即生效）
+      // 拼多多翻页上限（发票刷新与订单同步共用）：夹在 20~2000，非法值回默认值（v0.3.14 起 1000，改完下次同步即生效）
       if (config.runtime && config.runtime.pddMaxPages !== undefined) {
         const n = Number(config.runtime.pddMaxPages);
         merged.runtime.pddMaxPages = Number.isFinite(n) && n > 0
@@ -3920,7 +4151,17 @@ const server = http.createServer(async (req, res) => {
         const u = String(config.runtime.agentInstallerUrl || '').trim();
         merged.runtime.agentInstallerUrl = /^https?:\/\//i.test(u) ? u : '';
       }
-      fs.writeFileSync(filePath, JSON.stringify(merged, null, 2), 'utf-8');
+      try {
+        fs.writeFileSync(filePath, JSON.stringify(merged, null, 2), 'utf-8');
+      } catch (e) {
+        if (e.code === 'EACCES' || e.code === 'EROFS' || e.code === 'EPERM') {
+          throw new Error('配置文件不可写（' + e.code + '）：' + filePath
+            + '。容器部署请把配置挂载到可写目录并用环境变量 APP_CONFIG_FILE 指向它'
+            + '（如 docker-compose 加 volumes: "./data/config.json:/data/config.json" 且 APP_CONFIG_FILE=/data/config.json），'
+            + '或进入容器执行 chown $(id -u):$(id -g) ' + filePath + ' 修正属主。');
+        }
+        throw e;
+      }
       // 兼容旧调用：允许随配置一起提交本人抬头。看板已不再走这条路
       // （抬头属于用户信息，统一在「系统管理 → 用户管理」里按账号维护）
       if (config.buyerInfo) {
@@ -4567,6 +4808,54 @@ const server = http.createServer(async (req, res) => {
       });
     }
 
+    // ── 商品手工价（v0.3.28）────────────────────────────────────────────
+    //   平台取价错了 / 没关联上平台商品时，人工填一份齐货通价（单价 + 整件价 + 规格）。
+    //   优先级高于 goods_price_cache：比价分析与补货单都按它算，「重新取价」也不会覆盖；
+    //   要回平台价就点「取消手工价」。按品牌方共用（同品牌看到的是同一份价）。
+    //   读随商品列表权限；写要「平台取价」权限（改的是参比价，会影响别人的补货结论）。
+    if (method === 'GET' && p === '/api/products/manual-prices') {
+      if (!canProduct) return denyProduct();
+      const bo = brandOf(req, url, user);
+      const skus = String(url.searchParams.get('skus') || '').split(',').map((x) => x.trim()).filter(Boolean);
+      const prices = await productPrice.readManual({
+        brandId: bo.brandId || (Number(user.brand_id) || 1), skus,
+        kind: url.searchParams.get('kind') || 'qht',
+      }).catch(() => ({}));
+      return sendJson(res, 200, { ok: true, prices });
+    }
+    if (method === 'POST' && p === '/api/products/manual-price') {
+      if (!canProduct) return denyProduct();
+      if (!canPrice) return denyPrice();
+      writeGuard();
+      const b = await readBody(req);
+      const bo = brandFromBody(user, b);
+      const brandId = bo.brandId || (Number(user.brand_id) || 1);
+      const out = await productPrice.saveManual({
+        brandId,
+        sku: b.sku, kind: b.kind, goodsName: b.goodsName,
+        mode: b.mode, unitPrice: b.unitPrice, packPrice: b.packPrice, specQty: b.specQty,
+        spec: b.spec, smallUnit: b.smallUnit, note: b.note,
+        operator: user.username,
+      });
+      if (out.ok) await logOp(user, 'product.manual_price', {
+        tenantId, brandId, sku: out.sku,
+        unitPrice: out.price && out.price.unitPrice, packPrice: out.price && out.price.packPrice,
+        packQty: out.price && out.price.packingSpecification, kind: out.kind,
+      });
+      return sendJson(res, out.ok ? 200 : 400, out);
+    }
+    if (method === 'POST' && p === '/api/products/manual-price/clear') {
+      if (!canProduct) return denyProduct();
+      if (!canPrice) return denyPrice();
+      writeGuard();
+      const b = await readBody(req);
+      const bo = brandFromBody(user, b);
+      const brandId = bo.brandId || (Number(user.brand_id) || 1);
+      const out = await productPrice.clearManual({ brandId, sku: b.sku, kind: b.kind });
+      if (out.ok) await logOp(user, 'product.manual_price_clear', { tenantId, brandId, sku: out.sku });
+      return sendJson(res, out.ok ? 200 : 400, out);
+    }
+
     // ── 供应商下拉（v0.3.12）────────────────────────────────────────────
     // 本地价要选供应商，但补货页用户不一定有「供应商管理 / 货单管理」权限，
     // 所以单开一个只读接口：有商品或补货权限就能拿到自己的供应商名单（只读，不能增删改）。
@@ -4653,7 +4942,12 @@ const server = http.createServer(async (req, res) => {
       const supNameById = {};
       const supIdByName = {};
       for (const r of supRows) { supNameById[r.id] = r.name; supIdByName[r.name] = r.id; }
-      const out = products.comparePrices({ rows: use, priceMap, supNameById, supIdByName });
+      // 手工价（v0.3.28）：按品牌 + SKU 取，优先级高于平台缓存（关联错了也能靠手工价纠错）
+      let manualMap = {};
+      try {
+        manualMap = await productPrice.readManualMap({ rows: use, kind: 'qht' });
+      } catch (e) { manualMap = {}; }
+      const out = products.comparePrices({ rows: use, priceMap, manualMap, supNameById, supIdByName });
       return sendJson(res, 200, Object.assign({ truncated, batch: batch || null }, out));
     }
     // ── 自动匹配阿发商品（v0.2.92）────────────────────────────────────────
@@ -5410,6 +5704,65 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, out.ok ? 200 : 400, out);
       }
 
+      // 补货单里「加一行」用的商品搜索（按账号所属品牌方商品库，名称/SKU 模糊）
+      if (method === 'GET' && p === '/api/replenish-order/products') {
+        const brandId = user.role === 'admin'
+          ? (brandOf(req, url, user).brandId || 0)
+          : await brandIdOfUser(roUid);
+        return sendJson(res, 200, await replenishOrder.searchProducts({
+          brandId, keyword: url.searchParams.get('q') || '', limit: url.searchParams.get('limit'),
+        }));
+      }
+
+      // 保存一行明细（itemId 为空 = 新增；有值 = 改这一行）。金额服务端重算，不信前端传的总额
+      if (method === 'POST' && p === '/api/replenish-order/item-save') {
+        writeGuard();
+        const body = await readBody(req);
+        const out = await replenishOrder.saveItem({
+          userId: roUid, orderId: body.orderId, itemId: body.itemId,
+          sku: body.sku, goodsName: body.goodsName, channel: body.channel, channelLabel: body.channelLabel,
+          qtyPack: body.qtyPack, specQty: body.specQty, unitPrice: body.unitPrice, suggestQty: body.suggestQty,
+        });
+        if (out.ok) {
+          await logOp(user, 'replenish.item_save', {
+            tenantId: roUid, orderId: Number(body.orderId), created: !Number(body.itemId),
+            sku: body.sku, qtyPack: body.qtyPack, unitPrice: body.unitPrice,
+          });
+        }
+        return sendJson(res, out.ok ? 200 : 400, out);
+      }
+
+      if (method === 'POST' && p === '/api/replenish-order/item-delete') {
+        writeGuard();
+        const body = await readBody(req);
+        const out = await replenishOrder.deleteItem({
+          userId: roUid, orderId: body.orderId, itemId: body.itemId,
+        });
+        if (out.ok) {
+          await logOp(user, 'replenish.item_delete', {
+            tenantId: roUid, orderId: Number(body.orderId), sku: body.sku || '',
+          });
+        }
+        return sendJson(res, out.ok ? 200 : 400, out);
+      }
+
+      // 换供应商（单头）：已关联货单时服务端会拒，避免一张单跟货单对不上供应商
+      if (method === 'POST' && p === '/api/replenish-order/supplier') {
+        writeGuard();
+        const body = await readBody(req);
+        const out = await replenishOrder.setSupplier({
+          userId: roUid, id: body.id, supplierId: body.supplierId,
+          supplierName: body.supplierName, operator: user.username,
+        });
+        if (out.ok) {
+          await logOp(user, 'replenish.supplier', {
+            tenantId: roUid, orderId: out.order && out.order.id,
+            supplierName: out.order && out.order.supplierName,
+          });
+        }
+        return sendJson(res, out.ok ? 200 : 400, out);
+      }
+
       if (method === 'POST' && p === '/api/replenish-order/delete') {
         writeGuard();
         const body = await readBody(req);
@@ -5421,30 +5774,26 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 404, { error: '未知的补货单接口' });
     }
 
-    // ── 供应商售后（v0.3.2）────────────────────────────────────────────────
-    //    售后管理菜单整页替换为「针对供应商的售后」，与牵牛花退单脱钩：
-    //    旧 /api/qnh/after-sales/* 一族已下线（数据保留在库），这里换新接口。
-    //    权限沿用 after_sale_enabled 列（超管恒可用）；数据归属同供应商/货单（tenantOf）。
+    // ── 商品售后（v0.3.25）────────────────────────────────────────────────
+    //    售后菜单整页换成「商品售后」：台账主体是商品（名称 + SKU + 数量 + 原因），
+    //    不再挂供应商/金额；旧的 supplier_after 已停用（清理见 sql/upgrade/0.3.25-商品售后.sql）。
+    //    状态四档人工变更：已退货必填运单号，已退款必传截图（手机扫码拍照 / 界面截图粘贴）。
+    //    权限沿用 after_sale_enabled 列（超管恒可用）；数据归属同商品/货单（tenantOf）。
     if (p.startsWith('/api/after/')) {
       const canAfter = isAdmin || !!Number(user.after_sale_enabled);
-      if (!canAfter) return sendJson(res, 403, { error: '未开启供应商售后权限，请联系超级管理员' });
-      const afUid = tenantId;   // 数据归属用户（员工录入归属所属主体，写入合法性由 writeGuard 判）
+      if (!canAfter) return sendJson(res, 403, { error: '未开启商品售后权限，请联系超级管理员' });
+      const afUid = tenantId;   // 数据归属用户（员工操作归属所属主体，写入合法性由 writeGuard 判）
 
-      // 供应商下拉：与货单/供应商管理共用同一本字典（售后页筛选与新增都用它）
-      if (method === 'GET' && p === '/api/after/suppliers') {
-        return sendJson(res, 200, { rows: await afterSales.allSuppliers(afUid) });
-      }
-
-      // 列表：按供应商 / 状态 / 日期区间 / 关键字，带四档计数与凭证（现签 1 小时链接）
+      // 列表：商品名称 / SKU / 状态 / 日期区间，带四档计数与凭证（现签 1 小时链接）
       if (method === 'GET' && p === '/api/after/list') {
         const q = url.searchParams;
         const [list, counts] = await Promise.all([
           afterSales.listAfter({
-            supplier: q.get('supplier') || '',
+            goodsName: q.get('goodsName') || '',
+            sku: q.get('sku') || '',
             status: q.get('status') == null ? '' : q.get('status'),
             from: q.get('from') || '',
             to: q.get('to') || '',
-            keyword: q.get('keyword') || '',
             page: q.get('page'),
             size: q.get('size'),
             userId: afUid,
@@ -5454,23 +5803,37 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 200, Object.assign(list, { counts, statuses: afterSales.AFTER_STATUSES }));
       }
 
-      // 单条详情（凭证弹窗直接用列表里带出的 attaches，这个接口留给刷新/外链场景）
-      if (method === 'GET' && p === '/api/after/detail') {
-        const out = await afterSales.getAfter({ userId: afUid, id: url.searchParams.get('id') });
-        return sendJson(res, out.ok ? 200 : 404, out);
+      // 商品模糊搜索（新增售后用）：只搜品牌商品库 brand_product。
+      //   员工/普通账号锁定「所属主体的品牌」—— 用 tenantId 反查，避免员工自己的 brand_id 为空时搜错品牌。
+      if (method === 'GET' && p === '/api/after/products') {
+        const bo = user.role === 'admin'
+          ? brandOf(req, url, user)
+          : { brandId: await brandIdOfUser(afUid), all: false };
+        return sendJson(res, 200, await afterSales.searchProducts({
+          brandId: bo.brandId, all: bo.all,
+          keyword: url.searchParams.get('q') || '',
+          limit: url.searchParams.get('limit'),
+        }));
       }
 
-      // 新增：供应商（字典必选）+ 内容 + 金额 + 售后日期 + 备注
+      // 新增：商品名称 + SKU + 数量 + 售后原因 + 售后日期 + 商品实物图（至少 1 张）
+      //   图片先经上传令牌暂存在 waybill_image（token 维度），保存成功后再搬到 qnh_after_attach；
+      //   失败时暂存行留着，用户补完表单重试不用重拍。
       if (method === 'POST' && p === '/api/after/create') {
         const body = await readBody(req);
         writeGuard();
+        const token = String(body.token || '');
+        const images = token ? await waybill.tokenObjects({ userId: afUid, token }) : [];
         const out = await afterSales.createAfter({
-          userId: afUid, supplierId: body.supplierId, goodsDesc: body.goodsDesc,
-          amount: body.amount, afterDate: body.afterDate, note: body.note, operator: user.username,
+          userId: afUid,
+          goodsName: body.goodsName, sku: body.sku, qty: body.qty,
+          afterReason: body.afterReason, afterDate: body.afterDate, note: body.note,
+          operator: user.username, images,
         });
+        if (out.ok && token) await waybill.dropTokenImages({ userId: afUid, token });
         if (out.ok) await logOp(user, 'after.create', {
-          tenantId: afUid, id: out.id, supplierName: out.supplierName,
-          amount: body.amount, afterDate: body.afterDate,
+          tenantId: afUid, id: out.id, goodsName: out.goodsName, sku: out.sku,
+          qty: out.qty, afterDate: body.afterDate,
         });
         return sendJson(res, out.ok ? 200 : 400, out);
       }
@@ -5481,36 +5844,93 @@ const server = http.createServer(async (req, res) => {
         writeGuard();
         const out = await afterSales.deleteAfter({ userId: afUid, id: body.id });
         if (out.ok) await logOp(user, 'after.delete', {
-          tenantId: afUid, id: out.id, supplierName: out.supplierName, afterDate: body.afterDate,
+          tenantId: afUid, id: out.id, goodsName: out.goodsName, sku: out.sku, afterDate: out.afterDate,
         });
         return sendJson(res, out.ok ? 200 : 400, out);
       }
 
-      // 一键推进下一档：服务端按「当前 +1」算状态，凭证图必传（先传七牛拿 key）。
-      //   ⚠ 先确认记录存在且未到已退款，再传图 —— 否则被拒的请求会把图白白传上七牛留成孤儿。
+      // 状态变更：改到「已退款」需要一张退款截图（先取令牌里的图，再落库）
+      //   ⚠ 先校验记录与状态，再取图 —— 否则被拒的请求白占七牛空间。
       if (method === 'POST' && p === '/api/after/status') {
-        const body = await readBody(req, 9e6);   // 5MB 图片 base64 后约 6.7MB
+        const body = await readBody(req);
         writeGuard();
         const pre = await afterSales.getAfter({ userId: afUid, id: body.id });
         if (!pre.ok) return sendJson(res, 404, { ok: false, error: pre.error });
-        if (Number(pre.after.status) >= 3) {
-          return sendJson(res, 400, { ok: false, error: '这条售后已到「已退款」，流程结束' });
+        const next = Number(body.status);
+        if (!afterSales.AFTER_STATUSES.some((x) => x.value === next)) {
+          return sendJson(res, 400, { ok: false, error: '状态只能是 待处理 / 已申请 / 已退货 / 已退款' });
         }
-        const img = qiniu.decodeImagePayload(body.image || body.imageBase64);
-        if (!img.ok) return sendJson(res, 400, { ok: false, error: img.error });
-        const up = await qiniu.uploadImage(img.buffer, { mime: img.mime, userId: afUid, prefix: 'after-sale' });
-        if (!up.ok) return sendJson(res, 400, { ok: false, error: up.error });
-        const out = await afterSales.advanceAfter({
-          userId: afUid, id: body.id, note: body.note,
-          imageKey: up.key, imageMime: up.mime, imageSize: up.size, operator: user.username,
+        const curStatus = Number(pre.after.status) || 0;
+        if (next === 2 && !String(body.waybillNo || '').trim() && !pre.after.waybillNo) {
+          return sendJson(res, 400, { ok: false, error: '改到「已退货」必须填运单号' });
+        }
+        const token = String(body.token || '');
+        let images = [];
+        // 已经是「已退款」再保存（只改备注）不再强制补图，原来的截图还在凭证里
+        if (next === 3 && curStatus !== 3) {
+          images = token ? await waybill.tokenObjects({ userId: afUid, token }) : [];
+          if (!images.length) return sendJson(res, 400, { ok: false, error: '改到「已退款」必须上传一张退款截图' });
+        }
+        const out = await afterSales.setStatus({
+          userId: afUid, id: body.id, status: next, waybillNo: body.waybillNo,
+          note: body.note, operator: user.username, images,
         });
+        if (out.ok && next === 3 && token) await waybill.dropTokenImages({ userId: afUid, token });
         if (out.ok) await logOp(user, 'after.status', {
-          tenantId: afUid, id: out.id, statusLabel: out.statusLabel, imageKey: out.imageKey,
+          tenantId: afUid, id: out.id, goodsName: pre.after.goodsName, sku: pre.after.sku,
+          statusLabel: out.statusLabel, waybillNo: out.waybillNo,
         });
         return sendJson(res, out.ok ? 200 : 400, out);
       }
 
-      return sendJson(res, 404, { error: '未知的供应商售后接口' });
+      // —— 售后图片：手机扫码拍照 / 电脑粘贴截图，都走同一个 10 分钟临时令牌 ——
+      //   复用货单那套上传表（waybill_upload_token + waybill_image 暂存），token 唯一、互不干扰。
+      if (method === 'POST' && p === '/api/after/upload-token') {
+        writeGuard();
+        const out = await waybill.createUploadToken({ userId: afUid, operator: user.username, ttlSec: 600 });
+        if (!out.ok) return sendJson(res, 400, out);
+        const link = serverUrlOf(req) + '/m-upload?t=' + out.token + '&k=after';
+        return sendJson(res, 200, Object.assign(out, { link }));
+      }
+      if (method === 'GET' && p === '/api/after/upload-token') {
+        const token = url.searchParams.get('token') || '';
+        const out = await waybill.uploadSession(token);
+        if (!out.ok) return sendJson(res, 200, out);
+        if (Number(out.userId) !== Number(afUid)) {
+          return sendJson(res, 403, { error: '这个上传链接不属于当前账号' });
+        }
+        const imgs = await waybill.tokenImages({ userId: afUid, token });
+        return sendJson(res, 200, Object.assign(out, { images: imgs }));
+      }
+      // 电脑端粘贴/拖拽上传（已退款截图只允许扫码 + 粘贴，所以这个接口是主要通道之一）
+      if (method === 'POST' && p === '/api/after/upload') {
+        writeGuard();
+        const body = await readBody(req, 9e6);   // 5MB 图片 base64 后约 6.7MB
+        const sess = await waybill.uploadSession(body.token);
+        if (!sess.ok) return sendJson(res, 400, sess);
+        if (Number(sess.userId) !== Number(afUid)) {
+          return sendJson(res, 403, { error: '这个上传链接不属于当前账号' });
+        }
+        const out = await waybill.uploadImageToToken({
+          token: body.token, dataUrl: body.image || body.imageBase64,
+          ip: req.headers['x-forwarded-for'] || (req.socket && req.socket.remoteAddress) || '',
+        });
+        return sendJson(res, out.ok ? 200 : 400, out);
+      }
+
+      // 传错了撤一张（只删暂存行，七牛对象留着）
+      if (method === 'POST' && p === '/api/after/upload-remove') {
+        writeGuard();
+        const body = await readBody(req);
+        const sess = await waybill.uploadSession(body.token);
+        if (!sess.ok) return sendJson(res, 400, sess);
+        if (Number(sess.userId) !== Number(afUid)) {
+          return sendJson(res, 403, { error: '这个上传链接不属于当前账号' });
+        }
+        return sendJson(res, 200, await waybill.removeTokenImage({ userId: afUid, id: body.id }));
+      }
+
+      return sendJson(res, 404, { error: '未知的商品售后接口' });
     }
 
     // ── 牵牛花：退单列表 / 实时毛利（按「菜单权限」分别放行；超级管理员始终可用）──
@@ -5523,7 +5943,7 @@ const server = http.createServer(async (req, res) => {
       const canAfterSale = isAdmin || !!Number(user.after_sale_enabled);
       const qnhUid = tenantId;   // 本块所有读写的「数据归属用户」
       const profitApi = p === '/api/qnh/profit' || p === '/api/qnh/profit/pull' || p === '/api/qnh/profit/trend';
-      // 退款原因在退单列表改（供应商售后 v0.3.2 起不再读退单，旧售后页的「改原因」已下线）
+      // 退款原因在退单列表改（商品售后 v0.3.25 起不再读退单，旧售后页的「改原因」已下线）
       const reasonApi = p === '/api/qnh/refunds/reason';
       if (reasonApi) {
         if (!canRefund) return sendJson(res, 403, { error: '未开启退单列表权限，请联系超级管理员' });
@@ -5836,15 +6256,26 @@ const server = http.createServer(async (req, res) => {
 
       // 概况：登录态 + 状态汇总 + 状态字典；管理员额外拿到账号列表以便「代入」
       if (method === 'GET' && p === '/api/pdd/status') {
-        const [cookie, sum, orderSync] = await Promise.all([
+        const [cookie, sum, orderSync, mallStat] = await Promise.all([
           pdd.cookieStatus(pddUid).catch(() => ({ ok: false, logined: false, message: '登录态读取失败' })),
           pdd.summary(pddUid).catch(() => null),
           pddOrders.orderSyncSummary(pddUid).catch(() => null),
+          pdd.mallResolveStats(pddUid).catch(() => ({ pending: 0, resolved: 0 })),
         ]);
+        const aUid = agentUidFor(user, pddUid);
+        const mallAgentVer = aUid ? (agentHub.status(aUid).agentVer || '') : '';
         const out = {
           cookie,
           summary: sum,
           orderSync,
+          // 店铺 ID 解析进度：pending>0 时页面显示「解析店铺 ID」按钮（v0.3.16）
+          mallId: {
+            pending: mallStat.pending,
+            resolved: mallStat.resolved,
+            minVer: PDD_MALL_MIN_AGENT,
+            agentVer: mallAgentVer,
+            agentOutdated: !!(mallAgentVer && !verGte(mallAgentVer, PDD_MALL_MIN_AGENT)),
+          },
           // 「获取订单数据」首次全量不再限时间，一直翻到空页；这里给页面用的翻页上限（系统管理可改）
           maxPages: psync.getMaxPages(),
           statusText: pdd.STATUS_TEXT,
@@ -5887,6 +6318,94 @@ const server = http.createServer(async (req, res) => {
         const out = await pdd.sync({ userId: pddUid, trigger: 'manual' });
         await logOp(user, 'pdd.sync', { ok: !!out.ok, total: out.total, tenantId: pddUid });
         return sendJson(res, 200, out);
+      }
+
+      // 店铺 ID 解析进度：多少家店还没解析出来（催收按钮能否点亮就看这个）
+      if (method === 'GET' && p === '/api/pdd/mall-id/stats') {
+        const st = await pdd.mallResolveStats(pddUid);
+        const aUid = agentUidFor(user, pddUid);
+        const agentVer = aUid ? (agentHub.status(aUid).agentVer || '') : '';
+        return sendJson(res, 200, {
+          ok: true,
+          pending: st.pending,
+          resolved: st.resolved,
+          agentOnline: !!(aUid && agentHub.isOnline(aUid)),
+          agentVer,
+          minVer: PDD_MALL_MIN_AGENT,
+          agentOutdated: !!(agentVer && !verGte(agentVer, PDD_MALL_MIN_AGENT)),
+        });
+      }
+
+      // 「解析店铺 ID」：订单列表接口只给加密 mall_sn（protobuf + AES 密文），
+      // 解密密钥在拼多多服务端；服务器直连 /api/turing/mall/gr_st 一律 40002（风控 isIntercept），
+      // 静态抓 mall_page.html 又是空壳。唯一可行：让本机助手在已登录的真实页面里打开店铺页，
+      // 把页面自己解出来的 mall_id 抓回来 → 写 pdd_mall 缓存 + 回填 pdd_order.mall_id。
+      // 解析成功一次永久有效（mall_sn 与店铺一一对应），之后催收全走 mall_id，不用再开页面。
+      if (method === 'POST' && p === '/api/pdd/mall-id/resolve') {
+        const b = await readBody(req).catch(() => ({}));
+        const aUid = agentUidFor(user, pddUid);
+        if (!aUid) {
+          return sendJson(res, 200, {
+            ok: false, needAgent: true,
+            message: '本机助手未连接：解析店铺 ID 必须在本机已登录的助手窗口里跑。请先启动「催收小助手」并绑定本机助手。',
+          });
+        }
+        if (!agentVersionGate(res, aUid, '解析店铺 ID')) return;
+        const agentVer = agentHub.status(aUid).agentVer || '';
+        if (agentVer && !verGte(agentVer, PDD_MALL_MIN_AGENT)) {
+          return sendJson(res, 200, {
+            ok: false, needAgent: true, agentOutdated: true,
+            message: `这台电脑上的催收小助手是 v${agentVer}，还不支持解析店铺 ID。请升级到 v${PDD_MALL_MIN_AGENT} 及以上。`,
+          });
+        }
+        const running = [...PDD_TASKS.values()].find(
+          (c) => c.kind === 'mall' && c.userId === Number(pddUid) && c.status === 'pending'
+        );
+        if (running) {
+          return sendJson(res, 200, {
+            ok: true, pending: true, taskId: running.taskId, already: true,
+            total: running.total, message: '店铺 ID 解析正在运行中，继续展示进度…',
+          });
+        }
+        // limit 不传 / 传 0 = 全部解析（0.3.20 起默认一次点完全部，不再 20 个一批）
+        const limit = Number(b.limit) > 0 ? Math.min(500, Math.floor(Number(b.limit))) : 0;
+        const targets = await pdd.mallResolveTargets(pddUid, limit);
+        if (!targets.length) {
+          const st = await pdd.mallResolveStats(pddUid);
+          return sendJson(res, 200, {
+            ok: true, total: 0,
+            message: st.pending
+              ? '暂无可解析的店铺：刚解析失败过的店 10 分钟内不重复尝试，请稍后再点。'
+              : '需要解析的店铺 ID 都已完成（仅超期未开票、且交易成功的单；退款/取消的单不解析）。',
+          });
+        }
+        const taskId = 'pddmall-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+        const ctx = {
+          taskId, kind: 'mall', userId: Number(pddUid), status: 'pending', message: '',
+          agentUid: aUid,
+          total: targets.length,
+          done: 0,                      // 已处理数（跨段累计，用于进度换算）
+          queue: targets.slice(),       // 待下发的店铺队列（每段 PDD_MALL_BATCH 个）
+          retry: [],                    // 首轮失败、等整轮跑完再试一次的店铺
+          retryRound: 0,
+          results: [], okCount: 0, failCount: 0, filled: 0,
+          okSet: new Set(), failSet: new Set(),   // 按店铺去重计数（重试轮不重复计）
+          progress: { index: 0, total: targets.length, current: '', okCount: 0, failCount: 0 },
+          progressLog: [],
+          createdAt: Date.now(), expiresAt: Date.now() + PDD_MALL_TASK_TTL_MS,
+        };
+        PDD_TASKS.set(taskId, ctx);
+        // 先注册任务再下发：助手回执可能比 send() 返回还快，先 set 再 send 才不会丢第一段结果
+        if (!dispatchMallBatch(ctx)) {
+          PDD_TASKS.delete(taskId);
+          return sendJson(res, 200, { ok: false, needAgent: true, message: '下发解析任务失败：本机助手连接已断开，请确认助手正在运行。' });
+        }
+        await logOp(user, 'pdd.mall.resolve', { tenantId: pddUid, total: targets.length, agentUid: aUid });
+        return sendJson(res, 200, {
+          ok: true, pending: true, taskId, total: targets.length,
+          message: `已下发解析任务（共 ${targets.length} 个店铺，分 ${Math.ceil(targets.length / PDD_MALL_BATCH)} 段自动续跑），`
+            + '正在本机助手里逐个打开商家会话页取 mall_id…',
+        });
       }
 
       // 「获取订单数据」：拉「我的订单」全部订单（待付款/待发货/待收货/已完成/已退款）
@@ -6036,8 +6555,10 @@ const server = http.createServer(async (req, res) => {
         const sent = agentHub.send(aUid, {
           type: 'pdd_login',
           taskId,
-          // 发票助手页：未登录会自动跳登录，登录完正好停在订单页，方便确认身份
-          url: (process.env.PDD_LOGIN_URL || 'https://mobile.yangkeduo.com/commercial_pre_orders.html'),
+          // 落地页 = 买家「消息」列表（chat_list）。原来给的是发票助手页，但那个页面里没有
+          // 任何入口能进到消息页，用户想看后台发出的催收消息只能停在消息列表。
+          // 助手收到登录成功后也会自己跳到同一页（老助手只要给它这个 url 也能落地）。
+          url: (process.env.PDD_LOGIN_URL || 'https://mobile.yangkeduo.com/chat_list.html'),
           timeoutMs: PDD_LOGIN_TIMEOUT_MS,
         });
         if (!sent) {
@@ -6156,7 +6677,8 @@ const server = http.createServer(async (req, res) => {
         });
       }
 
-      // 「催商家开票」：给「商家处理中」的订单发一条催收消息 → 派给该用户的本机助手
+      // 「催商家开票」：给可催的订单发一条催收消息 → 派给该用户的本机助手
+      // 可催 = 商家处理中(6)，或 v0.3.19 放开的「超期未开票(9) + 交易成功 + 非退款」
       // 助手加载真实聊天页打字点发送（anti-content 必须由页面风控 SDK 生成，服务器无法复刻）
       if (method === 'POST' && p === '/api/pdd/send') {
         const b = await readBody(req);
@@ -6187,7 +6709,7 @@ const server = http.createServer(async (req, res) => {
         if (!orders.length) {
           return sendJson(res, 200, {
             ok: false,
-            message: '没有可催收的订单：只能对「商家处理中」的订单催开票'
+            message: '没有可催收的订单：只能对「商家处理中」或「超期未开票且交易成功」的订单催开票'
               + (invalid.length ? `（跳过：${invalid.slice(0, 3).join('、')}${invalid.length > 3 ? ' 等' : ''}）` : ''),
           });
         }
@@ -6205,9 +6727,12 @@ const server = http.createServer(async (req, res) => {
             order_sn: o.order_sn, invoice_amount: o.invoice_amount,
           });
           if (!content.trim()) continue;   // 模板为空绝不发空消息（1688 已经踩过这个坑）
-          if (!perOrder && seenMall.has(String(o.mall_id))) continue;
-          seenMall.add(String(o.mall_id));
-          items.push({ order_sn: o.order_sn, mall_id: o.mall_id, content });
+          // 去重键：优先 mall_id（同一商家会话唯一）；没有 mall_id 时用 mall_sn 兜底，
+          // 否则全部落在 'null' 上，会把不同商家合并成一条，只发给第一个商家。
+          const mallKey = o.mall_id ? 'm' + o.mall_id : 's' + String(o.mall_sn || '');
+          if (!perOrder && seenMall.has(mallKey)) continue;
+          seenMall.add(mallKey);
+          items.push({ order_sn: o.order_sn, mall_id: o.mall_id, mall_sn: o.mall_sn || '', content });
         }
         if (!items.length) {
           return sendJson(res, 200, { ok: false, message: '催收消息内容为空：请到「系统管理 → 拼多多催收消息」配置模板' });

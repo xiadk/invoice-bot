@@ -275,13 +275,13 @@ async function ensureQnhSchema(q) {
       ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='手工登记的售后（售后管理页「新增售后」）'",
 
     // 售后凭证图片（v0.2.108）：每次状态变更必须留一张，存七牛对象 key（不含域名）。
-    //   行键 row_key 与列表一致：ref:<退单号> / man:<手工售后id>；
+    //   行键 row_key 与列表一致：pa:<商品售后id> / ref:<退单号> / man:<手工售后id>；
     //   展示时由 lib/qiniu.js 的 signUrl() 现签私有空间临时链接，库里不存 URL
     //   （换域名、换空间都不用改历史数据）。
     'CREATE TABLE IF NOT EXISTS `qnh_after_attach` (' +
       "  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT," +
       "  `user_id` INT NOT NULL DEFAULT 1 COMMENT '数据归属用户（员工操作时记所属主体账号）'," +
-      "  `row_key` VARCHAR(64) NOT NULL COMMENT '售后行键：ref:<退单号> / man:<手工售后id>'," +
+      "  `row_key` VARCHAR(64) NOT NULL COMMENT '售后行键：pa:<商品售后id> / ref:<退单号> / man:<手工售后id>'," +
       "  `status` TINYINT NOT NULL DEFAULT 0 COMMENT '本次变更后的处理状态：0待处理 1已申请 2已退货 3已退款'," +
       "  `object_key` VARCHAR(512) NOT NULL COMMENT '七牛对象 key（不含域名，展示时签名）'," +
       "  `mime` VARCHAR(64) DEFAULT NULL COMMENT '图片类型（image/png 等）'," +
@@ -325,6 +325,7 @@ async function ensureQnhSchema(q) {
       "  `user_id` INT NOT NULL DEFAULT 1 COMMENT '数据归属用户'," +
       "  `order_sn` VARCHAR(64) NOT NULL COMMENT '订单号'," +
       "  `mall_id` BIGINT DEFAULT NULL COMMENT '店铺 ID'," +
+      "  `mall_sn` VARCHAR(128) DEFAULT NULL COMMENT '店铺加密串（mall_url 里的 mall_sn，用于反解 mall_id）'," +
       "  `goods_name` VARCHAR(255) DEFAULT NULL COMMENT '商品名'," +
       "  `spec` VARCHAR(255) DEFAULT NULL COMMENT '规格'," +
       "  `thumb_url` VARCHAR(512) DEFAULT NULL COMMENT '商品图'," +
@@ -333,6 +334,7 @@ async function ensureQnhSchema(q) {
       "  `invoice_status` TINYINT NOT NULL DEFAULT 0 COMMENT '开票状态 7待申请 0暂不可开票 1开票中 2已开票 6商家处理中'," +
       "  `invoice_time_str` VARCHAR(255) DEFAULT NULL COMMENT '开票进度说明（如「预计订单确认收货后10日之内开票」）'," +
       "  `reject_reason` VARCHAR(512) DEFAULT NULL COMMENT '驳回原因'," +
+      "  `note` VARCHAR(255) DEFAULT NULL COMMENT '本地说明备注（订单超时没有申请入口/申请失败原因/无法开启聊天，线下处理）'," +
       "  `business_type` TINYINT DEFAULT NULL COMMENT '业务类型（页面 business_type）'," +
       "  `invoice_kind` TINYINT DEFAULT NULL COMMENT '发票类型（页面 invoice_kind）'," +
       "  `payer_name` VARCHAR(128) DEFAULT NULL COMMENT '发票抬头（付款方名称）'," +
@@ -356,8 +358,28 @@ async function ensureQnhSchema(q) {
       "  PRIMARY KEY (`user_id`,`order_sn`)," +
       "  KEY `idx_pdo_status` (`user_id`,`invoice_status`)," +
       "  KEY `idx_pdo_ostatus` (`user_id`,`order_status`)," +
+      "  KEY `idx_pdo_msn` (`user_id`,`mall_sn`)," +
       "  KEY `idx_pdo_time` (`order_time`)" +
       ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='拼多多订单与开票状态'",
+
+    // 拼多多「店铺加密串 → 数字 mall_id」解析缓存（v0.3.16）
+    // 为什么要有它：订单列表接口只给加密的 mall_sn（protobuf + AES 密文），密钥在拼多多服务端，
+    // 服务端直连解密接口 /api/turing/mall/gr_st 会被风控拦（40002 isIntercept）。
+    // 唯一可行的是让本机助手在已登录的真实页面里跑一次，把页面自己解出来的 mall_id 抓回来存这里。
+    // 解析成功一次就永久可用（mall_sn 与店铺一一对应、不随时间变），之后催收全走 mall_id。
+    'CREATE TABLE IF NOT EXISTS `pdd_mall` (' +
+      "  `user_id` INT NOT NULL DEFAULT 1 COMMENT '数据归属用户'," +
+      "  `mall_sn` VARCHAR(128) NOT NULL COMMENT '店铺加密串（订单 mall_url 里的 mall_sn）'," +
+      "  `mall_id` BIGINT DEFAULT NULL COMMENT '解析出的数字店铺 ID（NULL=还没解析成功）'," +
+      "  `mall_name` VARCHAR(128) DEFAULT NULL COMMENT '店铺名（订单接口的 mall_name，便于人工核对）'," +
+      "  `fail_reason` VARCHAR(255) DEFAULT NULL COMMENT '最近一次解析失败原因'," +
+      "  `tried_at` DATETIME DEFAULT NULL COMMENT '最近一次解析尝试时间'," +
+      "  `agent_ver` VARCHAR(32) DEFAULT NULL COMMENT '执行解析的助手版本'," +
+      "  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP," +
+      "  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP," +
+      "  PRIMARY KEY (`user_id`,`mall_sn`)," +
+      "  KEY `idx_pm_mallid` (`user_id`,`mall_id`)" +
+      ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='拼多多店铺 mall_sn→mall_id 解析缓存'",
 
     // 拼多多登录态（Cookie 串）。与 qnh_session 同样的思路：入库不落盘。
     // 只需要 Cookie 头，不需要 Playwright storageState（接口是纯 HTTP 调用）。
@@ -951,13 +973,47 @@ async function migrate(conn, dbName) {
       ['tabs_belong', "VARCHAR(64) DEFAULT NULL COMMENT '平台分类标签 all/unreceived/unrated 等'"],
       ['parent_order_sn', "VARCHAR(64) DEFAULT NULL COMMENT '组合单父单号（多多买菜 PO-）'"],
       ['order_source', "TINYINT NOT NULL DEFAULT 1 COMMENT '来源：1=发票助手接口 2=订单列表接口'"],
+      // v0.3.16：加密店铺串，用于让本机助手反解 mall_id（接口只给加密串，密钥在拼多多服务端）
+      ['mall_sn', "VARCHAR(128) DEFAULT NULL COMMENT '店铺加密串（mall_url 里的 mall_sn）'"],
+      // v0.3.24：本地「说明」备注（订单超时没有申请入口 / 申请失败原因 / 无法开启聊天，线下处理）
+      ['note', "VARCHAR(255) DEFAULT NULL COMMENT '本地说明备注（超期未申请/申请失败原因/聊天打不开原因）'"],
     ]) {
       if (!(await colExists('pdd_order', col))) {
         await q(`ALTER TABLE \`pdd_order\` ADD COLUMN \`${col}\` ${decl}`);
       }
     }
+    // v0.3.24 口径回填：交易成功 + 发票接口从没给过状态(9) → 暂不可开票(0) + 备注。
+    // 只补 9 且 note 为空的单；发票接口已写真实状态(7/6/2/1/0)的单绝不碰。反复执行安全。
+    {
+      const back = await q(
+        "UPDATE `pdd_order` SET `invoice_status` = 0, `note` = '订单超时没有申请入口' " +
+        " WHERE `invoice_status` = 9 AND `order_status` = 4 AND (`note` IS NULL OR `note` = '')"
+      ).catch(() => null);
+      if (back && back.affectedRows) {
+        console.log(`[db] 已把 ${back.affectedRows} 单「交易成功+未同步开票」归入「暂不可开票」并备注`);
+      }
+    }
     if (!(await idxExists('pdd_order', 'idx_pdo_ostatus'))) {
       await q('ALTER TABLE `pdd_order` ADD KEY `idx_pdo_ostatus` (`user_id`,`order_status`)');
+    }
+    if (!(await idxExists('pdd_order', 'idx_pdo_msn'))) {
+      await q('ALTER TABLE `pdd_order` ADD KEY `idx_pdo_msn` (`user_id`,`mall_sn`)');
+    }
+    // 回填存量 mall_sn：老数据只有 raw_json，里面 mall_url 的 mall_sn 是百分号编码的 base64，
+    // 这里做同样的解码（%2B→+、%2F→/、%3D→=），只补空值，反复执行安全。
+    // 不补这段的话，老订单必须重新全量同步才会带上 mall_sn（1000 页，很慢）。
+    // ⚠ 必须先 REPLACE 掉 decrypt_mall_sn=：它同样包含 "mall_sn=" 子串，且排在后面，
+    //   不处理的话 SUBSTRING_INDEX(..., -1) 取到的是 "1"（decrypt_mall_sn=1 的 1）。
+    if (await colExists('pdd_order', 'mall_sn')) {
+      const filled = await q(
+        "UPDATE `pdd_order` SET `mall_sn` = REPLACE(REPLACE(REPLACE(" +
+        "SUBSTRING_INDEX(SUBSTRING_INDEX(SUBSTRING_INDEX(REPLACE(`raw_json`, 'decrypt_mall_sn=', 'DEMSNX'), 'mall_sn=', -1), '&', 1), '\"', 1)," +
+        " '%2B', '+'), '%2F', '/'), '%3D', '=')" +
+        " WHERE `mall_sn` IS NULL AND `raw_json` LIKE '%mall_sn=%'"
+      ).catch(() => null);
+      if (filled && filled.affectedRows) {
+        console.log(`[db] 回填 pdd_order.mall_sn：${filled.affectedRows} 行`);
+      }
     }
   }
 
@@ -1337,6 +1393,35 @@ async function migrate(conn, dbName) {
     );
   }
 
+  // ── 商品手工价（v0.3.28）──
+  //    平台取价错了 / 没关联平台商品时，人工填一份齐货通价（单价 + 整件价 + 规格）。
+  //    唯一键 brand_id+sku+kind，优先级高于 goods_price_cache；比价与补货单都读它。
+  //    与 sql/schema.sql 的 5.3b 同源，改一处就要改另一处。
+  if (!(await tableExists('product_price_manual'))) {
+    await q(
+      'CREATE TABLE `product_price_manual` (' +
+      '  `id`          BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,' +
+      "  `brand_id`    INT           NOT NULL DEFAULT 0    COMMENT '品牌方（brand.id）：同品牌共用一份'," +
+      "  `sku`         VARCHAR(64)   NOT NULL              COMMENT '商品SKU'," +
+      "  `kind`        VARCHAR(8)    NOT NULL DEFAULT 'qht' COMMENT '价格来源：qht=齐货通'," +
+      "  `goods_name`  VARCHAR(512)  NOT NULL DEFAULT ''   COMMENT '商品名称快照'," +
+      "  `unit_price`  DECIMAL(12,4) DEFAULT NULL          COMMENT '手工单价（折合小单位，元）'," +
+      "  `pack_price`  DECIMAL(12,2) DEFAULT NULL          COMMENT '手工整件价（元/件）'," +
+      "  `pack_qty`    DECIMAL(12,2) DEFAULT NULL          COMMENT '一件含多少小单位'," +
+      "  `spec`        VARCHAR(64)   DEFAULT NULL          COMMENT '规格文案'," +
+      "  `small_unit`  VARCHAR(16)   DEFAULT NULL          COMMENT '小单位（瓶/罐/支）'," +
+      "  `note`        VARCHAR(255)  DEFAULT NULL          COMMENT '改价原因'," +
+      "  `updated_by`  VARCHAR(64)   DEFAULT NULL          COMMENT '最后改价人'," +
+      '  `created_at`  DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT \'首次填写时间\',' +
+      '  `updated_at`  DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,' +
+      '  PRIMARY KEY (`id`),' +
+      '  UNIQUE KEY `uk_ppm_scope` (`brand_id`, `sku`, `kind`),' +
+      '  KEY `idx_ppm_kind` (`kind`, `brand_id`)' +
+      ') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci' +
+      "  COMMENT='商品手工价（人工覆盖平台取价，比价与补货单优先用它）'"
+    );
+  }
+
   // ── 供应商 / 货单管理（v0.3.0）──
   //   两个新菜单沿用 app_user 逐列开关；supplier / waybill / waybill_image / waybill_upload_token
   //   是普通业务表。下面的 DDL 与 sql/schema.sql 必须同源（改一处就要改另一处）。
@@ -1478,21 +1563,23 @@ async function migrate(conn, dbName) {
     }
   }
 
-  // ── 供应商售后台账（v0.3.2）──
-  //   售后管理菜单整页替换为「针对供应商的售后」，不再读牵牛花退单。
-  //   凭证图继续存 qnh_after_attach（row_key 用 sup:<id>），那张表 v0.2.108 就有，不用动。
-  //   旧的 qnh_refund_order 售后列 / qnh_after_manual 保留在库，只是界面不再展示。
-  if (!(await tableExists('supplier_after'))) {
+  // ── 商品售后台账（v0.3.25）──
+  //   售后菜单整页换成「商品售后」：主体是商品（名称 + SKU + 数量 + 原因），不再挂供应商/金额。
+  //   凭证图继续存 qnh_after_attach（row_key 用 pa:<id>）：
+  //     status=0 新建时的商品实物图，status=3 已退款截图。
+  //   旧的 supplier_after 已停用（v0.3.25 起代码不再引用），清理脚本见 sql/upgrade/0.3.25-商品售后.sql。
+  if (!(await tableExists('product_after'))) {
     await q(
-      'CREATE TABLE `supplier_after` (' +
+      'CREATE TABLE `product_after` (' +
       '  `id`            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,' +
       "  `user_id`       INT           NOT NULL DEFAULT 1   COMMENT '数据归属用户（员工录入时是所属主体账号）'," +
-      "  `supplier_id`   INT           NOT NULL DEFAULT 0   COMMENT '供应商（supplier.id，0=供应商已被删）'," +
-      "  `supplier_name` VARCHAR(64)   NOT NULL DEFAULT ''  COMMENT '登记时的供应商名称快照（兜底展示）'," +
-      "  `goods_desc`    VARCHAR(512)  NOT NULL DEFAULT ''  COMMENT '售后内容（商品/事由文字描述）'," +
-      "  `amount`        DECIMAL(12,2) NOT NULL DEFAULT 0.00 COMMENT '售后金额（元）'," +
+      "  `goods_name`    VARCHAR(255)  NOT NULL DEFAULT ''  COMMENT '商品名称（选中商品自动回填，可手改）'," +
+      "  `sku`           VARCHAR(64)   NOT NULL DEFAULT ''  COMMENT '商品 SKU'," +
+      "  `qty`           INT           NOT NULL DEFAULT 1   COMMENT '售后数量（件）'," +
+      "  `after_reason`  VARCHAR(255)  DEFAULT NULL         COMMENT '售后原因'," +
       "  `after_date`    DATE          NOT NULL             COMMENT '售后日期（按此列查询与排序）'," +
-      "  `status`        TINYINT       NOT NULL DEFAULT 0   COMMENT '处理状态：0待处理 1已申请 2已退货 3已退款（人工推进，一键下一档）'," +
+      "  `status`        TINYINT       NOT NULL DEFAULT 0   COMMENT '处理状态：0待处理 1已申请 2已退货 3已退款（人工变更）'," +
+      "  `waybill_no`    VARCHAR(64)   DEFAULT NULL         COMMENT '退货运单号（状态改到「已退货」时必填）'," +
       "  `note`          VARCHAR(255)  DEFAULT NULL         COMMENT '备注'," +
       "  `handled_by`    VARCHAR(64)   DEFAULT NULL         COMMENT '最后处理人（登录账号）'," +
       '  `handled_at`    DATETIME      DEFAULT NULL         COMMENT \'最后处理时间\',' +
@@ -1500,11 +1587,11 @@ async function migrate(conn, dbName) {
       "  `created_at`    DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '新建日期'," +
       '  `updated_at`    DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,' +
       '  PRIMARY KEY (`id`),' +
-      '  KEY `idx_sa_user_date`   (`user_id`, `after_date`),' +
-      '  KEY `idx_sa_user_sup`    (`user_id`, `supplier_id`),' +
-      '  KEY `idx_sa_user_status` (`user_id`, `status`)' +
+      '  KEY `idx_pa_user_date`   (`user_id`, `after_date`),' +
+      '  KEY `idx_pa_user_sku`    (`user_id`, `sku`),' +
+      '  KEY `idx_pa_user_status` (`user_id`, `status`)' +
       ') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci' +
-      "  COMMENT='供应商售后台账（供应商 + 内容 + 金额 + 售后日期 + 凭证）'"
+      "  COMMENT='商品售后台账（商品名称/SKU + 数量 + 原因 + 状态 + 运单号 + 凭证）'"
     );
   }
 

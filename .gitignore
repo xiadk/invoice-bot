@@ -34,3 +34,6 @@ release/
 /server.log
 # logs/ 是开发时 `node server.js >> logs/dev-8787.log` 的运行日志目录；容器里日志走 docker logs
 /logs/
+
+# ── AI 协作工具的项目记忆目录（本机工作记录，不入库）──
+.workbuddy/

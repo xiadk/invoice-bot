@@ -239,6 +239,8 @@
   .bill-table .el-table__header th { background: #fafbfc; }
   .bill-table .el-table__header th .cell { font-weight: 600; color: var(--text); }
   .bill-table .el-input-number .el-input__inner { text-align: right; padding-right: 6px; }
+  /* 账单金额输入（v0.3.27：改用 el-input，见模板注释）——右对齐，和原来的 el-input-number 视觉一致 */
+  .bill-table .bill-amt-input .el-input__inner { text-align: right; padding-right: 6px; }
   .bill-table .bill-strong { font-weight: 700; }
   .company { font-weight: 600; }
   .th-sort { cursor: pointer; user-select: none; white-space: nowrap; }
@@ -1148,36 +1150,57 @@
             <el-table-column label="采购价" width="80">
               <template slot-scope="p"><span class="amount">{{ yuan(p.row.purchase_price) }}</span></template>
             </el-table-column>
+            <!-- 齐货通价（v0.3.28）：平台价 + 手工价（手工优先）；可「修改/解除」关联，也可「改价」手填 -->
             <el-table-column label="齐货通价" min-width="215" class-name="col-price">
               <template slot-scope="p">
-                <template v-if="p.row.qht_goods_id">
-                  <template v-if="rp.prices[pkey(p.row, 'qht')] && rp.prices[pkey(p.row, 'qht')].ok">
-                    <div style="display:flex;flex-direction:column;gap:2px;min-width:120px">
-                      <img v-if="rp.prices[pkey(p.row, 'qht')].picture || p.row.image_url"
-                           :src="imgThumb(rp.prices[pkey(p.row, 'qht')].picture || p.row.image_url, 80)" :alt="p.row.goods_name"
-                           width="40" height="40" loading="lazy" decoding="async"
-                           style="width:40px;height:40px;object-fit:cover;border-radius:4px;display:block"
-                           @error="imgError($event, rp.prices[pkey(p.row, 'qht')].picture || p.row.image_url)" />
-                      <div style="display:flex;justify-content:space-between;gap:8px;font-size:12px;line-height:18px">
-                        <span class="loginid">单价</span><b class="amount ok">¥{{ rp.prices[pkey(p.row, 'qht')].unitPrice }}</b>
-                      </div>
-                      <div style="display:flex;justify-content:space-between;gap:8px;font-size:12px;line-height:18px">
-                        <span class="loginid">整件价</span><b>¥{{ rp.prices[pkey(p.row, 'qht')].saleIP }}</b>
-                      </div>
-                      <div style="display:flex;justify-content:space-between;gap:8px;font-size:12px;line-height:18px">
-                        <span class="loginid">规格</span><span class="loginid">{{ rp.prices[pkey(p.row, 'qht')].packingSpecification }}{{ rp.prices[pkey(p.row, 'qht')].smallUnit }}</span>
-                      <div v-if="rp.prices[pkey(p.row, 'qht')].fetchedAt"
-                           style="font-size:11px;line-height:14px;color:#909399">
-                        缓存于 {{ rp.prices[pkey(p.row, 'qht')].fetchedAt }}
-                      </div>
-                      </div>
+                <template v-if="qhtPrice(p.row) && qhtPrice(p.row).ok">
+                  <div style="display:flex;flex-direction:column;gap:2px;min-width:120px">
+                    <img v-if="qhtPrice(p.row).picture || p.row.image_url"
+                         :src="imgThumb(qhtPrice(p.row).picture || p.row.image_url, 80)" :alt="p.row.goods_name"
+                         width="40" height="40" loading="lazy" decoding="async"
+                         style="width:40px;height:40px;object-fit:cover;border-radius:4px;display:block"
+                         @error="imgError($event, qhtPrice(p.row).picture || p.row.image_url)" />
+                    <div style="display:flex;justify-content:space-between;gap:8px;font-size:12px;line-height:18px">
+                      <span class="loginid">单价</span><b class="amount ok">¥{{ qhtPrice(p.row).unitPrice }}</b>
                     </div>
-                    <el-button v-if="canPrice" size="mini" type="primary" plain style="margin-top:4px" @click="openBuy(p.row)">选购</el-button>
-                  </template>
-                  <span v-else-if="rp.prices[pkey(p.row, 'qht')]" class="loginid" style="color:#f56c6c">取价失败</span>
-                  <span v-else class="loginid">未取价</span>
+                    <div style="display:flex;justify-content:space-between;gap:8px;font-size:12px;line-height:18px">
+                      <span class="loginid">整件价</span><b>¥{{ qhtPrice(p.row).saleIP }}</b>
+                    </div>
+                    <div style="display:flex;justify-content:space-between;gap:8px;font-size:12px;line-height:18px">
+                      <span class="loginid">规格</span><span class="loginid">{{ qhtPrice(p.row).packingSpecification }}{{ qhtPrice(p.row).smallUnit }}</span>
+                    <div v-if="qhtPrice(p.row).fetchedAt || qhtPrice(p.row).manual"
+                         style="font-size:11px;line-height:14px;color:#909399">
+                      <el-tag v-if="qhtPrice(p.row).manual" size="mini" type="warning"
+                              style="height:16px;line-height:16px;padding:0 4px;margin-right:4px">手工</el-tag>
+                      <span :title="qhtPrice(p.row).note || ''">
+                        {{ qhtPrice(p.row).manual ? ((qhtPrice(p.row).updatedBy || '') + ' 改于 ' + (qhtPrice(p.row).fetchedAt || '—')) : ('缓存于 ' + qhtPrice(p.row).fetchedAt) }}
+                      </span>
+                    </div>
+                    </div>
+                  </div>
+                  <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:4px">
+                    <el-button v-if="canPrice && p.row.qht_goods_id" size="mini" type="primary" plain @click="openBuy(p.row)">选购</el-button>
+                    <el-button v-if="canPrice" size="mini" type="primary" plain @click="openQhtManual(p.row)">改价</el-button>
+                    <el-button size="mini" type="primary" plain @click="openLinkDlg(p.row)">修改</el-button>
+                    <el-button v-if="p.row.qht_goods_id" size="mini" type="danger" plain @click="unlinkQhtRow(p.row)">解除</el-button>
+                    <el-button v-if="canPrice && qhtPrice(p.row).manual" size="mini" plain @click="clearQhtManual(p.row)">取消手工</el-button>
+                  </div>
                 </template>
-                <el-button v-else size="mini" type="warning" plain @click="openLinkDlg(p.row)">关联</el-button>
+                <template v-else-if="p.row.qht_goods_id">
+                  <span class="loginid" :style="{ color: qhtPrice(p.row) ? '#f56c6c' : '' }">
+                    {{ qhtPrice(p.row) ? '取价失败' : '未取价' }}
+                  </span>
+                  <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:4px">
+                    <el-button v-if="canPrice" size="mini" type="primary" plain @click="openQhtManual(p.row)">改价</el-button>
+                    <el-button size="mini" type="primary" plain @click="openLinkDlg(p.row)">修改</el-button>
+                    <el-button size="mini" type="danger" plain @click="unlinkQhtRow(p.row)">解除</el-button>
+                  </div>
+                </template>
+                <template v-else>
+                  <el-button size="mini" type="warning" plain @click="openLinkDlg(p.row)">关联</el-button>
+                  <el-button v-if="canPrice" size="mini" type="primary" plain @click="openQhtManual(p.row)">手工价</el-button>
+                  <div v-if="!canPrice" class="loginid" style="font-size:11px;margin-top:4px">没有平台取价权限，无法手填价</div>
+                </template>
               </template>
             </el-table-column>
             <el-table-column label="阿发价" min-width="215" class-name="col-price">
@@ -1341,6 +1364,58 @@
             <el-button size="small" type="danger" plain :disabled="localDlg.saving" @click="clearLocalPrice">清空本地价</el-button>
             <el-button size="small" @click="localDlg.visible = false">取消</el-button>
             <el-button size="small" type="primary" :loading="localDlg.saving" @click="saveLocalPriceDlg">保存</el-button>
+          </div>
+        </el-dialog>
+
+        <!-- 齐货通手工价（v0.3.28）：平台取价错了 / 没关联上商品时，人工填一份，比价与补货单优先用它 -->
+        <el-dialog title="齐货通手工价" :visible.sync="mpDlg.visible" width="520px" top="8vh" append-to-body>
+          <div class="loginid" style="margin-bottom:8px">
+            {{ mpDlg.sku }}<span v-if="mpDlg.goodsName"> · {{ mpDlg.goodsName }}</span>
+          </div>
+          <el-alert type="warning" :closable="false" show-icon style="margin-bottom:10px"
+                    title="手工价优先于平台取价"
+                    description="保存后比价分析与补货单都按这个价算，点「重新取价」也不会把它覆盖；要回到平台价点下面的「取消手工价」。"></el-alert>
+          <el-form label-position="top" size="small" :inline="false">
+            <el-row :gutter="12">
+              <el-col :span="12">
+                <el-form-item label="规格数量（一件含多少个，可留空）">
+                  <el-input v-model="mpDlg.specQty" type="number" min="0" placeholder="如 24（1 件 = 24 罐）"
+                            @input="onMpCalc('qty')"></el-input>
+                </el-form-item>
+              </el-col>
+              <el-col :span="12">
+                <el-form-item label="小单位（选填）">
+                  <el-input v-model="mpDlg.smallUnit" maxlength="8" placeholder="瓶 / 罐 / 袋"></el-input>
+                </el-form-item>
+              </el-col>
+            </el-row>
+            <el-row :gutter="12">
+              <el-col :span="12">
+                <el-form-item label="整件价（元/件）">
+                  <el-input v-model="mpDlg.packPrice" type="number" min="0" placeholder="如 99.96"
+                            @input="onMpCalc('pack')"></el-input>
+                </el-form-item>
+              </el-col>
+              <el-col :span="12">
+                <el-form-item label="单价（元/个）">
+                  <el-input v-model="mpDlg.unitPrice" type="number" min="0" placeholder="如 4.17"
+                            @input="onMpCalc('unit')"></el-input>
+                </el-form-item>
+              </el-col>
+            </el-row>
+            <el-form-item label="改价原因（选填，方便以后核对）">
+              <el-input v-model="mpDlg.note" maxlength="255" clearable placeholder="如：平台价含运费 / 平台规格录错"></el-input>
+            </el-form-item>
+            <el-alert v-if="mpDlg.hint" :title="mpDlg.hint" type="info" :closable="false" show-icon></el-alert>
+            <div class="loginid" style="margin-top:8px">
+              两个价格都是四舍五入到分；只填一个也会把另一个算出来（规格数量留空时只存单价）。
+            </div>
+          </el-form>
+          <div slot="footer">
+            <el-button v-if="mpDlg.hasManual" size="small" type="danger" plain :disabled="mpDlg.saving"
+                       @click="clearQhtManual(mpDlg.row)">取消手工价</el-button>
+            <el-button size="small" @click="mpDlg.visible = false">取消</el-button>
+            <el-button size="small" type="primary" :loading="mpDlg.saving" @click="saveQhtManual">保存</el-button>
           </div>
         </el-dialog>
 
@@ -1787,11 +1862,6 @@
 
         <!-- 商品同步（仅超管）：选择品牌方后拉取牵牛花商品，写入该品牌方的商品库 -->
         <el-dialog title="商品同步 · 选择品牌方" :visible.sync="product.syncDlg.visible" width="540px" append-to-body>
-          <div class="form-tip" style="margin-bottom:10px">
-            每个品牌方有独立的牵牛花账号，拉取到的商品写入该品牌方（同品牌下所有用户共享一套商品数据）。
-            同步分两轮：<b>先拉全部「正常采购」商品，拉完再拉全部「停止采购」商品</b>（停采商品同样入库，可在商品列表按状态看到，并单独统计货值）。
-            单个品牌每轮约 170 页、每页停 1 秒；两轮下来约 8~10 分钟。同步会<b>覆盖更新</b>采购价 / 可用库存 / 在途库存 / 30天销量 / 采购状态 / 主图。
-          </div>
           <el-checkbox-group v-model="product.syncDlg.brandIds">
             <div v-for="b in product.syncDlg.brandsQnh" :key="b.id"
                  style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
@@ -1948,9 +2018,14 @@
             <el-table-column label="收入" label-class-name="bill-grp">
               <el-table-column v-for="it in billIncomeItems" :key="it.key" :label="it.label" width="142">
                 <template slot-scope="p">
-                  <el-input-number :value="p.row.cells[it.key]" :min="0" :precision="2" :controls="false"
-                                   size="mini" style="width:112px"
-                                   @change="v => saveBillCell(p.row, it.key, v)"></el-input-number>
+                  <!-- 金额输入（v0.3.27）：必须用 v-model 绑到 bill.draft 的编辑缓冲上。
+                       :value 单向绑定在 Element 里行不通——每次重渲染都会把 input.value 重置回 prop，
+                       用户刚敲的数字会被抹掉（表现为「输完立马变 0」）。
+                       失焦/回车时再清洗解析（1,200 / ¥1200 / 全角数字都能存），解析不了明确报错。 -->
+                  <el-input v-model="bill.draft[p.row.month + '|' + it.key]"
+                            size="mini" class="bill-amt-input" style="width:112px"
+                            @blur="saveBillCellText(p.row, it.key)"
+                            @keyup.enter.native="saveBillCellText(p.row, it.key)"></el-input>
                 </template>
               </el-table-column>
               <el-table-column label="收入合计" width="132">
@@ -1968,9 +2043,10 @@
                   <el-tag v-if="it.source === 'auto'" size="mini" type="info" style="margin-left:4px">系统</el-tag>
                 </template>
                 <template slot-scope="p">
-                  <el-input-number v-if="it.source === 'manual'" :value="p.row.cells[it.key]" :min="0" :precision="2"
-                                   :controls="false" size="mini" style="width:104px"
-                                   @change="v => saveBillCell(p.row, it.key, v)"></el-input-number>
+                  <el-input v-if="it.source === 'manual'" v-model="bill.draft[p.row.month + '|' + it.key]"
+                            size="mini" class="bill-amt-input" style="width:104px"
+                            @blur="saveBillCellText(p.row, it.key)"
+                            @keyup.enter.native="saveBillCellText(p.row, it.key)"></el-input>
                   <!-- 系统项：金额 + 参与统计的订单数（点金额看明细核对）；两口径不一致时标红放大 -->
                   <span v-else class="bill-auto" :class="{ 'bill-mismatch': billCmpBad(p.row, it) }"
                         :title="billCmpBad(p.row, it) ? '平台自动项与同名供应商货单金额不一致，点击看两边明细对比' : '点击查看参与统计的全部订单明细'"
@@ -2251,7 +2327,7 @@
               </el-col>
             </el-row>
             <div class="form-tip">
-              默认 <b>300</b> 页。发票刷新一页 20 条（约 6000 单）、拉订单一页 50 条（约 15000 单），
+              默认 <b>1000</b> 页。发票刷新一页 20 条（约 2 万单）、拉订单一页 50 条（约 5 万单），
               两者都是<b>翻到空页才停</b>，这个上限只用于防止接口异常时无限翻页。<br>
               撞到上限时页面会明确提示「已到翻页上限」，不会静默少拉；若确认还有更早的订单没拉到，把这里调大即可。<br>
               保存后<b>立即生效</b>（下一次同步就读新值），不需要重启服务。
@@ -2290,10 +2366,6 @@
             <el-button size="small" @click="userKw = ''">重置</el-button>
             <span class="fb-spacer"></span>
             <span class="loginid">显示 {{ filteredUsers.length }} / {{ users.length }} 个账号</span>
-          </div>
-          <div class="form-tip" style="margin-bottom:10px">
-            开票抬头属于<b>用户信息</b>，在这里按账号逐个维护：<b>登录账号 = 公司全称</b>，点某行的「编辑」即可改公司全称 / 纳税人识别号 / 收票邮箱。
-            催收话术里的 {companyName} / {taxNo} / {email} 会按<b>该账号自己的抬头</b>取值。
           </div>
           <el-table :data="filteredUsers" size="small" border style="width:100%" empty-text="加载中...">
             <el-table-column prop="id" label="ID" width="56"></el-table-column>
@@ -2409,19 +2481,11 @@
       <!-- ══════════ 员工管理（v0.2.104，仅主体账号可见） ══════════ -->
       <div v-show="page === 'staff'" id="page-staff">
         <div class="page-bar">
-          <span class="pb-info">
-            员工账号是<b>菜单受限的操作员</b>：登录后看到的退单 / 商品 / 补货等数据与<b>你完全同一套</b>，
-            区别只在能看到哪些菜单。员工<b>不能再建员工</b>，也看不到本页。
-          </span>
           <span class="pb-actions">
             <el-button size="small" @click="loadStaff">刷新</el-button>
             <el-button size="small" type="primary" @click="openStaffCreate">+ 新增员工</el-button>
           </span>
         </div>
-
-        <el-alert type="info" :closable="false" show-icon style="margin-bottom:12px"
-                  :title="'所属主体账号：' + ((staffOwner && staffOwner.username) || '—') + (staffOwner && staffOwner.brandName ? '（品牌方：' + staffOwner.brandName + '）' : '')"
-                  description="员工的有效期跟随你的账号：你的账号到期或被停用后，所有员工账号会同时无法登录。"></el-alert>
 
         <el-card shadow="never" class="section-card">
           <div slot="header">
@@ -2500,10 +2564,6 @@
               </div>
             </el-form-item>
           </el-form>
-          <div class="form-tip">
-            员工与你共用同一套数据，所以<b>退单、商品这些菜单只是「能看哪块」</b>，不是数据隔离。
-            默认全部关闭，按岗位勾选即可（例如售后专员只勾「供应商售后」）。
-          </div>
           <span slot="footer">
             <el-button size="small" @click="staffDlg.visible = false">取消</el-button>
             <el-button size="small" type="primary" :loading="staffDlg.saving" @click="saveStaff">保存</el-button>
@@ -2767,8 +2827,7 @@
         <el-dialog :title="'退款原因 · ' + (reasonDlg.refundNo || '')"
                    :visible.sync="reasonDlg.visible" width="560px" append-to-body>
           <div class="form-tip" style="margin-bottom:10px">
-            平台原始原因（只读）：{{ reasonDlg.raw || '—' }}<br>
-            下面这一栏是本系统自己记的原因，<b>每天同步不会覆盖</b>；清空后页面回落到平台原值。
+            平台原始原因（只读）：{{ reasonDlg.raw || '—' }}
           </div>
           <el-input type="textarea" :rows="3" v-model="reasonDlg.value" maxlength="512" show-word-limit
                     placeholder="如：顾客嫌日期不新鲜，已退款"></el-input>
@@ -2780,7 +2839,7 @@
 
       </div>
 
-      <!-- ══════════ 供应商售后（v0.3.2，整页替换旧「售后管理」，不再读退单） ══════════ -->
+      <!-- ══════════ 商品售后（v0.3.25：商品名称/SKU + 数量 + 原因 + 状态 + 凭证） ══════════ -->
       <div v-show="page === 'after'" id="page-after">
         <!-- 处理状态统计（点卡片即按该状态筛选，再点一次取消） -->
         <div class="stat-row">
@@ -2796,10 +2855,12 @@
         <el-card shadow="never" class="section-card">
           <div class="filter-bar">
             <span class="fb-label">筛选</span>
-            <el-select v-model="af.supplier" size="small" style="width:180px" clearable filterable
-                       placeholder="全部供应商" @change="onAfFilter">
-              <el-option v-for="s in af.supplierOptions" :key="s.id" :label="s.name" :value="String(s.id)"></el-option>
-            </el-select>
+            <el-input v-model="af.goodsName" size="small" style="width:190px" clearable
+                      placeholder="商品名称（模糊）"
+                      @keyup.enter.native="onAfFilter" @clear="onAfFilter"></el-input>
+            <el-input v-model="af.sku" size="small" style="width:150px" clearable
+                      placeholder="SKU（模糊）"
+                      @keyup.enter.native="onAfFilter" @clear="onAfFilter"></el-input>
             <el-select v-model="af.status" size="small" style="width:130px" @change="onAfFilter">
               <el-option label="全部状态" value=""></el-option>
               <el-option v-for="s in af.statuses" :key="s.value" :label="s.label" :value="String(s.value)"></el-option>
@@ -2808,9 +2869,6 @@
                             value-format="yyyy-MM-dd" range-separator="至"
                             start-placeholder="售后日期起" end-placeholder="止"
                             @change="onAfFilter"></el-date-picker>
-            <el-input v-model="af.keyword" size="small" style="width:200px" clearable
-                      placeholder="内容 / 备注 / 供应商名称"
-                      @keyup.enter.native="onAfFilter" @clear="onAfFilter"></el-input>
             <el-button size="small" type="primary" plain @click="onAfFilter">查询</el-button>
             <el-button size="small" type="primary" icon="el-icon-plus" @click="openAfCreate">新增售后</el-button>
             <span class="fb-spacer"></span>
@@ -2819,41 +2877,41 @@
 
           <el-table :data="af.rows" size="small" border style="width:100%" v-loading="af.loading"
                     empty-text="没有符合条件的售后记录">
-            <el-table-column label="售后日期" width="110">
+            <el-table-column label="售后日期" width="108">
               <template slot-scope="p"><span class="loginid">{{ p.row.afterDate || '—' }}</span></template>
             </el-table-column>
-            <el-table-column label="供应商" min-width="170">
-              <template slot-scope="p"><span :title="p.row.supplierName">{{ p.row.supplierName || '—' }}</span></template>
+            <el-table-column label="商品名称" min-width="250">
+              <template slot-scope="p"><span :title="p.row.goodsName">{{ p.row.goodsName || '—' }}</span></template>
             </el-table-column>
-            <el-table-column label="售后内容" min-width="240">
-              <template slot-scope="p"><span :title="p.row.goodsDesc">{{ p.row.goodsDesc || '—' }}</span></template>
+            <el-table-column label="商品SKU" width="150">
+              <template slot-scope="p"><span class="loginid" :title="p.row.sku">{{ p.row.sku || '—' }}</span></template>
             </el-table-column>
-            <el-table-column label="售后金额" width="120" align="right">
-              <template slot-scope="p"><span class="amount">{{ wbMoney(p.row.amount) }}</span></template>
+            <el-table-column label="数量" width="76" align="center">
+              <template slot-scope="p">{{ p.row.qty || 0 }}</template>
             </el-table-column>
-            <el-table-column label="处理状态" width="110">
+            <el-table-column label="售后原因" min-width="180">
+              <template slot-scope="p"><span :title="p.row.afterReason">{{ p.row.afterReason || '—' }}</span></template>
+            </el-table-column>
+            <el-table-column label="状态" width="108">
               <template slot-scope="p">
                 <el-tag size="mini" :type="afStatusTag(p.row.status)">{{ p.row.statusLabel }}</el-tag>
+                <div v-if="p.row.waybillNo" class="loginid" :title="'运单号 ' + p.row.waybillNo"
+                     style="margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
+                  {{ p.row.waybillNo }}
+                </div>
               </template>
             </el-table-column>
-            <el-table-column label="备注" min-width="150">
-              <template slot-scope="p"><span class="loginid" :title="p.row.note">{{ p.row.note || '—' }}</span></template>
-            </el-table-column>
-            <el-table-column label="新建日期" width="145">
-              <template slot-scope="p"><span class="loginid">{{ p.row.createdAt || '—' }}</span></template>
-            </el-table-column>
-            <el-table-column label="操作人" width="100">
-              <template slot-scope="p"><span class="loginid">{{ p.row.createdBy || '—' }}</span></template>
-            </el-table-column>
-            <el-table-column label="操作" width="230" fixed="right">
+            <el-table-column label="操作人" width="110">
               <template slot-scope="p">
-                <el-button type="text" size="mini" :disabled="readonly || afNextStatus(p.row) === null"
-                           :title="afNextStatus(p.row) === null ? '已退款，流程结束' : ('推进到「' + afStatusLabel(afNextStatus(p.row)) + '」，需要上传一张凭证截图')"
-                           @click="openAfStatus(p.row)">
-                  {{ afNextStatus(p.row) === null ? '已完成' : '→ ' + afStatusLabel(afNextStatus(p.row)) }}
-                </el-button>
-                <el-button v-if="(p.row.attaches || []).length" type="text" size="mini"
-                           @click="openAfAttach(p.row)">凭证({{ p.row.attaches.length }})</el-button>
+                <span class="loginid" :title="'录入 ' + (p.row.createdBy || '—') + ' / 处理 ' + (p.row.handledBy || '—')">
+                  {{ p.row.handledBy || p.row.createdBy || '—' }}
+                </span>
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" width="196" fixed="right">
+              <template slot-scope="p">
+                <el-button type="text" size="mini" :disabled="readonly" @click="openAfStatus(p.row)">处理</el-button>
+                <el-button type="text" size="mini" @click="openAfAttach(p.row)">凭证({{ (p.row.attaches || []).length }})</el-button>
                 <el-button type="text" size="mini" style="color:#f56c6c" @click="deleteAf(p.row)">删除</el-button>
               </template>
             </el-table-column>
@@ -2868,49 +2926,74 @@
           </div>
         </el-card>
 
-        <!-- 处理售后：一键推进下一档，必须上传一张凭证截图；弹框里不再选状态 -->
-        <el-dialog title="上传售后凭证" :visible.sync="afDlg.visible" width="560px" top="6vh" append-to-body
+        <!-- 处理售后：选目标状态 → 已退货填运单号，已退款传退款截图（扫码拍照 / 粘贴） -->
+        <el-dialog title="处理售后" :visible.sync="afDlg.visible" width="600px" top="6vh" append-to-body
                    custom-class="af-up-dlg" @closed="onAfDlgClosed">
           <div class="af-up-head">
-            <span class="fb-label">将标记为</span>
-            <el-tag size="small" type="warning">{{ afDlg.nextLabel }}</el-tag>
-            <span class="loginid">当前「{{ afDlg.fromLabel }}」，确定后立即变更</span>
+            <b :title="afDlg.goodsName">{{ afDlg.goodsName }}</b>
+            <span class="loginid">{{ afDlg.sku }}</span>
+            <span class="loginid">· 当前「{{ afDlg.fromLabel }}」</span>
           </div>
 
-          <div class="af-up-drop" :class="{ 'is-drag': afDlg.dragging, 'is-error': !!afDlg.imgError }"
-               @click="pickAfImage"
-               @dragover.prevent="afDlg.dragging = true"
-               @dragleave.prevent="afDlg.dragging = false"
-               @drop.prevent="onAfDrop">
-            <template v-if="!afDlg.imgPreview">
-              <i class="el-icon-picture-outline" style="font-size:30px;color:#c0c4cc"></i>
-              <div>点击选择图片，或直接 <b>Ctrl+V 粘贴</b> 截图，也可以把图片拖进来</div>
-              <div class="loginid">必填 · 支持 png / jpg / webp / gif · 单张 ≤5MB（过大的图会自动压缩）</div>
-            </template>
-            <img v-else :src="afDlg.imgPreview" class="af-up-thumb" alt="凭证预览">
-          </div>
-          <input ref="afFile" type="file" accept="image/png,image/jpeg,image/webp,image/gif"
-                 style="display:none" @change="onAfFile">
+          <el-form label-position="top" size="small">
+            <el-form-item label="改为">
+              <el-radio-group v-model="afDlg.status" @change="onAfStatusPick">
+                <el-radio-button v-for="s in af.statuses" :key="s.value" :label="s.value">{{ s.label }}</el-radio-button>
+              </el-radio-group>
+            </el-form-item>
 
-          <div v-if="afDlg.imgPreview" class="af-up-ops">
-            <span class="loginid">{{ afDlg.imgName || '已选择图片' }}</span>
-            <el-button type="text" size="mini" @click.stop="clearAfImage">重新选择</el-button>
-          </div>
-          <div v-if="afDlg.imgError" class="af-up-err">{{ afDlg.imgError }}</div>
+            <el-form-item v-if="afDlg.status === 2" label="退货运单号（必填）">
+              <el-input v-model="afDlg.waybillNo" maxlength="64" clearable
+                        placeholder="快递单号，如 SF1234567890"></el-input>
+            </el-form-item>
 
-          <el-form label-position="top" size="small" style="margin-top:12px">
-            <el-form-item label="备注（选填，记录处理过程）">
-              <el-input type="textarea" :rows="3" v-model="afDlg.note" maxlength="255" show-word-limit
-                        placeholder="如：已联系供应商，等对方补发"></el-input>
+            <el-form-item v-if="afDlg.status === 3" label="退款截图（必填）">
+              <div class="af-up-drop" :class="{ 'is-error': !!afDlg.up.error }" style="cursor:default">
+                <template v-if="!afDlg.up.images.length">
+                  <i class="el-icon-scissors" style="font-size:28px;color:#c0c4cc"></i>
+                  <div>把退款截图复制后，在弹窗里按 <b>Ctrl+V</b> 粘贴</div>
+                  <div class="loginid">也可以手机扫右侧二维码拍照上传 · 只支持这两种方式（不提供本机选文件）</div>
+                </template>
+                <div v-else class="wb-img-grid" style="width:100%">
+                  <div class="wb-img" v-for="im in afDlg.up.images" :key="im.id">
+                    <img :src="im.url" alt="退款截图" @click="openAfImage(im.url)">
+                    <i class="el-icon-close" @click.stop="removeAfImage(afDlg.up, im)"></i>
+                  </div>
+                </div>
+              </div>
+              <div class="af-up-err" v-if="afDlg.up.error">{{ afDlg.up.error }}</div>
+              <div class="wb-phone" style="margin-top:10px">
+                <div class="wb-phone-l">
+                  <div style="font-size:13px;font-weight:600">手机扫码拍照上传</div>
+                  <div class="loginid" style="margin-top:4px;line-height:1.7">
+                    手机扫右侧二维码 → 拍退款到账截图，传完自动出现在上面。
+                  </div>
+                  <div style="margin-top:6px">
+                    <span class="wb-left" :class="{ 'is-warn': afDlg.up.leftSec <= 60 }">
+                      {{ afDlg.up.leftSec > 0 ? '链接剩余 ' + wbFmtLeft(afDlg.up.leftSec) : '链接已过期' }}
+                    </span>
+                    <el-button type="text" size="mini" @click="makeAfUploadLink(afDlg.up)">刷新二维码</el-button>
+                  </div>
+                </div>
+                <div class="wb-qr" v-if="afDlg.up.qr" v-html="afDlg.up.qr"></div>
+                <div class="wb-qr" v-else style="display:flex;align-items:center;justify-content:center;color:#c0c4cc;font-size:12px;text-align:center">二维码<br>生成中</div>
+              </div>
+            </el-form-item>
+
+            <el-form-item label="备注（选填）">
+              <el-input type="textarea" :rows="2" v-model="afDlg.note" maxlength="255" show-word-limit
+                        placeholder="如：已联系商家，退款 3 个工作日到账"></el-input>
             </el-form-item>
           </el-form>
+
+          <el-alert v-if="afDlg.error" type="error" :closable="false" show-icon :title="afDlg.error"></el-alert>
           <span slot="footer">
             <el-button size="small" @click="afDlg.visible = false">取消</el-button>
             <el-button size="small" type="primary" :loading="afDlg.saving" @click="saveAfStatus">确定变更</el-button>
           </span>
         </el-dialog>
 
-        <!-- 凭证查看：一次状态变更一张，最新在前 -->
+        <!-- 凭证查看：一次变更一张，最新在前 -->
         <el-dialog :title="afAttach.title" :visible.sync="afAttach.visible" width="620px" top="6vh" append-to-body>
           <div v-if="!afAttach.rows.length" class="loginid">这条记录还没有凭证图片</div>
           <div v-for="(a, i) in afAttach.rows" :key="i" class="af-att-row">
@@ -2920,44 +3003,106 @@
               <div v-if="a.note" style="margin-top:4px">{{ a.note }}</div>
             </div>
             <img v-if="a.url" :src="a.url" class="af-att-img" alt="凭证" @click="openAfImage(a.url)">
-            <span v-else class="loginid">（图片链接不可用：存储未配置，或链接已过期 —— 链接随列表加载签发，刷新列表后重新打开即可）</span>
+            <span v-else class="loginid">（图片链接不可用：存储未配置，或链接已过期 —— 刷新列表后重新打开即可）</span>
           </div>
         </el-dialog>
 
-        <!-- 新增售后：选供应商（供应商管理维护）+ 内容 + 金额 + 日期 -->
-        <el-dialog title="新增售后" :visible.sync="afNew.visible" width="620px" top="6vh" append-to-body>
+        <!-- 新增售后：搜商品 → 自动回填名称/SKU → 数量 + 原因 + 实物图 -->
+        <el-dialog title="新增售后" :visible.sync="afNew.visible" width="660px" top="5vh" append-to-body
+                   custom-class="af-new-dlg" @closed="onAfNewClosed">
           <el-form label-position="top" size="small">
-            <el-form-item label="供应商（必填）">
-              <el-select v-model="afNew.supplierId" filterable clearable style="width:100%"
-                         placeholder="搜索并选择供应商" :loading="afNew.loadingSupplier">
-                <el-option v-for="s in afNew.suppliers" :key="s.id" :label="s.name" :value="s.id"></el-option>
+            <el-form-item label="搜索商品">
+              <el-select v-model="afNew.pick" filterable remote clearable style="width:100%"
+                         placeholder="输入商品名称或 SKU，例如「橘」或「6924」"
+                         :remote-method="searchAfProducts" :loading="afNew.searching"
+                         @change="onAfPickProduct">
+                <el-option v-for="p in afNew.options" :key="p.brandId + '|' + p.sku"
+                           :label="p.goodsName + ' · ' + p.sku"
+                           :value="p.brandId + '|' + p.sku">
+                  <span>{{ p.goodsName }}</span>
+                  <span class="loginid" style="float:right;margin-left:12px">{{ p.sku }}</span>
+                </el-option>
               </el-select>
-              <div class="loginid" style="margin-top:4px">
-                供应商在 <a href="javascript:void(0)" @click="jumpSupplier">供应商管理</a> 里维护
-              </div>
             </el-form-item>
-            <el-form-item label="售后内容（商品 / 事由描述）">
-              <el-input type="textarea" :rows="2" v-model="afNew.goodsDesc" maxlength="512" show-word-limit
-                        placeholder="如：5 箱橘子压坏，要求补发"></el-input>
-            </el-form-item>
+
             <el-row :gutter="12">
-              <el-col :span="12">
-                <el-form-item label="售后金额（元）">
-                  <el-input v-model="afNew.amount" placeholder="0.00" clearable></el-input>
+              <el-col :span="16">
+                <el-form-item label="商品名称">
+                  <el-input v-model="afNew.goodsName" maxlength="255" disabled
+                            placeholder="从上面搜索选中商品后自动填入"></el-input>
                 </el-form-item>
               </el-col>
-              <el-col :span="12">
+              <el-col :span="8">
+                <el-form-item label="商品SKU">
+                  <el-input v-model="afNew.sku" maxlength="64" disabled placeholder="自动填入"></el-input>
+                </el-form-item>
+              </el-col>
+            </el-row>
+
+            <el-row :gutter="12">
+              <el-col :span="8">
+                <el-form-item label="数量（件）">
+                  <el-input-number v-model="afNew.qty" :min="1" :max="99999" size="small" style="width:100%"
+                                   controls-position="right"></el-input-number>
+                </el-form-item>
+              </el-col>
+              <el-col :span="8">
                 <el-form-item label="售后日期">
                   <el-date-picker v-model="afNew.afterDate" type="date" value-format="yyyy-MM-dd"
                                   placeholder="选择日期" style="width:100%"></el-date-picker>
                 </el-form-item>
               </el-col>
+              <el-col :span="8">
+                <el-form-item label="售后原因（必填）">
+                  <el-input v-model="afNew.afterReason" maxlength="255" clearable
+                            placeholder="如：破损 / 少件 / 临期"></el-input>
+                </el-form-item>
+              </el-col>
             </el-row>
-            <el-form-item label="备注（选填）">
-              <el-input v-model="afNew.note" maxlength="255" show-word-limit placeholder="内部备注，如处理人、单据号"></el-input>
+
+            <el-form-item label="商品实物图片（必填，至少 1 张）">
+              <div class="wb-img-grid">
+                <div class="wb-img" v-for="im in afNew.up.images" :key="im.id">
+                  <img :src="im.url" alt="商品实物图" @click="openAfImage(im.url)">
+                  <i class="el-icon-close" @click.stop="removeAfImage(afNew.up, im)"></i>
+                </div>
+                <div class="wb-img-add" v-if="afNew.up.images.length < afImgMax" @click="pickAfFile(afNew.up)">
+                  <i class="el-icon-plus"></i>
+                  <div class="loginid" style="margin-top:2px">本机选图</div>
+                </div>
+              </div>
+              <input ref="afFileNew" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple
+                     style="display:none" @change="onAfFilePick($event, afNew.up)">
+              <div class="loginid" style="margin-top:6px">
+                {{ afNew.up.images.length }} / {{ afImgMax }} 张 · 也可以直接 <b>Ctrl+V</b> 粘贴截图，或手机扫码拍照
+              </div>
+              <div class="af-up-err" v-if="afNew.up.error">{{ afNew.up.error }}</div>
             </el-form-item>
+
+            <el-form-item label="备注（选填）">
+              <el-input v-model="afNew.note" maxlength="255" show-word-limit placeholder="内部备注，如单号、处理人"></el-input>
+            </el-form-item>
+
+            <div class="wb-phone">
+              <div class="wb-phone-l">
+                <div style="font-size:13px;font-weight:600">手机扫码拍商品实物图</div>
+                <div class="loginid" style="margin-top:4px;line-height:1.7">
+                  手机扫右侧二维码 → 拍照上传，传完自动出现在上面的图片区。
+                </div>
+                <div style="margin-top:6px">
+                  <span class="wb-left" :class="{ 'is-warn': afNew.up.leftSec <= 60 }">
+                    {{ afNew.up.leftSec > 0 ? '链接剩余 ' + wbFmtLeft(afNew.up.leftSec) : '链接已过期' }}
+                  </span>
+                  <el-button type="text" size="mini" @click="makeAfUploadLink(afNew.up)">刷新二维码</el-button>
+                </div>
+              </div>
+              <div class="wb-qr" v-if="afNew.up.qr" v-html="afNew.up.qr"></div>
+              <div class="wb-qr" v-else style="display:flex;align-items:center;justify-content:center;color:#c0c4cc;font-size:12px;text-align:center">二维码<br>生成中</div>
+            </div>
           </el-form>
-          <el-alert v-if="afNew.error" type="error" :closable="false" show-icon :title="afNew.error"></el-alert>
+
+          <el-alert v-if="afNew.error" type="error" :closable="false" show-icon :title="afNew.error"
+                    style="margin-top:10px"></el-alert>
           <span slot="footer">
             <el-button size="small" @click="afNew.visible = false">取消</el-button>
             <el-button size="small" type="primary" :loading="afNew.saving" @click="saveAfCreate">保存</el-button>
@@ -3046,7 +3191,6 @@
                       :title="'「' + spMerge.fromName + '」名下有 ' + (spMerge.usage.ledger + spMerge.usage.localRefs) + ' 条数据要迁走'">
               <div style="line-height:1.9;font-size:13px">
                 货单 <b>{{ spMerge.usage.waybill }}</b> 张 ·
-                供应商售后 <b>{{ spMerge.usage.after }}</b> 条 ·
                 补货单 <b>{{ spMerge.usage.replenishOrder }}</b> 张 ·
                 商品本地价供应商 <b>{{ spMerge.usage.localRefs }}</b> 个
                 <div class="loginid" style="margin-top:4px">
@@ -3403,11 +3547,22 @@
           </div>
         </el-dialog>
 
-        <!-- 补货单详情：明细每行都留了折算依据（建议量 / 规格 / 件数 / 单价） -->
-        <el-dialog title="补货单详情" :visible.sync="roView.visible" width="1080px" top="5vh" append-to-body>
-          <div v-if="roView.order" class="loginid" style="display:flex;gap:18px;flex-wrap:wrap;margin-bottom:10px">
+        <!-- 补货单详情（v0.3.28 起可编辑）：改数量/规格/单价、删行、搜商品加行、换供应商 -->
+        <el-dialog title="补货单详情" :visible.sync="roView.visible" width="1080px" top="5vh" append-to-body
+                   @closed="onRoViewClosed">
+          <div v-if="roView.order" class="loginid" style="display:flex;gap:18px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
             <span>补货单 <b>#{{ roView.order.id }}</b></span>
-            <span>供应商 <b>{{ roView.order.supplierName }}</b></span>
+            <span v-if="!roView.editing">供应商 <b>{{ roView.order.supplierName }}</b></span>
+            <span v-else style="display:inline-flex;align-items:center;gap:6px">
+              供应商
+              <el-select v-model="roView.supplierId" size="mini" filterable style="width:170px"
+                         :disabled="!!roView.order.waybillId"
+                         :title="roView.order.waybillId ? '已关联货单，先取消关联才能换供应商' : '换供应商（台账里没有会自动建）'">
+                <el-option v-for="s in ro.suppliers" :key="s.id" :label="s.name" :value="s.id"></el-option>
+              </el-select>
+              <el-button size="mini" type="primary" plain :loading="roView.saving" :disabled="!!roView.order.waybillId"
+                         @click="saveRoSupplier">改</el-button>
+            </span>
             <span>金额 <b style="color:#f56c6c">{{ wbMoney(roView.order.amount) }}</b></span>
             <span>商品 {{ roView.order.itemCount }} 个 · {{ roView.order.qtyTotal }} 件</span>
             <span>生成 {{ roView.order.createdAt }}</span>
@@ -3416,7 +3571,15 @@
               <b v-if="Math.abs(roView.order.diff) < 0.005" class="ro-diff-ok">（一致）</b>
               <b v-else class="ro-diff-bad">（相差 {{ wbMoney(roView.order.diff) }}）</b>
             </span>
+            <span class="fb-spacer" style="flex:1"></span>
+            <el-button v-if="roView.editing" size="mini" type="primary" icon="el-icon-plus"
+                       @click="openRoAdd">添加商品</el-button>
+            <el-button size="mini" :type="roView.editing ? 'success' : 'primary'" plain @click="toggleRoEdit">
+              {{ roView.editing ? '完成编辑' : '编辑' }}
+            </el-button>
           </div>
+          <el-alert v-if="roView.editing" type="info" :closable="false" show-icon style="margin-bottom:8px"
+                    title="改完记得点每行的「保存」：金额一律服务端按「补货数量 × 规格 × 单价」重算，单头金额与货单差额跟着变。"></el-alert>
           <el-table :data="roView.items" size="small" border :max-height="tblH.cmp"
                     style="width:100%" v-loading="roView.loading" empty-text="没有明细">
             <el-table-column label="商品SKU" width="140">
@@ -3446,9 +3609,71 @@
             <el-table-column label="行总额" width="100" align="right">
               <template slot-scope="p"><b class="amount">{{ wbMoney(p.row.amount) }}</b></template>
             </el-table-column>
+            <el-table-column v-if="roView.editing" label="操作" width="112" align="center">
+              <template slot-scope="p">
+                <el-button type="text" size="mini" @click="openRoItem(p.row)">改</el-button>
+                <el-button type="text" size="mini" style="color:#f56c6c" @click="deleteRoItem(p.row)">删除</el-button>
+              </template>
+            </el-table-column>
           </el-table>
           <div slot="footer">
             <el-button size="small" @click="roView.visible = false">关闭</el-button>
+          </div>
+        </el-dialog>
+
+        <!-- 补货单明细行编辑（新增/修改共用）：数量 × 规格 × 单价 = 行总额，服务端再算一遍 -->
+        <el-dialog :title="roItem.itemId ? '修改补货明细' : '新增补货明细'" :visible.sync="roItem.visible"
+                   width="520px" top="8vh" append-to-body>
+          <div class="loginid" style="margin-bottom:10px">
+            {{ roItem.sku }}<span v-if="roItem.goodsName"> · {{ roItem.goodsName }}</span>
+          </div>
+          <el-form label-position="top" size="small" :inline="false">
+            <el-row :gutter="12">
+              <el-col :span="8">
+                <el-form-item label="补货数量（件）">
+                  <el-input-number v-model="roItem.qtyPack" :min="1" :max="999999" size="small"
+                                   controls-position="right" style="width:100%"></el-input-number>
+                </el-form-item>
+              </el-col>
+              <el-col :span="8">
+                <el-form-item label="规格（件含多少个）">
+                  <el-input v-model="roItem.specQty" type="number" min="0" placeholder="1"></el-input>
+                </el-form-item>
+              </el-col>
+              <el-col :span="8">
+                <el-form-item label="单价（元/个）">
+                  <el-input v-model="roItem.unitPrice" type="number" min="0" placeholder="0.00"></el-input>
+                </el-form-item>
+              </el-col>
+            </el-row>
+            <el-alert :title="'行总额 = ' + (roItem.qtyPack || 0) + ' 件 × ' + (roItem.specQty || 1) + ' × '
+                       + (roItem.unitPrice === '' ? '0' : roItem.unitPrice) + ' = ' + wbMoney(roItemPreview)"
+                      type="info" :closable="false" show-icon></el-alert>
+          </el-form>
+          <el-alert v-if="roItem.error" type="error" :closable="false" show-icon :title="roItem.error"
+                    style="margin-top:8px"></el-alert>
+          <div slot="footer">
+            <el-button size="small" @click="roItem.visible = false">取消</el-button>
+            <el-button size="small" type="primary" :loading="roItem.saving" @click="saveRoItem">保存</el-button>
+          </div>
+        </el-dialog>
+
+        <!-- 补货单加行：搜品牌商品库，选中带出名称/规格/参考价，再进上面的行编辑 -->
+        <el-dialog title="添加商品到补货单" :visible.sync="roAdd.visible" width="680px" top="8vh" append-to-body>
+          <el-select v-model="roAdd.keyword" filterable remote clearable style="width:100%"
+                     placeholder="输入商品名称或 SKU 搜索"
+                     :remote-method="searchRoProducts" :loading="roAdd.loading" @change="onRoAddPick">
+            <el-option v-for="it in roAdd.rows" :key="it.brandId + '|' + it.sku"
+                       :label="it.goodsName + ' · ' + it.sku" :value="it.brandId + '|' + it.sku">
+              <span>{{ it.goodsName }}</span>
+              <span class="loginid" style="float:right;margin-left:12px">{{ it.sku }}</span>
+            </el-option>
+          </el-select>
+          <div class="loginid" style="margin-top:8px">
+            选中后按本地价 / 采购价预填单价与规格，可以再改；同一张单里同一 SKU 只能有一行。
+          </div>
+          <div slot="footer">
+            <el-button size="small" @click="roAdd.visible = false">取消</el-button>
           </div>
         </el-dialog>
       </div>
@@ -3782,6 +4007,15 @@
                          :action-loading="pd.orderSyncing" :can-logout="true"
                          @login="onPddLoginBtn" @logout="logoutPdd" @action="syncPddOrders">
             <template slot="actions">
+              <el-button v-if="pd.mallId && pd.mallId.pending > 0" size="small" type="warning" plain
+                         :loading="pd.mallResolving" @click="resolveMallIds"
+                         :title="'订单接口只给加密的店铺串（mall_sn），密钥在拼多多服务端，只能在本机助手已登录的窗口里跑一次解出数字店铺 ID。点一次会把全部待解析店铺跑完（服务端自动分段续跑，失败的还会自动重试一轮）'">
+                解析店铺 ID（{{ pd.mallId.pending }}）
+              </el-button>
+              <el-tag v-else-if="pd.mallId && pd.mallId.resolved > 0" size="small" type="success"
+                      title="已解析的店铺都缓存了数字 mall_id，之后催收直接用，不用再开页面">
+                店铺 ID 已解析 {{ pd.mallId.resolved }}
+              </el-tag>
               <el-tag v-if="pd.orderSync && pd.orderSync.lastAt" size="small" type="info"
                       title="最近一次订单同步时间（取数来自拼多多「我的订单」）">
                 订单同步 {{ String(pd.orderSync.lastAt).slice(0, 16) }}
@@ -3821,15 +4055,19 @@
                     :title="'任务失败：' + (pd.applyDialog.message || '未知原因')"
                     :description="pd.applyDialog.kind === 'orders'
                       ? '拉取订单失败，发票状态也未刷新。常见原因：拼多多登录态过期（重新登录后再试）、接口风控限流（过几分钟再试）。已入库的部分不受影响。'
-                      : (pd.applyDialog.kind === 'send'
+                      : (pd.applyDialog.kind === 'mall'
+                        ? '店铺 ID 一个都没解出来。常见原因：拼多多登录态过期（先在助手里重新登录）、店铺页被风控拦（过几分钟再试）。没解出来的店铺，其订单暂时只能人工去平台催。'
+                        : (pd.applyDialog.kind === 'send'
                         ? '未发出任何催收消息。可按提示处理后重试（等待上一个任务结束 / 重新登录拼多多 / 升级助手）；已发出去的部分不受影响。'
-                        : '未提交开票申请。可按提示处理后重试（等待上一个任务结束 / 重新登录拼多多 / 升级助手）；已提交成功的部分不受影响。')"></el-alert>
+                        : '未提交开票申请。可按提示处理后重试（等待上一个任务结束 / 重新登录拼多多 / 升级助手）；已提交成功的部分不受影响。'))"></el-alert>
           <el-alert v-else-if="!pd.applyDialog.running && pd.applyDialog.status === 'timeout'" type="warning"
                     :closable="false" show-icon style="margin-top:10px"
                     :title="pd.applyDialog.message"></el-alert>
           <el-alert v-else-if="!pd.applyDialog.running && pd.applyDialog.status === 'done'" type="success"
                     :closable="false" show-icon style="margin-top:10px"
-                    :title="pd.applyDialog.message || (pd.applyDialog.kind === 'orders' ? '同步完成' : '申请提交完成')"></el-alert>
+                    :title="pd.applyDialog.message || (pd.applyDialog.kind === 'orders'
+                      ? '同步完成'
+                      : (pd.applyDialog.kind === 'mall' ? '解析完成' : '申请提交完成'))"></el-alert>
         </el-card>
 
         <!-- 筛选 + 列表 -->
@@ -3938,7 +4176,8 @@
             </el-table-column>
             <el-table-column label="进度 / 说明" min-width="180">
               <template slot-scope="p">
-                <span v-if="p.row.rejectReason" style="color:#e6a23c">{{ p.row.rejectReason }}</span>
+                <span v-if="p.row.note" style="color:#e6a23c">{{ p.row.note }}</span>
+                <span v-else-if="p.row.rejectReason" style="color:#e6a23c">{{ p.row.rejectReason }}</span>
                 <span v-else class="loginid">{{ p.row.invoiceTimeStr || '—' }}</span>
               </template>
             </el-table-column>
@@ -3952,14 +4191,8 @@
                 <el-button v-if="p.row.chatable" type="text" size="mini" :disabled="pd.applying"
                            style="color:#e6a23c" @click="sendPddMsgRows([p.row])"
                            title="发送话术里的抬头/税号/邮箱取本账号默认抬头">发送催收消息</el-button>
-                <!-- 已完成 + 未同步开票：平台已关闭开票入口、且订单接口拿不到数字 mall_id（聊天页必须要它），
-                     自动催收发不出去 → 给「去平台催」，在平台订单页里点「联系商家」走线下开票 -->
-                <el-tooltip v-if="!p.row.applyable && !p.row.chatable && p.row.manualChat" placement="top"
-                            content="这单已超过平台开票期限（入口已关闭），且订单接口拿不到商家会话 ID，无法自动发送。点这里打开平台订单页，在页面里点「联系商家」催其线下开票。">
-                  <el-button type="text" size="mini" style="color:#e6a23c"
-                             @click="openPddOrder(p.row)">去平台催</el-button>
-                </el-tooltip>
-                <span v-if="!p.row.applyable && !p.row.chatable && !p.row.manualChat" class="loginid">—</span>
+                <!-- 2026-11-04 口径：催收只对「商家处理中」开放；暂不可开票/未同步开票不显示任何催收入口 -->
+                <span v-if="!p.row.applyable && !p.row.chatable" class="loginid">—</span>
               </template>
             </el-table-column>
           </el-table>
@@ -4331,10 +4564,6 @@
 
   <!-- ══════════ 品牌方管理（超管：新增 / 改名 / 启停） ══════════ -->
   <el-dialog title="品牌方管理" :visible.sync="brandDlg.visible" width="660px" append-to-body>
-    <div class="form-tip" style="margin-bottom:10px">
-      商品数据按<b>品牌方</b>共享：同一品牌方下的用户看到同一套商品（由「商品同步」从牵牛花拉取）。
-      每个品牌方对应一套牵牛花账号，新增后需在「商品列表 → 商品同步」里为该品牌方登录牵牛花。
-    </div>
     <div style="display:flex;gap:8px;margin-bottom:12px;align-items:center">
       <el-input v-model="brandDlg.newName" size="small" placeholder="新品牌方名称，如：优购哆" style="width:180px"></el-input>
       <el-input v-model="brandDlg.newNote" size="small" placeholder="备注（可选，如牵牛花账号）" style="width:220px"></el-input>
@@ -4367,15 +4596,6 @@
   <!-- ══════════ 菜单权限（逐用户开放功能） ══════════ -->
   <el-dialog :title="'菜单权限 · ' + (menuPermit.username || '')" :visible.sync="menuPermit.visible"
              width="460px" append-to-body>
-    <div class="form-tip" style="margin-bottom:12px">
-      <template v-if="menuPermit.scope === 'staff'">
-        员工能看到的菜单<b>只能是你自己已经开通的</b>（未开通的不会出现在这里，需要开请找超级管理员）。
-        勾选后该员工登录即可看到对应菜单。
-      </template>
-      <template v-else>
-        勾选后该账号登录即可看到对应菜单；超管默认拥有全部菜单，无需设置。
-      </template>
-    </div>
     <div class="menu-perm-row" v-for="m in menuPermitRows" :key="m.key">
       <div>
         <b>{{ m.label }}</b>
@@ -4627,6 +4847,12 @@ Vue.component('qnh-tenant-picker', {
   </el-card>`,
 });
 
+// 商品售后（v0.3.25）：一次图片上传会话的状态（手机扫码 / 粘贴共用一份，弹窗各自独立）
+const afUpBox = () => ({
+  token: '', link: '', qr: '', leftSec: 0, images: [], polling: null,
+  uploading: false, dragging: false, error: '',
+});
+
 const vm = new Vue({
   el: '#app',
   data() {
@@ -4649,8 +4875,12 @@ const vm = new Vue({
         summary: null, lastRun: null,
         cookie: { logined: false, loading: false, message: '', accountName: '', pdduid: '', writtenAt: null },
         // 「同步订单与发票」：一次点击 = 后台拉订单（首次全量、之后增量）+ 拉完接着刷发票状态
-        // orderSync 来自 /api/pdd/status；maxPages = 翻页上限（两段共用，系统管理可配，默认 300）
-        orderSyncing: false, orderTaskId: '', orderSync: null, maxPages: 300,
+        // orderSync 来自 /api/pdd/status；maxPages = 翻页上限（两段共用，系统管理可配，默认 1000）
+        orderSyncing: false, orderTaskId: '', orderSync: null, maxPages: 1000,
+        // 「解析店铺 ID」：订单接口只给加密 mall_sn，得靠本机助手在已登录页面里跑一次解出 mall_id
+        // pending = 还有多少家店没解出来；resolved = 已缓存成功的店铺数
+        mallId: { pending: 0, resolved: 0, minVer: '', agentVer: '', agentOutdated: false },
+        mallResolving: false, mallTaskId: '',
         // 批量申请发票
         // selected = 跨页累计的已勾选行（翻页不清空）；picked 是它的 {orderSn: row} 索引，
         // 用来在 data 整页替换（后端分页）时把「本页取消勾选」的行摘掉、其余页的保留
@@ -4699,7 +4929,7 @@ const vm = new Vue({
       // 补货界面（导入完成后进入）+ 关联的齐货通弹窗
       // 补货默认 20 条/页（页码可翻）；页大小最多 100 条
       // 上限 100 是硬约束：el-table（Element UI 2.x）无虚拟滚动，一次渲染上千行会把主线程卡死十几秒
-      rp: { visible: false, loading: false, pricing: false, afaPricing: false, jdPricing: false, batchId: null, rows: [], prices: {}, afaPrices: {}, jdPrices: {}, total: 0, page: 1, size: 20, expect: 0, filteredValue: 0,
+      rp: { visible: false, loading: false, pricing: false, afaPricing: false, jdPricing: false, batchId: null, rows: [], prices: {}, qhtManual: {}, afaPrices: {}, jdPrices: {}, total: 0, page: 1, size: 20, expect: 0, filteredValue: 0,
             // 筛选（v0.2.92）：默认展示当前品牌方全部商品；draftQ 是输入框，q 是「已生效」的关键词
             draftQ: '', q: '', status: '', brand: '', brandStats: [],
             session: { configured: false, tokenMasked: '', xUser: '' }, afaSession: { configured: false, tokenMasked: '', storeId: '', appId: '' },
@@ -4708,6 +4938,10 @@ const vm = new Vue({
       // 弹窗表格高度按视口动态算（写死 vh 在小屏笔记本上会把弹窗撑出屏幕）
       tblH: { rp: 500, link: 320, cmp: 460 },
       // 本地价（v0.3.11）：弹框里整件价 / 单价 / 规格数量互算，mode 记住最后改的是哪个价格
+      // 齐货通手工价（v0.3.28）：平台价错了直接改，比价与补货单优先用它
+      mpDlg: { visible: false, saving: false, row: null, hasManual: false,
+               sku: '', goodsName: '', brandId: 0, specQty: '', smallUnit: '', unitPrice: '', packPrice: '',
+               note: '', mode: 'unit', hint: '' },
       localDlg: { visible: false, saving: false, row: null, sku: '', goodsName: '', brandId: 0,
                   specQty: '', unitPrice: '', packPrice: '', supplierId: '', mode: 'unit', hint: '' },
       // 本地价弹框的供应商下拉（/api/products/suppliers 只读，避免要求供应商管理权限）
@@ -4717,10 +4951,16 @@ const vm = new Vue({
              onlyCheaper: false, q: '', error: '', truncated: false },
       // 补货单管理（v0.3.12）
       ro: { loading: false, rows: [], total: 0, sumAmount: 0, page: 1, size: 20,
-            supplier: '', range: null, linked: '' },
+            supplier: '', range: null, linked: '', suppliers: [] },
       roLink: { visible: false, loading: false, saving: false, error: '',
                 orderId: 0, order: {}, rows: [], picked: null },
-      roView: { visible: false, loading: false, order: null, items: [] },
+      // 补货单详情（v0.3.28 起可编辑）：editing 打开行内「改/删」与「添加商品」
+      roView: { visible: false, loading: false, order: null, items: [], editing: false, saving: false, supplierId: null },
+      // 补货单明细行编辑（itemId=0 表示新增）
+      roItem: { visible: false, saving: false, error: '', orderId: 0, itemId: 0, sku: '', goodsName: '',
+                channel: '', channelLabel: '', qtyPack: 1, specQty: '1', unitPrice: '' },
+      // 补货单加行：搜品牌商品库
+      roAdd: { visible: false, loading: false, keyword: '', rows: [] },
       rpLink: { visible: false, sku: '', keyword: '', rows: [], loading: false, error: '', picked: null, total: 0, page: 1, size: 20 },
       rpBuy: { visible: false, sku: '', goodsId: null, goodsName: '', qty: 1, saving: false },
       qhtDlg: { visible: false, account: '', password: '', saving: false },
@@ -4738,7 +4978,7 @@ const vm = new Vue({
       // 交易市场
       market: { loading: false, rows: [], total: 0, page: 1, size: 20, summary: {} },
       // 账单（按月）：cols = 每个月一列 { month, hasRow, cells(手工项), auto(1688/拼多多), totals }
-      bill: { loading: false, syncing: false, items: [], cols: [] },
+      bill: { loading: false, syncing: false, items: [], cols: [], draft: {} },
       billAdd: { visible: false, month: '', copyFrom: '', saving: false },
       // 账单「系统」支出项的订单明细弹窗（点金额打开，用于核对条数与合计）
       billOrders: { visible: false, loading: false, platform: '', month: '', title: '', rows: [], cols: {}, total: 0, sum: 0, page: 1, size: 50 },
@@ -4779,8 +5019,8 @@ const vm = new Vue({
         gapMin: 15, gapMax: 30, chunkMax: 450, orderItem: '', reminder: '', serverUrl: '',
         // 拼多多催收话术（与 1688 的 templates 完全分开，只有一条）
         pddChat: '', pddGapSec: 4,
-        // 拼多多翻页上限（发票刷新与订单同步共用，默认 300 页）
-        pddMaxPages: 300,
+        // 拼多多翻页上限（发票刷新与订单同步共用，默认 1000 页）
+        pddMaxPages: 1000,
         // 发完一家后，是否在上家的间隔等待里提前加载下一家的会话（默认开）
         prefetch: true,
         // ── 助手版本治理 ──
@@ -4813,7 +5053,7 @@ const vm = new Vue({
       // v0.3.13：弹窗不再硬编码，超管用全量、主体只用 staffAllowed 过滤后的一份。
       staffMenus: [
         { key: 'refund', label: '退单列表', field: 'qnhRefundEnabled', tip: '查看退单数据、订单/配送日志、发送提醒' },
-        { key: 'after', label: '供应商售后', field: 'afterSaleEnabled', tip: '退单商品的售后台账：处理状态与售后原因' },
+        { key: 'after', label: '商品售后', field: 'afterSaleEnabled', tip: '按商品名称/SKU 登记的售后台账：数量、原因、状态与退款凭证' },
         { key: 'profit', label: '实时毛利监控', field: 'qnhProfitEnabled', tip: '查看订单毛利/预计收入，手动拉取当天毛利数据' },
         { key: 'product', label: '商品列表', field: 'productEnabled', tip: '导入补货参考文件、补货、关联齐货通/阿发商品' },
         { key: 'replenish', label: '补货', field: 'replenishEnabled', tip: '导入补货参考文件、查看品牌方商品与价格' },
@@ -4828,21 +5068,21 @@ const vm = new Vue({
       // 主体自己已开通、可以授给员工的菜单 key（/api/staff/users 下发；员工管理永远不在里面）
       staffAllowed: [],
       staffDlg: { visible: false, id: null, username: '', password: '', displayName: '', note: '', saving: false, menus: {} },
-      // ── 供应商售后（v0.3.2 起整页替换旧售后管理，不再读退单）──
+      // ── 商品售后（v0.3.25：商品名称/SKU + 数量 + 原因 + 状态 + 凭证）──
       af: {
         loading: false, rows: [], total: 0, page: 1, size: 20,
-        supplier: '', range: null, supplierOptions: [],
-        status: '', keyword: '', counts: { all: 0, 0: 0, 1: 0, 2: 0, 3: 0 },
+        goodsName: '', sku: '', range: null,
+        status: '', counts: { all: 0, 0: 0, 1: 0, 2: 0, 3: 0 },
         statuses: [
           { value: 0, label: '待处理', tag: 'info' }, { value: 1, label: '已申请', tag: 'warning' },
           { value: 2, label: '已退货', tag: '' }, { value: 3, label: '已退款', tag: 'success' },
         ],
       },
-      // 处理售后（v0.2.108）：一键推进下一档，弹框只收「凭证图 + 备注」，不再选状态
+      // 处理售后：选目标状态（已退货填运单号 / 已退款传退款截图）
       afDlg: {
-        visible: false, id: null,
-        fromLabel: '', nextLabel: '', note: '', saving: false,
-        img: '', imgPreview: '', imgName: '', imgError: '', dragging: false,
+        visible: false, id: null, goodsName: '', sku: '',
+        fromStatus: 0, fromLabel: '', status: 0, waybillNo: '', note: '', saving: false, error: '',
+        up: afUpBox(),
       },
       // ── 供应商管理（v0.3.0）──
       sp: { loading: false, rows: [], total: 0, page: 1, size: 20, keyword: '' },
@@ -4869,13 +5109,14 @@ const vm = new Vue({
       // 货单详情：基本信息 + 图片（点开看大图）
       wbView: { visible: false, loading: false, waybill: {}, images: [], error: '' },
       // 凭证查看：点「凭证(n)」打开，列出这条售后每次变更的截图
-      afAttach: { visible: false, title: '供应商售后凭证', rows: [] },
-      // 新增供应商售后：选供应商（供应商管理维护）+ 内容 + 金额 + 日期
+      afAttach: { visible: false, title: '商品售后凭证', rows: [] },
+      // 新增商品售后：搜商品（名称/SKU）→ 自动回填 → 数量 + 原因 + 实物图
       afNew: {
-        visible: false, suppliers: [], loadingSupplier: false, supplierId: null,
-        goodsDesc: '', amount: '', afterDate: '', note: '', saving: false, error: '',
+        visible: false, pick: '', options: [], searching: false,
+        goodsName: '', sku: '', qty: 1, afterReason: '', afterDate: '', note: '',
+        saving: false, error: '', up: afUpBox(),
       },
-      // 退款原因编辑（退单列表用；供应商售后 v0.3.2 起不再读退单）
+      // 退款原因编辑（退单列表用；商品售后 v0.3.25 起不再读退单）
       reasonDlg: { visible: false, refundNo: '', value: '', raw: '', from: 'refund', saving: false },
       // 操作日志（仅超级管理员）
       opLog: { draftUsername: '', username: '', page: 1, size: 20, total: 0, rows: [], loading: false, summary: {} },
@@ -4942,7 +5183,7 @@ const vm = new Vue({
         ].filter(Boolean) },
         { title: '牵牛花监控', items: [
           this.canRefund ? { key: 'refund', label: '退单列表', icon: 'el-icon-s-claim' } : null,
-          this.canAfter ? { key: 'after', label: '供应商售后', icon: 'el-icon-refresh-left' } : null,
+          this.canAfter ? { key: 'after', label: '商品售后', icon: 'el-icon-refresh-left' } : null,
           this.canProfit ? { key: 'profit', label: '实时毛利监控', icon: 'el-icon-s-data' } : null,
         ].filter(Boolean) },
         { title: '系统', items: [
@@ -5008,13 +5249,22 @@ const vm = new Vue({
     // 平台取价权限（v0.2.95）：登录齐货通 / 重新取价 / 配置阿发Token / 自动匹配阿发 / 阿发重新取价 / 选购加购
     //   这些操作要动平台真实账号，默认只给超级管理员，普通账号由超管在「菜单权限 → 平台取价」里授权
     canPrice() { return !!(this.me && (this.me.role === 'admin' || this.me.priceEnabled)); },
-    // 供应商售后权限（v0.2.104 引入；v0.3.2 起页面内容替换为供应商售后）：独立菜单，可与退单列表分开授权
+    // 商品售后权限（v0.2.104 引入；v0.3.25 起页面改为商品维度）：独立菜单，可与退单列表分开授权
     canAfter() { return !!(this.me && (this.me.role === 'admin' || this.me.afterSaleEnabled)); },
     // 供应商管理 / 货单管理（v0.3.0）：两个独立菜单开关，超管始终可见
     canSupplier() { return !!(this.me && (this.me.role === 'admin' || this.me.supplierEnabled)); },
     canWaybill() { return !!(this.me && (this.me.role === 'admin' || this.me.waybillEnabled)); },
     canReplenishOrder() { return !!(this.me && (this.me.role === 'admin' || this.me.replenishOrderEnabled)); },
     /** 比价弹窗里实际显示的行（只看买贵了 + 关键词），服务端已把买贵的排在最前 */
+    /** 补货单明细行编辑的金额预览（与服务端 lineOf 同口径：件数 × 规格 × 单价，四舍五入到分） */
+    roItemPreview() {
+      const d = this.roItem || {};
+      const q = Number(d.qtyPack) || 0;
+      const spec = Number(d.specQty) > 0 ? Number(d.specQty) : 1;
+      const unit = String(d.unitPrice == null ? '' : d.unitPrice).trim() === '' ? 0 : Number(d.unitPrice);
+      if (!Number.isFinite(unit) || unit < 0) return 0;
+      return Math.round((q * spec * unit + Number.EPSILON) * 100) / 100;
+    },
     cmpRows() {
       const kw = String(this.cmp.q || '').trim().toLowerCase();
       return (this.cmp.rows || []).filter((r) => {
@@ -5026,6 +5276,9 @@ const vm = new Vue({
     },
     /** 一张货单最多传几张图（与 lib/waybill.js 的 MAX_IMAGES 保持一致） */
     wbImgMax() { return 9; },
+    // ⚠ 必须放 computed：模板里 `{{ afImgMax }} 张` 是当值用的，写进 methods 会渲染成
+    //   "function () { [native code] }"（0.3.28 就栽过这个），上限判断 this.afImgMax 也拿不到数字
+    afImgMax() { return 6; },
     // 员工管理（v0.2.104）：只有「主体账号」且已开通「员工管理」权限才看得到（v0.3.13）
     canStaff() { return !!(this.me && this.me.canStaff); },
     /**
@@ -5170,7 +5423,8 @@ const vm = new Vue({
       const p = ad.progress;
       const isSend = ad.kind === 'send';
       const isOrders = ad.kind === 'orders';
-      const name = isOrders ? '同步订单与发票' : (isSend ? '批量催商家开票' : '批量申请发票');
+      const name = isOrders ? '同步订单与发票'
+        : (ad.kind === 'mall' ? '解析店铺 ID' : (isSend ? '批量催商家开票' : '批量申请发票'));
       const done = p ? (Number(p.index) || 0) : 0;
       const total = p ? (Number(p.total) || 0) : 0;
       let s;
@@ -5185,7 +5439,7 @@ const vm = new Vue({
           s = (ad.running ? name + '：① 拉取订单 ' : name + '（已结束）：① 拉取订单 ')
             + '第 ' + (Number(p && p.page) || 0) + ' 页 · ' + orderPart;
           // 全量不再限时间：进度标题上写清翻页上限，撞上限时用户能看到原因
-          if (ad.full) s += ' · 全量（翻到空页为止，上限 ' + (this.pd.maxPages || 300) + ' 页）';
+          if (ad.full) s += ' · 全量（翻到空页为止，上限 ' + (this.pd.maxPages || 1000) + ' 页）';
           else if (ad.running) s += ' · 增量（追平即停）';
         }
       } else {
@@ -6446,7 +6700,7 @@ const vm = new Vue({
     onRefundSize(s) { this.rq.size = s; this.rq.page = 1; this.loadRefunds(); },
     refundRowClass({ row }) { return row && row.picked ? 'row-picked' : ''; },
 
-    // ── 售后原因（退单列表写 refund_reason；供应商售后 v0.3.2 起不再读退单）──
+    // ── 售后原因（退单列表写 refund_reason；商品售后 v0.3.25 起不再读退单）──
     /** 打开编辑框：value 取现有原因，raw 展示平台原值（手工记录没有平台原值） */
     /** 退单列表的「编辑退款原因」（人工列 refund_reason，同步不覆盖） */
     openReason(row) {
@@ -6484,7 +6738,7 @@ const vm = new Vue({
       }
     },
 
-    // ── 供应商售后（v0.3.2，整页替换旧「售后管理」，不再读退单）──
+    // ── 商品售后（v0.3.25：商品名称/SKU + 数量 + 原因 + 状态 + 凭证）──
     afStatusTag(s) {
       const hit = (this.af.statuses || []).find((x) => Number(x.value) === Number(s));
       return hit ? hit.tag : 'info';
@@ -6492,11 +6746,6 @@ const vm = new Vue({
     afStatusLabel(s) {
       const hit = (this.af.statuses || []).find((x) => Number(x.value) === Number(s));
       return hit ? hit.label : '';
-    },
-    /** 下一档：待处理→已申请→已退货→已退款，到顶返回 null（按钮显示「已完成」并禁用） */
-    afNextStatus(row) {
-      const s = Number(row && row.status) || 0;
-      return s >= 3 ? null : s + 1;
     },
     toggleAfStatus(key) {
       this.af.status = this.af.status === key ? '' : key;
@@ -6506,24 +6755,16 @@ const vm = new Vue({
     onAfFilter() { this.af.page = 1; this.loadAfterSales(); },
     onAfPage(p) { this.af.page = p; this.loadAfterSales(); },
     onAfSize(s) { this.af.size = s; this.af.page = 1; this.loadAfterSales(); },
-    /** 供应商下拉：筛选条与新增弹窗共用一份（供应商管理维护的同一本字典） */
-    async loadAfSuppliers(force) {
-      if (!force && (this.af.supplierOptions || []).length) return;
-      try {
-        const d = await this.api('/api/after/suppliers');
-        this.af.supplierOptions = d.rows || [];
-      } catch (e) { /* 下拉拿不到不拦着列表，只是筛不了 */ }
-    },
     async loadAfterSales() {
       this.af.loading = true;
       try {
         const r = Array.isArray(this.af.range) ? this.af.range : [];
         const q = new URLSearchParams();
-        if (this.af.supplier) q.set('supplier', this.af.supplier);
+        if (this.af.goodsName) q.set('goodsName', this.af.goodsName);
+        if (this.af.sku) q.set('sku', this.af.sku);
         if (this.af.status !== '') q.set('status', this.af.status);
         if (r[0]) q.set('from', r[0]);
         if (r[1]) q.set('to', r[1]);
-        if (this.af.keyword) q.set('keyword', this.af.keyword);
         q.set('page', this.af.page);
         q.set('size', this.af.size);
         const d = await this.api('/api/after/list?' + q.toString());
@@ -6532,95 +6773,103 @@ const vm = new Vue({
         this.af.total = d.total || 0;
         this.af.counts = d.counts || { all: 0, 0: 0, 1: 0, 2: 0, 3: 0 };
         if (Array.isArray(d.statuses) && d.statuses.length) this.af.statuses = d.statuses;
-        this.loadAfSuppliers();
       } catch (e) {
         this.$message.error('加载售后列表失败：' + e.message);
       } finally {
         this.af.loading = false;
       }
     },
-    openAfStatus(row) {
-      if (this.readonly) { this.$message.warning('只读模式下不能修改'); return; }
-      const cur = Number(row.status) || 0;
-      const next = this.afNextStatus(row);
-      if (next === null) { this.$message.info('这条售后已到「已退款」，流程结束'); return; }
-      this.afDlg = {
-        visible: true, id: row.id,
-        fromLabel: this.afStatusLabel(cur), nextLabel: this.afStatusLabel(next),
-        note: row.note || '', saving: false,
-        img: '', imgPreview: '', imgName: '', imgError: '', dragging: false,
-      };
-      // 粘贴截图：只在弹框打开期间挂，关掉就摘
-      this._afPasteHandler = (e) => this.onAfPaste(e);
-      document.addEventListener('paste', this._afPasteHandler);
-      this.$nextTick(() => { if (this.$refs.afFile) this.$refs.afFile.value = ''; });
+
+    // —— 售后图片：一个弹窗一份上传会话（token 10 分钟），手机扫码 / 粘贴 / 本机选图共用 ——
+    afUpStop(box) {
+      if (box && box.polling) { clearInterval(box.polling); box.polling = null; }
     },
-    onAfDlgClosed() {
-      if (this._afPasteHandler) {
-        document.removeEventListener('paste', this._afPasteHandler);
-        this._afPasteHandler = null;
-      }
-      this.afDlg.img = '';
-      this.afDlg.imgPreview = '';
-    },
-    /** Ctrl+V：从剪贴板取第一张图（截图工具复制出来的一般是 image/png） */
-    onAfPaste(e) {
-      if (!this.afDlg.visible) return;
-      const items = (e.clipboardData && e.clipboardData.items) || [];
-      for (const it of items) {
-        if (it.kind === 'file' && /^image\//.test(it.type)) {
-          const f = it.getAsFile();
-          if (f) {
-            e.preventDefault();
-            this.setAfImage(f, '粘贴的截图');
-            return;
-          }
-        }
+    /** 生成/刷新手机扫码上传链接（顺带开 2 秒轮询，手机传完电脑上自动出现） */
+    async makeAfUploadLink(box) {
+      if (!box) return;
+      box.error = '';
+      try {
+        const d = await this.api('/api/after/upload-token', {
+          method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+        });
+        if (!d || !d.ok) { box.error = (d && d.error) || '生成上传链接失败'; return; }
+        this.afUpStop(box);
+        box.token = d.token;
+        box.link = d.link || '';
+        box.leftSec = Number(d.ttl) || 600;
+        box.qr = this.qrSvg(d.link);
+        this.afUpPoll(box);
+        box.polling = setInterval(() => this.afUpPoll(box), 2000);
+      } catch (e) {
+        box.error = '生成上传链接失败：' + (e.message || e);
       }
     },
-    pickAfImage() { if (this.$refs.afFile) this.$refs.afFile.click(); },
-    onAfFile(e) {
-      const f = (e.target.files || [])[0];
-      if (f) this.setAfImage(f, f.name);
+    async afUpPoll(box) {
+      if (!box || !box.token) return;
+      try {
+        const d = await this.api('/api/after/upload-token?token=' + encodeURIComponent(box.token));
+        if (!d || !d.ok) { box.leftSec = 0; this.afUpStop(box); return; }
+        box.leftSec = Number(d.leftSec) || 0;
+        // 本地正在上传时不覆盖，免得把刚传上去还没回显的那张刷没
+        if (!box.uploading) box.images = d.images || [];
+        if (box.leftSec <= 0) this.afUpStop(box);
+      } catch (e) { /* 轮询失败静默重试 */ }
     },
-    onAfDrop(e) {
-      this.afDlg.dragging = false;
-      const f = (e.dataTransfer && e.dataTransfer.files || [])[0];
-      if (f) this.setAfImage(f, f.name);
+    pickAfFile(box) {
+      if (box && !box.uploading && this.$refs.afFileNew) this.$refs.afFileNew.click();
     },
-    clearAfImage() {
-      this.afDlg.img = '';
-      this.afDlg.imgPreview = '';
-      this.afDlg.imgName = '';
-      this.afDlg.imgError = '';
-      if (this.$refs.afFile) this.$refs.afFile.value = '';
+    async onAfFilePick(e, box) {
+      const files = Array.prototype.slice.call((e.target && e.target.files) || []);
+      if (e.target) e.target.value = '';
+      for (const f of files) await this.afUpUpload(box, f, f.name);
     },
-    /** 收下图片文件：先校验类型/大小，再压到最长边 1600 的 jpeg（手机截图 3MB 压完约 200KB） */
-    async setAfImage(file, name) {
-      const okType = /^image\/(png|jpeg|jpg|webp|gif)$/i.test(file.type || '');
-      if (!okType) { this.afDlg.imgError = '只支持 png / jpg / webp / gif 图片'; return; }
-      if (file.size > 5 * 1024 * 1024) {
-        this.afDlg.imgError = '图片超过 5MB（' + (file.size / 1048576).toFixed(1) + 'MB），请压缩后再传';
+    /** 收下一张图：先压缩（最长边 1600 jpeg），再走 token 接口传到七牛暂存 */
+    async afUpUpload(box, file, name) {
+      if (!box) return;
+      if ((box.images || []).length >= this.afImgMax) { box.error = '最多 ' + this.afImgMax + ' 张'; return; }
+      if (!/^image\/(png|jpeg|jpg|webp|gif)$/i.test(file.type || '')) {
+        box.error = '只支持 png / jpg / webp / gif 图片';
         return;
       }
-      this.afDlg.imgError = '';
+      if (file.size > 5 * 1024 * 1024) {
+        box.error = '图片超过 5MB（' + (file.size / 1048576).toFixed(1) + 'MB），请压缩后再传';
+        return;
+      }
+      if (!box.token) await this.makeAfUploadLink(box);
+      if (!box.token) return;
+      box.uploading = true;
+      box.error = '';
       try {
         const dataUrl = await this.compressAfImage(file);
-        this.afDlg.img = dataUrl;
-        this.afDlg.imgPreview = dataUrl;
-        this.afDlg.imgName = name || '图片';
+        const d = await this.api('/api/after/upload', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ token: box.token, image: dataUrl }),
+        });
+        if (!d || !d.ok) {
+          box.error = (d && d.error) || '上传失败';
+          if (/过期|无效/.test(box.error)) box.qr = '';
+          return;
+        }
+        await this.afUpPoll(box);
+        void name;
       } catch (e) {
-        this.afDlg.imgError = '读取图片失败：' + (e.message || e);
+        box.error = '上传失败：' + (e.message || e);
+      } finally {
+        box.uploading = false;
       }
     },
+    /**
+     * 压缩图片：最长边压到 1600、转 jpeg（白底，避免 png 透明变黑底）。
+     * ⚠ 0.3.25 起这里一直调用一个不存在的 this.compressAfImage —— 本机选图 / Ctrl+V 粘贴
+     *   全部报 "compressAfImage is not a function"，0.3.30 补上实现。gif 不进 canvas（会丢动画）。
+     */
     compressAfImage(file) {
       return new Promise((resolve, reject) => {
-        // gif 可能是动图，压缩就没动画了，原样读
-        if (/^image\/gif$/i.test(file.type || '')) {
-          const fr = new FileReader();
-          fr.onload = () => resolve(fr.result);
-          fr.onerror = () => reject(new Error('读取失败'));
-          fr.readAsDataURL(file);
+        if (!/^image\/(png|jpeg|jpg|webp)$/i.test(file.type || '')) {
+          const r = new FileReader();
+          r.onload = () => resolve(String(r.result));
+          r.onerror = () => reject(new Error('读取图片失败'));
+          r.readAsDataURL(file);
           return;
         }
         const url = URL.createObjectURL(file);
@@ -6628,14 +6877,16 @@ const vm = new Vue({
         img.onload = () => {
           try {
             const MAX = 1600;
-            let { width: w, height: h } = img;
-            const scale = Math.min(1, MAX / Math.max(w, h));
-            w = Math.round(w * scale);
-            h = Math.round(h * scale);
+            let w = img.naturalWidth, h = img.naturalHeight;
+            if (!w || !h) throw new Error('图片尺寸读取失败');
+            if (Math.max(w, h) > MAX) {
+              const k = MAX / Math.max(w, h);
+              w = Math.round(w * k); h = Math.round(h * k);
+            }
             const cv = document.createElement('canvas');
             cv.width = w; cv.height = h;
             const ctx = cv.getContext('2d');
-            ctx.fillStyle = '#fff';           // png 透明底转 jpeg 会变黑，先铺白
+            ctx.fillStyle = '#ffffff';
             ctx.fillRect(0, 0, w, h);
             ctx.drawImage(img, 0, 0, w, h);
             resolve(cv.toDataURL('image/jpeg', 0.85));
@@ -6645,43 +6896,112 @@ const vm = new Vue({
             URL.revokeObjectURL(url);
           }
         };
-        img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('图片格式无法解析')); };
+        img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('图片解析失败')); };
         img.src = url;
       });
+    },
+    async removeAfImage(box, im) {
+      if (!box || !im) return;
+      try {
+        const d = await this.api('/api/after/upload-remove', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ token: box.token, id: im.id }),
+        });
+        if (!d || !d.ok) { this.$message.error((d && d.error) || '删除失败'); return; }
+        box.images = (box.images || []).filter((x) => Number(x.id) !== Number(im.id));
+      } catch (e) {
+        this.$message.error('删除失败：' + e.message);
+      }
+    },
+    /** 弹窗打开期间挂全局粘贴监听（Ctrl+V 截图直接进当前上传区） */
+    bindAfPaste() {
+      this.unbindAfPaste();
+      this._afPaste = (e) => this.onAfPaste(e);
+      document.addEventListener('paste', this._afPaste);
+    },
+    unbindAfPaste() {
+      if (this._afPaste) {
+        document.removeEventListener('paste', this._afPaste);
+        this._afPaste = null;
+      }
+    },
+    onAfPaste(e) {
+      const items = (e.clipboardData && e.clipboardData.items) || [];
+      let file = null;
+      for (const it of items) {
+        if (it.kind === 'file' && /^image\//.test(it.type)) { file = it.getAsFile(); break; }
+      }
+      if (!file) return;
+      let box = null;
+      if (this.afNew.visible) box = this.afNew.up;
+      else if (this.afDlg.visible && Number(this.afDlg.status) === 3) box = this.afDlg.up;
+      if (!box) return;
+      e.preventDefault();
+      this.afUpUpload(box, file, '粘贴的截图');
+    },
+
+    // —— 处理售后 ——
+    openAfStatus(row) {
+      if (this.readonly) { this.$message.warning('只读模式下不能修改'); return; }
+      const cur = Number(row.status) || 0;
+      const next = cur >= 3 ? 3 : cur + 1;   // 默认推进下一档，也可以自己选别的
+      this.afDlg = {
+        visible: true, id: row.id,
+        goodsName: row.goodsName || '', sku: row.sku || '',
+        fromStatus: cur, fromLabel: this.afStatusLabel(cur), status: next,
+        waybillNo: row.waybillNo || '', note: row.note || '',
+        saving: false, error: '', up: afUpBox(),
+      };
+      this.bindAfPaste();
+      if (next === 3) this.makeAfUploadLink(this.afDlg.up);
+    },
+    /** 选到「已退款」时才需要图：第一次切过去就备好二维码 */
+    onAfStatusPick() {
+      const d0 = this.afDlg;
+      if (Number(d0.status) === 3 && !d0.up.token) this.makeAfUploadLink(d0.up);
+    },
+    onAfDlgClosed() {
+      this.unbindAfPaste();
+      this.afUpStop(this.afDlg.up);
+      this.afDlg.up = afUpBox();
+      this.afDlg.saving = false;
+      this.afDlg.error = '';
     },
     async saveAfStatus() {
       const d0 = this.afDlg;
       if (!d0.id || d0.saving) return;
-      if (!d0.img) { d0.imgError = '请先上传售后凭证图片（每次推进都要留一张）'; return; }
+      d0.error = '';
+      const st = Number(d0.status);
+      if (st === 2 && !String(d0.waybillNo || '').trim()) { d0.error = '改到「已退货」必须填运单号'; return; }
+      if (st === 3 && Number(d0.fromStatus) !== 3 && !(d0.up.images || []).length) {
+        d0.error = '改到「已退款」必须上传一张退款截图';
+        return;
+      }
       d0.saving = true;
       try {
         const d = await this.api('/api/after/status', {
           method: 'POST', headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ id: d0.id, note: d0.note, image: d0.img }),
+          body: JSON.stringify({
+            id: d0.id, status: st, waybillNo: d0.waybillNo, note: d0.note,
+            token: st === 3 ? d0.up.token : '',
+          }),
         });
-        if (!d || d.error) { this.$message.error((d && d.error) || '保存失败'); return; }
-        const row = (this.af.rows || []).find((r) => r.id === d0.id);
-        if (row) {
-          row.status = Number(d.status);
-          row.statusLabel = d.statusLabel || '';
-          row.note = d0.note || '';
-          row.handledBy = (this.me && this.me.username) || '';
-        }
-        this.$message.success('已标记为「' + (d.statusLabel || '') + '」');
+        if (!d || d.error) { d0.error = (d && d.error) || '保存失败'; return; }
+        this.$message.success('已改为「' + (d.statusLabel || '') + '」');
         d0.visible = false;
-        // 统计卡与凭证数都要跟着变，整页重拉
         this.loadAfterSales();
       } catch (e) {
-        this.$message.error('保存失败：' + e.message);
+        d0.error = '保存失败：' + e.message;
       } finally {
         d0.saving = false;
       }
     },
+
     /** 凭证查看：列表里已带签名链接（1 小时有效），直接展示 */
     openAfAttach(row) {
       this.afAttach = {
         visible: true,
-        title: '供应商售后凭证 · ' + (row.supplierName || '') + (row.goodsDesc ? ' · ' + row.goodsDesc : ''),
+        title: '商品售后凭证 · ' + (row.goodsName || '—') + (row.sku ? ' · ' + row.sku : ''),
         rows: (row.attaches || []).slice(),
       };
     },
@@ -6689,42 +7009,63 @@ const vm = new Vue({
       if (url) window.open(url, '_blank');
     },
 
-    // ── 新增供应商售后 ──
+    // —— 新增商品售后 ——
     async openAfCreate() {
       if (this.readonly) { this.$message.warning('只读模式下不能修改'); return; }
       this.afNew = {
-        visible: true, suppliers: (this.af.supplierOptions || []).slice(), loadingSupplier: false,
-        supplierId: null, goodsDesc: '', amount: '', afterDate: this.todayStr(), note: '', saving: false, error: '',
+        visible: true, pick: '', options: [], searching: false,
+        goodsName: '', sku: '', qty: 1, afterReason: '', afterDate: this.todayStr(), note: '',
+        saving: false, error: '', up: afUpBox(),
       };
-      // 兜底拉一次（筛选下拉没加载出来时）
-      if (!this.afNew.suppliers.length) {
-        this.afNew.loadingSupplier = true;
-        try {
-          const d = await this.api('/api/after/suppliers');
-          this.afNew.suppliers = d.rows || [];
-          this.af.supplierOptions = this.afNew.suppliers.slice();
-        } catch (e) { /* 弹窗里会看到空下拉 + 提示去供应商管理 */ } finally {
-          this.afNew.loadingSupplier = false;
-        }
+      this.bindAfPaste();
+      this.makeAfUploadLink(this.afNew.up);
+      this.searchAfProducts('');   // 先给一批最近更新的商品，省得空白
+    },
+    onAfNewClosed() {
+      this.unbindAfPaste();
+      this.afUpStop(this.afNew.up);
+      this.afNew.up = afUpBox();
+      this.afNew.saving = false;
+    },
+    /** 商品模糊搜索（只搜品牌商品库；选中后自动回填名称与 SKU） */
+    async searchAfProducts(kw) {
+      this.afNew.searching = true;
+      try {
+        const d = await this.api('/api/after/products?q=' + encodeURIComponent(String(kw || '').trim()) + '&limit=20');
+        this.afNew.options = (d && d.rows) || [];
+      } catch (e) {
+        this.afNew.options = [];
+      } finally {
+        this.afNew.searching = false;
       }
+    },
+    onAfPickProduct(v) {
+      const hit = (this.afNew.options || []).find((p) => (p.brandId + '|' + p.sku) === v);
+      if (!hit) return;
+      this.afNew.goodsName = hit.goodsName || '';
+      this.afNew.sku = hit.sku || '';
     },
     async saveAfCreate() {
       const d0 = this.afNew;
       if (d0.saving) return;
       d0.error = '';
-      if (!d0.supplierId) { d0.error = '请先选择供应商（到供应商管理里维护）'; return; }
-      if (!String(d0.goodsDesc || '').trim()) { d0.error = '请填写售后内容（商品 / 事由描述）'; return; }
+      if (!String(d0.goodsName || '').trim()) { d0.error = '请先在搜索框选中商品（名称与 SKU 自动回填）'; return; }
+      if (!String(d0.sku || '').trim()) { d0.error = '请先在搜索框选中商品（名称与 SKU 自动回填）'; return; }
+      if (!String(d0.afterReason || '').trim()) { d0.error = '请填写售后原因'; return; }
+      if (!Number.isInteger(Number(d0.qty)) || Number(d0.qty) < 1) { d0.error = '数量要填不小于 1 的整数'; return; }
+      if (!(d0.up.images || []).length) { d0.error = '请上传至少 1 张商品实物图片'; return; }
       d0.saving = true;
       try {
         const d = await this.api('/api/after/create', {
           method: 'POST', headers: { 'content-type': 'application/json' },
           body: JSON.stringify({
-            supplierId: d0.supplierId, goodsDesc: d0.goodsDesc,
-            amount: d0.amount, afterDate: d0.afterDate, note: d0.note,
+            goodsName: d0.goodsName, sku: d0.sku, qty: d0.qty,
+            afterReason: d0.afterReason, afterDate: d0.afterDate, note: d0.note,
+            token: d0.up.token,
           }),
         });
         if (!d || d.error) { d0.error = (d && d.error) || '保存失败'; return; }
-        this.$message.success('已新增一条供应商售后');
+        this.$message.success('已新增一条商品售后（待处理）');
         d0.visible = false;
         this.af.page = 1;
         this.loadAfterSales();
@@ -6737,8 +7078,8 @@ const vm = new Vue({
     async deleteAf(row) {
       if (this.readonly) { this.$message.warning('只读模式下不能修改'); return; }
       try {
-        await this.$confirm('确定删除这条售后记录？<br><b>' + this.esc(row.supplierName || '') + '</b> · '
-          + this.esc(row.goodsDesc || '') + ' · ' + this.esc(row.afterDate || ''),
+        await this.$confirm('确定删除这条售后记录？<br><b>' + this.esc(row.goodsName || '') + '</b> · '
+          + this.esc(row.sku || '') + ' · ' + this.esc(row.afterDate || ''),
           '删除售后记录', { dangerouslyUseHTMLString: true, confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' });
       } catch (e) { return; }
       try {
@@ -6753,7 +7094,6 @@ const vm = new Vue({
         this.$message.error('删除失败：' + e.message);
       }
     },
-
 
     async loadRefundTrend() {
       try {
@@ -7054,7 +7394,16 @@ const vm = new Vue({
         };
         this.pd.summary = d.summary || null;
         this.pd.orderSync = d.orderSync || null;
-        this.pd.maxPages = Number(d.maxPages) > 0 ? Number(d.maxPages) : 300;
+        if (d.mallId) {
+          this.pd.mallId = {
+            pending: Number(d.mallId.pending) || 0,
+            resolved: Number(d.mallId.resolved) || 0,
+            minVer: d.mallId.minVer || '',
+            agentVer: d.mallId.agentVer || '',
+            agentOutdated: !!d.mallId.agentOutdated,
+          };
+        }
+        this.pd.maxPages = Number(d.maxPages) > 0 ? Number(d.maxPages) : 1000;
         if (Array.isArray(d.sessions)) this.pddSessions = d.sessions.map(Number);
         if (Array.isArray(d.users)) {
           this.pddUsers = d.users;
@@ -7120,6 +7469,81 @@ const vm = new Vue({
     },
     onPddPage(p) { this.pd.page = p; this.loadPddOrders(); },
     onPddSize(s) { this.pd.size = s; this.pd.page = 1; this.loadPddOrders(); },
+
+    // ── 「解析店铺 ID」：订单接口只给加密 mall_sn（protobuf + AES，密钥在拼多多服务端），
+    //   服务器直连解密接口一律被风控拦（40002），只能让本机助手在已登录页面里跑一次，
+    //   把页面自己解出来的 mall_id 抓回服务端缓存。解一次永久有效。
+    async resolveMallIds() {
+      if (this.pd.mallResolving) { this.$message.info('正在解析中，请稍候…'); return; }
+      const st = this.pd.mallId || {};
+      if (st.agentOutdated) {
+        this.$message.warning(`本机助手是 v${st.agentVer || '未知'}，解析店铺 ID 需要 v${st.minVer} 及以上，请先更新助手`);
+        return;
+      }
+      // 只解析「超期不可申请（invoice_status=9）+ 交易成功」的单：发票接口拉得到的单自带 mall_id，不必解析
+      if (!st.pending) { this.$message.success('需要解析的店铺 ID 都已完成（仅「商家处理中」的催收单需要解析）'); return; }
+      this.pd.mallResolving = true;
+      try {
+        const d = await this.pddApi('/api/pdd/mall-id/resolve', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ limit: 0 }),   // 0 = 全部（服务端按 60 个一段自动续跑，一次点完）
+        });
+        if (d.error) { this.$message.error(d.error); return; }
+        if (d.needAgent) {
+          this.$message.warning(d.message || '本机助手未连接');
+          return;
+        }
+        if (!d.ok) { this.$message.error(d.message || '发起解析失败'); return; }
+        if (!d.pending) { this.$message.success(d.message || '需要解析的店铺 ID 都已完成（仅「商家处理中」的催收单需要解析）'); return; }
+        this.pd.mallTaskId = d.taskId;
+        this.pd.applyDialog = {
+          visible: true, running: true, kind: 'mall', status: '', message: d.message || '',
+          progress: { index: 0, total: Number(d.total) || 0 }, log: [], startedAt: Date.now(),
+        };
+        this.$nextTick(() => {
+          const card = this.$refs.applyCard;
+          const el = card && (card.$el || card);
+          if (el && el.scrollIntoView) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        });
+        this.pollPddMallResolve().catch(() => {});
+      } catch (e) {
+        this.$message.error('发起解析失败：' + (e.message || e));
+      } finally {
+        this.pd.mallResolving = false;
+      }
+    },
+    // 轮询解析进度：跑完刷新订单列表（mall_id 已回填，催收按钮会跟着亮起来）
+    async pollPddMallResolve() {
+      const taskId = this.pd.mallTaskId;
+      if (!taskId) return;
+      const started = Date.now();
+      for (;;) {
+        if (Date.now() - started > 30 * 60 * 1000) {
+          this.pd.applyDialog.running = false;
+          this.pd.applyDialog.status = 'timeout';
+          this.pd.applyDialog.message = '等待超时（30 分钟）。解析可能仍在后台进行，稍后刷新本页看结果。';
+          return;
+        }
+        await new Promise((r) => setTimeout(r, 1500));
+        let d = null;
+        try {
+          d = await this.pddApi('/api/pdd/task-status?taskId=' + encodeURIComponent(taskId));
+        } catch (e) { d = null; }
+        if (!d || d.error) continue;
+        if (d.progress) this.pd.applyDialog.progress = d.progress;
+        if (Array.isArray(d.progressLog)) this.pd.applyDialog.log = d.progressLog;
+        if (d.status === 'pending') continue;
+        this.pd.applyDialog.running = false;
+        this.pd.applyDialog.status = d.ok ? 'done' : 'failed';
+        this.pd.applyDialog.message = d.message || '';
+        if (d.ok) this.$message.success(d.message || '店铺 ID 解析完成');
+        else this.$message.error(d.message || '店铺 ID 解析失败');
+        await this.loadPddStatus();
+        await this.loadPddOrders();
+        return;
+      }
+    },
 
     // ── 「同步订单与发票」：一次点击跑两段（0.2.99 合并）──
     //   ① 拉「我的订单」订单（首次全量、之后增量追平）
@@ -7308,19 +7732,11 @@ const vm = new Vue({
       }
     },
 
-    // ── 拼多多「催商家开票」（商家处理中订单；行内单个 / 勾选批量，同一入口） ──
+    // ── 拼多多「催商家开票」（只对「商家处理中」开放；行内单个 / 勾选批量，同一入口） ──
     sendPddBatch() { this.sendPddMsgRows(this.pd.selected); },
-    /** 打开拼多多订单页：已完成但「未同步开票」的单，平台已关开票入口、又没有商家会话 ID，
-     *  只能在平台页面里点「联系商家」走线下开票（不伪造状态、不发注定失败的消息） */
-    openPddOrder(row) {
-      const sn = row && row.orderSn;
-      if (!sn) { this.$message.warning('缺少订单号'); return; }
-      window.open('https://mobile.yangkeduo.com/order.html?order_sn=' + encodeURIComponent(sn),
-        '_blank', 'noopener');
-    },
     async sendPddMsgRows(rows) {
       const list = (rows || []).filter((r) => r && r.chatable);
-      if (!list.length) { this.$message.warning('请先勾选「商家处理中」的订单'); return; }
+      if (!list.length) { this.$message.warning('请先勾选「商家处理中」的订单（其余状态不可催收）'); return; }
       if (this.pd.applying) return;
       if (this.qnhNeedPick) { this.$message.warning('请先选择要以哪个账号的身份操作'); return; }
       // 发送用本账号默认抬头（app_user 公司全称/税号/邮箱，管理员在「系统管理 → 用户管理」里维护）
@@ -7353,7 +7769,7 @@ const vm = new Vue({
           return;
         }
         if (Array.isArray(d.skipped) && d.skipped.length) {
-          this.$message.warning('有 ' + d.skipped.length + ' 笔订单不可催收（非该账号或非商家处理中），已跳过');
+          this.$message.warning('有 ' + d.skipped.length + ' 笔订单不可催收（非该账号、或非「商家处理中」），已跳过');
         }
         this.$message.info(d.message || '已下发催收任务');
         this.clearPddPicked();   // 已提交的单不必再勾着（避免重复发送同一批）
@@ -8189,8 +8605,8 @@ const vm = new Vue({
           // 拼多多话术：同样做字段级回退，避免把空值存回去
           pddChat: (typeof pm.chat === 'string' && pm.chat.trim()) ? pm.chat : (dpm.chat || this.defaultPddChat),
           pddGapSec: Math.max(2, Math.round((Number(pm.gapMs) || Number(dpm.gapMs) || 4000) / 1000)),
-          // 拼多多翻页上限（发票刷新与订单同步共用；空/非法 → 回退 300）
-          pddMaxPages: Math.min(2000, Math.max(20, Number(rt.pddMaxPages) || 300)),
+          // 拼多多翻页上限（发票刷新与订单同步共用；空/非法 → 回退 1000）
+          pddMaxPages: Math.min(2000, Math.max(20, Number(rt.pddMaxPages) || 1000)),
           // 「提前加载下一家会话」：缺省 true（没配过就是开）
           prefetch: String(rt.prefetchNextSeller) !== 'false',
           // 助手版本治理：最低要求留空=跟随服务端；宽限天数默认 3 天
@@ -8223,7 +8639,7 @@ const vm = new Vue({
             sendGapMinSec: Number(this.cfg.gapMin) || 15,
             sendGapMaxSec: Number(this.cfg.gapMax) || 30,
             // 拼多多翻页上限（发票刷新与订单同步共用，保存后下次同步即生效，无需重启）
-            pddMaxPages: Math.min(2000, Math.max(20, Number(this.cfg.pddMaxPages) || 300)),
+            pddMaxPages: Math.min(2000, Math.max(20, Number(this.cfg.pddMaxPages) || 1000)),
             // 「提前加载下一家会话」开关（下次发送任务生效，无需重启）
             prefetchNextSeller: this.cfg.prefetch !== false,
             // 助手版本治理：最低要求留空=跟随服务端版本；宽限天数 0~30；外部直链兜底
@@ -8983,6 +9399,7 @@ const vm = new Vue({
       // 三个接口互不依赖（各写各的 prices/afaPrices/jdPrices），并发跑：串行时 200 条要多等 100ms 以上
       await Promise.all([
         this.loadQhtPrices(this.rp.rows, { mode: 'cache' }),
+        this.loadManualPrices(this.rp.rows),
         this.loadAfaPrices(this.rp.rows, { mode: 'cache' }),
         this.loadJdPrices(this.rp.rows, { mode: 'cache' }),
       ]);
@@ -9372,7 +9789,7 @@ const vm = new Vue({
       try { u = await this.api('/api/waybill/suppliers/usage?id=' + row.id); } catch (e) { u = null; }
       const parts = [];
       if (u && u.waybill) parts.push(`${u.waybill} 张货单`);
-      if (u && u.after) parts.push(`${u.after} 条供应商售后`);
+      if (u && u.after) parts.push(`${u.after} 条商品售后`);
       if (u && u.replenishOrder) parts.push(`${u.replenishOrder} 张补货单`);
       if (parts.length) {
         this.$message.warning(`「${row.name}」下面还有${parts.join('、')}，不能删除。请先用「迁移」转到其他供应商。`, 6000);
@@ -9756,6 +10173,7 @@ const vm = new Vue({
         this.ro.rows = (d && d.rows) || [];
         this.ro.total = Number(d && d.total) || 0;
         this.ro.sumAmount = Number(d && d.sumAmount) || 0;
+        if (d && d.suppliers) this.ro.suppliers = d.suppliers;   // 详情里「换供应商」的下拉就靠它
         const maxPage = Math.max(1, Math.ceil(this.ro.total / this.ro.size));
         if (this.ro.page > maxPage) { this.ro.page = maxPage; await this.loadReplenishOrders(); }
       } catch (e) { this.$message.error('补货单加载失败: ' + e.message); }
@@ -9819,6 +10237,130 @@ const vm = new Vue({
         this.roView.items = d.items || [];
       } catch (e) { this.$message.error('加载详情失败：' + e.message); }
       finally { this.roView.loading = false; }
+    },
+    /** 重拉当前详情（编辑后金额/条数都变了，以服务端为准），保留编辑态 */
+    async refreshRoView(orderId) {
+      const keepEditing = this.roView.editing;
+      const d = await this.api('/api/replenish-order/detail?id=' + orderId).catch(() => null);
+      if (!d || !d.ok) return;
+      this.roView.order = d.order;
+      this.roView.items = d.items || [];
+      this.roView.editing = keepEditing;
+      this.roView.supplierId = Number(d.order.supplierId) > 0 ? Number(d.order.supplierId) : null;
+      this.loadReplenishOrders();
+    },
+    toggleRoEdit() {
+      this.roView.editing = !this.roView.editing;
+      if (this.roView.editing && this.roView.order) {
+        this.roView.supplierId = Number(this.roView.order.supplierId) > 0 ? Number(this.roView.order.supplierId) : null;
+      }
+    },
+    onRoViewClosed() {
+      this.roView.editing = false;
+      this.roView.supplierId = null;
+    },
+    /** 换供应商：服务端会拒掉「已关联货单」的单，前端也把下拉禁用了 */
+    async saveRoSupplier() {
+      const o = this.roView.order;
+      if (!o) return;
+      if (!this.roView.supplierId) return this.$message.warning('先选一个供应商');
+      this.roView.saving = true;
+      try {
+        const d = await this.api('/api/replenish-order/supplier', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ id: o.id, supplierId: this.roView.supplierId }),
+        });
+        if (!d.ok) return this.$message.error(d.error || '换供应商失败');
+        this.$message.success('供应商已改为「' + (d.order && d.order.supplierName) + '」');
+        await this.refreshRoView(o.id);
+      } catch (e) { this.$message.error('换供应商失败：' + e.message); }
+      finally { this.roView.saving = false; }
+    },
+    /** 打开行编辑（row 为空 = 新增，需先带 sku/goodsName/默认价） */
+    openRoItem(row) {
+      const o = this.roView.order;
+      if (!o) return;
+      this.roItem = {
+        visible: true, saving: false, error: '', orderId: o.id,
+        itemId: row && row.id ? Number(row.id) : 0,
+        sku: (row && row.sku) || '',
+        goodsName: (row && row.goodsName) || '',
+        channel: (row && row.channel) || 'qht',
+        channelLabel: (row && row.channelLabel) || '齐货通',
+        qtyPack: row && row.qtyPack ? Number(row.qtyPack) : 1,
+        specQty: row && row.specQty != null ? String(row.specQty) : '1',
+        unitPrice: row && row.unitPrice != null ? String(row.unitPrice) : '',
+      };
+    },
+    async saveRoItem() {
+      const d = this.roItem;
+      if (!d.sku) return this.$message.warning('缺少商品SKU');
+      if (!(Number(d.qtyPack) >= 1)) { d.error = '补货数量必须 ≥ 1 件'; return; }
+      if (String(d.unitPrice).trim() === '' || !(Number(d.unitPrice) >= 0)) { d.error = '请填单价（元/个）'; return; }
+      d.saving = true; d.error = '';
+      try {
+        const r = await this.api('/api/replenish-order/item-save', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            orderId: d.orderId, itemId: d.itemId || 0, sku: d.sku, goodsName: d.goodsName,
+            channel: d.channel, channelLabel: d.channelLabel,
+            qtyPack: d.qtyPack, specQty: d.specQty, unitPrice: d.unitPrice,
+          }),
+        });
+        if (!r.ok) { d.error = r.error || '保存失败'; return; }
+        this.roView.order = r.order;
+        this.roView.items = r.items || [];
+        this.$message.success(d.itemId ? '已保存这一行' : '已加入补货单');
+        d.visible = false;
+        this.loadReplenishOrders();
+      } catch (e) { d.error = '保存失败：' + e.message; }
+      finally { d.saving = false; }
+    },
+    async deleteRoItem(row) {
+      if (!row || !row.id) return;
+      try {
+        await this.$confirm('从补货单里删除「' + (row.goodsName || row.sku) + '」这一行？\n金额会按剩余明细重算，删除后不可恢复。',
+          '删除明细', { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' });
+      } catch (e) { return; }
+      try {
+        const d = await this.api('/api/replenish-order/item-delete', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ orderId: this.roView.order.id, itemId: row.id, sku: row.sku }),
+        });
+        if (!d.ok) return this.$message.error(d.error || '删除失败');
+        this.roView.order = d.order;
+        this.roView.items = d.items || [];
+        this.$message.success('已删除这一行');
+        this.loadReplenishOrders();
+      } catch (e) { this.$message.error('删除失败：' + e.message); }
+    },
+    openRoAdd() {
+      this.roAdd = { visible: true, loading: false, keyword: '', rows: [] };
+    },
+    /** 加行的商品搜索（远程）：空关键词给前 20 个，便于直接挑 */
+    async searchRoProducts(kw) {
+      this.roAdd.loading = true;
+      try {
+        const d = await this.api('/api/replenish-order/products?q=' + encodeURIComponent(String(kw || '')));
+        this.roAdd.rows = (d && d.rows) || [];
+      } catch (e) { this.roAdd.rows = []; }
+      finally { this.roAdd.loading = false; }
+    },
+    /** 选中商品 → 直接进行编辑，按本地价 / 采购价预填单价与规格 */
+    onRoAddPick(val) {
+      const key = String(val || '');
+      const it = (this.roAdd.rows || []).find((x) => x.brandId + '|' + x.sku === key);
+      if (!it) return;
+      this.roAdd.visible = false;
+      const unit = it.localPrice != null ? it.localPrice : (it.purchasePrice != null ? it.purchasePrice : '');
+      const spec = it.localSpecQty != null ? it.localSpecQty : 1;
+      this.openRoItem(null);
+      this.roItem.sku = it.sku;
+      this.roItem.goodsName = it.goodsName || '';
+      this.roItem.channel = 'local';
+      this.roItem.channelLabel = '手工录入';
+      this.roItem.specQty = String(spec);
+      this.roItem.unitPrice = unit === '' ? '' : String(unit);
     },
     async deleteRo(row) {
       try {
@@ -10096,6 +10638,143 @@ const vm = new Vue({
         d.visible = false;
       } catch (e) { this.$message.error('清空失败: ' + e.message); }
       finally { d.saving = false; }
+    },
+    // ══════ 齐货通手工价（v0.3.28）：平台价错了直接改，比价与补货单优先用它 ══════
+    /**
+     * 某行的齐货通价：**手工价优先**，其次平台缓存。
+     * 键都带品牌前缀（同一 SKU 在不同品牌方价格不同）。
+     */
+    qhtPrice(row) {
+      if (!row) return null;
+      const b = Number(row.brand_id) || Number(this.me && this.me.brandId) || 1;
+      const man = (this.rp.qhtManual || {})[b + ':' + row.sku];
+      if (man && man.ok) return man;
+      const k = this.pkey(row, 'qht');
+      return k ? (this.rp.prices[k] || null) : null;
+    },
+    /** 拉本页商品的手工价（只读，按品牌分组批量取；取不到就当没有，不影响看平台价） */
+    async loadManualPrices(rows) {
+      const src = Array.isArray(rows) ? rows : (this.rp.rows || []);
+      const groups = new Map();
+      for (const r of src) {
+        if (!r || !r.sku) continue;
+        const b = Number(r.brand_id) || Number(this.me && this.me.brandId) || 1;
+        if (!groups.has(b)) groups.set(b, new Set());
+        groups.get(b).add(String(r.sku));
+      }
+      const acc = {};
+      for (const [brandId, set] of groups) {
+        const list = [...set];
+        for (let i = 0; i < list.length; i += 300) {
+          const part = list.slice(i, i + 300);
+          try {
+            const d = await this.api('/api/products/manual-prices?brand=' + brandId
+              + '&kind=qht&skus=' + encodeURIComponent(part.join(',')));
+            Object.assign(acc, (d && d.prices) || {});
+          } catch (e) { /* 手工价属于附加信息，取不到不必打扰用户 */ }
+        }
+      }
+      // 整体替换：Vue2 对对象新增属性不响应，逐个加键会「存了但页面不刷新」
+      this.rp.qhtManual = acc;
+    },
+    /** 打开改价弹窗：有手工价带手工价，没有就用平台价预填（多数场景只是在平台价上微调） */
+    openQhtManual(row) {
+      const cur = this.qhtPrice(row);
+      const man = cur && cur.manual ? cur : null;
+      const specOf = (v) => (v == null || v === '' ? '' : String(v));
+      this.mpDlg = {
+        visible: true, saving: false, row, hasManual: !!man,
+        sku: row.sku, goodsName: row.goods_name || '',
+        brandId: Number(row.brand_id) || Number(this.me && this.me.brandId) || 1,
+        specQty: man ? specOf(man.packingSpecification) : (cur ? specOf(cur.packingSpecification) : ''),
+        smallUnit: (man || cur || {}).smallUnit || '',
+        unitPrice: cur && cur.unitPrice != null ? String(cur.unitPrice) : '',
+        packPrice: cur && cur.saleIP != null ? String(cur.saleIP) : '',
+        note: man ? (man.note || '') : '',
+        mode: 'unit', hint: '',
+      };
+    },
+    /** 互算：与「本地价」同一套规则（改单价 → 整件价 = 单价 × 规格；改整件价 → 单价 = 整件价 ÷ 规格） */
+    onMpCalc(src) {
+      const d = this.mpDlg;
+      if (src !== 'qty') d.mode = src === 'pack' ? 'pack' : 'unit';
+      const r2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
+      const qtyRaw = String(d.specQty == null ? '' : d.specQty).trim();
+      const qty = qtyRaw === '' ? null : Number(qtyRaw);
+      const hasQty = qty != null && Number.isFinite(qty) && qty > 0;
+      if (d.mode === 'pack') {
+        const pack = String(d.packPrice == null ? '' : d.packPrice).trim() === '' ? null : Number(d.packPrice);
+        if (pack == null || !Number.isFinite(pack)) { d.unitPrice = ''; d.hint = ''; return; }
+        if (!hasQty) { d.unitPrice = ''; d.hint = '填整件价需要同时填规格数量（一件多少个），否则算不出单价'; return; }
+        d.unitPrice = String(r2(pack / qty));
+        d.hint = '整件价 ' + r2(pack) + ' ÷ 规格 ' + qty + ' = 单价 ' + r2(pack / qty);
+        return;
+      }
+      const unit = String(d.unitPrice == null ? '' : d.unitPrice).trim() === '' ? null : Number(d.unitPrice);
+      if (unit == null || !Number.isFinite(unit)) { d.packPrice = ''; d.hint = ''; return; }
+      if (!hasQty) { d.packPrice = ''; d.hint = '未填规格数量 → 只保存单价，没有整件价'; return; }
+      d.packPrice = String(r2(unit * qty));
+      d.hint = '单价 ' + r2(unit) + ' × 规格 ' + qty + ' = 整件价 ' + r2(unit * qty);
+    },
+    async saveQhtManual() {
+      const d = this.mpDlg;
+      if (!d.sku) return;
+      d.saving = true;
+      try {
+        const r = await this.api('/api/products/manual-price', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            brandId: d.brandId, sku: d.sku, goodsName: d.goodsName, kind: 'qht',
+            mode: d.mode, unitPrice: d.unitPrice, packPrice: d.packPrice, specQty: d.specQty,
+            smallUnit: d.smallUnit, note: d.note,
+          }),
+        });
+        if (r.error) { this.$message.error('手工价保存失败: ' + r.error); return; }
+        // 以服务端返回为准（四舍五入、反推规格都只认一处），就地更新，列表不用重拉
+        const key = Number(r.brandId || d.brandId) + ':' + (r.sku || d.sku);
+        this.rp.qhtManual = Object.assign({}, this.rp.qhtManual, { [key]: r.price });
+        this.$message.success('手工价已保存：比价分析与补货单都按它算');
+        d.visible = false;
+      } catch (e) { this.$message.error('手工价保存失败: ' + e.message); }
+      finally { d.saving = false; }
+    },
+    /** 取消手工价（回到平台取价）。row 可传可不传（弹窗里的按钮用 mpDlg.row） */
+    async clearQhtManual(row) {
+      const r0 = row || (this.mpDlg && this.mpDlg.row);
+      if (!r0) return;
+      try {
+        await this.$confirm('取消「' + (r0.goods_name || r0.sku) + '」的齐货通手工价？取消后回到平台取价（平台没取到就显示未取价）。',
+          '取消手工价', { confirmButtonText: '取消手工价', cancelButtonText: '返回', type: 'warning' });
+      } catch (e) { return; }
+      const brandId = Number(r0.brand_id) || Number(this.me && this.me.brandId) || 1;
+      try {
+        const r = await this.api('/api/products/manual-price/clear', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ brandId, sku: r0.sku, kind: 'qht' }),
+        });
+        if (r.error) { this.$message.error('取消失败: ' + r.error); return; }
+        const next = Object.assign({}, this.rp.qhtManual);
+        delete next[brandId + ':' + r0.sku];
+        this.rp.qhtManual = next;
+        if (this.mpDlg.visible) this.mpDlg.visible = false;
+        this.$message.success('已取消手工价');
+      } catch (e) { this.$message.error('取消失败: ' + e.message); }
+    },
+    /** 解除齐货通关联（与阿发「解除」同口径：写空值，之后可重新关联；手工价不受影响） */
+    async unlinkQhtRow(row) {
+      try {
+        await this.$confirm('解除「' + (row.goods_name || row.sku) + '」与齐货通商品的关联？解除后可以重新关联。',
+          '解除关联', { confirmButtonText: '解除关联', cancelButtonText: '取消', type: 'warning' });
+      } catch (e) { return; }
+      try {
+        const d = await this.api('/api/products/link', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ sku: row.sku, goodsId: '', brandId: row.brand_id || null }),
+        });
+        if (d.error) { this.$message.error('解除失败: ' + d.error); return; }
+        row.qht_goods_id = '';
+        this.$message.success('已解除关联');
+      } catch (e) { this.$message.error('解除失败: ' + e.message); }
     },
     // ══════ 比价分析（v0.3.11）══════
     /** 按当前筛选范围（与列表同一份参数）拉比价结果；跨页，不受分页影响 */
@@ -10571,6 +11250,7 @@ const vm = new Vue({
         if (d.error) { this.$message.error(d.error); return; }
         this.bill.items = d.items || [];
         this.bill.cols = d.months || [];
+        this.fillBillDraft(); // 金额输入框的编辑缓冲（v0.3.27）
       } catch (e) { this.$message.error('账单加载失败: ' + e.message); }
       finally { if (!silent) this.bill.loading = false; }
     },
@@ -10591,6 +11271,65 @@ const vm = new Vue({
       }
     },
     /** 改一个单元格 → 立即保存，静默重算（保存后重新拉一次，金额口径统一由服务端算） */
+    /** 账单金额框显示值：始终两位小数 */
+    billCellText(row, key) {
+      const v = row && row.cells ? Number(row.cells[key]) : 0;
+      return (Number.isFinite(v) ? v : 0).toFixed(2);
+    },
+    /**
+     * 重建金额框的编辑缓冲（v0.3.27）。
+     * Element 的 el-input 用 :value 单向绑定时，每次重渲染都会把输入框里的内容重置回 prop，
+     * 用户刚敲的数字会被抹掉 —— 所以必须 v-model 绑一份可写的本地缓冲，失焦时才提交。
+     * 整体替换对象（而不是逐个 $set），保证所有键一创建就是响应式的。
+     */
+    fillBillDraft() {
+      const d = {};
+      for (const col of (this.bill.cols || [])) {
+        for (const it of (this.bill.items || [])) {
+          if (it.source !== 'manual') continue;
+          d[col.month + '|' + it.key] = (Number(col.cells && col.cells[it.key]) || 0).toFixed(2);
+        }
+      }
+      this.bill.draft = d;
+    },
+    /**
+     * 金额文本解析（v0.3.27）：容忍从 Excel / 网页里复制来的各种写法。
+     * 支持 ¥ ￥ $ 元、千分位逗号（中英文）、空格、全角数字；空串按 0。
+     * 解析不了返回 null，由调用方报错 —— 绝不能返回 0：原来 el-input-number 就是把
+     * 「1,200 / ¥1200 / ９００」解析成 NaN 后静默回滚成 0，用户只看到「输完变 0」。
+     */
+    parseAmount(raw) {
+      let s = String(raw == null ? '' : raw).trim();
+      if (!s) return 0;
+      s = s
+        .replace(/[０-９]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xfee0))
+        .replace(/[，,]/g, '')
+        .replace(/[¥￥$元]/g, '')
+        .replace(/\s+/g, '');
+      if (!/^-?(\d+(\.\d*)?|\.\d+)$/.test(s)) return null;
+      const n = Number(s);
+      return Number.isFinite(n) ? n : null;
+    },
+    /** 金额框失焦 / 回车：清洗解析后保存；解析失败明确报错，并把缓冲还原成库里的值 */
+    async saveBillCellText(row, key) {
+      const k = row.month + '|' + key;
+      const raw = this.bill.draft[k];
+      const restore = () => this.$set(this.bill.draft, k, this.billCellText(row, key));
+      const parsed = this.parseAmount(raw);
+      if (parsed === null) {
+        this.$message.error('金额格式不对：「' + String(raw == null ? '' : raw).slice(0, 20) + '」，请填数字（如 1200 或 1,200.50）');
+        restore();
+        return;
+      }
+      if (parsed < 0) {
+        this.$message.error('金额不能为负数');
+        restore();
+        return;
+      }
+      const v = Number(parsed.toFixed(2));
+      if (Number(row.cells[key]) === v) { restore(); return; } // 没改就只把显示格式化回来
+      await this.saveBillCell(row, key, v);
+    },
     async saveBillCell(col, item, value) {
       const v = Math.max(0, Number(value) || 0);
       if (Number(col.cells[item]) === v) return;

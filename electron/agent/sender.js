@@ -22,7 +22,8 @@
  *   ④ 「卖家间隔」配置项继续保留：它是保底下限，会话切换快起来后（如后续接入 SPA 复用）
  *      它就是唯一的节流手段。
  */
-const { app, BrowserWindow, session } = require('electron');
+const { app, session } = require('electron');
+const siteFrame = require('../ui/site-frame');
 const path = require('path');
 const fs = require('fs');
 
@@ -159,8 +160,10 @@ function getSendWindow() {
   ensureAntiSourceDump();
   const part = session.fromPartition(PARTITION);
   try { part.setUserAgent(REAL_UA); } catch (e) { /* 忽略 */ }
-  sendWin = new BrowserWindow({
-    show: false, width: 1120, height: 780, title: '1688（发送窗口）', autoHideMenuBar: true,
+  // 带顶部工具栏的网站窗口（← 返回 / → 前进 / ⟳ 刷新 + 网址），返回的是兼容 BrowserWindow 的代理；
+  // 发送内核继续通过 sendWin.webContents 驱动页面（代理已把它指向站点视图）。
+  sendWin = siteFrame.create({
+    show: false, width: 1120, height: 780, title: '1688（发送窗口）',
     webPreferences: {
       partition: PARTITION,
       nodeIntegration: false, contextIsolation: true, sandbox: true, webSecurity: true,

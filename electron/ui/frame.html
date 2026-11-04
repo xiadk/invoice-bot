@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>加载中…</title>
+<style>
+  :root { --bg:#f7f8fa; --line:#e3e7ee; --ink:#374151; --mut:#6b7280; --hover:#eef2f7; }
+  * { box-sizing:border-box; }
+  html, body { margin:0; padding:0; height:100%; overflow:hidden; background:#fff; }
+  body { font:13px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; color:var(--ink); }
+  /* 只有顶部 40px 可见（下方被站点视图遮住），其余留白 */
+  .bar { display:flex; align-items:center; gap:6px; height:40px; padding:0 8px;
+         background:var(--bg); border-bottom:1px solid var(--line); user-select:none; }
+  button { width:28px; height:28px; display:flex; align-items:center; justify-content:center;
+           font:15px/1 -apple-system,"Segoe UI",sans-serif; color:var(--ink);
+           background:#fff; border:1px solid var(--line); border-radius:7px; cursor:pointer; padding:0; }
+  button:hover:not(:disabled) { background:var(--hover); }
+  button:active:not(:disabled) { transform:translateY(1px); }
+  button:disabled { opacity:.35; cursor:default; }
+  #url { flex:1; min-width:0; font-size:12px; color:var(--mut);
+         white-space:nowrap; overflow:hidden; text-overflow:ellipsis; padding:0 4px; }
+  .sep { width:1px; height:18px; background:var(--line); margin:0 2px; }
+</style>
+</head>
+<body>
+<div class="bar">
+  <button id="back" title="返回上一页" aria-label="返回上一页">←</button>
+  <button id="fwd" title="前进" aria-label="前进" disabled>→</button>
+  <button id="reload" title="刷新当前页" aria-label="刷新">⟳</button>
+  <span class="sep"></span>
+  <span id="url" title="">—</span>
+</div>
+<script>
+const els = {
+  back: document.getElementById('back'),
+  fwd: document.getElementById('fwd'),
+  reload: document.getElementById('reload'),
+  url: document.getElementById('url'),
+};
+function label(u) {
+  if (!u) return '—';
+  try {
+    const x = new URL(u);
+    if (!/^https?:$/.test(x.protocol)) return u.slice(0, 120);
+    return x.host + (x.pathname === '/' ? '' : x.pathname) + (x.search ? x.search : '');
+  } catch (e) { return u.slice(0, 120); }
+}
+function render(s) {
+  const st = s || {};
+  els.back.disabled = !st.canBack;
+  els.fwd.disabled = !st.canForward;
+  els.url.textContent = label(st.url);
+  els.url.title = st.url || '';
+  // 刻意不动 document.title：窗口标题要固定成「拼多多（登录窗口）」这类业务名，
+  // 跟着网址变反而让人认不出窗口（v0.3.15 自查时踩到过）。
+}
+if (window.xshFrame) {
+  window.xshFrame.onState(render);
+  window.xshFrame.ready();
+  els.back.onclick = () => window.xshFrame.nav('back');
+  els.fwd.onclick = () => window.xshFrame.nav('forward');
+  els.reload.onclick = () => window.xshFrame.nav('reload');
+} else {
+  // preload 没起来时不要让按钮变成哑巴：至少给个可见提示
+  els.url.textContent = '工具栏未就绪（preload 未加载）';
+}
+</script>
+</body>
+</html>

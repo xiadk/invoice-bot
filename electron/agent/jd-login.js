@@ -17,7 +17,8 @@
  * 按账号隔离：每个看板账号一个持久分区（persist:jd-<uid>），
  *   任一账号登录后不再影响其他账号（1688 / 拼多多 踩过的坑）。
  */
-const { BrowserWindow, session } = require('electron');
+const { session } = require('electron');
+const siteFrame = require('../ui/site-frame');
 
 const PARTITION = 'persist:jd';
 const REAL_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
@@ -64,8 +65,9 @@ function getWindow(uid) {
   if (exist && !exist.isDestroyed()) return exist;
   const part = session.fromPartition(partition);
   try { part.setUserAgent(REAL_UA); } catch (e) { /* 忽略 */ }
-  const win = new BrowserWindow({
-    show: false, width: 1180, height: 820, title: '京东万商', autoHideMenuBar: true,
+  // 带顶部工具栏的网站窗口（← 返回 / → 前进 / ⟳ 刷新 + 网址），返回的是兼容 BrowserWindow 的代理
+  const win = siteFrame.create({
+    show: false, width: 1180, height: 820, title: '京东万商',
     webPreferences: {
       partition,
       nodeIntegration: false, contextIsolation: true, sandbox: true, webSecurity: true,
