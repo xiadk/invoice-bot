@@ -1787,11 +1787,6 @@
 
         <!-- 商品同步（仅超管）：选择品牌方后拉取牵牛花商品，写入该品牌方的商品库 -->
         <el-dialog title="商品同步 · 选择品牌方" :visible.sync="product.syncDlg.visible" width="540px" append-to-body>
-          <div class="form-tip" style="margin-bottom:10px">
-            每个品牌方有独立的牵牛花账号，拉取到的商品写入该品牌方（同品牌下所有用户共享一套商品数据）。
-            同步分两轮：<b>先拉全部「正常采购」商品，拉完再拉全部「停止采购」商品</b>（停采商品同样入库，可在商品列表按状态看到，并单独统计货值）。
-            单个品牌每轮约 170 页、每页停 1 秒；两轮下来约 8~10 分钟。同步会<b>覆盖更新</b>采购价 / 可用库存 / 在途库存 / 30天销量 / 采购状态 / 主图。
-          </div>
           <el-checkbox-group v-model="product.syncDlg.brandIds">
             <div v-for="b in product.syncDlg.brandsQnh" :key="b.id"
                  style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
@@ -2291,10 +2286,6 @@
             <span class="fb-spacer"></span>
             <span class="loginid">显示 {{ filteredUsers.length }} / {{ users.length }} 个账号</span>
           </div>
-          <div class="form-tip" style="margin-bottom:10px">
-            开票抬头属于<b>用户信息</b>，在这里按账号逐个维护：<b>登录账号 = 公司全称</b>，点某行的「编辑」即可改公司全称 / 纳税人识别号 / 收票邮箱。
-            催收话术里的 {companyName} / {taxNo} / {email} 会按<b>该账号自己的抬头</b>取值。
-          </div>
           <el-table :data="filteredUsers" size="small" border style="width:100%" empty-text="加载中...">
             <el-table-column prop="id" label="ID" width="56"></el-table-column>
             <el-table-column label="账号" width="150">
@@ -2409,19 +2400,11 @@
       <!-- ══════════ 员工管理（v0.2.104，仅主体账号可见） ══════════ -->
       <div v-show="page === 'staff'" id="page-staff">
         <div class="page-bar">
-          <span class="pb-info">
-            员工账号是<b>菜单受限的操作员</b>：登录后看到的退单 / 商品 / 补货等数据与<b>你完全同一套</b>，
-            区别只在能看到哪些菜单。员工<b>不能再建员工</b>，也看不到本页。
-          </span>
           <span class="pb-actions">
             <el-button size="small" @click="loadStaff">刷新</el-button>
             <el-button size="small" type="primary" @click="openStaffCreate">+ 新增员工</el-button>
           </span>
         </div>
-
-        <el-alert type="info" :closable="false" show-icon style="margin-bottom:12px"
-                  :title="'所属主体账号：' + ((staffOwner && staffOwner.username) || '—') + (staffOwner && staffOwner.brandName ? '（品牌方：' + staffOwner.brandName + '）' : '')"
-                  description="员工的有效期跟随你的账号：你的账号到期或被停用后，所有员工账号会同时无法登录。"></el-alert>
 
         <el-card shadow="never" class="section-card">
           <div slot="header">
@@ -2500,10 +2483,6 @@
               </div>
             </el-form-item>
           </el-form>
-          <div class="form-tip">
-            员工与你共用同一套数据，所以<b>退单、商品这些菜单只是「能看哪块」</b>，不是数据隔离。
-            默认全部关闭，按岗位勾选即可（例如售后专员只勾「商品售后」）。
-          </div>
           <span slot="footer">
             <el-button size="small" @click="staffDlg.visible = false">取消</el-button>
             <el-button size="small" type="primary" :loading="staffDlg.saving" @click="saveStaff">保存</el-button>
@@ -2767,8 +2746,7 @@
         <el-dialog :title="'退款原因 · ' + (reasonDlg.refundNo || '')"
                    :visible.sync="reasonDlg.visible" width="560px" append-to-body>
           <div class="form-tip" style="margin-bottom:10px">
-            平台原始原因（只读）：{{ reasonDlg.raw || '—' }}<br>
-            下面这一栏是本系统自己记的原因，<b>每天同步不会覆盖</b>；清空后页面回落到平台原值。
+            平台原始原因（只读）：{{ reasonDlg.raw || '—' }}
           </div>
           <el-input type="textarea" :rows="3" v-model="reasonDlg.value" maxlength="512" show-word-limit
                     placeholder="如：顾客嫌日期不新鲜，已退款"></el-input>
@@ -4424,10 +4402,6 @@
 
   <!-- ══════════ 品牌方管理（超管：新增 / 改名 / 启停） ══════════ -->
   <el-dialog title="品牌方管理" :visible.sync="brandDlg.visible" width="660px" append-to-body>
-    <div class="form-tip" style="margin-bottom:10px">
-      商品数据按<b>品牌方</b>共享：同一品牌方下的用户看到同一套商品（由「商品同步」从牵牛花拉取）。
-      每个品牌方对应一套牵牛花账号，新增后需在「商品列表 → 商品同步」里为该品牌方登录牵牛花。
-    </div>
     <div style="display:flex;gap:8px;margin-bottom:12px;align-items:center">
       <el-input v-model="brandDlg.newName" size="small" placeholder="新品牌方名称，如：优购哆" style="width:180px"></el-input>
       <el-input v-model="brandDlg.newNote" size="small" placeholder="备注（可选，如牵牛花账号）" style="width:220px"></el-input>
@@ -4460,15 +4434,6 @@
   <!-- ══════════ 菜单权限（逐用户开放功能） ══════════ -->
   <el-dialog :title="'菜单权限 · ' + (menuPermit.username || '')" :visible.sync="menuPermit.visible"
              width="460px" append-to-body>
-    <div class="form-tip" style="margin-bottom:12px">
-      <template v-if="menuPermit.scope === 'staff'">
-        员工能看到的菜单<b>只能是你自己已经开通的</b>（未开通的不会出现在这里，需要开请找超级管理员）。
-        勾选后该员工登录即可看到对应菜单。
-      </template>
-      <template v-else>
-        勾选后该账号登录即可看到对应菜单；超管默认拥有全部菜单，无需设置。
-      </template>
-    </div>
     <div class="menu-perm-row" v-for="m in menuPermitRows" :key="m.key">
       <div>
         <b>{{ m.label }}</b>
