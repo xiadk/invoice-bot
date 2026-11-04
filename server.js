@@ -74,7 +74,7 @@ const jagent = require('./lib/jd-agent');
 const qiniu = require('./lib/qiniu');
 const waybill = require('./lib/waybill');
 const replenishOrder = require('./lib/replenish-order');
-const afterSales = require('./lib/supplier-after');
+const afterSales = require('./lib/product-after');
 const pdd = require('./lib/pdd');
 const pddOrders = require('./lib/pdd-orders');
 const aliOrders = require('./lib/ali-orders');
@@ -660,7 +660,7 @@ const MENU_PERMS = {
   billing: { col: 'billing_enabled', label: '账单', field: 'billingEnabled' },
   replenish: { col: 'replenish_enabled', label: '补货', field: 'replenishEnabled' },
   price: { col: 'price_enabled', label: '平台取价', field: 'priceEnabled' },
-  after: { col: 'after_sale_enabled', label: '供应商售后', field: 'afterSaleEnabled' },
+  after: { col: 'after_sale_enabled', label: '商品售后', field: 'afterSaleEnabled' },
   supplier: { col: 'supplier_enabled', label: '供应商管理', field: 'supplierEnabled' },
   waybill: { col: 'waybill_enabled', label: '货单管理', field: 'waybillEnabled' },
   replenishOrder: { col: 'replenish_order_enabled', label: '补货单管理', field: 'replenishOrderEnabled' },
@@ -1192,14 +1192,14 @@ const OP_ACTIONS = {
   'waybill.supplier_delete': (d) => `删除供应商「${d.name || ''}」`
     + (d.localCleared ? `（顺带清空了 ${d.localCleared} 个商品的本地价供应商标记）` : ''),
   'waybill.supplier_merge': (d) => `迁移供应商「${d.fromName || ''}」→「${d.toName || ''}」`
-    + `（货单 ${d.waybillN || 0} 张、供应商售后 ${d.afterN || 0} 条、补货单 ${d.orderN || 0} 张、`
+    + `（货单 ${d.waybillN || 0} 张、补货单 ${d.orderN || 0} 张、`
     + `商品本地价 ${(Number(d.brandLocalN) || 0) + (Number(d.itemLocalN) || 0)} 个${d.deleted ? '，旧供应商已删除' : ''}）`,
   'waybill.create': (d) => `新增货单（供应商「${d.supplierName || ''}」，金额 ${d.amount == null ? '' : d.amount}，${d.billDate || ''}，${d.images || 0} 张图）`,
   'waybill.delete': (d) => `删除货单（供应商「${d.supplierName || ''}」，${d.billDate || ''}）`,
   'waybill.upload_token': (d) => `生成了货单图片的手机上传链接（5 分钟有效）`,
-  'after.create': (d) => `新增供应商售后（供应商「${d.supplierName || ''}」，金额 ${d.amount == null ? '' : d.amount}，${d.afterDate || ''}）`,
-  'after.delete': (d) => `删除供应商售后（供应商「${d.supplierName || ''}」，${d.afterDate || ''}）`,
-  'after.status': (d) => `推进了供应商售后状态到「${d.statusLabel || ''}」（供应商「${d.supplierName || ''}」，凭证 ${d.imageKey || ''}）`,
+  'after.create': (d) => `新增商品售后（「${d.goodsName || ''}」SKU ${d.sku || ''}，数量 ${d.qty == null ? '' : d.qty}，${d.afterDate || ''}）`,
+  'after.delete': (d) => `删除商品售后（「${d.goodsName || ''}」SKU ${d.sku || ''}，${d.afterDate || ''}）`,
+  'after.status': (d) => `商品售后状态改为「${d.statusLabel || ''}」（「${d.goodsName || ''}」SKU ${d.sku || ''}${d.waybillNo ? '，运单号 ' + d.waybillNo : ''}）`,
   'qnh.view': () => '打开了退单列表页',
   'pdd.apply.start': (d) => `发起了批量申请发票任务（${d.total || 0} 单${d.invalid ? `，跳过 ${d.invalid} 单` : ''}）`,
   'pdd.apply': (d) => d.ok === false
@@ -5653,30 +5653,26 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 404, { error: '未知的补货单接口' });
     }
 
-    // ── 供应商售后（v0.3.2）────────────────────────────────────────────────
-    //    售后管理菜单整页替换为「针对供应商的售后」，与牵牛花退单脱钩：
-    //    旧 /api/qnh/after-sales/* 一族已下线（数据保留在库），这里换新接口。
-    //    权限沿用 after_sale_enabled 列（超管恒可用）；数据归属同供应商/货单（tenantOf）。
+    // ── 商品售后（v0.3.25）────────────────────────────────────────────────
+    //    售后菜单整页换成「商品售后」：台账主体是商品（名称 + SKU + 数量 + 原因），
+    //    不再挂供应商/金额；旧的 supplier_after 已停用（清理见 sql/upgrade/0.3.25-商品售后.sql）。
+    //    状态四档人工变更：已退货必填运单号，已退款必传截图（手机扫码拍照 / 界面截图粘贴）。
+    //    权限沿用 after_sale_enabled 列（超管恒可用）；数据归属同商品/货单（tenantOf）。
     if (p.startsWith('/api/after/')) {
       const canAfter = isAdmin || !!Number(user.after_sale_enabled);
-      if (!canAfter) return sendJson(res, 403, { error: '未开启供应商售后权限，请联系超级管理员' });
-      const afUid = tenantId;   // 数据归属用户（员工录入归属所属主体，写入合法性由 writeGuard 判）
+      if (!canAfter) return sendJson(res, 403, { error: '未开启商品售后权限，请联系超级管理员' });
+      const afUid = tenantId;   // 数据归属用户（员工操作归属所属主体，写入合法性由 writeGuard 判）
 
-      // 供应商下拉：与货单/供应商管理共用同一本字典（售后页筛选与新增都用它）
-      if (method === 'GET' && p === '/api/after/suppliers') {
-        return sendJson(res, 200, { rows: await afterSales.allSuppliers(afUid) });
-      }
-
-      // 列表：按供应商 / 状态 / 日期区间 / 关键字，带四档计数与凭证（现签 1 小时链接）
+      // 列表：商品名称 / SKU / 状态 / 日期区间，带四档计数与凭证（现签 1 小时链接）
       if (method === 'GET' && p === '/api/after/list') {
         const q = url.searchParams;
         const [list, counts] = await Promise.all([
           afterSales.listAfter({
-            supplier: q.get('supplier') || '',
+            goodsName: q.get('goodsName') || '',
+            sku: q.get('sku') || '',
             status: q.get('status') == null ? '' : q.get('status'),
             from: q.get('from') || '',
             to: q.get('to') || '',
-            keyword: q.get('keyword') || '',
             page: q.get('page'),
             size: q.get('size'),
             userId: afUid,
@@ -5686,23 +5682,37 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 200, Object.assign(list, { counts, statuses: afterSales.AFTER_STATUSES }));
       }
 
-      // 单条详情（凭证弹窗直接用列表里带出的 attaches，这个接口留给刷新/外链场景）
-      if (method === 'GET' && p === '/api/after/detail') {
-        const out = await afterSales.getAfter({ userId: afUid, id: url.searchParams.get('id') });
-        return sendJson(res, out.ok ? 200 : 404, out);
+      // 商品模糊搜索（新增售后用）：只搜品牌商品库 brand_product。
+      //   员工/普通账号锁定「所属主体的品牌」—— 用 tenantId 反查，避免员工自己的 brand_id 为空时搜错品牌。
+      if (method === 'GET' && p === '/api/after/products') {
+        const bo = user.role === 'admin'
+          ? brandOf(req, url, user)
+          : { brandId: await brandIdOfUser(afUid), all: false };
+        return sendJson(res, 200, await afterSales.searchProducts({
+          brandId: bo.brandId, all: bo.all,
+          keyword: url.searchParams.get('q') || '',
+          limit: url.searchParams.get('limit'),
+        }));
       }
 
-      // 新增：供应商（字典必选）+ 内容 + 金额 + 售后日期 + 备注
+      // 新增：商品名称 + SKU + 数量 + 售后原因 + 售后日期 + 商品实物图（至少 1 张）
+      //   图片先经上传令牌暂存在 waybill_image（token 维度），保存成功后再搬到 qnh_after_attach；
+      //   失败时暂存行留着，用户补完表单重试不用重拍。
       if (method === 'POST' && p === '/api/after/create') {
         const body = await readBody(req);
         writeGuard();
+        const token = String(body.token || '');
+        const images = token ? await waybill.tokenObjects({ userId: afUid, token }) : [];
         const out = await afterSales.createAfter({
-          userId: afUid, supplierId: body.supplierId, goodsDesc: body.goodsDesc,
-          amount: body.amount, afterDate: body.afterDate, note: body.note, operator: user.username,
+          userId: afUid,
+          goodsName: body.goodsName, sku: body.sku, qty: body.qty,
+          afterReason: body.afterReason, afterDate: body.afterDate, note: body.note,
+          operator: user.username, images,
         });
+        if (out.ok && token) await waybill.dropTokenImages({ userId: afUid, token });
         if (out.ok) await logOp(user, 'after.create', {
-          tenantId: afUid, id: out.id, supplierName: out.supplierName,
-          amount: body.amount, afterDate: body.afterDate,
+          tenantId: afUid, id: out.id, goodsName: out.goodsName, sku: out.sku,
+          qty: out.qty, afterDate: body.afterDate,
         });
         return sendJson(res, out.ok ? 200 : 400, out);
       }
@@ -5713,36 +5723,93 @@ const server = http.createServer(async (req, res) => {
         writeGuard();
         const out = await afterSales.deleteAfter({ userId: afUid, id: body.id });
         if (out.ok) await logOp(user, 'after.delete', {
-          tenantId: afUid, id: out.id, supplierName: out.supplierName, afterDate: body.afterDate,
+          tenantId: afUid, id: out.id, goodsName: out.goodsName, sku: out.sku, afterDate: out.afterDate,
         });
         return sendJson(res, out.ok ? 200 : 400, out);
       }
 
-      // 一键推进下一档：服务端按「当前 +1」算状态，凭证图必传（先传七牛拿 key）。
-      //   ⚠ 先确认记录存在且未到已退款，再传图 —— 否则被拒的请求会把图白白传上七牛留成孤儿。
+      // 状态变更：改到「已退款」需要一张退款截图（先取令牌里的图，再落库）
+      //   ⚠ 先校验记录与状态，再取图 —— 否则被拒的请求白占七牛空间。
       if (method === 'POST' && p === '/api/after/status') {
-        const body = await readBody(req, 9e6);   // 5MB 图片 base64 后约 6.7MB
+        const body = await readBody(req);
         writeGuard();
         const pre = await afterSales.getAfter({ userId: afUid, id: body.id });
         if (!pre.ok) return sendJson(res, 404, { ok: false, error: pre.error });
-        if (Number(pre.after.status) >= 3) {
-          return sendJson(res, 400, { ok: false, error: '这条售后已到「已退款」，流程结束' });
+        const next = Number(body.status);
+        if (!afterSales.AFTER_STATUSES.some((x) => x.value === next)) {
+          return sendJson(res, 400, { ok: false, error: '状态只能是 待处理 / 已申请 / 已退货 / 已退款' });
         }
-        const img = qiniu.decodeImagePayload(body.image || body.imageBase64);
-        if (!img.ok) return sendJson(res, 400, { ok: false, error: img.error });
-        const up = await qiniu.uploadImage(img.buffer, { mime: img.mime, userId: afUid, prefix: 'after-sale' });
-        if (!up.ok) return sendJson(res, 400, { ok: false, error: up.error });
-        const out = await afterSales.advanceAfter({
-          userId: afUid, id: body.id, note: body.note,
-          imageKey: up.key, imageMime: up.mime, imageSize: up.size, operator: user.username,
+        const curStatus = Number(pre.after.status) || 0;
+        if (next === 2 && !String(body.waybillNo || '').trim() && !pre.after.waybillNo) {
+          return sendJson(res, 400, { ok: false, error: '改到「已退货」必须填运单号' });
+        }
+        const token = String(body.token || '');
+        let images = [];
+        // 已经是「已退款」再保存（只改备注）不再强制补图，原来的截图还在凭证里
+        if (next === 3 && curStatus !== 3) {
+          images = token ? await waybill.tokenObjects({ userId: afUid, token }) : [];
+          if (!images.length) return sendJson(res, 400, { ok: false, error: '改到「已退款」必须上传一张退款截图' });
+        }
+        const out = await afterSales.setStatus({
+          userId: afUid, id: body.id, status: next, waybillNo: body.waybillNo,
+          note: body.note, operator: user.username, images,
         });
+        if (out.ok && next === 3 && token) await waybill.dropTokenImages({ userId: afUid, token });
         if (out.ok) await logOp(user, 'after.status', {
-          tenantId: afUid, id: out.id, statusLabel: out.statusLabel, imageKey: out.imageKey,
+          tenantId: afUid, id: out.id, goodsName: pre.after.goodsName, sku: pre.after.sku,
+          statusLabel: out.statusLabel, waybillNo: out.waybillNo,
         });
         return sendJson(res, out.ok ? 200 : 400, out);
       }
 
-      return sendJson(res, 404, { error: '未知的供应商售后接口' });
+      // —— 售后图片：手机扫码拍照 / 电脑粘贴截图，都走同一个 10 分钟临时令牌 ——
+      //   复用货单那套上传表（waybill_upload_token + waybill_image 暂存），token 唯一、互不干扰。
+      if (method === 'POST' && p === '/api/after/upload-token') {
+        writeGuard();
+        const out = await waybill.createUploadToken({ userId: afUid, operator: user.username, ttlSec: 600 });
+        if (!out.ok) return sendJson(res, 400, out);
+        const link = serverUrlOf(req) + '/m-upload?t=' + out.token + '&k=after';
+        return sendJson(res, 200, Object.assign(out, { link }));
+      }
+      if (method === 'GET' && p === '/api/after/upload-token') {
+        const token = url.searchParams.get('token') || '';
+        const out = await waybill.uploadSession(token);
+        if (!out.ok) return sendJson(res, 200, out);
+        if (Number(out.userId) !== Number(afUid)) {
+          return sendJson(res, 403, { error: '这个上传链接不属于当前账号' });
+        }
+        const imgs = await waybill.tokenImages({ userId: afUid, token });
+        return sendJson(res, 200, Object.assign(out, { images: imgs }));
+      }
+      // 电脑端粘贴/拖拽上传（已退款截图只允许扫码 + 粘贴，所以这个接口是主要通道之一）
+      if (method === 'POST' && p === '/api/after/upload') {
+        writeGuard();
+        const body = await readBody(req, 9e6);   // 5MB 图片 base64 后约 6.7MB
+        const sess = await waybill.uploadSession(body.token);
+        if (!sess.ok) return sendJson(res, 400, sess);
+        if (Number(sess.userId) !== Number(afUid)) {
+          return sendJson(res, 403, { error: '这个上传链接不属于当前账号' });
+        }
+        const out = await waybill.uploadImageToToken({
+          token: body.token, dataUrl: body.image || body.imageBase64,
+          ip: req.headers['x-forwarded-for'] || (req.socket && req.socket.remoteAddress) || '',
+        });
+        return sendJson(res, out.ok ? 200 : 400, out);
+      }
+
+      // 传错了撤一张（只删暂存行，七牛对象留着）
+      if (method === 'POST' && p === '/api/after/upload-remove') {
+        writeGuard();
+        const body = await readBody(req);
+        const sess = await waybill.uploadSession(body.token);
+        if (!sess.ok) return sendJson(res, 400, sess);
+        if (Number(sess.userId) !== Number(afUid)) {
+          return sendJson(res, 403, { error: '这个上传链接不属于当前账号' });
+        }
+        return sendJson(res, 200, await waybill.removeTokenImage({ userId: afUid, id: body.id }));
+      }
+
+      return sendJson(res, 404, { error: '未知的商品售后接口' });
     }
 
     // ── 牵牛花：退单列表 / 实时毛利（按「菜单权限」分别放行；超级管理员始终可用）──
@@ -5755,7 +5822,7 @@ const server = http.createServer(async (req, res) => {
       const canAfterSale = isAdmin || !!Number(user.after_sale_enabled);
       const qnhUid = tenantId;   // 本块所有读写的「数据归属用户」
       const profitApi = p === '/api/qnh/profit' || p === '/api/qnh/profit/pull' || p === '/api/qnh/profit/trend';
-      // 退款原因在退单列表改（供应商售后 v0.3.2 起不再读退单，旧售后页的「改原因」已下线）
+      // 退款原因在退单列表改（商品售后 v0.3.25 起不再读退单，旧售后页的「改原因」已下线）
       const reasonApi = p === '/api/qnh/refunds/reason';
       if (reasonApi) {
         if (!canRefund) return sendJson(res, 403, { error: '未开启退单列表权限，请联系超级管理员' });

@@ -275,13 +275,13 @@ async function ensureQnhSchema(q) {
       ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='手工登记的售后（售后管理页「新增售后」）'",
 
     // 售后凭证图片（v0.2.108）：每次状态变更必须留一张，存七牛对象 key（不含域名）。
-    //   行键 row_key 与列表一致：ref:<退单号> / man:<手工售后id>；
+    //   行键 row_key 与列表一致：pa:<商品售后id> / ref:<退单号> / man:<手工售后id>；
     //   展示时由 lib/qiniu.js 的 signUrl() 现签私有空间临时链接，库里不存 URL
     //   （换域名、换空间都不用改历史数据）。
     'CREATE TABLE IF NOT EXISTS `qnh_after_attach` (' +
       "  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT," +
       "  `user_id` INT NOT NULL DEFAULT 1 COMMENT '数据归属用户（员工操作时记所属主体账号）'," +
-      "  `row_key` VARCHAR(64) NOT NULL COMMENT '售后行键：ref:<退单号> / man:<手工售后id>'," +
+      "  `row_key` VARCHAR(64) NOT NULL COMMENT '售后行键：pa:<商品售后id> / ref:<退单号> / man:<手工售后id>'," +
       "  `status` TINYINT NOT NULL DEFAULT 0 COMMENT '本次变更后的处理状态：0待处理 1已申请 2已退货 3已退款'," +
       "  `object_key` VARCHAR(512) NOT NULL COMMENT '七牛对象 key（不含域名，展示时签名）'," +
       "  `mime` VARCHAR(64) DEFAULT NULL COMMENT '图片类型（image/png 等）'," +
@@ -1534,21 +1534,23 @@ async function migrate(conn, dbName) {
     }
   }
 
-  // ── 供应商售后台账（v0.3.2）──
-  //   售后管理菜单整页替换为「针对供应商的售后」，不再读牵牛花退单。
-  //   凭证图继续存 qnh_after_attach（row_key 用 sup:<id>），那张表 v0.2.108 就有，不用动。
-  //   旧的 qnh_refund_order 售后列 / qnh_after_manual 保留在库，只是界面不再展示。
-  if (!(await tableExists('supplier_after'))) {
+  // ── 商品售后台账（v0.3.25）──
+  //   售后菜单整页换成「商品售后」：主体是商品（名称 + SKU + 数量 + 原因），不再挂供应商/金额。
+  //   凭证图继续存 qnh_after_attach（row_key 用 pa:<id>）：
+  //     status=0 新建时的商品实物图，status=3 已退款截图。
+  //   旧的 supplier_after 已停用（v0.3.25 起代码不再引用），清理脚本见 sql/upgrade/0.3.25-商品售后.sql。
+  if (!(await tableExists('product_after'))) {
     await q(
-      'CREATE TABLE `supplier_after` (' +
+      'CREATE TABLE `product_after` (' +
       '  `id`            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,' +
       "  `user_id`       INT           NOT NULL DEFAULT 1   COMMENT '数据归属用户（员工录入时是所属主体账号）'," +
-      "  `supplier_id`   INT           NOT NULL DEFAULT 0   COMMENT '供应商（supplier.id，0=供应商已被删）'," +
-      "  `supplier_name` VARCHAR(64)   NOT NULL DEFAULT ''  COMMENT '登记时的供应商名称快照（兜底展示）'," +
-      "  `goods_desc`    VARCHAR(512)  NOT NULL DEFAULT ''  COMMENT '售后内容（商品/事由文字描述）'," +
-      "  `amount`        DECIMAL(12,2) NOT NULL DEFAULT 0.00 COMMENT '售后金额（元）'," +
+      "  `goods_name`    VARCHAR(255)  NOT NULL DEFAULT ''  COMMENT '商品名称（选中商品自动回填，可手改）'," +
+      "  `sku`           VARCHAR(64)   NOT NULL DEFAULT ''  COMMENT '商品 SKU'," +
+      "  `qty`           INT           NOT NULL DEFAULT 1   COMMENT '售后数量（件）'," +
+      "  `after_reason`  VARCHAR(255)  DEFAULT NULL         COMMENT '售后原因'," +
       "  `after_date`    DATE          NOT NULL             COMMENT '售后日期（按此列查询与排序）'," +
-      "  `status`        TINYINT       NOT NULL DEFAULT 0   COMMENT '处理状态：0待处理 1已申请 2已退货 3已退款（人工推进，一键下一档）'," +
+      "  `status`        TINYINT       NOT NULL DEFAULT 0   COMMENT '处理状态：0待处理 1已申请 2已退货 3已退款（人工变更）'," +
+      "  `waybill_no`    VARCHAR(64)   DEFAULT NULL         COMMENT '退货运单号（状态改到「已退货」时必填）'," +
       "  `note`          VARCHAR(255)  DEFAULT NULL         COMMENT '备注'," +
       "  `handled_by`    VARCHAR(64)   DEFAULT NULL         COMMENT '最后处理人（登录账号）'," +
       '  `handled_at`    DATETIME      DEFAULT NULL         COMMENT \'最后处理时间\',' +
@@ -1556,11 +1558,11 @@ async function migrate(conn, dbName) {
       "  `created_at`    DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '新建日期'," +
       '  `updated_at`    DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,' +
       '  PRIMARY KEY (`id`),' +
-      '  KEY `idx_sa_user_date`   (`user_id`, `after_date`),' +
-      '  KEY `idx_sa_user_sup`    (`user_id`, `supplier_id`),' +
-      '  KEY `idx_sa_user_status` (`user_id`, `status`)' +
+      '  KEY `idx_pa_user_date`   (`user_id`, `after_date`),' +
+      '  KEY `idx_pa_user_sku`    (`user_id`, `sku`),' +
+      '  KEY `idx_pa_user_status` (`user_id`, `status`)' +
       ') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci' +
-      "  COMMENT='供应商售后台账（供应商 + 内容 + 金额 + 售后日期 + 凭证）'"
+      "  COMMENT='商品售后台账（商品名称/SKU + 数量 + 原因 + 状态 + 运单号 + 凭证）'"
     );
   }
 

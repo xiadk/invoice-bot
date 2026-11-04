@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="format-detection" content="telephone=no">
-<title>上传货单图片</title>
+<title>上传凭证图片</title>
 <style>
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   :root { --bg:#f5f7fa; --card:#fff; --text:#1f2d3d; --text2:#7b8794; --line:#e4e7ed;
@@ -51,7 +51,7 @@
 <body>
 <div class="wrap">
   <header>
-    <h1>上传货单图片</h1>
+    <h1 id="h1">上传图片</h1>
     <p class="sub" id="sub">正在校验链接…</p>
   </header>
 
@@ -64,7 +64,7 @@
     <input type="file" id="file" accept="image/*" multiple hidden>
     <p class="tip">
       可一次选多张，图片会自动压缩后上传，每张不超过 5MB。<br>
-      传完回到电脑上点「保存货单」即可，这些图会挂到这张货单上。
+      <span id="hint">传完回到电脑上点「保存」即可，这些图会挂到当前记录上。</span>
     </p>
     <div class="list" id="list"></div>
   </div>
@@ -76,7 +76,14 @@
 <script>
 (function () {
   'use strict';
-  var T = new URLSearchParams(location.search).get('t') || '';
+  var QS = new URLSearchParams(location.search);
+  var T = QS.get('t') || '';
+  // k=after 是「商品售后」的上传链接（货单链接不带这个参数），只换文案，上传流程完全一样
+  var KIND = QS.get('k') || '';
+  if (KIND === 'after') {
+    document.getElementById('h1').textContent = '上传售后凭证';
+    document.getElementById('hint').textContent = '传完回到电脑上点「保存」即可，这些图会挂到这条售后记录上。';
+  }
   var MAXEDGE = 1600;          // 最长边压到这个尺寸（跟电脑端的售后凭证一致）
   var QUALITY = 0.85;
   var leftSec = 0;
@@ -247,7 +254,7 @@
       leftSec = Number(d.leftSec) || 0;
       count = Number(d.imgCount) || 0;
       max = Number(d.max) || 9;
-      sub.textContent = '传完回到电脑上点「保存货单」即可';
+      sub.textContent = KIND === 'after' ? '传完回到电脑上点「保存」即可' : '传完回到电脑上点「保存货单」即可';
       sub.className = 'sub';
       main.hidden = false;
       renderClock();
