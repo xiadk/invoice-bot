@@ -1,8 +1,8 @@
 /**
  * tmp-preview.js — 用看板的真实数据渲染「将要发送」的催收消息（不联网、不发送）
  * 逻辑与 server.js doSend() 完全一致：
- *   {amount}  = 该会员名的待开票金额
- *   {orderId} = 该会员名 invoice_state !== 'issued' 的全部订单号
+ *   {amount}  = 该会员名的待开票金额（已排除交易关闭的订单）
+ *   {orderId} = 该会员名 invoice_state !== 'issued' 且非交易关闭的全部订单号
  */
 const fs = require('fs');
 const { buildMessages } = require('./lib/sender');
@@ -18,7 +18,9 @@ const { buildMessages } = require('./lib/sender');
     const m = all.find((x) => x.loginId === lid);
     if (!m) { console.log('!! 找不到会员名', lid); continue; }
     const det = await (await fetch(base + '/api/seller-detail?loginId=' + encodeURIComponent(lid))).json();
-    const toRemind = det.orders.filter((o) => o.invoice_state !== 'issued');
+    const toRemind = det.orders.filter(
+      (o) => o.invoice_state !== 'issued' && !String(o.order_status || '').includes('关闭')
+    );
     const msgSeller = {
       loginId: m.sellerLogin,
       amount: Number(m.pendingAmount),

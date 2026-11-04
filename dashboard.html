@@ -627,7 +627,7 @@
           <el-table-column type="expand">
             <template slot-scope="p">
               <div class="members-box">
-                <div class="members-head">该公司下的 1688 会员名（店铺）—— 催收按会员名分别发送：{amount}=该会员名的待开票金额，{orderId}=该会员名「未开票」的全部订单号</div>
+                <div class="members-head">该公司下的 1688 会员名（店铺）—— 催收按会员名分别发送：{amount}=该会员名的待开票金额，{orderId}=该会员名「未开票」的全部订单号（交易关闭的既不计算金额、也不进消息）</div>
                 <div class="member" v-for="m in p.row.members" :key="m.loginId">
                   <div class="member-line">
                     <el-checkbox :value="!!selected[m.loginId]" :disabled="!m.canSend || readonly"
@@ -636,7 +636,8 @@
                     <div class="m-name">
                       <b>{{ m.sellerLogin || m.loginId }}</b>
                       <el-tag v-if="isSent(m)" size="mini" type="success" style="margin-left:6px">已催收</el-tag>
-                      <div class="loginid">{{ m.total }} 单 · {{ yuan(m.totalAmount) }}</div>
+                      <div class="loginid">{{ m.total }} 单 · {{ yuan(m.totalAmount) }}<span
+                        v-if="m.closedCount" :title="'交易关闭 ' + m.closedCount + ' 单 / ¥' + m.closedAmount + '：没成交，不计入待开票金额，也不会进催收消息'">（另有 {{ m.closedCount }} 单交易关闭未计入）</span></div>
                     </div>
                     <div class="m-kv">
                       <span class="kv-label">税务局已开票</span>
@@ -675,7 +676,7 @@
                     <div v-else-if="detailCache[m.loginId].error" style="color:#d32f2f;font-size:12px">加载失败：{{ detailCache[m.loginId].error }}</div>
                     <template v-else>
                       <div class="sec">
-                        <span>订单明细（共 {{ (detailCache[m.loginId].orders || []).length }} 单）· 商家线下开票可单个或「全部标记已开票」</span>
+                        <span>订单明细（共 {{ (detailCache[m.loginId].orders || []).length }} 单<span v-if="closedCntOf(detailCache[m.loginId])" class="loginid" style="font-weight:400">，其中 {{ closedCntOf(detailCache[m.loginId]) }} 单交易关闭不计入催收</span>）· 商家线下开票可单个或「全部标记已开票」</span>
                         <span class="row-actions" v-if="!readonly">
                           <el-button v-if="pendingCnt(detailCache[m.loginId])" size="mini" @click="markAll(m, 'confirm-all', pendingCnt(detailCache[m.loginId]))">全部标记已开票({{ pendingCnt(detailCache[m.loginId]) }})</el-button>
                           <el-button v-if="manualCntOf(detailCache[m.loginId])" size="mini" @click="markAll(m, 'cancel-all', manualCntOf(detailCache[m.loginId]))">取消人工确认({{ manualCntOf(detailCache[m.loginId]) }})</el-button>
@@ -689,12 +690,17 @@
                             <td>{{ yuan(o.pay_amount) }}</td>
                             <td>{{ fmtMinute(o.pay_time) }}</td>
                             <td>
-                              <el-tag size="mini" :type="o.invoice_state === 'issued' ? 'success' : (o.invoice_state === 'applying' ? 'warning' : 'danger')">{{ statusText(o.invoice_state) }}</el-tag>
+                              <el-tag v-if="isClosedOrder(o.order_status)" size="mini" type="info"
+                                      :title="'平台订单状态：' + o.order_status + '（没成交，不计入待开票金额，也不会进催收消息）'">交易关闭</el-tag>
+                              <el-tag v-else size="mini" :type="o.invoice_state === 'issued' ? 'success' : (o.invoice_state === 'applying' ? 'warning' : 'danger')">{{ statusText(o.invoice_state) }}</el-tag>
                               <el-tag v-if="o.state_source === 'manual'" size="mini" style="margin-left:4px">人工</el-tag>
                             </td>
                             <td v-if="!readonly">
-                              <el-button v-if="o.state_source === 'manual'" size="mini" @click="markOrder(m, o, 'cancel')">取消人工确认</el-button>
-                              <el-button v-else size="mini" @click="markOrder(m, o, 'confirm')">标记已开票</el-button>
+                              <span v-if="isClosedOrder(o.order_status)" class="muted" style="font-size:12px">无需开票</span>
+                              <template v-else>
+                                <el-button v-if="o.state_source === 'manual'" size="mini" @click="markOrder(m, o, 'cancel')">取消人工确认</el-button>
+                                <el-button v-else size="mini" @click="markOrder(m, o, 'confirm')">标记已开票</el-button>
+                              </template>
                             </td>
                           </tr>
                           <tr v-if="!(detailCache[m.loginId].orders || []).length"><td :colspan="readonly ? 4 : 5" class="muted">无订单</td></tr>
@@ -759,7 +765,10 @@
           <el-table-column prop="totalAmount" label="订单 / 金额" width="130" sortable="custom"
                            :sort-orders="['descending', 'ascending', null]"
                            :header-cell-style="{ cursor: 'pointer' }">
-            <template slot-scope="p">{{ p.row.total }} 单<br><span class="amount">{{ yuan(p.row.totalAmount) }}</span></template>
+            <template slot-scope="p">{{ p.row.total }} 单<br><span class="amount">{{ yuan(p.row.totalAmount) }}</span>
+              <div v-if="p.row.closedCount" class="loginid"
+                   :title="'交易关闭 ' + p.row.closedCount + ' 单 / ¥' + p.row.closedAmount + '：没成交，不计入订单金额与待开票金额'">关闭 {{ p.row.closedCount }} 单未计入</div>
+            </template>
           </el-table-column>
           <el-table-column label="已开票金额（税务局）" width="190">
             <template slot-scope="p">
@@ -2358,18 +2367,18 @@
             <b>用户列表</b> <span class="loginid">（{{ users.length }} 个账号）</span>
             <el-button size="mini" style="margin-left:10px" @click="loadUsers">刷新</el-button>
           </div>
-          <!-- 搜索：公司名称 / 税号 / 账号，三者任一模糊命中即显示 -->
+          <!-- 搜索：公司全称 / 登录账号 / 税号，三者任一模糊命中即显示 -->
           <div class="filter-bar">
             <span class="fb-label">搜索</span>
             <el-input v-model="userKw" size="small" style="width:300px" clearable
-                      placeholder="公司名称 / 税号 / 账号（模糊匹配）"></el-input>
+                      placeholder="公司全称 / 登录账号 / 税号（模糊匹配）"></el-input>
             <el-button size="small" @click="userKw = ''">重置</el-button>
             <span class="fb-spacer"></span>
             <span class="loginid">显示 {{ filteredUsers.length }} / {{ users.length }} 个账号</span>
           </div>
           <el-table :data="filteredUsers" size="small" border style="width:100%" empty-text="加载中...">
             <el-table-column prop="id" label="ID" width="56"></el-table-column>
-            <el-table-column label="账号" width="150">
+            <el-table-column label="登录账号" width="150">
               <template slot-scope="p"><b>{{ p.row.username }}</b><div v-if="p.row.mustChangePassword" class="loginid">需改密</div></template>
             </el-table-column>
             <el-table-column label="角色" width="130"><template slot-scope="p">
@@ -2395,7 +2404,7 @@
                 </template>
               </template>
             </el-table-column>
-            <el-table-column label="公司名称 / 抬头" min-width="170"><template slot-scope="p">{{ p.row.companyName || '—' }}<div v-if="p.row.note" class="loginid">{{ p.row.note }}</div></template></el-table-column>
+            <el-table-column label="公司全称" min-width="170"><template slot-scope="p">{{ p.row.companyFullName || '—' }}<div v-if="p.row.note" class="loginid">{{ p.row.note }}</div></template></el-table-column>
             <el-table-column label="税号" width="170"><template slot-scope="p"><span class="loginid">{{ p.row.taxNo || '—' }}</span></template></el-table-column>
             <el-table-column label="收票邮箱" width="170"><template slot-scope="p"><span class="loginid">{{ p.row.email || '—' }}</span></template></el-table-column>
             <el-table-column label="数据量" width="130"><template slot-scope="p"><span class="loginid">{{ p.row.role === 'admin' ? '系统账号 · 不承载业务数据' : p.row.orderCount + ' 单 / ' + p.row.mappingCount + ' 映射' }}</span></template></el-table-column>
@@ -2439,7 +2448,8 @@
         <el-dialog title="新增用户" :visible.sync="newUserDlg" width="640px" top="10vh" append-to-body>
           <el-form label-position="top" size="small">
             <el-row :gutter="12">
-              <el-col :xs="24" :md="16"><el-form-item label="公司全称（= 登录账号）*"><el-input v-model="newUser.company" placeholder="如：中山仕赫贸易有限公司"></el-input></el-form-item></el-col>
+              <el-col :xs="24" :md="8"><el-form-item label="登录账号 *"><el-input v-model="newUser.username" maxlength="64" placeholder="如：shanghe（也可用中文）"></el-input></el-form-item></el-col>
+              <el-col :xs="24" :md="8"><el-form-item label="公司全称 *"><el-input v-model="newUser.company" maxlength="255" placeholder="如：中山仕赫贸易有限公司"></el-input></el-form-item></el-col>
               <el-col :xs="24" :md="8"><el-form-item label="初始密码 *"><el-input v-model="newUser.password" placeholder="至少 4 位"></el-input></el-form-item></el-col>
               <el-col :xs="24" :md="8"><el-form-item label="角色">
                 <el-select v-model="newUser.role" style="width:100%"><el-option label="普通用户" value="user"></el-option><el-option label="超级管理员" value="admin"></el-option></el-select>
@@ -2468,7 +2478,7 @@
               <el-col :xs="24"><el-form-item label="备注"><el-input v-model="newUser.note" placeholder="可选"></el-input></el-form-item></el-col>
             </el-row>
           </el-form>
-          <div class="form-tip">账号 = 公司全称（业务账号才需要抬头）。若「角色」选<b>超级管理员</b>，只需填「公司全称」与初始密码，税号 / 邮箱会被忽略。
+          <div class="form-tip">登录账号只管登录，公司全称用于列表显示与开票抬头（催收话术里的 {companyName}），两者互不影响。若「角色」选<b>超级管理员</b>，税号 / 邮箱会被忽略。
             <br>使用期限到期后该账号<b>无法登录</b>，已登录的会话调用任何接口都会被拒绝；需要继续使用请到列表点「续期」。</div>
           <span slot="footer">
             <el-tag v-if="createOk" type="success" size="small" style="margin-right:10px">✓ 已创建</el-tag>
@@ -3491,7 +3501,8 @@
               <template slot-scope="p">
                 <el-button type="text" size="mini" @click="openRoView(p.row)">详情</el-button>
                 <el-button v-if="p.row.waybillId" type="text" size="mini" @click="unlinkRo(p.row)">取消关联</el-button>
-                <el-button type="text" size="mini" style="color:#f56c6c" @click="deleteRo(p.row)">删除</el-button>
+                <el-button v-if="!p.row.waybillId" type="text" size="mini" style="color:#f56c6c" @click="deleteRo(p.row)">删除</el-button>
+                <span v-else class="loginid" style="font-size:12px;color:#c0c4cc" title="已关联货单，只能查看">删除</span>
               </template>
             </el-table-column>
           </el-table>
@@ -3547,22 +3558,14 @@
           </div>
         </el-dialog>
 
-        <!-- 补货单详情（v0.3.28 起可编辑）：改数量/规格/单价、删行、搜商品加行、换供应商 -->
+        <!-- 补货单详情（v0.3.33）：未关联货单可编辑（改数量/规格/单价、删行、加行、换供应商）；
+             已关联货单整单只读；供应商是齐货通/永源顺时可一键加购 -->
         <el-dialog title="补货单详情" :visible.sync="roView.visible" width="1080px" top="5vh" append-to-body
                    @closed="onRoViewClosed">
           <div v-if="roView.order" class="loginid" style="display:flex;gap:18px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
             <span>补货单 <b>#{{ roView.order.id }}</b></span>
-            <span v-if="!roView.editing">供应商 <b>{{ roView.order.supplierName }}</b></span>
-            <span v-else style="display:inline-flex;align-items:center;gap:6px">
-              供应商
-              <el-select v-model="roView.supplierId" size="mini" filterable style="width:170px"
-                         :disabled="!!roView.order.waybillId"
-                         :title="roView.order.waybillId ? '已关联货单，先取消关联才能换供应商' : '换供应商（台账里没有会自动建）'">
-                <el-option v-for="s in ro.suppliers" :key="s.id" :label="s.name" :value="s.id"></el-option>
-              </el-select>
-              <el-button size="mini" type="primary" plain :loading="roView.saving" :disabled="!!roView.order.waybillId"
-                         @click="saveRoSupplier">改</el-button>
-            </span>
+            <span>供应商 <b>{{ roView.order.supplierName }}</b></span>
+            <el-tag v-if="roView.order.waybillId" size="mini" type="info">已关联货单 · 只读</el-tag>
             <span>金额 <b style="color:#f56c6c">{{ wbMoney(roView.order.amount) }}</b></span>
             <span>商品 {{ roView.order.itemCount }} 个 · {{ roView.order.qtyTotal }} 件</span>
             <span>生成 {{ roView.order.createdAt }}</span>
@@ -3572,12 +3575,19 @@
               <b v-else class="ro-diff-bad">（相差 {{ wbMoney(roView.order.diff) }}）</b>
             </span>
             <span class="fb-spacer" style="flex:1"></span>
+            <el-button v-if="roCartKind" size="mini" type="warning" icon="el-icon-shopping-cart-full"
+                       :loading="roView.carting" @click="oneKeyCart">
+              一键加购到{{ roCartKind === 'afa' ? '永源顺' : '齐货通' }}
+            </el-button>
             <el-button v-if="roView.editing" size="mini" type="primary" icon="el-icon-plus"
                        @click="openRoAdd">添加商品</el-button>
-            <el-button size="mini" :type="roView.editing ? 'success' : 'primary'" plain @click="toggleRoEdit">
+            <el-button v-if="!roView.order.waybillId" size="mini" :type="roView.editing ? 'success' : 'primary'" plain
+                       @click="toggleRoEdit">
               {{ roView.editing ? '完成编辑' : '编辑' }}
             </el-button>
           </div>
+          <el-alert v-if="roView.order && roView.order.waybillId" type="info" :closable="false" show-icon style="margin-bottom:8px"
+                    title="这张补货单已关联货单，只能查看：要改明细/删除/换供应商，先在列表里「取消关联」。"></el-alert>
           <el-alert v-if="roView.editing" type="info" :closable="false" show-icon style="margin-bottom:8px"
                     title="改完记得点每行的「保存」：金额一律服务端按「补货数量 × 规格 × 单价」重算，单头金额与货单差额跟着变。"></el-alert>
           <el-table :data="roView.items" size="small" border :max-height="tblH.cmp"
@@ -3600,8 +3610,8 @@
             <el-table-column label="补货数量" width="88" align="right">
               <template slot-scope="p"><b>{{ p.row.qtyPack }}</b> 件</template>
             </el-table-column>
-            <el-table-column label="最低单价" width="90" align="right">
-              <template slot-scope="p"><span class="amount">{{ yuan(p.row.unitPrice) }}</span></template>
+            <el-table-column label="最低单价" width="96" align="right">
+              <template slot-scope="p"><span class="amount" :title="'单价 ' + p.row.unitPrice + ' 元/个（库里存 4 位小数，行总额按它算）'">{{ yuan4(p.row.unitPrice) }}</span></template>
             </el-table-column>
             <el-table-column label="整件价" width="90" align="right">
               <template slot-scope="p"><span class="loginid">{{ p.row.packPrice == null ? '—' : yuan(p.row.packPrice) }}</span></template>
@@ -3609,9 +3619,10 @@
             <el-table-column label="行总额" width="100" align="right">
               <template slot-scope="p"><b class="amount">{{ wbMoney(p.row.amount) }}</b></template>
             </el-table-column>
-            <el-table-column v-if="roView.editing" label="操作" width="112" align="center">
+            <el-table-column v-if="roView.editing" label="操作" width="176" align="center">
               <template slot-scope="p">
                 <el-button type="text" size="mini" @click="openRoItem(p.row)">改</el-button>
+                <el-button type="text" size="mini" @click="openRoMove(p.row)">换供应商</el-button>
                 <el-button type="text" size="mini" style="color:#f56c6c" @click="deleteRoItem(p.row)">删除</el-button>
               </template>
             </el-table-column>
@@ -3636,13 +3647,15 @@
                 </el-form-item>
               </el-col>
               <el-col :span="8">
-                <el-form-item label="规格（件含多少个）">
-                  <el-input v-model="roItem.specQty" type="number" min="0" placeholder="1"></el-input>
+                <el-form-item label="规格（件含多少，可小数）">
+                  <el-input v-model="roItem.specQty" placeholder="1"
+                            @blur="roItem.specQty = normDecimal(roItem.specQty, 2)"></el-input>
                 </el-form-item>
               </el-col>
               <el-col :span="8">
-                <el-form-item label="单价（元/个）">
-                  <el-input v-model="roItem.unitPrice" type="number" min="0" placeholder="0.00"></el-input>
+                <el-form-item label="单价（元/个，最多 4 位小数）">
+                  <el-input v-model="roItem.unitPrice" placeholder="0.0000"
+                            @blur="roItem.unitPrice = normDecimal(roItem.unitPrice, 4)"></el-input>
                 </el-form-item>
               </el-col>
             </el-row>
@@ -3655,6 +3668,34 @@
           <div slot="footer">
             <el-button size="small" @click="roItem.visible = false">取消</el-button>
             <el-button size="small" type="primary" :loading="roItem.saving" @click="saveRoItem">保存</el-button>
+          </div>
+        </el-dialog>
+
+        <!-- 换供应商（v0.3.33 行级）：把这一行的补货数量搬到目标供应商的补货单，本行删除 -->
+        <el-dialog title="换供应商（搬这一行）" :visible.sync="roMove.visible" width="560px" top="8vh" append-to-body>
+          <div class="loginid" style="margin-bottom:10px">
+            SKU <b style="font-family:Consolas,monospace">{{ roMove.sku }}</b>
+            <span v-if="roMove.goodsName"> · {{ roMove.goodsName }}</span><br>
+            补货数量 <b>{{ roMove.qtyPack }}</b> 件 · 规格 {{ roMove.specQty }}/件 ·
+            单价 {{ yuan4(roMove.unitPrice) }} · 行总额 <b>{{ wbMoney(roMove.amount) }}</b>
+          </div>
+          <el-form label-position="top" size="small">
+            <el-form-item label="搬到哪个供应商的补货单">
+              <el-select v-model="roMove.supplierId" filterable placeholder="选择目标供应商" style="width:100%">
+                <el-option v-for="s in ro.suppliers" :key="s.id" :label="s.name" :value="s.id"
+                           :disabled="s.id === roMove.fromSupplierId"></el-option>
+              </el-select>
+            </el-form-item>
+          </el-form>
+          <el-alert type="warning" :closable="false" show-icon
+                    title="这一行的补货数量会并入目标供应商最新一张未关联货单（没有就新建，同 SKU 则累加数量），本行删除；源单搬空后自动删除。">
+          </el-alert>
+          <el-alert v-if="roMove.error" type="error" :closable="false" show-icon :title="roMove.error"
+                    style="margin-top:8px"></el-alert>
+          <div slot="footer">
+            <el-button size="small" @click="roMove.visible = false">取消</el-button>
+            <el-button size="small" type="primary" :loading="roMove.saving" :disabled="!roMove.supplierId"
+                       @click="confirmRoMove">确认搬迁</el-button>
           </div>
         </el-dialog>
 
@@ -4528,10 +4569,11 @@
     </el-table>
   </el-dialog>
 
-  <!-- ══════════ 编辑用户（账号 + 开票抬头） ══════════ -->
+  <!-- ══════════ 编辑用户（登录账号 / 公司全称 / 开票抬头） ══════════ -->
   <el-dialog :title="userEdit.title" :visible.sync="userEdit.visible" width="460px" append-to-body>
     <el-form label-position="top" size="small">
-      <el-form-item label="公司全称（= 登录账号）"><el-input v-model="userEdit.company" :disabled="userEdit.lockCompany" placeholder="如：中山仕赫贸易有限公司"></el-input></el-form-item>
+      <el-form-item label="登录账号"><el-input v-model="userEdit.username" maxlength="64" :disabled="userEdit.lockCompany" placeholder="登录用，如：shanghe"></el-input></el-form-item>
+      <el-form-item label="公司全称"><el-input v-model="userEdit.company" maxlength="255" placeholder="如：中山仕赫贸易有限公司"></el-input></el-form-item>
       <el-form-item label="纳税人识别号"><el-input v-model="userEdit.taxNo"></el-input></el-form-item>
       <el-form-item label="收票邮箱"><el-input v-model="userEdit.email" placeholder="发票接收邮箱"></el-input></el-form-item>
       <el-form-item label="品牌方（决定能看到哪套商品数据）">
@@ -4822,7 +4864,7 @@ Vue.component('qnh-tenant-picker', {
   },
   methods: {
     labelOf(u) {
-      const name = (u.companyName || u.username || ('#' + u.id));
+      const name = (u.companyFullName || u.companyName || u.username || ('#' + u.id));
       const tags = [];
       if (Number(u.id) === Number(this.selfId)) tags.push('我自己');
       if ((this.sessions || []).some((s) => Number(s) === Number(u.id))) tags.push('已登录' + this.service);
@@ -4954,8 +4996,11 @@ const vm = new Vue({
             supplier: '', range: null, linked: '', suppliers: [] },
       roLink: { visible: false, loading: false, saving: false, error: '',
                 orderId: 0, order: {}, rows: [], picked: null },
-      // 补货单详情（v0.3.28 起可编辑）：editing 打开行内「改/删」与「添加商品」
-      roView: { visible: false, loading: false, order: null, items: [], editing: false, saving: false, supplierId: null },
+      // 补货单详情（v0.3.33）：未关联货单才可编辑；已关联 = 只读；carting 是一键加购的进度锁
+      roView: { visible: false, loading: false, order: null, items: [], editing: false, saving: false, carting: false },
+      // 换供应商（行级搬迁）：选目标供应商，把这一行的补货数量并入对方补货单
+      roMove: { visible: false, saving: false, error: '', orderId: 0, itemId: 0, sku: '', goodsName: '',
+                qtyPack: 0, specQty: 1, unitPrice: 0, amount: 0, fromSupplierId: 0, supplierId: null },
       // 补货单明细行编辑（itemId=0 表示新增）
       roItem: { visible: false, saving: false, error: '', orderId: 0, itemId: 0, sku: '', goodsName: '',
                 channel: '', channelLabel: '', qtyPack: 1, specQty: '1', unitPrice: '' },
@@ -5033,7 +5078,7 @@ const vm = new Vue({
       defaultPddChat: '你好，麻烦尽快开一下发票，在平台都已经申请！！！如需线下开票，我的抬头：{companyName}，'
         + '税号：{taxNo}，邮箱：{email}，非常感谢，已经在平台申请！！！',
       previewText: '', saveOk: false,
-      users: [], newUser: { company: '', password: '', role: 'user', taxNo: '', email: '', note: '', brandId: 1, expiryMode: '1m', expiresAt: '' },
+      users: [], newUser: { username: '', company: '', password: '', role: 'user', taxNo: '', email: '', note: '', brandId: 1, expiryMode: '1m', expiresAt: '' },
       // 品牌方（商品数据按品牌方共享）：列表 + 管理弹框
       brands: [],
       brandDlg: { visible: false, loading: false, saving: false, newName: '', newNote: '', rows: [] },
@@ -5042,7 +5087,7 @@ const vm = new Vue({
       build: { running: false, ok: null, error: '', version: '', installer: null, installers: [], platform: '', log: [] },
       uploading: false, uploadProgress: 0, uploadMsg: '',
       creatingUser: false, createOk: false,
-      userEdit: { visible: false, id: null, title: '', company: '', taxNo: '', email: '', note: '', brandId: 1, hint: '', lockCompany: false, saving: false, expiryMode: 'permanent', expiresAt: '' },
+      userEdit: { visible: false, id: null, title: '', username: '', company: '', taxNo: '', email: '', note: '', brandId: 1, hint: '', lockCompany: false, saving: false, expiryMode: 'permanent', expiresAt: '' },
       // 菜单权限弹窗（退单列表 / 实时毛利监控）
       menuPermit: { visible: false, id: null, username: '', scope: 'admin', refund: false, profit: false, product: false, market: false, billing: false, replenish: false, price: false, after: false, supplier: false, waybill: false, replenishOrder: false, staff: false, saving: false,
                     origin: { refund: false, profit: false, product: false, market: false, billing: false, replenish: false, price: false, after: false, supplier: false, waybill: false, replenishOrder: false, staff: false } },
@@ -5265,6 +5310,15 @@ const vm = new Vue({
       if (!Number.isFinite(unit) || unit < 0) return 0;
       return Math.round((q * spec * unit + Number.EPSILON) * 100) / 100;
     },
+    /** 一键加购走哪个平台：只看供应商名（齐货通 / 永源顺·城配速达），且要有「平台取价」权限 */
+    roCartKind() {
+      const o = this.roView && this.roView.order;
+      if (!o || !this.canPrice) return '';
+      const nm = String(o.supplierName || '');
+      if (nm.indexOf('齐货通') >= 0) return 'qht';
+      if (nm.indexOf('永源顺') >= 0 || nm.indexOf('城配速达') >= 0 || nm.indexOf('阿发') >= 0) return 'afa';
+      return '';
+    },
     cmpRows() {
       const kw = String(this.cmp.q || '').trim().toLowerCase();
       return (this.cmp.rows || []).filter((r) => {
@@ -5467,17 +5521,17 @@ const vm = new Vue({
         return '<div style="color:' + color + '">' + this.esc(l.t) + ' ' + this.esc(l.text) + '</div>';
       }).join('');
     },
-    // 当前查看的账号名（展示用）
+    // 当前查看的账号名（展示用）：公司全称优先（v0.3.32 起与登录账号分开）
     qnhWhoLabel() {
       if (!this.me) return '';
-      if (!this.isAdmin) return this.me.companyName || this.me.username || '';
+      if (!this.isAdmin) return this.me.companyFullName || this.me.companyName || this.me.username || '';
       const u = (this.qnhUsers || []).find((x) => Number(x.id) === Number(this.qnhTenant));
-      return u ? (u.companyName || u.username || ('#' + u.id)) : '';
+      return u ? (u.companyFullName || u.companyName || u.username || ('#' + u.id)) : '';
     },
     // 配置归属提示
     qnhConfigOwner() {
       if (!this.me) return '';
-      if (!this.isAdmin) return (this.me.companyName || this.me.username) + '（我自己）';
+      if (!this.isAdmin) return (this.me.companyFullName || this.me.companyName || this.me.username) + '（我自己）';
       return this.qnhWhoLabel || '未选择账号';
     },
     // 毛利告警「发不出去」的阻断项（只看毛利专用机器人，与退单提醒通道无关）
@@ -5550,12 +5604,12 @@ const vm = new Vue({
           sub: '启用 ' + this.users.filter((u) => u.status === 'active').length + ' 个' },
       ];
     },
-    /** 用户列表搜索：公司名称 / 税号 / 账号，任一模糊命中即保留（不区分大小写） */
+    /** 用户列表搜索：公司全称 / 税号 / 登录账号，任一模糊命中即保留（不区分大小写） */
     filteredUsers() {
       const kw = String(this.userKw || '').trim().toLowerCase();
       const list = this.users || [];
       if (!kw) return list;
-      return list.filter((u) => [u.username, u.companyName, u.taxNo]
+      return list.filter((u) => [u.username, u.companyFullName, u.companyName, u.taxNo]
         .some((v) => String(v || '').toLowerCase().includes(kw)));
     },
     /** 操作日志统计卡：后端全量只读汇总，不随筛选变化 */
@@ -5684,7 +5738,8 @@ const vm = new Vue({
     userName() { return (this.me && (this.me.displayName || this.me.username)) || '—'; },
     userRoleText() {
       if (!this.me) return '';
-      return (this.me.role === 'admin' ? '超级管理员' : '普通用户') + (this.me.companyName ? ' · ' + this.me.companyName : '');
+      const cn = this.me.companyFullName || this.me.companyName || '';
+      return (this.me.role === 'admin' ? '超级管理员' : '普通用户') + (cn ? ' · ' + cn : '');
     },
     selectedCount() { return Object.keys(this.selected).length; },
     expandedKeys() { return Object.keys(this.expanded); },
@@ -5841,7 +5896,12 @@ const vm = new Vue({
     fmtDate(v) { return v ? String(v).slice(0, 10) : ''; },
     fmtSize(n) { return n > 1048576 ? (n / 1048576).toFixed(2) + ' MB' : (n / 1024).toFixed(0) + ' KB'; },
     isSent(m) { return !!this.sent[sentKey(m)]; },
-    pendingCnt(d) { return (d.orders || []).filter(o => o.invoice_state !== 'issued').length; },
+    // 交易关闭 = 没成交：不计入待开票金额、不进催收消息（服务端口径同此）
+    isClosedOrder(st) { return String(st == null ? '' : st).includes('关闭'); },
+    closedCntOf(d) { return (d.orders || []).filter(o => this.isClosedOrder(o.order_status)).length; },
+    pendingCnt(d) {
+      return (d.orders || []).filter(o => o.invoice_state !== 'issued' && !this.isClosedOrder(o.order_status)).length;
+    },
     manualCntOf(d) { return (d.orders || []).filter(o => o.state_source === 'manual').length; },
     okLogs(d) { return (d.sendLogs || []).filter(l => l.result === 'ok').length; },
     failLogs(d) { const a = (d.sendLogs || []); return a.length - a.filter(l => l.result === 'ok').length; },
@@ -6007,7 +6067,7 @@ const vm = new Vue({
         const memberCnt = this.companies.reduce((a, c) => a + c.memberCount, 0);
         this.meta = '数据: ' + d.generatedAt + ' · ' + this.companies.length + ' 家公司 / ' + memberCnt + ' 个会员名'
           + (d.tenant ? ' · 租户: ' + d.tenant.username : '');
-        this.tenantLabel = d.tenant ? (d.tenant.companyName || d.tenant.username) : '';
+        this.tenantLabel = d.tenant ? (d.tenant.companyFullName || d.tenant.companyName || d.tenant.username) : '';
         this.loadTrend();
         // 丢弃已折叠会员名的过期明细缓存；仍展开的强制刷新
         const open = this.orderOpen, next = {};
@@ -8888,7 +8948,9 @@ const vm = new Vue({
     },
     async createUser() {
       const payload = {
-        companyName: (this.newUser.company || '').trim(), username: (this.newUser.company || '').trim(),
+        // 登录账号与公司全称分开（v0.3.32）：账号只管登录，公司全称用于显示/开票抬头
+        username: (this.newUser.username || '').trim(),
+        companyFullName: (this.newUser.company || '').trim(),
         password: this.newUser.password, role: this.newUser.role,
         taxNo: (this.newUser.taxNo || '').trim(), email: (this.newUser.email || '').trim(), note: (this.newUser.note || '').trim(),
         brandId: Number(this.newUser.brandId) || 1,   // 所属品牌方（默认优购哆）
@@ -8899,12 +8961,14 @@ const vm = new Vue({
         const exp = this.expiryParam(this.newUser.expiryMode, this.newUser.expiresAt);
         if (exp !== undefined) payload.expiresAt = exp;
       }
-      if (!payload.username || !payload.password) { this.$message.warning('请填写「公司全称（= 登录账号）」与初始密码'); return; }
+      if (!payload.username) { this.$message.warning('请填写登录账号'); return; }
+      if (!payload.companyFullName) { this.$message.warning('请填写公司全称'); return; }
+      if (!payload.password) { this.$message.warning('请填写初始密码'); return; }
       this.creatingUser = true;
       try {
         const d = await this.api('/api/admin/users/create', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) });
         if (d.error) { this.$message.error('创建失败: ' + d.error); this.creatingUser = false; return; }
-        this.newUser = { company: '', password: '', role: 'user', taxNo: '', email: '', note: '', brandId: (this.brands[0] && this.brands[0].id) || 1, expiryMode: '1m', expiresAt: '' };
+        this.newUser = { username: '', company: '', password: '', role: 'user', taxNo: '', email: '', note: '', brandId: (this.brands[0] && this.brands[0].id) || 1, expiryMode: '1m', expiresAt: '' };
         this.createOk = true; setTimeout(() => { this.createOk = false; }, 2500);
         this.newUserDlg = false;       // 创建成功即关弹框，列表在下方已刷新
         await this.loadUsers();
@@ -8949,24 +9013,26 @@ const vm = new Vue({
       await this.loadUsers();
     },
     openUserCreate() {
-      this.newUser = { company: '', password: '', role: 'user', taxNo: '', email: '', note: '', brandId: (this.brands[0] && this.brands[0].id) || 1, expiryMode: '1m', expiresAt: '' };
+      this.newUser = { username: '', company: '', password: '', role: 'user', taxNo: '', email: '', note: '', brandId: (this.brands[0] && this.brands[0].id) || 1, expiryMode: '1m', expiresAt: '' };
       this.createOk = false;
       this.newUserDlg = true;
       if (!this.brands.length) this.loadBrands();
     },
-    viewUserData(u) { this.setTenantView(u.id, u.companyName || u.username); },
+    viewUserData(u) { this.setTenantView(u.id, u.companyFullName || u.companyName || u.username); },
     openUserEdit(u) {
       this.userEdit = {
         visible: true, id: u.id, title: `编辑用户 #${u.id}（${u.username}）`,
-        company: u.companyName || u.username || '', taxNo: u.taxNo || '', email: u.email || '', note: u.note || '',
+        username: u.username,
+        company: u.companyFullName || u.companyName || u.username || '',
+        taxNo: u.taxNo || '', email: u.email || '', note: u.note || '',
         brandId: Number(u.brandId) || 1,
         // 使用期限（v0.2.97）：有到期日 → 自定义并回填日期；无 → 永久
         expiryMode: u.expiresAt ? 'custom' : 'permanent',
         expiresAt: u.expiresAt ? String(u.expiresAt).slice(0, 10) : '',
         lockCompany: u.username === 'admin',
         hint: u.username === 'admin'
-          ? '内置超级管理员 <b>admin</b> 的登录账号名固定，这里只改它的开票抬头。'
-          : '公司全称即<b>登录账号</b>，改这里会同时改掉该账号的登录名（当前：<b>' + this.esc(u.username) + '</b>）。',
+          ? '内置超级管理员 <b>admin</b> 的登录账号固定不可改，这里只改它的公司全称。'
+          : '登录账号与公司全称互不影响：改账号只影响登录名；改公司全称只影响列表显示与开票抬头（催收话术里的 {companyName}）。',
         saving: false,
       };
       if (!this.brands.length) this.loadBrands();
@@ -8975,12 +9041,14 @@ const vm = new Vue({
       const ue = this.userEdit;
       const u = (this.users || []).find(x => x.id === ue.id) || {};
       const company = (ue.company || '').trim();
+      const username = (ue.username || '').trim();
+      if (u.username !== 'admin' && !username) { this.$message.warning('登录账号不能为空'); return; }
       if (!company) { this.$message.warning('公司全称不能为空'); return; }
       const payload = {
-        id: ue.id, companyName: company, taxNo: (ue.taxNo || '').trim(), email: (ue.email || '').trim(),
+        id: ue.id, companyFullName: company, taxNo: (ue.taxNo || '').trim(), email: (ue.email || '').trim(),
         note: (ue.note || '').trim(), role: u.role, brandId: Number(ue.brandId) || 1,
       };
-      if (u.username !== 'admin') payload.username = company;
+      if (u.username !== 'admin') payload.username = username;
       // 使用期限（v0.2.97）：不传 = 保持原值；permanent = 改永久；日期 = 当天 23:59:59
       if (u.role !== 'admin') {
         if (ue.expiryMode === 'custom' && !ue.expiresAt) { this.$message.warning('请选择到期日'); return; }
@@ -9040,7 +9108,7 @@ const vm = new Vue({
       this.switchPage('board');
       this.loadData();
     },
-    exitTenantView() { this.setTenantView(this.me.id, this.me.companyName || this.me.username); },
+    exitTenantView() { this.setTenantView(this.me.id, this.me.companyFullName || this.me.companyName || this.me.username); },
 
     // ══════ 操作日志 ══════
     /**
@@ -9728,6 +9796,24 @@ const vm = new Vue({
     // ══════════ 供应商管理（v0.3.0）══════════
     /** 金额统一 ¥0.00：模板里不能直接用全局的 yuan()（Vue 模板只认实例属性） */
     wbMoney(v) { return '¥' + (Number(v) || 0).toFixed(2); },
+    /** 单价专用（v0.3.33）：最多 4 位小数、去尾零 —— 1.6667 显示 1.6667，1.5 显示 1.5，不会被抹成 2 位 */
+    yuan4(v) {
+      const n = Number(v);
+      if (!Number.isFinite(n)) return '—';
+      return '¥' + n.toFixed(4).replace(/0+$/, '').replace(/\.$/, '');
+    },
+    /** 小数输入规整：中文句号→小数点、去掉非数字字符、只留一个小数点、限制小数位（超了直接截断） */
+    normDecimal(v, digits) {
+      let s = String(v == null ? '' : v).replace(/[。．]/g, '.').replace(/[^\d.]/g, '');
+      const dot = s.indexOf('.');
+      if (dot >= 0) {
+        s = s.slice(0, dot + 1) + s.slice(dot + 1).replace(/\./g, '');
+        const keep = Number(digits) || 0;
+        if (s.length - dot - 1 > keep) s = s.slice(0, dot + 1 + keep);
+      }
+      if (s.charAt(0) === '.') s = '0' + s;
+      return s;
+    },
     /** 倒计时 mm:ss */
     wbFmtLeft(s) {
       const n = Math.max(0, Math.floor(Number(s) || 0));
@@ -10229,7 +10315,7 @@ const vm = new Vue({
       } catch (e) { this.$message.error('取消关联失败：' + e.message); }
     },
     async openRoView(row) {
-      this.roView = { visible: true, loading: true, order: null, items: [] };
+      this.roView = { visible: true, loading: true, order: null, items: [], editing: false, saving: false, carting: false };
       try {
         const d = await this.api('/api/replenish-order/detail?id=' + row.id);
         if (!d.ok) { this.$message.error(d.error || '加载详情失败'); this.roView.visible = false; return; }
@@ -10238,43 +10324,111 @@ const vm = new Vue({
       } catch (e) { this.$message.error('加载详情失败：' + e.message); }
       finally { this.roView.loading = false; }
     },
-    /** 重拉当前详情（编辑后金额/条数都变了，以服务端为准），保留编辑态 */
-    async refreshRoView(orderId) {
-      const keepEditing = this.roView.editing;
-      const d = await this.api('/api/replenish-order/detail?id=' + orderId).catch(() => null);
-      if (!d || !d.ok) return;
-      this.roView.order = d.order;
-      this.roView.items = d.items || [];
-      this.roView.editing = keepEditing;
-      this.roView.supplierId = Number(d.order.supplierId) > 0 ? Number(d.order.supplierId) : null;
-      this.loadReplenishOrders();
-    },
     toggleRoEdit() {
-      this.roView.editing = !this.roView.editing;
-      if (this.roView.editing && this.roView.order) {
-        this.roView.supplierId = Number(this.roView.order.supplierId) > 0 ? Number(this.roView.order.supplierId) : null;
+      const o = this.roView.order;
+      if (o && Number(o.waybillId) > 0) {
+        this.roView.editing = false;
+        this.$message.warning('这张补货单已关联货单，只能查看；要改先「取消关联」');
+        return;
       }
+      this.roView.editing = !this.roView.editing;
     },
     onRoViewClosed() {
       this.roView.editing = false;
-      this.roView.supplierId = null;
+      this.roMove.visible = false;
     },
-    /** 换供应商：服务端会拒掉「已关联货单」的单，前端也把下拉禁用了 */
-    async saveRoSupplier() {
+    /** 一键加购：整单明细按补货数量加进用户自己的齐货通 / 永源顺购物车（真实动作） */
+    async oneKeyCart() {
       const o = this.roView.order;
-      if (!o) return;
-      if (!this.roView.supplierId) return this.$message.warning('先选一个供应商');
-      this.roView.saving = true;
+      const kind = this.roCartKind;
+      if (!o || !kind) return;
+      const label = kind === 'afa' ? '永源顺' : '齐货通';
+      const items = this.roView.items || [];
+      const qty = items.reduce((s, it) => s + (Number(it.qtyPack) || 0), 0);
+      if (!items.length) return this.$message.warning('这张单没有明细');
       try {
-        const d = await this.api('/api/replenish-order/supplier', {
+        await this.$confirm(
+          '会把本单 ' + items.length + ' 个商品、共 ' + qty + ' 件加入你自己的' + label + '购物车。\n'
+          + '这是真实操作，加完请到' + label + '里核对数量。',
+          '一键加购到' + label, { type: 'warning', confirmButtonText: '确认加购', cancelButtonText: '取消' });
+      } catch (e) { return; }
+      this.roView.carting = true;
+      try {
+        const d = await this.api('/api/replenish-order/add-to-cart', {
           method: 'POST', headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ id: o.id, supplierId: this.roView.supplierId }),
+          body: JSON.stringify({ id: o.id }),
         });
-        if (!d.ok) return this.$message.error(d.error || '换供应商失败');
-        this.$message.success('供应商已改为「' + (d.order && d.order.supplierName) + '」');
-        await this.refreshRoView(o.id);
-      } catch (e) { this.$message.error('换供应商失败：' + e.message); }
-      finally { this.roView.saving = false; }
+        if (d.needLogin) { await this.promptCartLogin(kind, d.error); return; }
+        if (!d.ok) { this.$message.error(d.error || '加购失败'); return; }
+        const lines = ['已加入' + label + '购物车：' + d.added + ' 个商品、' + d.qtyTotal + ' 件'];
+        if ((d.skipped || []).length) {
+          lines.push('', '跳过 ' + d.skipped.length + ' 个（未关联' + label + '商品）：');
+          d.skipped.slice(0, 12).forEach((x) => lines.push('· ' + (x.sku || '') + ' ' + (x.goodsName || '') + ' —— ' + x.reason));
+          if (d.skipped.length > 12) lines.push('· …… 还有 ' + (d.skipped.length - 12) + ' 个');
+        }
+        if ((d.failed || []).length) {
+          lines.push('', '失败 ' + d.failed.length + ' 个：');
+          d.failed.slice(0, 12).forEach((x) => lines.push('· ' + (x.sku || '') + ' ' + (x.qty || 0) + ' 件 —— ' + x.error));
+          if (d.failed.length > 12) lines.push('· …… 还有 ' + (d.failed.length - 12) + ' 个');
+        }
+        this.$alert(lines.join('\n'), '加购结果', { confirmButtonText: '知道了' }).catch(() => {});
+      } catch (e) { this.$message.error('加购失败：' + e.message); }
+      finally { this.roView.carting = false; }
+    },
+    /** 平台未登录：跳回「补货」页并直接打开登录框（齐货通账号密码 / 永源顺 Token） */
+    async promptCartLogin(kind, err) {
+      const label = kind === 'afa' ? '永源顺' : '齐货通';
+      if (!this.canReplenish) {
+        this.$message.warning(label + '未登录（' + (err || '登录态已失效') + '）；当前账号没有「补货」菜单权限，请联系管理员重新登录');
+        return;
+      }
+      try {
+        await this.$confirm(
+          label + '未登录或登录态已失效' + (err ? '：' + err : '') + '\n点「去登录」跳到补货页面，登录好再回来点一键加购。',
+          label + '未登录', { type: 'warning', confirmButtonText: '去登录', cancelButtonText: '稍后' });
+      } catch (e) { return; }
+      this.page = 'replenish';
+      this.$nextTick(() => setTimeout(() => {
+        if (kind === 'qht') this.onQhtBtn(); else this.onAfaBtn();
+      }, 200));
+    },
+    /** 换供应商（行级）：把这一行搬到目标供应商的补货单，本行删除 */
+    openRoMove(row) {
+      const o = this.roView.order;
+      if (!o || !row || !row.id) return;
+      this.roMove = {
+        visible: true, saving: false, error: '', orderId: o.id, itemId: Number(row.id),
+        sku: row.sku, goodsName: row.goodsName || '', qtyPack: Number(row.qtyPack) || 0,
+        specQty: Number(row.specQty) || 1, unitPrice: Number(row.unitPrice) || 0,
+        amount: Number(row.amount) || 0,
+        fromSupplierId: Number(o.supplierId) || 0, supplierId: null,
+      };
+    },
+    async confirmRoMove() {
+      const m = this.roMove;
+      if (!m.supplierId) return this.$message.warning('先选目标供应商');
+      m.saving = true; m.error = '';
+      try {
+        const d = await this.api('/api/replenish-order/item-move', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ orderId: m.orderId, itemId: m.itemId, supplierId: m.supplierId, sku: m.sku, qtyPack: m.qtyPack }),
+        });
+        if (!d.ok) { m.error = d.error || '换供应商失败'; return; }
+        m.visible = false;
+        const bits = ['已搬到「' + d.targetSupplierName + '」的补货单 #' + d.targetOrderId];
+        if (d.merged) bits.push('目标单已有该 SKU，数量已累加');
+        bits.push('本行已删除');
+        if (d.sourceDeleted) bits.push('源单已没有明细，已一并删除');
+        this.$message.success(bits.join('；'));
+        this.loadReplenishOrders();
+        if (d.sourceDeleted) this.roView.visible = false;
+        else {
+          this.roView.order = d.order;
+          this.roView.items = d.items || [];
+          this.roView.editing = true;
+        }
+      } catch (e) { m.error = '换供应商失败：' + e.message; }
+      finally { m.saving = false; }
     },
     /** 打开行编辑（row 为空 = 新增，需先带 sku/goodsName/默认价） */
     openRoItem(row) {
@@ -10295,8 +10449,11 @@ const vm = new Vue({
     async saveRoItem() {
       const d = this.roItem;
       if (!d.sku) return this.$message.warning('缺少商品SKU');
+      // 提交前再规整一次小数（输入过程中不打断用户，这里兜底）
+      d.unitPrice = this.normDecimal(d.unitPrice, 4);
+      d.specQty = this.normDecimal(d.specQty, 2);
       if (!(Number(d.qtyPack) >= 1)) { d.error = '补货数量必须 ≥ 1 件'; return; }
-      if (String(d.unitPrice).trim() === '' || !(Number(d.unitPrice) >= 0)) { d.error = '请填单价（元/个）'; return; }
+      if (String(d.unitPrice).trim() === '' || !(Number(d.unitPrice) >= 0)) { d.error = '请填单价（元/个，可带小数）'; return; }
       d.saving = true; d.error = '';
       try {
         const r = await this.api('/api/replenish-order/item-save', {
@@ -10445,6 +10602,8 @@ const vm = new Vue({
     async loadQhtPrices(rows, opts) {
       const src = Array.isArray(rows) ? rows : (this.rp.rows || []);
       const mode = (opts && opts.mode) === 'cache' ? 'cache' : 'refresh';
+      // quiet：调用方自己会给出更准确的提示（例如「关联成功但没取到价」），不再叠一条通用告警
+      const quiet = !!(opts && opts.quiet);
       const groups = this.priceGroups(src, 'qht_goods_id');
       if (!groups.size) return { cached: 0, fetched: 0 };
       const acc = {};
@@ -10471,8 +10630,10 @@ const vm = new Vue({
       // 整体替换而不是逐个加键：Vue2 对对象新增属性不响应，会「取到了但页面不刷新」
       if (Object.keys(acc).length) this.rp.prices = Object.assign({}, this.rp.prices, acc);
       if (err) {
-        this.$message.warning('取价失败：' + err.error
-          + ((err.code === 'no_session' || err.code === 'auth') ? '（点右上角「登录态设置」重新粘贴）' : ''));
+        if (!quiet) {
+          this.$message.warning('取价失败：' + err.error
+            + ((err.code === 'no_session' || err.code === 'auth') ? '（点右上角「登录态设置」重新粘贴）' : ''));
+        }
       }
       return { cached, fetched };
     },
@@ -10522,6 +10683,16 @@ const vm = new Vue({
         const row = this.rowsOf(this.rpLink.src).find((r) => r.sku === this.rpLink.sku);
         if (row) row.qht_goods_id = String(pick.goodsId);
         this.rpLink.visible = false;
+        // ⚠ v0.3.31：关联成功就立刻把这一个商品的价格取回来、存进缓存并显示，
+        //   不用等用户再点「取价」或等定时刷新。旧版这里只写了 goodsId，
+        //   页面要等到下一次取价才有数，看着像「已关联但没价」。
+        //   取不到价（没登录态 / 接口报错）不算关联失败：行仍是「已关联未取价」，可稍后重试。
+        if (row) {
+          await this.loadQhtPrices([row], { mode: 'refresh', quiet: true });
+          if (!this.qhtPrice(row)) {
+            this.$message.warning('已关联，但价格这次没取到（可稍后点「取价」重试）');
+          }
+        }
         this.$message.success('已关联：' + pick.goodsName);
       } catch (e) { this.$message.error('关联失败: ' + e.message); }
     },
@@ -10772,7 +10943,15 @@ const vm = new Vue({
           body: JSON.stringify({ sku: row.sku, goodsId: '', brandId: row.brand_id || null }),
         });
         if (d.error) { this.$message.error('解除失败: ' + d.error); return; }
+        // 顺手清掉价格缓存键：不然行上没了 goodsId、缓存里还留着一份，
+        // 后面同 SKU 重新关联别的商品时容易误显示旧价
+        const oldKey = this.pkey(row, 'qht');
         row.qht_goods_id = '';
+        if (oldKey && this.rp.prices[oldKey]) {
+          const next = Object.assign({}, this.rp.prices);
+          delete next[oldKey];
+          this.rp.prices = next;
+        }
         this.$message.success('已解除关联');
       } catch (e) { this.$message.error('解除失败: ' + e.message); }
     },

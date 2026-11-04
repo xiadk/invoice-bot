@@ -403,6 +403,8 @@ function publicUser(u) {
     username: u.username,
     role: u.role,
     status: u.status,
+    // 公司全称（v0.3.32）：与登录账号分开；界面显示公司名优先用它，老库退回开票抬头/账号
+    companyFullName: u.company_full_name || u.company_name || '',
     companyName: u.company_name || '',
     taxNo: u.tax_no || '',
     email: u.email || '',
@@ -537,14 +539,19 @@ function productScope(o) {
       salesExpr: 'COALESCE(bp.sales_30d, pi.sales_30d)',
       statusExpr, statusCodeExpr: 'bp.purchase_status_code',
       imageExpr: "COALESCE(NULLIF(pi.image_url, ''), bp.image_url)",
-      qhtExpr: 'COALESCE(pi.qht_goods_id, bp.qht_goods_id)',
-      afaExpr: 'COALESCE(pi.afa_goods_id, bp.afa_goods_id)',
-      jdExpr: 'COALESCE(pi.jd_sku_id, bp.jd_sku_id)',
-      localExpr: 'COALESCE(pi.local_price, bp.local_price)',
-      localPackExpr: 'COALESCE(pi.local_pack_price, bp.local_pack_price)',
-      localQtyExpr: 'COALESCE(pi.local_spec_qty, bp.local_spec_qty)',
-      // 供应商 0 表示「没填」，不能直接 COALESCE（否则个人行没填时永远盖掉品牌行的值）
-      localSupExpr: 'COALESCE(NULLIF(pi.local_supplier_id, 0), bp.local_supplier_id, 0)',
+      // ⚠ v0.3.31：关联/价格一律「品牌行优先」，与写入侧 writeProductLink/writeProductLocal
+      //   的 brand-first 同一权威。旧版这里是 COALESCE(pi.x, bp.x)（个人行优先）：
+      //   关联当时 SKU 还没同步进 brand_product 就会写进个人行，之后品牌表补上该 SKU 也不会
+      //   补关联列 —— 结果批次视图（导入补货文件）读得到、品牌视图（直接查询）读不到，
+      //   同一个 SKU 两个视图读数漂移。个人行只保留「SKU 不在品牌表」时的兜底作用。
+      qhtExpr: 'COALESCE(bp.qht_goods_id, pi.qht_goods_id)',
+      afaExpr: 'COALESCE(bp.afa_goods_id, pi.afa_goods_id)',
+      jdExpr: 'COALESCE(bp.jd_sku_id, pi.jd_sku_id)',
+      localExpr: 'COALESCE(bp.local_price, pi.local_price)',
+      localPackExpr: 'COALESCE(bp.local_pack_price, pi.local_pack_price)',
+      localQtyExpr: 'COALESCE(bp.local_spec_qty, pi.local_spec_qty)',
+      // 供应商 0 表示「没填」，不能直接 COALESCE（否则品牌行没填时会把个人行的值顶掉）
+      localSupExpr: 'COALESCE(NULLIF(bp.local_supplier_id, 0), pi.local_supplier_id, 0)',
       bpIdExpr: 'bp.id', suggestExpr: 'pi.suggest_qty', fileExpr: 'pi.source_file', batchExpr: 'pi.batch_id',
     };
   }
@@ -583,12 +590,18 @@ function productScope(o) {
 async function writeProductLink(col, value, { brandId, userId, sku }) {
   const ALLOWED = ['qht_goods_id', 'afa_goods_id', 'jd_sku_id', 'local_price'];
   if (!ALLOWED.includes(col)) throw new Error('不允许写入的列：' + col);
+  const v = (value === undefined || value === null || String(value).trim() === '') ? null : value;
   const ex = await db.query('SELECT id FROM brand_product WHERE brand_id = ? AND sku = ? LIMIT 1', [brandId, sku]);
   if (ex.length) {
-    await db.exec(`UPDATE brand_product SET ${col} = ? WHERE brand_id = ? AND sku = ?`, [value, brandId, sku]);
+    await db.exec(`UPDATE brand_product SET ${col} = ? WHERE brand_id = ? AND sku = ?`, [v, brandId, sku]);
+    // ⚠ v0.3.31：品牌行是唯一权威来源，个人补货行里的历史值必须一起清掉。
+    //   旧版只在品牌行写，pi 里的旧值留着 → 解除关联后批次视图（旧版 pi 优先）
+    //   会把刚解除的值「复活」；现在的读取是 bp 优先，pi 残留虽不影响显示，
+    //   但会让后续排查两个表对不上，所以写入/解除都顺手清干净。
+    await db.exec(`UPDATE product_item SET ${col} = NULL WHERE brand_id = ? AND sku = ?`, [brandId, sku]);
     return { scope: 'brand', affected: 1 };
   }
-  const r = await db.exec(`UPDATE product_item SET ${col} = ? WHERE user_id = ? AND sku = ?`, [value, userId, sku]);
+  const r = await db.exec(`UPDATE product_item SET ${col} = ? WHERE user_id = ? AND sku = ?`, [v, userId, sku]);
   return { scope: 'item', affected: r.affectedRows || 0 };
 }
 
@@ -607,6 +620,13 @@ async function writeProductLocal({ brandId, userId, sku, unitPrice, packPrice, s
       'UPDATE brand_product SET local_price = ?, local_pack_price = ?, local_spec_qty = ?, local_supplier_id = ?'
       + ' WHERE brand_id = ? AND sku = ?',
       args.concat([brandId, sku]));
+    // 同 writeProductLink：清掉个人行里的历史本地价，避免「清空本地价后旧值又冒出来」
+    // ⚠ local_supplier_id 两表都是 NOT NULL DEFAULT 0，这里只能写 0，写 NULL 会报
+    //   「Column 'local_supplier_id' cannot be null」，连带整条清空语句失败。
+    await db.exec(
+      'UPDATE product_item SET local_price = NULL, local_pack_price = NULL, local_spec_qty = NULL, local_supplier_id = 0'
+      + ' WHERE brand_id = ? AND sku = ?',
+      [brandId, sku]);
     return { scope: 'brand', affected: 1 };
   }
   const r = await db.exec(
@@ -733,6 +753,18 @@ function assertWritable(user, tenantId) {
 // 数据加载（全部按 user_id 隔离）
 // ─────────────────────────────────────────────────────────────────────────
 
+/**
+ * 1688「交易关闭」判定（v0.3.34 用户要求）
+ *   交易关闭 = 没成交：既不该催开票，也不该计入订单金额 / 待开票金额。
+ *   order_status 存中文文案（库里实况只有「交易关闭」，但平台也可能给「交易已关闭」），
+ *   所以按「含 关闭」判断，别写死等号。口径与 lib/billing.js 的支出排除一致。
+ * ⚠ 催收相关 SQL 必须共用这两个表达式，否则「待开票金额」和消息里的订单清单会对不上。
+ */
+const ALI_OPEN_SQL = "COALESCE(o.order_status, '') NOT LIKE '%关闭%'";
+const ALI_CLOSED_SQL = "COALESCE(o.order_status, '') LIKE '%关闭%'";
+/** JS 侧同一判定（消息清单过滤、书签工具用） */
+const isClosedOrder = (status) => String(status == null ? '' : status).includes('关闭');
+
 /** 某用户的卖家聚合列表：订单维度 + 税务局已开票维度 */
 async function loadSellers(userId) {
   const orderRows = await db.query(`
@@ -740,15 +772,17 @@ async function loadSellers(userId) {
       COALESCE(NULLIF(o.seller_login,''), o.seller_company) AS loginId,
       MAX(o.seller_company)                                 AS company,
       MAX(o.seller_login)                                   AS sellerLogin,
-      COUNT(*)                                              AS total,
-      ROUND(SUM(COALESCE(o.pay_amount,0)), 2)               AS totalAmount,
-      SUM(o.invoice_state = 'none')                         AS noneCount,
-      SUM(o.invoice_state = 'applying')                     AS applyingCount,
-      SUM(o.invoice_state = 'issued')                       AS issuedStateCount,
-      SUM(o.invoice_state <> 'issued')                      AS unissuedCount,
-      SUM(o.invoice_state = 'issued' AND o.state_source = 'manual') AS manualIssuedCount,
-      ROUND(SUM(CASE WHEN o.invoice_state = 'issued' AND o.state_source = 'manual'
+      SUM(${ALI_OPEN_SQL})                                  AS total,
+      ROUND(SUM(CASE WHEN ${ALI_OPEN_SQL} THEN COALESCE(o.pay_amount,0) ELSE 0 END), 2) AS totalAmount,
+      SUM(${ALI_OPEN_SQL} AND o.invoice_state = 'none')     AS noneCount,
+      SUM(${ALI_OPEN_SQL} AND o.invoice_state = 'applying') AS applyingCount,
+      SUM(${ALI_OPEN_SQL} AND o.invoice_state = 'issued')   AS issuedStateCount,
+      SUM(${ALI_OPEN_SQL} AND o.invoice_state <> 'issued')  AS unissuedCount,
+      SUM(${ALI_OPEN_SQL} AND o.invoice_state = 'issued' AND o.state_source = 'manual') AS manualIssuedCount,
+      ROUND(SUM(CASE WHEN ${ALI_OPEN_SQL} AND o.invoice_state = 'issued' AND o.state_source = 'manual'
                      THEN COALESCE(o.pay_amount,0) ELSE 0 END), 2) AS manualIssuedAmount,
+      SUM(${ALI_CLOSED_SQL})                                AS closedCount,
+      ROUND(SUM(CASE WHEN ${ALI_CLOSED_SQL} THEN COALESCE(o.pay_amount,0) ELSE 0 END), 2) AS closedAmount,
       MAX(o.pay_time)                                       AS lastPayTime
     FROM invoice_order o
     WHERE o.user_id = ?
@@ -804,6 +838,9 @@ async function loadSellers(userId) {
       unissuedCount: Number(r.unissuedCount) || 0,
       manualIssuedCount: Number(r.manualIssuedCount) || 0,
       manualIssuedAmount: (Number(r.manualIssuedAmount) || 0).toFixed(2),
+      // 交易关闭的订单：不计入上面任何金额 / 单数，只单独带出来给页面做提示
+      closedCount: Number(r.closedCount) || 0,
+      closedAmount: (Number(r.closedAmount) || 0).toFixed(2),
       invoicedAmount: (inv ? Number(inv.invoiceAmount) || 0 : 0).toFixed(2),
       invoiceCount: inv ? Number(inv.invoiceCount) || 0 : 0,
       invoiceRowCount: inv ? Number(inv.invoiceRowCount) || 0 : 0,
@@ -882,6 +919,9 @@ async function loadCompanies(userId) {
       unissuedCount: sum(rows, 'unissuedCount'),
       manualIssuedCount: sum(rows, 'manualIssuedCount'),
       manualIssuedAmount: sum(rows, 'manualIssuedAmount').toFixed(2),
+      // 交易关闭（不计入上面金额 / 单数，只做提示）
+      closedCount: sum(rows, 'closedCount'),
+      closedAmount: sum(rows, 'closedAmount').toFixed(2),
       invoicedAmount: invoicedAmount.toFixed(2),
       invoiceCount: sum(rows, 'invoiceCount'),
       invoiceRowCount: sum(rows, 'invoiceRowCount'),
@@ -904,6 +944,8 @@ async function loadCompanies(userId) {
         unissuedCount: m.unissuedCount,
         manualIssuedCount: m.manualIssuedCount,
         manualIssuedAmount: m.manualIssuedAmount,
+        closedCount: m.closedCount,
+        closedAmount: m.closedAmount,
         invoicedAmount: m.invoicedAmount,
         invoiceCount: m.invoiceCount,
         invoiceRowCount: m.invoiceRowCount,
@@ -961,6 +1003,7 @@ async function loadSellerDetail(userId, loginId) {
  * 批量取「这些卖家各自的待催收订单」
  * 用于组装催收任务：原来 doClientSend 对每个卖家串行调 loadSellerDetail（每家 4 条 SQL），
  * 选 100 家就是 400 次往返 —— 纯属浪费。这里一次查完并按 loginId 分组。
+ * v0.3.34：交易关闭的订单不进催收消息（没成交就没待开票金额），金额与清单同一口径。
  * @returns {Promise<Map<string, Array<{orderId:string, amount:string}>>>}
  */
 async function loadPendingOrdersBatch(userId, loginIds) {
@@ -969,11 +1012,12 @@ async function loadPendingOrdersBatch(userId, loginIds) {
   if (!ids.length) return out;
   const ph = ids.map(() => '?').join(',');
   const rows = await db.query(
-    `SELECT COALESCE(NULLIF(seller_login,''), seller_company) AS loginId,
-            order_no, pay_amount, invoice_state, pay_time
-     FROM invoice_order
-     WHERE user_id = ? AND COALESCE(NULLIF(seller_login,''), seller_company) IN (${ph})
-     ORDER BY pay_time DESC`,
+    `SELECT COALESCE(NULLIF(o.seller_login,''), o.seller_company) AS loginId,
+            o.order_no, o.pay_amount, o.invoice_state, o.pay_time
+     FROM invoice_order o
+     WHERE o.user_id = ? AND COALESCE(NULLIF(o.seller_login,''), o.seller_company) IN (${ph})
+       AND ${ALI_OPEN_SQL}
+     ORDER BY o.pay_time DESC`,
     [userId, ...ids]
   );
   for (const r of rows) {
@@ -994,8 +1038,11 @@ async function bmComputeTask(userId, rawLogin) {
   );
   if (!s || !s.sellerLogin) return { none: true, reason: '未找到该卖家的待催收数据（可能未维护会员名映射）' };
   const detail = await loadSellerDetail(userId, s.loginId);
-  const toRemind = detail.orders.filter((o) => o.invoice_state !== 'issued');
-  if (!toRemind.length) return { none: true, reason: '该卖家订单均已开票' };
+  // 已开票的不再催；交易关闭的也不催（没成交，催了也开不出票）
+  const toRemind = detail.orders.filter(
+    (o) => o.invoice_state !== 'issued' && !isClosedOrder(o.order_status)
+  );
+  if (!toRemind.length) return { none: true, reason: '该卖家订单均已开票（或仅剩交易关闭的订单）' };
   const buyer = await buyerInfoOf(userId);
   const config = loadConfig();
   const runConfig = { ...config, buyerInfo: buyer };
@@ -1208,7 +1255,12 @@ const OP_ACTIONS = {
     ? `补货单 #${d.orderId} 新增明细（SKU ${d.sku || ''}，${d.qtyPack || 0} 件）`
     : `补货单 #${d.orderId} 改明细（SKU ${d.sku || ''}，${d.qtyPack || 0} 件 × ${d.unitPrice == null ? '—' : d.unitPrice}）`,
   'replenish.item_delete': (d) => `补货单 #${d.orderId} 删明细（SKU ${d.sku || ''}）`,
-  'replenish.supplier': (d) => `补货单 #${d.orderId} 换供应商为「${d.supplierName || ''}」`,
+  'replenish.item_move': (d) => `补货单 #${d.orderId} 把 SKU ${d.sku || ''}（${d.qtyPack || 0} 件）换供应商到「${d.supplierName || ''}」`
+    + `，搬到补货单 #${d.targetOrderId || 0}${d.merged ? '（目标单已有该 SKU，数量已累加）' : ''}`
+    + `${d.sourceDeleted ? '，源单已空已删除' : ''}`,
+  'replenish.cart': (d) => `补货单 #${d.orderId} 一键加购到${d.supplier || ''}购物车`
+    + `（提交 ${d.total || 0} 个，成功 ${d.added || 0} 个 / ${d.qtyTotal || 0} 件`
+    + `${d.failed ? `，失败 ${d.failed}` : ''}${d.skipped ? `，跳过 ${d.skipped}` : ''}）`,
   'qnh.view': () => '打开了退单列表页',
   'pdd.apply.start': (d) => `发起了批量申请发票任务（${d.total || 0} 单${d.invalid ? `，跳过 ${d.invalid} 单` : ''}）`,
   'pdd.apply': (d) => d.ok === false
@@ -1666,9 +1718,9 @@ function agentUidFor(user, tenantId) {
 /** 用户/租户的展示名（公司全称优先），只用于提示文案 */
 async function tenantLabelOf(uid) {
   try {
-    const r = await db.query('SELECT username, company_name FROM app_user WHERE id = ?', [Number(uid)]);
+    const r = await db.query('SELECT username, company_full_name, company_name FROM app_user WHERE id = ?', [Number(uid)]);
     const u = r[0] || null;
-    return u ? (u.company_name || u.username || '') : '';
+    return u ? (u.company_full_name || u.company_name || u.username || '') : '';
   } catch (e) { return ''; }
 }
 
@@ -2848,7 +2900,7 @@ async function loadMapping(userId, { allUsers = false } = {}) {
            u.name AS maintainer,
            agg.invoice_amount, agg.invoice_rows, agg.last_invoice_date
     FROM seller_name_mapping m
-    LEFT JOIN (SELECT id, COALESCE(NULLIF(company_name, ''), username) AS name FROM app_user) u
+    LEFT JOIN (SELECT id, COALESCE(NULLIF(company_full_name, ''), NULLIF(company_name, ''), username) AS name FROM app_user) u
            ON u.id = m.user_id
     ${scoped ? 'INNER JOIN' : 'LEFT JOIN'} ${agg} agg ON agg.n = m.tax_seller_name
     ORDER BY agg.last_invoice_date IS NULL, agg.last_invoice_date DESC, agg.invoice_amount DESC
@@ -2866,8 +2918,8 @@ async function loadMapping(userId, { allUsers = false } = {}) {
            MAX(i.seller_tax_no) AS seller_tax_no,
            MAX(i.remark) AS remark,
            COUNT(DISTINCT i.user_id) AS user_count,
-           GROUP_CONCAT(DISTINCT COALESCE(NULLIF(u.company_name,''), u.username)
-                        ORDER BY COALESCE(NULLIF(u.company_name,''), u.username) SEPARATOR '、') AS owners
+           GROUP_CONCAT(DISTINCT COALESCE(NULLIF(u.company_full_name,''), NULLIF(u.company_name,''), u.username)
+                        ORDER BY COALESCE(NULLIF(u.company_full_name,''), NULLIF(u.company_name,''), u.username) SEPARATOR '、') AS owners
     FROM issued_invoice i
     LEFT JOIN app_user u ON u.id = i.user_id
     LEFT JOIN seller_name_mapping m
@@ -3009,12 +3061,15 @@ async function setOrderState(userId, { orderNo, loginId, action }) {
   if (action === 'confirm-all' || action === 'cancel-all') {
     if (!loginId) throw new Error('缺少 loginId');
     const rows = await db.query(
-      `SELECT order_no, invoice_state, state_source FROM invoice_order
+      `SELECT order_no, invoice_state, state_source, order_status FROM invoice_order
        WHERE user_id = ? AND COALESCE(NULLIF(seller_login,''), seller_company) = ?`, [userId, loginId]);
     if (!rows.length) throw new Error('卖家不存在: ' + loginId);
 
     if (action === 'confirm-all') {
-      const targets = rows.filter((r) => r.invoice_state !== 'issued').map((r) => r.order_no);
+      // 交易关闭的订单不参与「全部标记已开票」：它们本来就不在待开票口径里
+      const targets = rows
+        .filter((r) => r.invoice_state !== 'issued' && !isClosedOrder(r.order_status))
+        .map((r) => r.order_no);
       const affected = await chunk(targets, (part) => db.exec(
         `UPDATE invoice_order SET invoice_state='issued', state_source='manual', state_note=?, state_updated_at=NOW()
          WHERE user_id = ? AND order_no IN (${part.map(() => '?').join(',')})`, [note, userId, ...part]));
@@ -3065,7 +3120,7 @@ async function setOrderState(userId, { orderNo, loginId, action }) {
 // ─────────────────────────────────────────────────────────────────────────
 async function listUsers() {
   const users = await db.query(`
-    SELECT u.id, u.username, u.role, u.status, u.company_name, u.tax_no, u.email, u.display_name, u.note,
+    SELECT u.id, u.username, u.role, u.status, u.company_full_name, u.company_name, u.tax_no, u.email, u.display_name, u.note,
            u.must_change_password, u.last_login_at, u.created_at, u.updated_at,
            u.qnh_refund_enabled, u.qnh_profit_enabled, u.product_enabled, u.market_enabled, u.billing_enabled,
            u.replenish_enabled, u.price_enabled, u.after_sale_enabled, u.brand_id, b.name AS brand_name,
@@ -3082,6 +3137,8 @@ async function listUsers() {
   `);
   return users.map((u) => ({
     id: u.id, username: u.username, role: u.role, status: u.status,
+    // 公司全称（v0.3.32）：与登录账号分开。老库 company_full_name 为空时退回抬头/账号，兼容未升级的库
+    companyFullName: u.company_full_name || u.company_name || u.username || '',
     companyName: u.company_name || '', taxNo: u.tax_no || '', email: u.email || '',
     displayName: u.display_name || '', note: u.note || '',
     mustChangePassword: !!u.must_change_password,
@@ -3123,11 +3180,12 @@ async function listUsers() {
 }
 
 /**
- * 登录账号规则。
- * 口径：**账号即公司全称**（开票抬头），所以必须允许中文；同时保留字母/数字/下划线/点/中划线/括号。
- * admin 是内置账号，不受"账号=公司全称"约束（其抬头会被清空，见下方 updateUser 的说明）。
+ * 登录账号规则（v0.3.32 起与公司全称解耦）。
+ * 账号只管登录，公司全称单独存 app_user.company_full_name；
+ * 因为历史账号就是中文公司名，规则仍允许中文，同时保留字母/数字/下划线/点/中划线/括号。
+ * admin 是内置账号，账号名固定不可改。
  */
-const USERNAME_RULE = '登录账号（公司全称）需 2~64 位，可用中文、字母、数字、下划线、点、中划线、括号';
+const USERNAME_RULE = '登录账号需 2~64 位，可用中文、字母、数字、下划线、点、中划线、括号';
 function validUsername(name) {
   return typeof name === 'string' && /^[\u4e00-\u9fa5A-Za-z0-9_.·()（）-]{2,64}$/.test(name);
 }
@@ -3142,17 +3200,19 @@ async function assertBrand(brandId) {
   return id;
 }
 
-async function createUser({ username, password, companyName, taxNo, email, role, displayName, note, brandId, expiresAt }, byUser) {
-  // 账号 = 公司全称：前端只填一个「公司全称」字段，这里做兜底（未传 username 时直接取 companyName）
-  const uname = String(username || companyName || '').trim();
-  const cname = String(companyName || uname || '').trim();
+async function createUser({ username, password, companyFullName, companyName, taxNo, email, role, displayName, note, brandId, expiresAt }, byUser) {
+  // 登录账号与公司全称分开（v0.3.32）。兼容旧调用：没传 username 时退回公司名，没传公司全称时退回账号。
+  const uname = String(username || companyFullName || companyName || '').trim();
+  const cfull = String(companyFullName || companyName || uname || '').trim();
   if (!validUsername(uname)) throw new Error(USERNAME_RULE);
+  if (!cfull) throw new Error('公司全称不能为空');
+  if (cfull.length > 255) throw new Error('公司全称最多 255 个字符');
   if (!password || String(password).length < 4) throw new Error('密码至少 4 位');
   const dup = await db.query('SELECT id FROM app_user WHERE username = ?', [uname]);
   if (dup.length) throw new Error('账号已存在: ' + uname);
   // 所属品牌方（商品数据按品牌方共享；不传默认优购哆）
   const bid = await assertBrand(brandId);
-  // 超级管理员是纯系统账号，不承载业务数据 → 不落开票抬头
+  // 超级管理员是纯系统账号，不承载业务数据 → 不落开票抬头（公司全称仍存，用于列表显示）
   const isAdminRole = role === 'admin';
   // 使用期限（v0.2.97）：不传 = 默认 1 个月；'permanent'/空 = 永久；'YYYY-MM-DD' = 当天 23:59:59
   //   超级管理员是系统账号，一律永久，不接受外部传入。默认值交给 MySQL 的 DATE_ADD，
@@ -3162,10 +3222,11 @@ async function createUser({ username, password, companyName, taxNo, email, role,
   const expSql = exp.value === undefined ? 'DATE_ADD(NOW(), INTERVAL 1 MONTH)' : '?';
   const expArgs = exp.value === undefined ? [] : [exp.value];
   const r = await db.exec(
-    `INSERT INTO app_user (username, password_hash, role, status, company_name, tax_no, email, display_name, note, created_by, brand_id, expires_at)
-     VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ${expSql})`,
+    `INSERT INTO app_user (username, password_hash, role, status, company_full_name, company_name, tax_no, email, display_name, note, created_by, brand_id, expires_at)
+     VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ${expSql})`,
     [uname, auth.hashPassword(password), isAdminRole ? 'admin' : 'user',
-      isAdminRole ? null : (cname || null),
+      cfull,
+      isAdminRole ? null : cfull,
       isAdminRole ? null : (taxNo || null),
       isAdminRole ? null : (email || null),
       displayName || null, note || null, byUser.id, bid, ...expArgs]
@@ -3175,20 +3236,20 @@ async function createUser({ username, password, companyName, taxNo, email, role,
     `SELECT u.expires_at, ${EXPIRY_COLS} FROM app_user u WHERE u.id = ?`, [r.insertId]
   ))[0] || {};
   return {
-    ok: true, id: r.insertId, username: uname, brandId: bid,
+    ok: true, id: r.insertId, username: uname, companyFullName: cfull, brandId: bid,
     expiresAt: isAdminRole ? null : (fresh.expires_at_text || null),
     expired: false,
     daysLeft: (isAdminRole || fresh.days_left == null) ? null : Number(fresh.days_left),
   };
 }
 
-async function updateUser({ id, username, companyName, taxNo, email, role, displayName, note, brandId, expiresAt }) {
+async function updateUser({ id, username, companyFullName, companyName, taxNo, email, role, displayName, note, brandId, expiresAt }) {
   const rows = await db.query('SELECT * FROM app_user WHERE id = ?', [id]);
   if (!rows.length) throw new Error('用户不存在');
   const u = rows[0];
   if (u.username === 'admin' && role === 'user') throw new Error('内置超级管理员 admin 不能降级为普通用户');
 
-  // 改「公司全称」= 改登录账号（两者同源）。admin 的内置账号名固定，不参与改名。
+  // 登录账号：只改账号，不再联动公司全称（v0.3.32）。admin 的内置账号名固定，不参与改名。
   let nextUsername = u.username;
   const wantUsername = String(username === undefined ? '' : username).trim();
   if (wantUsername && wantUsername !== u.username) {
@@ -3199,15 +3260,27 @@ async function updateUser({ id, username, companyName, taxNo, email, role, displ
     nextUsername = wantUsername;
   }
 
-  // 开票抬头：传了就按传的写（允许清空）；没传但账号改了 → 跟随账号；否则保持原值
+  // 公司全称（v0.3.32）：独立字段，传了就必须非空；没传沿用原值（老库可能只有 company_name）
+  const curFull = String(u.company_full_name || u.company_name || u.username || '').trim();
+  let nextFull = curFull;
+  if (companyFullName !== undefined) {
+    nextFull = String(companyFullName).trim();
+    if (!nextFull) throw new Error('公司全称不能为空');
+    if (nextFull.length > 255) throw new Error('公司全称最多 255 个字符');
+  } else if (companyName !== undefined) {
+    // 兼容旧调用：只传 companyName 时，它同时作为公司全称与开票抬头
+    nextFull = String(companyName).trim() || curFull;
+  }
+
+  // 开票抬头公司名：默认跟随公司全称（口径统一，催收话术 {companyName} 不变）
   let nextCompany;
-  if (companyName !== undefined) nextCompany = String(companyName).trim();
-  else if (nextUsername !== u.username) nextCompany = nextUsername;
-  else nextCompany = u.company_name || '';
+  if (companyName !== undefined && companyFullName === undefined) nextCompany = String(companyName).trim();
+  else nextCompany = nextFull;
 
   const nextRole = role === 'admin' ? 'admin' : (u.role === 'admin' ? 'admin' : 'user');
   // 超级管理员是纯系统账号，不承载业务数据 → 不维护开票抬头（用户列表中只保留「重置密码」）。
   // 这里对 admin 账号强制清空抬头，避免通过接口绕过界面停住一个与设计相悖的状态。
+  // 公司全称仍然保留（列表里要显示是谁），所以 admin 的 company_full_name 不会被清空。
   const isAdminAccount = nextRole === 'admin';
   // 所属品牌方：传了就按传的改（校验存在），没传保持原值
   const nextBrand = brandId === undefined ? (Number(u.brand_id) || 1) : await assertBrand(brandId);
@@ -3218,8 +3291,8 @@ async function updateUser({ id, username, companyName, taxNo, email, role, displ
   if (!exp.ok) throw new Error(exp.error);
   const nextExpires = exp.value === undefined ? (u.expires_at || null) : exp.value;
   await db.exec(
-    `UPDATE app_user SET username = ?, company_name = ?, tax_no = ?, email = ?, display_name = ?, note = ?, role = ?, brand_id = ?, expires_at = ? WHERE id = ?`,
-    [nextUsername,
+    `UPDATE app_user SET username = ?, company_full_name = ?, company_name = ?, tax_no = ?, email = ?, display_name = ?, note = ?, role = ?, brand_id = ?, expires_at = ? WHERE id = ?`,
+    [nextUsername, nextFull || null,
       isAdminAccount ? null : (nextCompany || null),
       isAdminAccount ? null : (taxNo === undefined ? u.tax_no : (String(taxNo).trim() || null)),
       isAdminAccount ? null : (email === undefined ? u.email : (String(email).trim() || null)),
@@ -3228,7 +3301,8 @@ async function updateUser({ id, username, companyName, taxNo, email, role, displ
       nextRole, nextBrand, nextExpires, id]
   );
   return {
-    ok: true, username: nextUsername, companyName: isAdminAccount ? '' : nextCompany, brandId: nextBrand,
+    ok: true, username: nextUsername, companyFullName: nextFull,
+    companyName: isAdminAccount ? '' : nextCompany, brandId: nextBrand,
   };
 }
 
@@ -3949,7 +4023,7 @@ const server = http.createServer(async (req, res) => {
       const unmatched = await db.query('SELECT COUNT(*) AS n FROM v_unmatched_seller_name WHERE user_id = ?', [tenantId]);
       const ignoredCnt = await db.query('SELECT COUNT(*) AS n FROM seller_name_mapping WHERE is_ignored = 1');
       const manual = await db.query("SELECT COUNT(*) AS n FROM invoice_order WHERE user_id = ? AND state_source = 'manual'", [tenantId]);
-      const tenant = (await db.query('SELECT id, username, company_name FROM app_user WHERE id = ?', [tenantId]))[0] || null;
+      const tenant = (await db.query('SELECT id, username, company_full_name, company_name FROM app_user WHERE id = ?', [tenantId]))[0] || null;
       return sendJson(res, 200, {
         companies,
         sentList,
@@ -3958,7 +4032,11 @@ const server = http.createServer(async (req, res) => {
         unmatchedNameCount: unmatched[0] ? unmatched[0].n : 0,
         ignoredNameCount: ignoredCnt[0] ? ignoredCnt[0].n : 0,
         manualIssuedCount: manual[0] ? manual[0].n : 0,
-        tenant: tenant ? { id: tenant.id, username: tenant.username, companyName: tenant.company_name || '' } : null,
+        tenant: tenant ? {
+          id: tenant.id, username: tenant.username,
+          companyFullName: tenant.company_full_name || tenant.company_name || tenant.username || '',
+          companyName: tenant.company_name || '',
+        } : null,
         viewer: { id: user.id, role: user.role },
         isOtherTenant: Number(tenantId) !== Number(user.id),
         generatedAt: new Date().toLocaleString('zh-CN', { hour12: false }),
@@ -3971,7 +4049,10 @@ const server = http.createServer(async (req, res) => {
       const size = Math.min(200, Math.max(1, Number(url.searchParams.get('size')) || 20));
       const kw = (url.searchParams.get('q') || '').trim();
       const date = normalizeDay(url.searchParams.get('date'));
-      const w = (kw ? 'AND (o.order_no LIKE ? OR o.seller_company LIKE ? OR o.seller_login LIKE ?) ' : '')
+      // 交易关闭的订单不计金额也不列出来 —— 看板顶部的「订单总金额」卡片同样排除，
+      // 明细合计必须跟卡片对上（用户点卡片看的就是这张表）
+      const w = `AND ${ALI_OPEN_SQL} `
+        + (kw ? 'AND (o.order_no LIKE ? OR o.seller_company LIKE ? OR o.seller_login LIKE ?) ' : '')
         + (date ? 'AND DATE(o.pay_time) = ? ' : '');
       const args = [];
       if (kw) args.push(`%${kw}%`, `%${kw}%`, `%${kw}%`);
@@ -4042,6 +4123,7 @@ const server = http.createServer(async (req, res) => {
         SELECT DATE(pay_time) AS d, COUNT(*) AS n, ROUND(SUM(COALESCE(pay_amount,0)),2) AS amt
         FROM invoice_order o
         WHERE o.user_id = ? AND o.pay_time IS NOT NULL AND DATE(o.pay_time) >= ?
+          AND ${ALI_OPEN_SQL}
         GROUP BY DATE(o.pay_time)
       `, [tenantId, fromStr]);
       const invRows = await db.query(`
@@ -4214,7 +4296,10 @@ const server = http.createServer(async (req, res) => {
           (r.autoMapped ? ` · 自动匹配 ${r.autoMapped} 个销方` : '') +
           (r.unmatchedNames && r.unmatchedNames.length ? ` · 待人工匹配 ${r.unmatchedNames.length} 个销方` : ''));
       } else {
-        taskLog(t, `✓ 订单导入完成：新增 ${r.inserted} 单 · 更新 ${r.updated} 单`);
+        // 订单导入后服务端会补跑一次销方自动匹配（v0.3.32）：先导发票后导订单的账号靠它补齐税名
+        taskLog(t, `✓ 订单导入完成：新增 ${r.inserted} 单 · 更新 ${r.updated} 单`
+          + (kind === 'orders' && r.rematch && r.rematch.autoMapped
+            ? ` · 补匹配税名 ${r.rematch.autoMapped} 个` : ''));
       }
       // 操作日志：记录导入（旁路）
       logOp(user, kind === 'invoices' ? 'import.invoice' : 'import.order', {
@@ -5746,18 +5831,39 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, out.ok ? 200 : 400, out);
       }
 
-      // 换供应商（单头）：已关联货单时服务端会拒，避免一张单跟货单对不上供应商
-      if (method === 'POST' && p === '/api/replenish-order/supplier') {
+      // 换供应商（v0.3.33 起是**行级**）：把这一行的补货数量搬到目标供应商的补货单，
+      // 本行删除、源单搬空即软删。整单改名已去掉，避免与搬行混淆。
+      if (method === 'POST' && p === '/api/replenish-order/item-move') {
         writeGuard();
         const body = await readBody(req);
-        const out = await replenishOrder.setSupplier({
-          userId: roUid, id: body.id, supplierId: body.supplierId,
-          supplierName: body.supplierName, operator: user.username,
+        const out = await replenishOrder.moveItemToSupplier({
+          userId: roUid, orderId: body.orderId, itemId: body.itemId,
+          supplierId: body.supplierId, operator: user.username,
         });
         if (out.ok) {
-          await logOp(user, 'replenish.supplier', {
-            tenantId: roUid, orderId: out.order && out.order.id,
-            supplierName: out.order && out.order.supplierName,
+          await logOp(user, 'replenish.item_move', {
+            tenantId: roUid, orderId: Number(body.orderId), sku: body.sku || '',
+            qtyPack: body.qtyPack, supplierName: out.targetSupplierName,
+            targetOrderId: out.targetOrderId, merged: out.merged, sourceDeleted: out.sourceDeleted,
+          });
+        }
+        return sendJson(res, out.ok ? 200 : 400, out);
+      }
+
+      // 一键加购：整单明细按补货数量加进用户自己的齐货通 / 永源顺购物车（真实动作）
+      if (method === 'POST' && p === '/api/replenish-order/add-to-cart') {
+        if (!canPrice) return sendJson(res, 403, { error: '账号没有「平台取价」权限，不能加购，请联系超级管理员' });
+        writeGuard();
+        const body = await readBody(req);
+        const out = await replenishOrder.addOrderToCart({
+          userId: roUid, orderId: body.id, operator: user.username,
+          brandId: brandFromBody(user, body).brandId || (Number(user.brand_id) || 1),
+        });
+        if (out.ok) {
+          await logOp(user, 'replenish.cart', {
+            tenantId: roUid, orderId: Number(body.id), supplier: out.supplier,
+            total: out.total, added: out.added, qtyTotal: out.qtyTotal,
+            failed: (out.failed || []).length, skipped: (out.skipped || []).length,
           });
         }
         return sendJson(res, out.ok ? 200 : 400, out);
@@ -7252,10 +7358,13 @@ const server = http.createServer(async (req, res) => {
         if (dup.length) return sendJson(res, 400, { error: '账号已存在: ' + uname });
         // 员工不单独设使用期限：跟着主体账号走（currentUser 会校验主体是否到期/停用）
         const r = await db.exec(
-          `INSERT INTO app_user (username, password_hash, role, status, company_name, display_name, note,
+          `INSERT INTO app_user (username, password_hash, role, status, company_full_name, company_name, display_name, note,
                                  created_by, owner_id, brand_id)
-           VALUES (?, ?, 'user', 'active', ?, ?, ?, ?, ?, ?)`,
-          [uname, auth.hashPassword(pwd), user.company_name || null,
+           VALUES (?, ?, 'user', 'active', ?, ?, ?, ?, ?, ?, ?)`,
+          [uname, auth.hashPassword(pwd),
+            // 员工不单独维护公司名，直接跟着主体账号走（v0.3.32 起公司全称单独一列）
+            user.company_full_name || user.company_name || null,
+            user.company_name || null,
             String(b.displayName || '').trim().slice(0, 64) || null,
             String(b.note || '').trim().slice(0, 255) || null,
             ownerId, ownerId, Number(user.brand_id) || 1]
@@ -7420,13 +7529,14 @@ const server = http.createServer(async (req, res) => {
         const kw = (url.searchParams.get('username') || '').trim();
         if (!kw) return sendJson(res, 400, { error: '缺少 username' });
         const rows = await db.query(
-          `SELECT id, username, role, status, company_name, tax_no, email FROM app_user
-           WHERE username = ? OR username LIKE ? ORDER BY username LIMIT 20`,
-          [kw, `%${kw}%`]
+          `SELECT id, username, role, status, company_full_name, company_name, tax_no, email FROM app_user
+           WHERE username = ? OR username LIKE ? OR company_full_name LIKE ? ORDER BY username LIMIT 20`,
+          [kw, `%${kw}%`, `%${kw}%`]
         );
         return sendJson(res, 200, {
           users: rows.map((u) => ({
             id: u.id, username: u.username, role: u.role, status: u.status,
+            companyFullName: u.company_full_name || u.company_name || u.username || '',
             companyName: u.company_name || '', taxNo: u.tax_no || '', email: u.email || '',
           })),
         });
