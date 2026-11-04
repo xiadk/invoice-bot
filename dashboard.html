@@ -239,6 +239,8 @@
   .bill-table .el-table__header th { background: #fafbfc; }
   .bill-table .el-table__header th .cell { font-weight: 600; color: var(--text); }
   .bill-table .el-input-number .el-input__inner { text-align: right; padding-right: 6px; }
+  /* 账单金额输入（v0.3.27：改用 el-input，见模板注释）——右对齐，和原来的 el-input-number 视觉一致 */
+  .bill-table .bill-amt-input .el-input__inner { text-align: right; padding-right: 6px; }
   .bill-table .bill-strong { font-weight: 700; }
   .company { font-weight: 600; }
   .th-sort { cursor: pointer; user-select: none; white-space: nowrap; }
@@ -1943,9 +1945,14 @@
             <el-table-column label="收入" label-class-name="bill-grp">
               <el-table-column v-for="it in billIncomeItems" :key="it.key" :label="it.label" width="142">
                 <template slot-scope="p">
-                  <el-input-number :value="p.row.cells[it.key]" :min="0" :precision="2" :controls="false"
-                                   size="mini" style="width:112px"
-                                   @change="v => saveBillCell(p.row, it.key, v)"></el-input-number>
+                  <!-- 金额输入（v0.3.27）：必须用 v-model 绑到 bill.draft 的编辑缓冲上。
+                       :value 单向绑定在 Element 里行不通——每次重渲染都会把 input.value 重置回 prop，
+                       用户刚敲的数字会被抹掉（表现为「输完立马变 0」）。
+                       失焦/回车时再清洗解析（1,200 / ¥1200 / 全角数字都能存），解析不了明确报错。 -->
+                  <el-input v-model="bill.draft[p.row.month + '|' + it.key]"
+                            size="mini" class="bill-amt-input" style="width:112px"
+                            @blur="saveBillCellText(p.row, it.key)"
+                            @keyup.enter.native="saveBillCellText(p.row, it.key)"></el-input>
                 </template>
               </el-table-column>
               <el-table-column label="收入合计" width="132">
@@ -1963,9 +1970,10 @@
                   <el-tag v-if="it.source === 'auto'" size="mini" type="info" style="margin-left:4px">系统</el-tag>
                 </template>
                 <template slot-scope="p">
-                  <el-input-number v-if="it.source === 'manual'" :value="p.row.cells[it.key]" :min="0" :precision="2"
-                                   :controls="false" size="mini" style="width:104px"
-                                   @change="v => saveBillCell(p.row, it.key, v)"></el-input-number>
+                  <el-input v-if="it.source === 'manual'" v-model="bill.draft[p.row.month + '|' + it.key]"
+                            size="mini" class="bill-amt-input" style="width:104px"
+                            @blur="saveBillCellText(p.row, it.key)"
+                            @keyup.enter.native="saveBillCellText(p.row, it.key)"></el-input>
                   <!-- 系统项：金额 + 参与统计的订单数（点金额看明细核对）；两口径不一致时标红放大 -->
                   <span v-else class="bill-auto" :class="{ 'bill-mismatch': billCmpBad(p.row, it) }"
                         :title="billCmpBad(p.row, it) ? '平台自动项与同名供应商货单金额不一致，点击看两边明细对比' : '点击查看参与统计的全部订单明细'"
@@ -4806,7 +4814,7 @@ const vm = new Vue({
       // 交易市场
       market: { loading: false, rows: [], total: 0, page: 1, size: 20, summary: {} },
       // 账单（按月）：cols = 每个月一列 { month, hasRow, cells(手工项), auto(1688/拼多多), totals }
-      bill: { loading: false, syncing: false, items: [], cols: [] },
+      bill: { loading: false, syncing: false, items: [], cols: [], draft: {} },
       billAdd: { visible: false, month: '', copyFrom: '', saving: false },
       // 账单「系统」支出项的订单明细弹窗（点金额打开，用于核对条数与合计）
       billOrders: { visible: false, loading: false, platform: '', month: '', title: '', rows: [], cols: {}, total: 0, sum: 0, page: 1, size: 50 },
@@ -10763,6 +10771,7 @@ const vm = new Vue({
         if (d.error) { this.$message.error(d.error); return; }
         this.bill.items = d.items || [];
         this.bill.cols = d.months || [];
+        this.fillBillDraft(); // 金额输入框的编辑缓冲（v0.3.27）
       } catch (e) { this.$message.error('账单加载失败: ' + e.message); }
       finally { if (!silent) this.bill.loading = false; }
     },
@@ -10783,6 +10792,65 @@ const vm = new Vue({
       }
     },
     /** 改一个单元格 → 立即保存，静默重算（保存后重新拉一次，金额口径统一由服务端算） */
+    /** 账单金额框显示值：始终两位小数 */
+    billCellText(row, key) {
+      const v = row && row.cells ? Number(row.cells[key]) : 0;
+      return (Number.isFinite(v) ? v : 0).toFixed(2);
+    },
+    /**
+     * 重建金额框的编辑缓冲（v0.3.27）。
+     * Element 的 el-input 用 :value 单向绑定时，每次重渲染都会把输入框里的内容重置回 prop，
+     * 用户刚敲的数字会被抹掉 —— 所以必须 v-model 绑一份可写的本地缓冲，失焦时才提交。
+     * 整体替换对象（而不是逐个 $set），保证所有键一创建就是响应式的。
+     */
+    fillBillDraft() {
+      const d = {};
+      for (const col of (this.bill.cols || [])) {
+        for (const it of (this.bill.items || [])) {
+          if (it.source !== 'manual') continue;
+          d[col.month + '|' + it.key] = (Number(col.cells && col.cells[it.key]) || 0).toFixed(2);
+        }
+      }
+      this.bill.draft = d;
+    },
+    /**
+     * 金额文本解析（v0.3.27）：容忍从 Excel / 网页里复制来的各种写法。
+     * 支持 ¥ ￥ $ 元、千分位逗号（中英文）、空格、全角数字；空串按 0。
+     * 解析不了返回 null，由调用方报错 —— 绝不能返回 0：原来 el-input-number 就是把
+     * 「1,200 / ¥1200 / ９００」解析成 NaN 后静默回滚成 0，用户只看到「输完变 0」。
+     */
+    parseAmount(raw) {
+      let s = String(raw == null ? '' : raw).trim();
+      if (!s) return 0;
+      s = s
+        .replace(/[０-９]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xfee0))
+        .replace(/[，,]/g, '')
+        .replace(/[¥￥$元]/g, '')
+        .replace(/\s+/g, '');
+      if (!/^-?(\d+(\.\d*)?|\.\d+)$/.test(s)) return null;
+      const n = Number(s);
+      return Number.isFinite(n) ? n : null;
+    },
+    /** 金额框失焦 / 回车：清洗解析后保存；解析失败明确报错，并把缓冲还原成库里的值 */
+    async saveBillCellText(row, key) {
+      const k = row.month + '|' + key;
+      const raw = this.bill.draft[k];
+      const restore = () => this.$set(this.bill.draft, k, this.billCellText(row, key));
+      const parsed = this.parseAmount(raw);
+      if (parsed === null) {
+        this.$message.error('金额格式不对：「' + String(raw == null ? '' : raw).slice(0, 20) + '」，请填数字（如 1200 或 1,200.50）');
+        restore();
+        return;
+      }
+      if (parsed < 0) {
+        this.$message.error('金额不能为负数');
+        restore();
+        return;
+      }
+      const v = Number(parsed.toFixed(2));
+      if (Number(row.cells[key]) === v) { restore(); return; } // 没改就只把显示格式化回来
+      await this.saveBillCell(row, key, v);
+    },
     async saveBillCell(col, item, value) {
       const v = Math.max(0, Number(value) || 0);
       if (Number(col.cells[item]) === v) return;
