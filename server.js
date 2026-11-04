@@ -537,14 +537,19 @@ function productScope(o) {
       salesExpr: 'COALESCE(bp.sales_30d, pi.sales_30d)',
       statusExpr, statusCodeExpr: 'bp.purchase_status_code',
       imageExpr: "COALESCE(NULLIF(pi.image_url, ''), bp.image_url)",
-      qhtExpr: 'COALESCE(pi.qht_goods_id, bp.qht_goods_id)',
-      afaExpr: 'COALESCE(pi.afa_goods_id, bp.afa_goods_id)',
-      jdExpr: 'COALESCE(pi.jd_sku_id, bp.jd_sku_id)',
-      localExpr: 'COALESCE(pi.local_price, bp.local_price)',
-      localPackExpr: 'COALESCE(pi.local_pack_price, bp.local_pack_price)',
-      localQtyExpr: 'COALESCE(pi.local_spec_qty, bp.local_spec_qty)',
-      // 供应商 0 表示「没填」，不能直接 COALESCE（否则个人行没填时永远盖掉品牌行的值）
-      localSupExpr: 'COALESCE(NULLIF(pi.local_supplier_id, 0), bp.local_supplier_id, 0)',
+      // ⚠ v0.3.31：关联/价格一律「品牌行优先」，与写入侧 writeProductLink/writeProductLocal
+      //   的 brand-first 同一权威。旧版这里是 COALESCE(pi.x, bp.x)（个人行优先）：
+      //   关联当时 SKU 还没同步进 brand_product 就会写进个人行，之后品牌表补上该 SKU 也不会
+      //   补关联列 —— 结果批次视图（导入补货文件）读得到、品牌视图（直接查询）读不到，
+      //   同一个 SKU 两个视图读数漂移。个人行只保留「SKU 不在品牌表」时的兜底作用。
+      qhtExpr: 'COALESCE(bp.qht_goods_id, pi.qht_goods_id)',
+      afaExpr: 'COALESCE(bp.afa_goods_id, pi.afa_goods_id)',
+      jdExpr: 'COALESCE(bp.jd_sku_id, pi.jd_sku_id)',
+      localExpr: 'COALESCE(bp.local_price, pi.local_price)',
+      localPackExpr: 'COALESCE(bp.local_pack_price, pi.local_pack_price)',
+      localQtyExpr: 'COALESCE(bp.local_spec_qty, pi.local_spec_qty)',
+      // 供应商 0 表示「没填」，不能直接 COALESCE（否则品牌行没填时会把个人行的值顶掉）
+      localSupExpr: 'COALESCE(NULLIF(bp.local_supplier_id, 0), pi.local_supplier_id, 0)',
       bpIdExpr: 'bp.id', suggestExpr: 'pi.suggest_qty', fileExpr: 'pi.source_file', batchExpr: 'pi.batch_id',
     };
   }
@@ -583,12 +588,18 @@ function productScope(o) {
 async function writeProductLink(col, value, { brandId, userId, sku }) {
   const ALLOWED = ['qht_goods_id', 'afa_goods_id', 'jd_sku_id', 'local_price'];
   if (!ALLOWED.includes(col)) throw new Error('不允许写入的列：' + col);
+  const v = (value === undefined || value === null || String(value).trim() === '') ? null : value;
   const ex = await db.query('SELECT id FROM brand_product WHERE brand_id = ? AND sku = ? LIMIT 1', [brandId, sku]);
   if (ex.length) {
-    await db.exec(`UPDATE brand_product SET ${col} = ? WHERE brand_id = ? AND sku = ?`, [value, brandId, sku]);
+    await db.exec(`UPDATE brand_product SET ${col} = ? WHERE brand_id = ? AND sku = ?`, [v, brandId, sku]);
+    // ⚠ v0.3.31：品牌行是唯一权威来源，个人补货行里的历史值必须一起清掉。
+    //   旧版只在品牌行写，pi 里的旧值留着 → 解除关联后批次视图（旧版 pi 优先）
+    //   会把刚解除的值「复活」；现在的读取是 bp 优先，pi 残留虽不影响显示，
+    //   但会让后续排查两个表对不上，所以写入/解除都顺手清干净。
+    await db.exec(`UPDATE product_item SET ${col} = NULL WHERE brand_id = ? AND sku = ?`, [brandId, sku]);
     return { scope: 'brand', affected: 1 };
   }
-  const r = await db.exec(`UPDATE product_item SET ${col} = ? WHERE user_id = ? AND sku = ?`, [value, userId, sku]);
+  const r = await db.exec(`UPDATE product_item SET ${col} = ? WHERE user_id = ? AND sku = ?`, [v, userId, sku]);
   return { scope: 'item', affected: r.affectedRows || 0 };
 }
 
@@ -607,6 +618,13 @@ async function writeProductLocal({ brandId, userId, sku, unitPrice, packPrice, s
       'UPDATE brand_product SET local_price = ?, local_pack_price = ?, local_spec_qty = ?, local_supplier_id = ?'
       + ' WHERE brand_id = ? AND sku = ?',
       args.concat([brandId, sku]));
+    // 同 writeProductLink：清掉个人行里的历史本地价，避免「清空本地价后旧值又冒出来」
+    // ⚠ local_supplier_id 两表都是 NOT NULL DEFAULT 0，这里只能写 0，写 NULL 会报
+    //   「Column 'local_supplier_id' cannot be null」，连带整条清空语句失败。
+    await db.exec(
+      'UPDATE product_item SET local_price = NULL, local_pack_price = NULL, local_spec_qty = NULL, local_supplier_id = 0'
+      + ' WHERE brand_id = ? AND sku = ?',
+      [brandId, sku]);
     return { scope: 'brand', affected: 1 };
   }
   const r = await db.exec(

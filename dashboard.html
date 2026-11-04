@@ -10445,6 +10445,8 @@ const vm = new Vue({
     async loadQhtPrices(rows, opts) {
       const src = Array.isArray(rows) ? rows : (this.rp.rows || []);
       const mode = (opts && opts.mode) === 'cache' ? 'cache' : 'refresh';
+      // quiet：调用方自己会给出更准确的提示（例如「关联成功但没取到价」），不再叠一条通用告警
+      const quiet = !!(opts && opts.quiet);
       const groups = this.priceGroups(src, 'qht_goods_id');
       if (!groups.size) return { cached: 0, fetched: 0 };
       const acc = {};
@@ -10471,8 +10473,10 @@ const vm = new Vue({
       // 整体替换而不是逐个加键：Vue2 对对象新增属性不响应，会「取到了但页面不刷新」
       if (Object.keys(acc).length) this.rp.prices = Object.assign({}, this.rp.prices, acc);
       if (err) {
-        this.$message.warning('取价失败：' + err.error
-          + ((err.code === 'no_session' || err.code === 'auth') ? '（点右上角「登录态设置」重新粘贴）' : ''));
+        if (!quiet) {
+          this.$message.warning('取价失败：' + err.error
+            + ((err.code === 'no_session' || err.code === 'auth') ? '（点右上角「登录态设置」重新粘贴）' : ''));
+        }
       }
       return { cached, fetched };
     },
@@ -10522,6 +10526,16 @@ const vm = new Vue({
         const row = this.rowsOf(this.rpLink.src).find((r) => r.sku === this.rpLink.sku);
         if (row) row.qht_goods_id = String(pick.goodsId);
         this.rpLink.visible = false;
+        // ⚠ v0.3.31：关联成功就立刻把这一个商品的价格取回来、存进缓存并显示，
+        //   不用等用户再点「取价」或等定时刷新。旧版这里只写了 goodsId，
+        //   页面要等到下一次取价才有数，看着像「已关联但没价」。
+        //   取不到价（没登录态 / 接口报错）不算关联失败：行仍是「已关联未取价」，可稍后重试。
+        if (row) {
+          await this.loadQhtPrices([row], { mode: 'refresh', quiet: true });
+          if (!this.qhtPrice(row)) {
+            this.$message.warning('已关联，但价格这次没取到（可稍后点「取价」重试）');
+          }
+        }
         this.$message.success('已关联：' + pick.goodsName);
       } catch (e) { this.$message.error('关联失败: ' + e.message); }
     },
@@ -10772,7 +10786,15 @@ const vm = new Vue({
           body: JSON.stringify({ sku: row.sku, goodsId: '', brandId: row.brand_id || null }),
         });
         if (d.error) { this.$message.error('解除失败: ' + d.error); return; }
+        // 顺手清掉价格缓存键：不然行上没了 goodsId、缓存里还留着一份，
+        // 后面同 SKU 重新关联别的商品时容易误显示旧价
+        const oldKey = this.pkey(row, 'qht');
         row.qht_goods_id = '';
+        if (oldKey && this.rp.prices[oldKey]) {
+          const next = Object.assign({}, this.rp.prices);
+          delete next[oldKey];
+          this.rp.prices = next;
+        }
         this.$message.success('已解除关联');
       } catch (e) { this.$message.error('解除失败: ' + e.message); }
     },

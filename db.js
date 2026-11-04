@@ -1422,6 +1422,37 @@ async function migrate(conn, dbName) {
     );
   }
 
+  // ── 关联列回填（v0.3.31）──
+  //   历史事故：关联那一刻 SKU 还没同步进 brand_product，writeProductLink 会回退写
+  //   product_item；之后商品同步把 SKU 补进品牌表却不会补关联列。于是同一个 SKU
+  //   「导入补货文件」读得到关联、「直接查询」读不到 → 已关联却不显示价格。
+  //   读取口径已在 v0.3.31 改成品牌行优先，这里把个人行里的历史值补到品牌行（只填空），
+  //   幂等：每次启动跑一遍，填过就不会再动；品牌行已有值一律不覆盖。
+  if (await tableExists('brand_product') && await tableExists('product_item')) {
+    const BACKFILL = [
+      ['qht_goods_id', "MAX(NULLIF(qht_goods_id, ''))"],
+      ['afa_goods_id', "MAX(NULLIF(afa_goods_id, ''))"],
+      ['jd_sku_id', "MAX(NULLIF(jd_sku_id, ''))"],
+      ['local_price', 'MAX(local_price)'],
+      ['local_pack_price', 'MAX(local_pack_price)'],
+      ['local_spec_qty', 'MAX(local_spec_qty)'],
+    ];
+    for (const [col, agg] of BACKFILL) {
+      if (!(await colExists('brand_product', col)) || !(await colExists('product_item', col))) continue;
+      const emptyCond = col.endsWith('_id')
+        ? `(bp.${col} IS NULL OR bp.${col} = '')`
+        : `bp.${col} IS NULL`;
+      const r = await q(
+        'UPDATE brand_product bp JOIN ('
+        + `SELECT brand_id, sku, ${agg} AS v FROM product_item GROUP BY brand_id, sku`
+        + ') m ON m.brand_id = bp.brand_id AND m.sku = bp.sku '
+        + `SET bp.${col} = m.v `
+        + `WHERE ${emptyCond} AND m.v IS NOT NULL`
+      );
+      if (r && r.affectedRows) console.log(`[db] 回填 brand_product.${col}（来自个人补货行）：${r.affectedRows} 行`);
+    }
+  }
+
   // ── 供应商 / 货单管理（v0.3.0）──
   //   两个新菜单沿用 app_user 逐列开关；supplier / waybill / waybill_image / waybill_upload_token
   //   是普通业务表。下面的 DDL 与 sql/schema.sql 必须同源（改一处就要改另一处）。
