@@ -65,7 +65,7 @@ const jd = require('./lib/jd-bmall');
 const priceCache = require('./lib/price-cache');
 const products = require('./lib/products');
 const billing = require('./lib/billing');
-const { loadConfig } = require('./lib/config');
+const { loadConfig, CONFIG_PATH } = require('./lib/config');
 const { AgentHub } = require('./lib/agent-hub');
 const { buildMessages } = require('./lib/sender');
 const qnh = require('./lib/qnh');
@@ -4077,8 +4077,12 @@ const server = http.createServer(async (req, res) => {
       if (!isAdmin) return sendJson(res, 403, { error: '仅超级管理员可修改系统配置' });
       const { config } = await readBody(req);
       if (!config || typeof config !== 'object') throw new Error('缺少 config');
-      const filePath = path.join(ROOT, 'config.json');
-      const old = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+      // 与 lib/config.js 同源：优先 APP_CONFIG_FILE（容器部署把配置挂载到可写目录），
+      // 否则项目根目录。此前写死 path.join(ROOT, 'config.json')，容器里 /app 不可写时保存必挂
+      const filePath = CONFIG_PATH;
+      let old = {};
+      try { old = JSON.parse(fs.readFileSync(filePath, 'utf-8')); }
+      catch (e) { if (e.code !== 'ENOENT') throw e; }
       const merged = { ...old };
       merged.runtime = { ...(old.runtime || {}), ...(config.runtime || {}) };
       // 拼多多翻页上限（发票刷新与订单同步共用）：夹在 20~2000，非法值回默认值（v0.3.14 起 1000，改完下次同步即生效）
@@ -4122,7 +4126,17 @@ const server = http.createServer(async (req, res) => {
         const u = String(config.runtime.agentInstallerUrl || '').trim();
         merged.runtime.agentInstallerUrl = /^https?:\/\//i.test(u) ? u : '';
       }
-      fs.writeFileSync(filePath, JSON.stringify(merged, null, 2), 'utf-8');
+      try {
+        fs.writeFileSync(filePath, JSON.stringify(merged, null, 2), 'utf-8');
+      } catch (e) {
+        if (e.code === 'EACCES' || e.code === 'EROFS' || e.code === 'EPERM') {
+          throw new Error('配置文件不可写（' + e.code + '）：' + filePath
+            + '。容器部署请把配置挂载到可写目录并用环境变量 APP_CONFIG_FILE 指向它'
+            + '（如 docker-compose 加 volumes: "./data/config.json:/data/config.json" 且 APP_CONFIG_FILE=/data/config.json），'
+            + '或进入容器执行 chown $(id -u):$(id -g) ' + filePath + ' 修正属主。');
+        }
+        throw e;
+      }
       // 兼容旧调用：允许随配置一起提交本人抬头。看板已不再走这条路
       // （抬头属于用户信息，统一在「系统管理 → 用户管理」里按账号维护）
       if (config.buyerInfo) {
