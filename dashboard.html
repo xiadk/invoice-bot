@@ -10427,7 +10427,14 @@ const vm = new Vue({
           body: JSON.stringify({ id: o.id }),
         });
         if (d.needLogin) { await this.promptCartLogin(kind, d.error); return; }
-        if (!d.ok) { this.$message.error(d.error || '加购失败'); return; }
+        // v0.3.35：失败的行在明细里标红打 ×（失败多半是没货；库里库存为 0 的本来就会标）。
+        // ⚠ 必须放在 d.ok 判断**之前**：全部失败时 d.ok 也是 false，提前 return 就标不上了
+        this.roView.noStockSkus = (d.failed || []).map((x) => String(x.sku || '')).filter(Boolean);
+        if (!d.ok) {
+          const extra = this.roView.noStockSkus.length ? '（失败的行已在明细里标红打 ×）' : '';
+          this.$message.error((d.error || '加购失败') + extra);
+          return;
+        }
         const lines = ['已加入' + label + '购物车：' + d.added + ' 个商品、' + d.qtyTotal + ' 件'];
         if ((d.skipped || []).length) {
           lines.push('', '跳过 ' + d.skipped.length + ' 个（未关联' + label + '商品）：');
@@ -10439,8 +10446,6 @@ const vm = new Vue({
           d.failed.slice(0, 12).forEach((x) => lines.push('· ' + (x.sku || '') + ' ' + (x.qty || 0) + ' 件 —— ' + x.error));
           if (d.failed.length > 12) lines.push('· …… 还有 ' + (d.failed.length - 12) + ' 个');
         }
-        // v0.3.35：加购失败的行在明细里标红打 ×（失败多半是没货；库里库存为 0 的本来就会标）
-        this.roView.noStockSkus = (d.failed || []).map((x) => String(x.sku || '')).filter(Boolean);
         this.$alert(lines.join('\n'), '加购结果', { confirmButtonText: '知道了' }).catch(() => {});
       } catch (e) { this.$message.error('加购失败：' + e.message); }
       finally { this.roView.carting = false; }
