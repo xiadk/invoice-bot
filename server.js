@@ -753,6 +753,18 @@ function assertWritable(user, tenantId) {
 // 数据加载（全部按 user_id 隔离）
 // ─────────────────────────────────────────────────────────────────────────
 
+/**
+ * 1688「交易关闭」判定（v0.3.34 用户要求）
+ *   交易关闭 = 没成交：既不该催开票，也不该计入订单金额 / 待开票金额。
+ *   order_status 存中文文案（库里实况只有「交易关闭」，但平台也可能给「交易已关闭」），
+ *   所以按「含 关闭」判断，别写死等号。口径与 lib/billing.js 的支出排除一致。
+ * ⚠ 催收相关 SQL 必须共用这两个表达式，否则「待开票金额」和消息里的订单清单会对不上。
+ */
+const ALI_OPEN_SQL = "COALESCE(o.order_status, '') NOT LIKE '%关闭%'";
+const ALI_CLOSED_SQL = "COALESCE(o.order_status, '') LIKE '%关闭%'";
+/** JS 侧同一判定（消息清单过滤、书签工具用） */
+const isClosedOrder = (status) => String(status == null ? '' : status).includes('关闭');
+
 /** 某用户的卖家聚合列表：订单维度 + 税务局已开票维度 */
 async function loadSellers(userId) {
   const orderRows = await db.query(`
@@ -760,15 +772,17 @@ async function loadSellers(userId) {
       COALESCE(NULLIF(o.seller_login,''), o.seller_company) AS loginId,
       MAX(o.seller_company)                                 AS company,
       MAX(o.seller_login)                                   AS sellerLogin,
-      COUNT(*)                                              AS total,
-      ROUND(SUM(COALESCE(o.pay_amount,0)), 2)               AS totalAmount,
-      SUM(o.invoice_state = 'none')                         AS noneCount,
-      SUM(o.invoice_state = 'applying')                     AS applyingCount,
-      SUM(o.invoice_state = 'issued')                       AS issuedStateCount,
-      SUM(o.invoice_state <> 'issued')                      AS unissuedCount,
-      SUM(o.invoice_state = 'issued' AND o.state_source = 'manual') AS manualIssuedCount,
-      ROUND(SUM(CASE WHEN o.invoice_state = 'issued' AND o.state_source = 'manual'
+      SUM(${ALI_OPEN_SQL})                                  AS total,
+      ROUND(SUM(CASE WHEN ${ALI_OPEN_SQL} THEN COALESCE(o.pay_amount,0) ELSE 0 END), 2) AS totalAmount,
+      SUM(${ALI_OPEN_SQL} AND o.invoice_state = 'none')     AS noneCount,
+      SUM(${ALI_OPEN_SQL} AND o.invoice_state = 'applying') AS applyingCount,
+      SUM(${ALI_OPEN_SQL} AND o.invoice_state = 'issued')   AS issuedStateCount,
+      SUM(${ALI_OPEN_SQL} AND o.invoice_state <> 'issued')  AS unissuedCount,
+      SUM(${ALI_OPEN_SQL} AND o.invoice_state = 'issued' AND o.state_source = 'manual') AS manualIssuedCount,
+      ROUND(SUM(CASE WHEN ${ALI_OPEN_SQL} AND o.invoice_state = 'issued' AND o.state_source = 'manual'
                      THEN COALESCE(o.pay_amount,0) ELSE 0 END), 2) AS manualIssuedAmount,
+      SUM(${ALI_CLOSED_SQL})                                AS closedCount,
+      ROUND(SUM(CASE WHEN ${ALI_CLOSED_SQL} THEN COALESCE(o.pay_amount,0) ELSE 0 END), 2) AS closedAmount,
       MAX(o.pay_time)                                       AS lastPayTime
     FROM invoice_order o
     WHERE o.user_id = ?
@@ -824,6 +838,9 @@ async function loadSellers(userId) {
       unissuedCount: Number(r.unissuedCount) || 0,
       manualIssuedCount: Number(r.manualIssuedCount) || 0,
       manualIssuedAmount: (Number(r.manualIssuedAmount) || 0).toFixed(2),
+      // 交易关闭的订单：不计入上面任何金额 / 单数，只单独带出来给页面做提示
+      closedCount: Number(r.closedCount) || 0,
+      closedAmount: (Number(r.closedAmount) || 0).toFixed(2),
       invoicedAmount: (inv ? Number(inv.invoiceAmount) || 0 : 0).toFixed(2),
       invoiceCount: inv ? Number(inv.invoiceCount) || 0 : 0,
       invoiceRowCount: inv ? Number(inv.invoiceRowCount) || 0 : 0,
@@ -902,6 +919,9 @@ async function loadCompanies(userId) {
       unissuedCount: sum(rows, 'unissuedCount'),
       manualIssuedCount: sum(rows, 'manualIssuedCount'),
       manualIssuedAmount: sum(rows, 'manualIssuedAmount').toFixed(2),
+      // 交易关闭（不计入上面金额 / 单数，只做提示）
+      closedCount: sum(rows, 'closedCount'),
+      closedAmount: sum(rows, 'closedAmount').toFixed(2),
       invoicedAmount: invoicedAmount.toFixed(2),
       invoiceCount: sum(rows, 'invoiceCount'),
       invoiceRowCount: sum(rows, 'invoiceRowCount'),
@@ -924,6 +944,8 @@ async function loadCompanies(userId) {
         unissuedCount: m.unissuedCount,
         manualIssuedCount: m.manualIssuedCount,
         manualIssuedAmount: m.manualIssuedAmount,
+        closedCount: m.closedCount,
+        closedAmount: m.closedAmount,
         invoicedAmount: m.invoicedAmount,
         invoiceCount: m.invoiceCount,
         invoiceRowCount: m.invoiceRowCount,
@@ -981,6 +1003,7 @@ async function loadSellerDetail(userId, loginId) {
  * 批量取「这些卖家各自的待催收订单」
  * 用于组装催收任务：原来 doClientSend 对每个卖家串行调 loadSellerDetail（每家 4 条 SQL），
  * 选 100 家就是 400 次往返 —— 纯属浪费。这里一次查完并按 loginId 分组。
+ * v0.3.34：交易关闭的订单不进催收消息（没成交就没待开票金额），金额与清单同一口径。
  * @returns {Promise<Map<string, Array<{orderId:string, amount:string}>>>}
  */
 async function loadPendingOrdersBatch(userId, loginIds) {
@@ -989,11 +1012,12 @@ async function loadPendingOrdersBatch(userId, loginIds) {
   if (!ids.length) return out;
   const ph = ids.map(() => '?').join(',');
   const rows = await db.query(
-    `SELECT COALESCE(NULLIF(seller_login,''), seller_company) AS loginId,
-            order_no, pay_amount, invoice_state, pay_time
-     FROM invoice_order
-     WHERE user_id = ? AND COALESCE(NULLIF(seller_login,''), seller_company) IN (${ph})
-     ORDER BY pay_time DESC`,
+    `SELECT COALESCE(NULLIF(o.seller_login,''), o.seller_company) AS loginId,
+            o.order_no, o.pay_amount, o.invoice_state, o.pay_time
+     FROM invoice_order o
+     WHERE o.user_id = ? AND COALESCE(NULLIF(o.seller_login,''), o.seller_company) IN (${ph})
+       AND ${ALI_OPEN_SQL}
+     ORDER BY o.pay_time DESC`,
     [userId, ...ids]
   );
   for (const r of rows) {
@@ -1014,8 +1038,11 @@ async function bmComputeTask(userId, rawLogin) {
   );
   if (!s || !s.sellerLogin) return { none: true, reason: '未找到该卖家的待催收数据（可能未维护会员名映射）' };
   const detail = await loadSellerDetail(userId, s.loginId);
-  const toRemind = detail.orders.filter((o) => o.invoice_state !== 'issued');
-  if (!toRemind.length) return { none: true, reason: '该卖家订单均已开票' };
+  // 已开票的不再催；交易关闭的也不催（没成交，催了也开不出票）
+  const toRemind = detail.orders.filter(
+    (o) => o.invoice_state !== 'issued' && !isClosedOrder(o.order_status)
+  );
+  if (!toRemind.length) return { none: true, reason: '该卖家订单均已开票（或仅剩交易关闭的订单）' };
   const buyer = await buyerInfoOf(userId);
   const config = loadConfig();
   const runConfig = { ...config, buyerInfo: buyer };
@@ -3034,12 +3061,15 @@ async function setOrderState(userId, { orderNo, loginId, action }) {
   if (action === 'confirm-all' || action === 'cancel-all') {
     if (!loginId) throw new Error('缺少 loginId');
     const rows = await db.query(
-      `SELECT order_no, invoice_state, state_source FROM invoice_order
+      `SELECT order_no, invoice_state, state_source, order_status FROM invoice_order
        WHERE user_id = ? AND COALESCE(NULLIF(seller_login,''), seller_company) = ?`, [userId, loginId]);
     if (!rows.length) throw new Error('卖家不存在: ' + loginId);
 
     if (action === 'confirm-all') {
-      const targets = rows.filter((r) => r.invoice_state !== 'issued').map((r) => r.order_no);
+      // 交易关闭的订单不参与「全部标记已开票」：它们本来就不在待开票口径里
+      const targets = rows
+        .filter((r) => r.invoice_state !== 'issued' && !isClosedOrder(r.order_status))
+        .map((r) => r.order_no);
       const affected = await chunk(targets, (part) => db.exec(
         `UPDATE invoice_order SET invoice_state='issued', state_source='manual', state_note=?, state_updated_at=NOW()
          WHERE user_id = ? AND order_no IN (${part.map(() => '?').join(',')})`, [note, userId, ...part]));
@@ -4019,7 +4049,10 @@ const server = http.createServer(async (req, res) => {
       const size = Math.min(200, Math.max(1, Number(url.searchParams.get('size')) || 20));
       const kw = (url.searchParams.get('q') || '').trim();
       const date = normalizeDay(url.searchParams.get('date'));
-      const w = (kw ? 'AND (o.order_no LIKE ? OR o.seller_company LIKE ? OR o.seller_login LIKE ?) ' : '')
+      // 交易关闭的订单不计金额也不列出来 —— 看板顶部的「订单总金额」卡片同样排除，
+      // 明细合计必须跟卡片对上（用户点卡片看的就是这张表）
+      const w = `AND ${ALI_OPEN_SQL} `
+        + (kw ? 'AND (o.order_no LIKE ? OR o.seller_company LIKE ? OR o.seller_login LIKE ?) ' : '')
         + (date ? 'AND DATE(o.pay_time) = ? ' : '');
       const args = [];
       if (kw) args.push(`%${kw}%`, `%${kw}%`, `%${kw}%`);
@@ -4090,6 +4123,7 @@ const server = http.createServer(async (req, res) => {
         SELECT DATE(pay_time) AS d, COUNT(*) AS n, ROUND(SUM(COALESCE(pay_amount,0)),2) AS amt
         FROM invoice_order o
         WHERE o.user_id = ? AND o.pay_time IS NOT NULL AND DATE(o.pay_time) >= ?
+          AND ${ALI_OPEN_SQL}
         GROUP BY DATE(o.pay_time)
       `, [tenantId, fromStr]);
       const invRows = await db.query(`

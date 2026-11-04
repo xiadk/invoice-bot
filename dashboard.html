@@ -627,7 +627,7 @@
           <el-table-column type="expand">
             <template slot-scope="p">
               <div class="members-box">
-                <div class="members-head">该公司下的 1688 会员名（店铺）—— 催收按会员名分别发送：{amount}=该会员名的待开票金额，{orderId}=该会员名「未开票」的全部订单号</div>
+                <div class="members-head">该公司下的 1688 会员名（店铺）—— 催收按会员名分别发送：{amount}=该会员名的待开票金额，{orderId}=该会员名「未开票」的全部订单号（交易关闭的既不计算金额、也不进消息）</div>
                 <div class="member" v-for="m in p.row.members" :key="m.loginId">
                   <div class="member-line">
                     <el-checkbox :value="!!selected[m.loginId]" :disabled="!m.canSend || readonly"
@@ -636,7 +636,8 @@
                     <div class="m-name">
                       <b>{{ m.sellerLogin || m.loginId }}</b>
                       <el-tag v-if="isSent(m)" size="mini" type="success" style="margin-left:6px">已催收</el-tag>
-                      <div class="loginid">{{ m.total }} 单 · {{ yuan(m.totalAmount) }}</div>
+                      <div class="loginid">{{ m.total }} 单 · {{ yuan(m.totalAmount) }}<span
+                        v-if="m.closedCount" :title="'交易关闭 ' + m.closedCount + ' 单 / ¥' + m.closedAmount + '：没成交，不计入待开票金额，也不会进催收消息'">（另有 {{ m.closedCount }} 单交易关闭未计入）</span></div>
                     </div>
                     <div class="m-kv">
                       <span class="kv-label">税务局已开票</span>
@@ -675,7 +676,7 @@
                     <div v-else-if="detailCache[m.loginId].error" style="color:#d32f2f;font-size:12px">加载失败：{{ detailCache[m.loginId].error }}</div>
                     <template v-else>
                       <div class="sec">
-                        <span>订单明细（共 {{ (detailCache[m.loginId].orders || []).length }} 单）· 商家线下开票可单个或「全部标记已开票」</span>
+                        <span>订单明细（共 {{ (detailCache[m.loginId].orders || []).length }} 单<span v-if="closedCntOf(detailCache[m.loginId])" class="loginid" style="font-weight:400">，其中 {{ closedCntOf(detailCache[m.loginId]) }} 单交易关闭不计入催收</span>）· 商家线下开票可单个或「全部标记已开票」</span>
                         <span class="row-actions" v-if="!readonly">
                           <el-button v-if="pendingCnt(detailCache[m.loginId])" size="mini" @click="markAll(m, 'confirm-all', pendingCnt(detailCache[m.loginId]))">全部标记已开票({{ pendingCnt(detailCache[m.loginId]) }})</el-button>
                           <el-button v-if="manualCntOf(detailCache[m.loginId])" size="mini" @click="markAll(m, 'cancel-all', manualCntOf(detailCache[m.loginId]))">取消人工确认({{ manualCntOf(detailCache[m.loginId]) }})</el-button>
@@ -689,12 +690,17 @@
                             <td>{{ yuan(o.pay_amount) }}</td>
                             <td>{{ fmtMinute(o.pay_time) }}</td>
                             <td>
-                              <el-tag size="mini" :type="o.invoice_state === 'issued' ? 'success' : (o.invoice_state === 'applying' ? 'warning' : 'danger')">{{ statusText(o.invoice_state) }}</el-tag>
+                              <el-tag v-if="isClosedOrder(o.order_status)" size="mini" type="info"
+                                      :title="'平台订单状态：' + o.order_status + '（没成交，不计入待开票金额，也不会进催收消息）'">交易关闭</el-tag>
+                              <el-tag v-else size="mini" :type="o.invoice_state === 'issued' ? 'success' : (o.invoice_state === 'applying' ? 'warning' : 'danger')">{{ statusText(o.invoice_state) }}</el-tag>
                               <el-tag v-if="o.state_source === 'manual'" size="mini" style="margin-left:4px">人工</el-tag>
                             </td>
                             <td v-if="!readonly">
-                              <el-button v-if="o.state_source === 'manual'" size="mini" @click="markOrder(m, o, 'cancel')">取消人工确认</el-button>
-                              <el-button v-else size="mini" @click="markOrder(m, o, 'confirm')">标记已开票</el-button>
+                              <span v-if="isClosedOrder(o.order_status)" class="muted" style="font-size:12px">无需开票</span>
+                              <template v-else>
+                                <el-button v-if="o.state_source === 'manual'" size="mini" @click="markOrder(m, o, 'cancel')">取消人工确认</el-button>
+                                <el-button v-else size="mini" @click="markOrder(m, o, 'confirm')">标记已开票</el-button>
+                              </template>
                             </td>
                           </tr>
                           <tr v-if="!(detailCache[m.loginId].orders || []).length"><td :colspan="readonly ? 4 : 5" class="muted">无订单</td></tr>
@@ -759,7 +765,10 @@
           <el-table-column prop="totalAmount" label="订单 / 金额" width="130" sortable="custom"
                            :sort-orders="['descending', 'ascending', null]"
                            :header-cell-style="{ cursor: 'pointer' }">
-            <template slot-scope="p">{{ p.row.total }} 单<br><span class="amount">{{ yuan(p.row.totalAmount) }}</span></template>
+            <template slot-scope="p">{{ p.row.total }} 单<br><span class="amount">{{ yuan(p.row.totalAmount) }}</span>
+              <div v-if="p.row.closedCount" class="loginid"
+                   :title="'交易关闭 ' + p.row.closedCount + ' 单 / ¥' + p.row.closedAmount + '：没成交，不计入订单金额与待开票金额'">关闭 {{ p.row.closedCount }} 单未计入</div>
+            </template>
           </el-table-column>
           <el-table-column label="已开票金额（税务局）" width="190">
             <template slot-scope="p">
@@ -5887,7 +5896,12 @@ const vm = new Vue({
     fmtDate(v) { return v ? String(v).slice(0, 10) : ''; },
     fmtSize(n) { return n > 1048576 ? (n / 1048576).toFixed(2) + ' MB' : (n / 1024).toFixed(0) + ' KB'; },
     isSent(m) { return !!this.sent[sentKey(m)]; },
-    pendingCnt(d) { return (d.orders || []).filter(o => o.invoice_state !== 'issued').length; },
+    // 交易关闭 = 没成交：不计入待开票金额、不进催收消息（服务端口径同此）
+    isClosedOrder(st) { return String(st == null ? '' : st).includes('关闭'); },
+    closedCntOf(d) { return (d.orders || []).filter(o => this.isClosedOrder(o.order_status)).length; },
+    pendingCnt(d) {
+      return (d.orders || []).filter(o => o.invoice_state !== 'issued' && !this.isClosedOrder(o.order_status)).length;
+    },
     manualCntOf(d) { return (d.orders || []).filter(o => o.state_source === 'manual').length; },
     okLogs(d) { return (d.sendLogs || []).filter(l => l.result === 'ok').length; },
     failLogs(d) { const a = (d.sendLogs || []); return a.length - a.filter(l => l.result === 'ok').length; },
