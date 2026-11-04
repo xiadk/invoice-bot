@@ -1891,6 +1891,13 @@ function onPddApplyDone(uid, msg) {
       if (n) console.log(`[pdd] 已把 ${n} 单标记为「已申请」（user ${ctx.userId}）`);
     });
   }
+  // 提交失败的单 → 商家处理中(6) + 说明备注原因（2026-11-04 用户口径）：
+  // 申请失败说明商家在处理开票，转 6 后「催收消息」入口才出现
+  if (results.some((r) => r && !r.ok && r.order_sn)) {
+    pdd.markApplyFailed(ctx.userId, results).then((n) => {
+      if (n) console.log(`[pdd] 已把 ${n} 单申请失败标记为「商家处理中」（user ${ctx.userId}）`);
+    });
+  }
 
   if (!msg.ok && !results.length) {
     ctx.status = 'failed';
@@ -1941,7 +1948,8 @@ function onPddApplyProgress(uid, msg) {
 
 /**
  * 助手回报「催商家开票」结果：逐条落 pdd_msg_log，并标记任务完成。
- * 与申请的区别：发消息不改变订单状态（只是提醒），所以不写 pdd_order。
+ * 2026-11-04 起：发送失败的单还要改状态（→ 暂不可开票(0)）并在 note 备注原因，
+ * 见 pdd.markSendFailed；发送成功不改订单状态（只是提醒）。
  */
 function onPddSendDone(uid, msg) {
   const ctx = PDD_TASKS.get(String((msg && msg.taskId) || ''));
@@ -1952,6 +1960,14 @@ function onPddSendDone(uid, msg) {
   ctx.failCount = Number(msg.failCount) || (results.length - ctx.okCount);
 
   pdd.logMsg(ctx.userId, results);
+
+  // 发送失败的单 → 暂不可开票(0) + 说明备注原因（2026-11-04 用户口径）；
+  // 聊天页加载超时/页面空白 → 备注「无法开启聊天，线下处理」。归 0 后催收入口自动消失。
+  if (results.some((r) => r && !r.ok && r.order_sn)) {
+    pdd.markSendFailed(ctx.userId, results).then((n) => {
+      if (n) console.log(`[pdd] 已把 ${n} 单发送失败标记为「暂不可开票」（user ${ctx.userId}）`);
+    });
+  }
 
   if (!msg.ok && !results.length) {
     ctx.status = 'failed';

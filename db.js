@@ -334,6 +334,7 @@ async function ensureQnhSchema(q) {
       "  `invoice_status` TINYINT NOT NULL DEFAULT 0 COMMENT '开票状态 7待申请 0暂不可开票 1开票中 2已开票 6商家处理中'," +
       "  `invoice_time_str` VARCHAR(255) DEFAULT NULL COMMENT '开票进度说明（如「预计订单确认收货后10日之内开票」）'," +
       "  `reject_reason` VARCHAR(512) DEFAULT NULL COMMENT '驳回原因'," +
+      "  `note` VARCHAR(255) DEFAULT NULL COMMENT '本地说明备注（订单超时没有申请入口/申请失败原因/无法开启聊天，线下处理）'," +
       "  `business_type` TINYINT DEFAULT NULL COMMENT '业务类型（页面 business_type）'," +
       "  `invoice_kind` TINYINT DEFAULT NULL COMMENT '发票类型（页面 invoice_kind）'," +
       "  `payer_name` VARCHAR(128) DEFAULT NULL COMMENT '发票抬头（付款方名称）'," +
@@ -974,9 +975,22 @@ async function migrate(conn, dbName) {
       ['order_source', "TINYINT NOT NULL DEFAULT 1 COMMENT '来源：1=发票助手接口 2=订单列表接口'"],
       // v0.3.16：加密店铺串，用于让本机助手反解 mall_id（接口只给加密串，密钥在拼多多服务端）
       ['mall_sn', "VARCHAR(128) DEFAULT NULL COMMENT '店铺加密串（mall_url 里的 mall_sn）'"],
+      // v0.3.24：本地「说明」备注（订单超时没有申请入口 / 申请失败原因 / 无法开启聊天，线下处理）
+      ['note', "VARCHAR(255) DEFAULT NULL COMMENT '本地说明备注（超期未申请/申请失败原因/聊天打不开原因）'"],
     ]) {
       if (!(await colExists('pdd_order', col))) {
         await q(`ALTER TABLE \`pdd_order\` ADD COLUMN \`${col}\` ${decl}`);
+      }
+    }
+    // v0.3.24 口径回填：交易成功 + 发票接口从没给过状态(9) → 暂不可开票(0) + 备注。
+    // 只补 9 且 note 为空的单；发票接口已写真实状态(7/6/2/1/0)的单绝不碰。反复执行安全。
+    {
+      const back = await q(
+        "UPDATE `pdd_order` SET `invoice_status` = 0, `note` = '订单超时没有申请入口' " +
+        " WHERE `invoice_status` = 9 AND `order_status` = 4 AND (`note` IS NULL OR `note` = '')"
+      ).catch(() => null);
+      if (back && back.affectedRows) {
+        console.log(`[db] 已把 ${back.affectedRows} 单「交易成功+未同步开票」归入「暂不可开票」并备注`);
       }
     }
     if (!(await idxExists('pdd_order', 'idx_pdo_ostatus'))) {

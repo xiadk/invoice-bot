@@ -2213,7 +2213,7 @@
         <el-card shadow="never" class="section-card">
           <div slot="header">
             <b>拼多多催收消息</b>
-            <span class="loginid">（只用于拼多多发票列表里「商家处理中」及「超期未开票但交易成功」订单的催商家开票，与上面 1688 的模板互不影响）</span>
+            <span class="loginid">（只用于拼多多发票列表里「商家处理中」订单的催商家开票，与上面 1688 的模板互不影响）</span>
           </div>
           <el-form label-position="top" size="small">
             <el-form-item label="催收话术（只有一条，发给商家客服会话）">
@@ -3951,7 +3951,8 @@
             </el-table-column>
             <el-table-column label="进度 / 说明" min-width="180">
               <template slot-scope="p">
-                <span v-if="p.row.rejectReason" style="color:#e6a23c">{{ p.row.rejectReason }}</span>
+                <span v-if="p.row.note" style="color:#e6a23c">{{ p.row.note }}</span>
+                <span v-else-if="p.row.rejectReason" style="color:#e6a23c">{{ p.row.rejectReason }}</span>
                 <span v-else class="loginid">{{ p.row.invoiceTimeStr || '—' }}</span>
               </template>
             </el-table-column>
@@ -3965,13 +3966,8 @@
                 <el-button v-if="p.row.chatable" type="text" size="mini" :disabled="pd.applying"
                            style="color:#e6a23c" @click="sendPddMsgRows([p.row])"
                            title="发送话术里的抬头/税号/邮箱取本账号默认抬头">发送催收消息</el-button>
-                <!-- 超期未开票 + 交易成功：能开聊（有 mall_id 或 mall_sn）的已走自动催收；这里只剩都没有的 -->
-                <el-tooltip v-if="!p.row.applyable && !p.row.chatable && p.row.manualChat" placement="top"
-                            content="这单已超过平台开票期限（入口已关闭），且订单里没有任何商家会话标识（mall_id / mall_sn），自动催收发不出去。点这里打开平台订单页，在页面里点「联系商家」催其线下开票。">
-                  <el-button type="text" size="mini" style="color:#e6a23c"
-                             @click="openPddOrder(p.row)">去平台催</el-button>
-                </el-tooltip>
-                <span v-if="!p.row.applyable && !p.row.chatable && !p.row.manualChat" class="loginid">—</span>
+                <!-- 2026-11-04 口径：催收只对「商家处理中」开放；暂不可开票/未同步开票不显示任何催收入口 -->
+                <span v-if="!p.row.applyable && !p.row.chatable" class="loginid">—</span>
               </template>
             </el-table-column>
           </el-table>
@@ -7158,7 +7154,7 @@ const vm = new Vue({
         return;
       }
       // 只解析「超期不可申请（invoice_status=9）+ 交易成功」的单：发票接口拉得到的单自带 mall_id，不必解析
-      if (!st.pending) { this.$message.success('需要解析的店铺 ID 都已完成（仅超期未开票、且交易成功的单）'); return; }
+      if (!st.pending) { this.$message.success('需要解析的店铺 ID 都已完成（仅「商家处理中」的催收单需要解析）'); return; }
       this.pd.mallResolving = true;
       try {
         const d = await this.pddApi('/api/pdd/mall-id/resolve', {
@@ -7172,7 +7168,7 @@ const vm = new Vue({
           return;
         }
         if (!d.ok) { this.$message.error(d.message || '发起解析失败'); return; }
-        if (!d.pending) { this.$message.success(d.message || '需要解析的店铺 ID 都已完成（仅超期未开票、且交易成功的单）'); return; }
+        if (!d.pending) { this.$message.success(d.message || '需要解析的店铺 ID 都已完成（仅「商家处理中」的催收单需要解析）'); return; }
         this.pd.mallTaskId = d.taskId;
         this.pd.applyDialog = {
           visible: true, running: true, kind: 'mall', status: '', message: d.message || '',
@@ -7409,19 +7405,11 @@ const vm = new Vue({
       }
     },
 
-    // ── 拼多多「催商家开票」（商家处理中 + 超期未开票但交易成功的单；行内单个 / 勾选批量，同一入口） ──
+    // ── 拼多多「催商家开票」（只对「商家处理中」开放；行内单个 / 勾选批量，同一入口） ──
     sendPddBatch() { this.sendPddMsgRows(this.pd.selected); },
-    /** 打开拼多多订单页：已完成但「未同步开票」的单，平台已关开票入口、又没有商家会话 ID，
-     *  只能在平台页面里点「联系商家」走线下开票（不伪造状态、不发注定失败的消息） */
-    openPddOrder(row) {
-      const sn = row && row.orderSn;
-      if (!sn) { this.$message.warning('缺少订单号'); return; }
-      window.open('https://mobile.yangkeduo.com/order.html?order_sn=' + encodeURIComponent(sn),
-        '_blank', 'noopener');
-    },
     async sendPddMsgRows(rows) {
       const list = (rows || []).filter((r) => r && r.chatable);
-      if (!list.length) { this.$message.warning('请先勾选可催收的订单（商家处理中，或超期未开票且交易成功）'); return; }
+      if (!list.length) { this.$message.warning('请先勾选「商家处理中」的订单（其余状态不可催收）'); return; }
       if (this.pd.applying) return;
       if (this.qnhNeedPick) { this.$message.warning('请先选择要以哪个账号的身份操作'); return; }
       // 发送用本账号默认抬头（app_user 公司全称/税号/邮箱，管理员在「系统管理 → 用户管理」里维护）
@@ -7454,7 +7442,7 @@ const vm = new Vue({
           return;
         }
         if (Array.isArray(d.skipped) && d.skipped.length) {
-          this.$message.warning('有 ' + d.skipped.length + ' 笔订单不可催收（非该账号、或非「商家处理中 / 超期未开票且交易成功」），已跳过');
+          this.$message.warning('有 ' + d.skipped.length + ' 笔订单不可催收（非该账号、或非「商家处理中」），已跳过');
         }
         this.$message.info(d.message || '已下发催收任务');
         this.clearPddPicked();   // 已提交的单不必再勾着（避免重复发送同一批）
