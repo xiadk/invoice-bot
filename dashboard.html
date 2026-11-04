@@ -3492,7 +3492,8 @@
               <template slot-scope="p">
                 <el-button type="text" size="mini" @click="openRoView(p.row)">详情</el-button>
                 <el-button v-if="p.row.waybillId" type="text" size="mini" @click="unlinkRo(p.row)">取消关联</el-button>
-                <el-button type="text" size="mini" style="color:#f56c6c" @click="deleteRo(p.row)">删除</el-button>
+                <el-button v-if="!p.row.waybillId" type="text" size="mini" style="color:#f56c6c" @click="deleteRo(p.row)">删除</el-button>
+                <span v-else class="loginid" style="font-size:12px;color:#c0c4cc" title="已关联货单，只能查看">删除</span>
               </template>
             </el-table-column>
           </el-table>
@@ -3548,22 +3549,14 @@
           </div>
         </el-dialog>
 
-        <!-- 补货单详情（v0.3.28 起可编辑）：改数量/规格/单价、删行、搜商品加行、换供应商 -->
+        <!-- 补货单详情（v0.3.33）：未关联货单可编辑（改数量/规格/单价、删行、加行、换供应商）；
+             已关联货单整单只读；供应商是齐货通/永源顺时可一键加购 -->
         <el-dialog title="补货单详情" :visible.sync="roView.visible" width="1080px" top="5vh" append-to-body
                    @closed="onRoViewClosed">
           <div v-if="roView.order" class="loginid" style="display:flex;gap:18px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
             <span>补货单 <b>#{{ roView.order.id }}</b></span>
-            <span v-if="!roView.editing">供应商 <b>{{ roView.order.supplierName }}</b></span>
-            <span v-else style="display:inline-flex;align-items:center;gap:6px">
-              供应商
-              <el-select v-model="roView.supplierId" size="mini" filterable style="width:170px"
-                         :disabled="!!roView.order.waybillId"
-                         :title="roView.order.waybillId ? '已关联货单，先取消关联才能换供应商' : '换供应商（台账里没有会自动建）'">
-                <el-option v-for="s in ro.suppliers" :key="s.id" :label="s.name" :value="s.id"></el-option>
-              </el-select>
-              <el-button size="mini" type="primary" plain :loading="roView.saving" :disabled="!!roView.order.waybillId"
-                         @click="saveRoSupplier">改</el-button>
-            </span>
+            <span>供应商 <b>{{ roView.order.supplierName }}</b></span>
+            <el-tag v-if="roView.order.waybillId" size="mini" type="info">已关联货单 · 只读</el-tag>
             <span>金额 <b style="color:#f56c6c">{{ wbMoney(roView.order.amount) }}</b></span>
             <span>商品 {{ roView.order.itemCount }} 个 · {{ roView.order.qtyTotal }} 件</span>
             <span>生成 {{ roView.order.createdAt }}</span>
@@ -3573,12 +3566,19 @@
               <b v-else class="ro-diff-bad">（相差 {{ wbMoney(roView.order.diff) }}）</b>
             </span>
             <span class="fb-spacer" style="flex:1"></span>
+            <el-button v-if="roCartKind" size="mini" type="warning" icon="el-icon-shopping-cart-full"
+                       :loading="roView.carting" @click="oneKeyCart">
+              一键加购到{{ roCartKind === 'afa' ? '永源顺' : '齐货通' }}
+            </el-button>
             <el-button v-if="roView.editing" size="mini" type="primary" icon="el-icon-plus"
                        @click="openRoAdd">添加商品</el-button>
-            <el-button size="mini" :type="roView.editing ? 'success' : 'primary'" plain @click="toggleRoEdit">
+            <el-button v-if="!roView.order.waybillId" size="mini" :type="roView.editing ? 'success' : 'primary'" plain
+                       @click="toggleRoEdit">
               {{ roView.editing ? '完成编辑' : '编辑' }}
             </el-button>
           </div>
+          <el-alert v-if="roView.order && roView.order.waybillId" type="info" :closable="false" show-icon style="margin-bottom:8px"
+                    title="这张补货单已关联货单，只能查看：要改明细/删除/换供应商，先在列表里「取消关联」。"></el-alert>
           <el-alert v-if="roView.editing" type="info" :closable="false" show-icon style="margin-bottom:8px"
                     title="改完记得点每行的「保存」：金额一律服务端按「补货数量 × 规格 × 单价」重算，单头金额与货单差额跟着变。"></el-alert>
           <el-table :data="roView.items" size="small" border :max-height="tblH.cmp"
@@ -3601,8 +3601,8 @@
             <el-table-column label="补货数量" width="88" align="right">
               <template slot-scope="p"><b>{{ p.row.qtyPack }}</b> 件</template>
             </el-table-column>
-            <el-table-column label="最低单价" width="90" align="right">
-              <template slot-scope="p"><span class="amount">{{ yuan(p.row.unitPrice) }}</span></template>
+            <el-table-column label="最低单价" width="96" align="right">
+              <template slot-scope="p"><span class="amount" :title="'单价 ' + p.row.unitPrice + ' 元/个（库里存 4 位小数，行总额按它算）'">{{ yuan4(p.row.unitPrice) }}</span></template>
             </el-table-column>
             <el-table-column label="整件价" width="90" align="right">
               <template slot-scope="p"><span class="loginid">{{ p.row.packPrice == null ? '—' : yuan(p.row.packPrice) }}</span></template>
@@ -3610,9 +3610,10 @@
             <el-table-column label="行总额" width="100" align="right">
               <template slot-scope="p"><b class="amount">{{ wbMoney(p.row.amount) }}</b></template>
             </el-table-column>
-            <el-table-column v-if="roView.editing" label="操作" width="112" align="center">
+            <el-table-column v-if="roView.editing" label="操作" width="176" align="center">
               <template slot-scope="p">
                 <el-button type="text" size="mini" @click="openRoItem(p.row)">改</el-button>
+                <el-button type="text" size="mini" @click="openRoMove(p.row)">换供应商</el-button>
                 <el-button type="text" size="mini" style="color:#f56c6c" @click="deleteRoItem(p.row)">删除</el-button>
               </template>
             </el-table-column>
@@ -3637,13 +3638,15 @@
                 </el-form-item>
               </el-col>
               <el-col :span="8">
-                <el-form-item label="规格（件含多少个）">
-                  <el-input v-model="roItem.specQty" type="number" min="0" placeholder="1"></el-input>
+                <el-form-item label="规格（件含多少，可小数）">
+                  <el-input v-model="roItem.specQty" placeholder="1"
+                            @blur="roItem.specQty = normDecimal(roItem.specQty, 2)"></el-input>
                 </el-form-item>
               </el-col>
               <el-col :span="8">
-                <el-form-item label="单价（元/个）">
-                  <el-input v-model="roItem.unitPrice" type="number" min="0" placeholder="0.00"></el-input>
+                <el-form-item label="单价（元/个，最多 4 位小数）">
+                  <el-input v-model="roItem.unitPrice" placeholder="0.0000"
+                            @blur="roItem.unitPrice = normDecimal(roItem.unitPrice, 4)"></el-input>
                 </el-form-item>
               </el-col>
             </el-row>
@@ -3656,6 +3659,34 @@
           <div slot="footer">
             <el-button size="small" @click="roItem.visible = false">取消</el-button>
             <el-button size="small" type="primary" :loading="roItem.saving" @click="saveRoItem">保存</el-button>
+          </div>
+        </el-dialog>
+
+        <!-- 换供应商（v0.3.33 行级）：把这一行的补货数量搬到目标供应商的补货单，本行删除 -->
+        <el-dialog title="换供应商（搬这一行）" :visible.sync="roMove.visible" width="560px" top="8vh" append-to-body>
+          <div class="loginid" style="margin-bottom:10px">
+            SKU <b style="font-family:Consolas,monospace">{{ roMove.sku }}</b>
+            <span v-if="roMove.goodsName"> · {{ roMove.goodsName }}</span><br>
+            补货数量 <b>{{ roMove.qtyPack }}</b> 件 · 规格 {{ roMove.specQty }}/件 ·
+            单价 {{ yuan4(roMove.unitPrice) }} · 行总额 <b>{{ wbMoney(roMove.amount) }}</b>
+          </div>
+          <el-form label-position="top" size="small">
+            <el-form-item label="搬到哪个供应商的补货单">
+              <el-select v-model="roMove.supplierId" filterable placeholder="选择目标供应商" style="width:100%">
+                <el-option v-for="s in ro.suppliers" :key="s.id" :label="s.name" :value="s.id"
+                           :disabled="s.id === roMove.fromSupplierId"></el-option>
+              </el-select>
+            </el-form-item>
+          </el-form>
+          <el-alert type="warning" :closable="false" show-icon
+                    title="这一行的补货数量会并入目标供应商最新一张未关联货单（没有就新建，同 SKU 则累加数量），本行删除；源单搬空后自动删除。">
+          </el-alert>
+          <el-alert v-if="roMove.error" type="error" :closable="false" show-icon :title="roMove.error"
+                    style="margin-top:8px"></el-alert>
+          <div slot="footer">
+            <el-button size="small" @click="roMove.visible = false">取消</el-button>
+            <el-button size="small" type="primary" :loading="roMove.saving" :disabled="!roMove.supplierId"
+                       @click="confirmRoMove">确认搬迁</el-button>
           </div>
         </el-dialog>
 
@@ -4956,8 +4987,11 @@ const vm = new Vue({
             supplier: '', range: null, linked: '', suppliers: [] },
       roLink: { visible: false, loading: false, saving: false, error: '',
                 orderId: 0, order: {}, rows: [], picked: null },
-      // 补货单详情（v0.3.28 起可编辑）：editing 打开行内「改/删」与「添加商品」
-      roView: { visible: false, loading: false, order: null, items: [], editing: false, saving: false, supplierId: null },
+      // 补货单详情（v0.3.33）：未关联货单才可编辑；已关联 = 只读；carting 是一键加购的进度锁
+      roView: { visible: false, loading: false, order: null, items: [], editing: false, saving: false, carting: false },
+      // 换供应商（行级搬迁）：选目标供应商，把这一行的补货数量并入对方补货单
+      roMove: { visible: false, saving: false, error: '', orderId: 0, itemId: 0, sku: '', goodsName: '',
+                qtyPack: 0, specQty: 1, unitPrice: 0, amount: 0, fromSupplierId: 0, supplierId: null },
       // 补货单明细行编辑（itemId=0 表示新增）
       roItem: { visible: false, saving: false, error: '', orderId: 0, itemId: 0, sku: '', goodsName: '',
                 channel: '', channelLabel: '', qtyPack: 1, specQty: '1', unitPrice: '' },
@@ -5266,6 +5300,15 @@ const vm = new Vue({
       const unit = String(d.unitPrice == null ? '' : d.unitPrice).trim() === '' ? 0 : Number(d.unitPrice);
       if (!Number.isFinite(unit) || unit < 0) return 0;
       return Math.round((q * spec * unit + Number.EPSILON) * 100) / 100;
+    },
+    /** 一键加购走哪个平台：只看供应商名（齐货通 / 永源顺·城配速达），且要有「平台取价」权限 */
+    roCartKind() {
+      const o = this.roView && this.roView.order;
+      if (!o || !this.canPrice) return '';
+      const nm = String(o.supplierName || '');
+      if (nm.indexOf('齐货通') >= 0) return 'qht';
+      if (nm.indexOf('永源顺') >= 0 || nm.indexOf('城配速达') >= 0 || nm.indexOf('阿发') >= 0) return 'afa';
+      return '';
     },
     cmpRows() {
       const kw = String(this.cmp.q || '').trim().toLowerCase();
@@ -9739,6 +9782,24 @@ const vm = new Vue({
     // ══════════ 供应商管理（v0.3.0）══════════
     /** 金额统一 ¥0.00：模板里不能直接用全局的 yuan()（Vue 模板只认实例属性） */
     wbMoney(v) { return '¥' + (Number(v) || 0).toFixed(2); },
+    /** 单价专用（v0.3.33）：最多 4 位小数、去尾零 —— 1.6667 显示 1.6667，1.5 显示 1.5，不会被抹成 2 位 */
+    yuan4(v) {
+      const n = Number(v);
+      if (!Number.isFinite(n)) return '—';
+      return '¥' + n.toFixed(4).replace(/0+$/, '').replace(/\.$/, '');
+    },
+    /** 小数输入规整：中文句号→小数点、去掉非数字字符、只留一个小数点、限制小数位（超了直接截断） */
+    normDecimal(v, digits) {
+      let s = String(v == null ? '' : v).replace(/[。．]/g, '.').replace(/[^\d.]/g, '');
+      const dot = s.indexOf('.');
+      if (dot >= 0) {
+        s = s.slice(0, dot + 1) + s.slice(dot + 1).replace(/\./g, '');
+        const keep = Number(digits) || 0;
+        if (s.length - dot - 1 > keep) s = s.slice(0, dot + 1 + keep);
+      }
+      if (s.charAt(0) === '.') s = '0' + s;
+      return s;
+    },
     /** 倒计时 mm:ss */
     wbFmtLeft(s) {
       const n = Math.max(0, Math.floor(Number(s) || 0));
@@ -10240,7 +10301,7 @@ const vm = new Vue({
       } catch (e) { this.$message.error('取消关联失败：' + e.message); }
     },
     async openRoView(row) {
-      this.roView = { visible: true, loading: true, order: null, items: [] };
+      this.roView = { visible: true, loading: true, order: null, items: [], editing: false, saving: false, carting: false };
       try {
         const d = await this.api('/api/replenish-order/detail?id=' + row.id);
         if (!d.ok) { this.$message.error(d.error || '加载详情失败'); this.roView.visible = false; return; }
@@ -10249,43 +10310,111 @@ const vm = new Vue({
       } catch (e) { this.$message.error('加载详情失败：' + e.message); }
       finally { this.roView.loading = false; }
     },
-    /** 重拉当前详情（编辑后金额/条数都变了，以服务端为准），保留编辑态 */
-    async refreshRoView(orderId) {
-      const keepEditing = this.roView.editing;
-      const d = await this.api('/api/replenish-order/detail?id=' + orderId).catch(() => null);
-      if (!d || !d.ok) return;
-      this.roView.order = d.order;
-      this.roView.items = d.items || [];
-      this.roView.editing = keepEditing;
-      this.roView.supplierId = Number(d.order.supplierId) > 0 ? Number(d.order.supplierId) : null;
-      this.loadReplenishOrders();
-    },
     toggleRoEdit() {
-      this.roView.editing = !this.roView.editing;
-      if (this.roView.editing && this.roView.order) {
-        this.roView.supplierId = Number(this.roView.order.supplierId) > 0 ? Number(this.roView.order.supplierId) : null;
+      const o = this.roView.order;
+      if (o && Number(o.waybillId) > 0) {
+        this.roView.editing = false;
+        this.$message.warning('这张补货单已关联货单，只能查看；要改先「取消关联」');
+        return;
       }
+      this.roView.editing = !this.roView.editing;
     },
     onRoViewClosed() {
       this.roView.editing = false;
-      this.roView.supplierId = null;
+      this.roMove.visible = false;
     },
-    /** 换供应商：服务端会拒掉「已关联货单」的单，前端也把下拉禁用了 */
-    async saveRoSupplier() {
+    /** 一键加购：整单明细按补货数量加进用户自己的齐货通 / 永源顺购物车（真实动作） */
+    async oneKeyCart() {
       const o = this.roView.order;
-      if (!o) return;
-      if (!this.roView.supplierId) return this.$message.warning('先选一个供应商');
-      this.roView.saving = true;
+      const kind = this.roCartKind;
+      if (!o || !kind) return;
+      const label = kind === 'afa' ? '永源顺' : '齐货通';
+      const items = this.roView.items || [];
+      const qty = items.reduce((s, it) => s + (Number(it.qtyPack) || 0), 0);
+      if (!items.length) return this.$message.warning('这张单没有明细');
       try {
-        const d = await this.api('/api/replenish-order/supplier', {
+        await this.$confirm(
+          '会把本单 ' + items.length + ' 个商品、共 ' + qty + ' 件加入你自己的' + label + '购物车。\n'
+          + '这是真实操作，加完请到' + label + '里核对数量。',
+          '一键加购到' + label, { type: 'warning', confirmButtonText: '确认加购', cancelButtonText: '取消' });
+      } catch (e) { return; }
+      this.roView.carting = true;
+      try {
+        const d = await this.api('/api/replenish-order/add-to-cart', {
           method: 'POST', headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ id: o.id, supplierId: this.roView.supplierId }),
+          body: JSON.stringify({ id: o.id }),
         });
-        if (!d.ok) return this.$message.error(d.error || '换供应商失败');
-        this.$message.success('供应商已改为「' + (d.order && d.order.supplierName) + '」');
-        await this.refreshRoView(o.id);
-      } catch (e) { this.$message.error('换供应商失败：' + e.message); }
-      finally { this.roView.saving = false; }
+        if (d.needLogin) { await this.promptCartLogin(kind, d.error); return; }
+        if (!d.ok) { this.$message.error(d.error || '加购失败'); return; }
+        const lines = ['已加入' + label + '购物车：' + d.added + ' 个商品、' + d.qtyTotal + ' 件'];
+        if ((d.skipped || []).length) {
+          lines.push('', '跳过 ' + d.skipped.length + ' 个（未关联' + label + '商品）：');
+          d.skipped.slice(0, 12).forEach((x) => lines.push('· ' + (x.sku || '') + ' ' + (x.goodsName || '') + ' —— ' + x.reason));
+          if (d.skipped.length > 12) lines.push('· …… 还有 ' + (d.skipped.length - 12) + ' 个');
+        }
+        if ((d.failed || []).length) {
+          lines.push('', '失败 ' + d.failed.length + ' 个：');
+          d.failed.slice(0, 12).forEach((x) => lines.push('· ' + (x.sku || '') + ' ' + (x.qty || 0) + ' 件 —— ' + x.error));
+          if (d.failed.length > 12) lines.push('· …… 还有 ' + (d.failed.length - 12) + ' 个');
+        }
+        this.$alert(lines.join('\n'), '加购结果', { confirmButtonText: '知道了' }).catch(() => {});
+      } catch (e) { this.$message.error('加购失败：' + e.message); }
+      finally { this.roView.carting = false; }
+    },
+    /** 平台未登录：跳回「补货」页并直接打开登录框（齐货通账号密码 / 永源顺 Token） */
+    async promptCartLogin(kind, err) {
+      const label = kind === 'afa' ? '永源顺' : '齐货通';
+      if (!this.canReplenish) {
+        this.$message.warning(label + '未登录（' + (err || '登录态已失效') + '）；当前账号没有「补货」菜单权限，请联系管理员重新登录');
+        return;
+      }
+      try {
+        await this.$confirm(
+          label + '未登录或登录态已失效' + (err ? '：' + err : '') + '\n点「去登录」跳到补货页面，登录好再回来点一键加购。',
+          label + '未登录', { type: 'warning', confirmButtonText: '去登录', cancelButtonText: '稍后' });
+      } catch (e) { return; }
+      this.page = 'replenish';
+      this.$nextTick(() => setTimeout(() => {
+        if (kind === 'qht') this.onQhtBtn(); else this.onAfaBtn();
+      }, 200));
+    },
+    /** 换供应商（行级）：把这一行搬到目标供应商的补货单，本行删除 */
+    openRoMove(row) {
+      const o = this.roView.order;
+      if (!o || !row || !row.id) return;
+      this.roMove = {
+        visible: true, saving: false, error: '', orderId: o.id, itemId: Number(row.id),
+        sku: row.sku, goodsName: row.goodsName || '', qtyPack: Number(row.qtyPack) || 0,
+        specQty: Number(row.specQty) || 1, unitPrice: Number(row.unitPrice) || 0,
+        amount: Number(row.amount) || 0,
+        fromSupplierId: Number(o.supplierId) || 0, supplierId: null,
+      };
+    },
+    async confirmRoMove() {
+      const m = this.roMove;
+      if (!m.supplierId) return this.$message.warning('先选目标供应商');
+      m.saving = true; m.error = '';
+      try {
+        const d = await this.api('/api/replenish-order/item-move', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ orderId: m.orderId, itemId: m.itemId, supplierId: m.supplierId, sku: m.sku, qtyPack: m.qtyPack }),
+        });
+        if (!d.ok) { m.error = d.error || '换供应商失败'; return; }
+        m.visible = false;
+        const bits = ['已搬到「' + d.targetSupplierName + '」的补货单 #' + d.targetOrderId];
+        if (d.merged) bits.push('目标单已有该 SKU，数量已累加');
+        bits.push('本行已删除');
+        if (d.sourceDeleted) bits.push('源单已没有明细，已一并删除');
+        this.$message.success(bits.join('；'));
+        this.loadReplenishOrders();
+        if (d.sourceDeleted) this.roView.visible = false;
+        else {
+          this.roView.order = d.order;
+          this.roView.items = d.items || [];
+          this.roView.editing = true;
+        }
+      } catch (e) { m.error = '换供应商失败：' + e.message; }
+      finally { m.saving = false; }
     },
     /** 打开行编辑（row 为空 = 新增，需先带 sku/goodsName/默认价） */
     openRoItem(row) {
@@ -10306,8 +10435,11 @@ const vm = new Vue({
     async saveRoItem() {
       const d = this.roItem;
       if (!d.sku) return this.$message.warning('缺少商品SKU');
+      // 提交前再规整一次小数（输入过程中不打断用户，这里兜底）
+      d.unitPrice = this.normDecimal(d.unitPrice, 4);
+      d.specQty = this.normDecimal(d.specQty, 2);
       if (!(Number(d.qtyPack) >= 1)) { d.error = '补货数量必须 ≥ 1 件'; return; }
-      if (String(d.unitPrice).trim() === '' || !(Number(d.unitPrice) >= 0)) { d.error = '请填单价（元/个）'; return; }
+      if (String(d.unitPrice).trim() === '' || !(Number(d.unitPrice) >= 0)) { d.error = '请填单价（元/个，可带小数）'; return; }
       d.saving = true; d.error = '';
       try {
         const r = await this.api('/api/replenish-order/item-save', {

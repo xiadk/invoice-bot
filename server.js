@@ -1228,7 +1228,12 @@ const OP_ACTIONS = {
     ? `补货单 #${d.orderId} 新增明细（SKU ${d.sku || ''}，${d.qtyPack || 0} 件）`
     : `补货单 #${d.orderId} 改明细（SKU ${d.sku || ''}，${d.qtyPack || 0} 件 × ${d.unitPrice == null ? '—' : d.unitPrice}）`,
   'replenish.item_delete': (d) => `补货单 #${d.orderId} 删明细（SKU ${d.sku || ''}）`,
-  'replenish.supplier': (d) => `补货单 #${d.orderId} 换供应商为「${d.supplierName || ''}」`,
+  'replenish.item_move': (d) => `补货单 #${d.orderId} 把 SKU ${d.sku || ''}（${d.qtyPack || 0} 件）换供应商到「${d.supplierName || ''}」`
+    + `，搬到补货单 #${d.targetOrderId || 0}${d.merged ? '（目标单已有该 SKU，数量已累加）' : ''}`
+    + `${d.sourceDeleted ? '，源单已空已删除' : ''}`,
+  'replenish.cart': (d) => `补货单 #${d.orderId} 一键加购到${d.supplier || ''}购物车`
+    + `（提交 ${d.total || 0} 个，成功 ${d.added || 0} 个 / ${d.qtyTotal || 0} 件`
+    + `${d.failed ? `，失败 ${d.failed}` : ''}${d.skipped ? `，跳过 ${d.skipped}` : ''}）`,
   'qnh.view': () => '打开了退单列表页',
   'pdd.apply.start': (d) => `发起了批量申请发票任务（${d.total || 0} 单${d.invalid ? `，跳过 ${d.invalid} 单` : ''}）`,
   'pdd.apply': (d) => d.ok === false
@@ -5792,18 +5797,39 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, out.ok ? 200 : 400, out);
       }
 
-      // 换供应商（单头）：已关联货单时服务端会拒，避免一张单跟货单对不上供应商
-      if (method === 'POST' && p === '/api/replenish-order/supplier') {
+      // 换供应商（v0.3.33 起是**行级**）：把这一行的补货数量搬到目标供应商的补货单，
+      // 本行删除、源单搬空即软删。整单改名已去掉，避免与搬行混淆。
+      if (method === 'POST' && p === '/api/replenish-order/item-move') {
         writeGuard();
         const body = await readBody(req);
-        const out = await replenishOrder.setSupplier({
-          userId: roUid, id: body.id, supplierId: body.supplierId,
-          supplierName: body.supplierName, operator: user.username,
+        const out = await replenishOrder.moveItemToSupplier({
+          userId: roUid, orderId: body.orderId, itemId: body.itemId,
+          supplierId: body.supplierId, operator: user.username,
         });
         if (out.ok) {
-          await logOp(user, 'replenish.supplier', {
-            tenantId: roUid, orderId: out.order && out.order.id,
-            supplierName: out.order && out.order.supplierName,
+          await logOp(user, 'replenish.item_move', {
+            tenantId: roUid, orderId: Number(body.orderId), sku: body.sku || '',
+            qtyPack: body.qtyPack, supplierName: out.targetSupplierName,
+            targetOrderId: out.targetOrderId, merged: out.merged, sourceDeleted: out.sourceDeleted,
+          });
+        }
+        return sendJson(res, out.ok ? 200 : 400, out);
+      }
+
+      // 一键加购：整单明细按补货数量加进用户自己的齐货通 / 永源顺购物车（真实动作）
+      if (method === 'POST' && p === '/api/replenish-order/add-to-cart') {
+        if (!canPrice) return sendJson(res, 403, { error: '账号没有「平台取价」权限，不能加购，请联系超级管理员' });
+        writeGuard();
+        const body = await readBody(req);
+        const out = await replenishOrder.addOrderToCart({
+          userId: roUid, orderId: body.id, operator: user.username,
+          brandId: brandFromBody(user, body).brandId || (Number(user.brand_id) || 1),
+        });
+        if (out.ok) {
+          await logOp(user, 'replenish.cart', {
+            tenantId: roUid, orderId: Number(body.id), supplier: out.supplier,
+            total: out.total, added: out.added, qtyTotal: out.qtyTotal,
+            failed: (out.failed || []).length, skipped: (out.skipped || []).length,
           });
         }
         return sendJson(res, out.ok ? 200 : 400, out);
