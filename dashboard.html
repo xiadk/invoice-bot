@@ -3011,7 +3011,7 @@
         <el-dialog title="新增售后" :visible.sync="afNew.visible" width="660px" top="5vh" append-to-body
                    custom-class="af-new-dlg" @closed="onAfNewClosed">
           <el-form label-position="top" size="small">
-            <el-form-item label="搜索商品（商品名称 / SKU 模糊搜，选中自动回填下面两项）">
+            <el-form-item label="搜索商品">
               <el-select v-model="afNew.pick" filterable remote clearable style="width:100%"
                          placeholder="输入商品名称或 SKU，例如「橘」或「6924」"
                          :remote-method="searchAfProducts" :loading="afNew.searching"
@@ -3027,13 +3027,13 @@
 
             <el-row :gutter="12">
               <el-col :span="16">
-                <el-form-item label="商品名称（搜索选中后自动回填）">
+                <el-form-item label="商品名称">
                   <el-input v-model="afNew.goodsName" maxlength="255" disabled
                             placeholder="从上面搜索选中商品后自动填入"></el-input>
                 </el-form-item>
               </el-col>
               <el-col :span="8">
-                <el-form-item label="商品SKU（自动回填）">
+                <el-form-item label="商品SKU">
                   <el-input v-model="afNew.sku" maxlength="64" disabled placeholder="自动填入"></el-input>
                 </el-form-item>
               </el-col>
@@ -6857,6 +6857,48 @@ const vm = new Vue({
       } finally {
         box.uploading = false;
       }
+    },
+    /**
+     * 压缩图片：最长边压到 1600、转 jpeg（白底，避免 png 透明变黑底）。
+     * ⚠ 0.3.25 起这里一直调用一个不存在的 this.compressAfImage —— 本机选图 / Ctrl+V 粘贴
+     *   全部报 "compressAfImage is not a function"，0.3.30 补上实现。gif 不进 canvas（会丢动画）。
+     */
+    compressAfImage(file) {
+      return new Promise((resolve, reject) => {
+        if (!/^image\/(png|jpeg|jpg|webp)$/i.test(file.type || '')) {
+          const r = new FileReader();
+          r.onload = () => resolve(String(r.result));
+          r.onerror = () => reject(new Error('读取图片失败'));
+          r.readAsDataURL(file);
+          return;
+        }
+        const url = URL.createObjectURL(file);
+        const img = new Image();
+        img.onload = () => {
+          try {
+            const MAX = 1600;
+            let w = img.naturalWidth, h = img.naturalHeight;
+            if (!w || !h) throw new Error('图片尺寸读取失败');
+            if (Math.max(w, h) > MAX) {
+              const k = MAX / Math.max(w, h);
+              w = Math.round(w * k); h = Math.round(h * k);
+            }
+            const cv = document.createElement('canvas');
+            cv.width = w; cv.height = h;
+            const ctx = cv.getContext('2d');
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(0, 0, w, h);
+            ctx.drawImage(img, 0, 0, w, h);
+            resolve(cv.toDataURL('image/jpeg', 0.85));
+          } catch (e) {
+            reject(e);
+          } finally {
+            URL.revokeObjectURL(url);
+          }
+        };
+        img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('图片解析失败')); };
+        img.src = url;
+      });
     },
     async removeAfImage(box, im) {
       if (!box || !im) return;
