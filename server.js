@@ -403,6 +403,8 @@ function publicUser(u) {
     username: u.username,
     role: u.role,
     status: u.status,
+    // 公司全称（v0.3.32）：与登录账号分开；界面显示公司名优先用它，老库退回开票抬头/账号
+    companyFullName: u.company_full_name || u.company_name || '',
     companyName: u.company_name || '',
     taxNo: u.tax_no || '',
     email: u.email || '',
@@ -1684,9 +1686,9 @@ function agentUidFor(user, tenantId) {
 /** 用户/租户的展示名（公司全称优先），只用于提示文案 */
 async function tenantLabelOf(uid) {
   try {
-    const r = await db.query('SELECT username, company_name FROM app_user WHERE id = ?', [Number(uid)]);
+    const r = await db.query('SELECT username, company_full_name, company_name FROM app_user WHERE id = ?', [Number(uid)]);
     const u = r[0] || null;
-    return u ? (u.company_name || u.username || '') : '';
+    return u ? (u.company_full_name || u.company_name || u.username || '') : '';
   } catch (e) { return ''; }
 }
 
@@ -2866,7 +2868,7 @@ async function loadMapping(userId, { allUsers = false } = {}) {
            u.name AS maintainer,
            agg.invoice_amount, agg.invoice_rows, agg.last_invoice_date
     FROM seller_name_mapping m
-    LEFT JOIN (SELECT id, COALESCE(NULLIF(company_name, ''), username) AS name FROM app_user) u
+    LEFT JOIN (SELECT id, COALESCE(NULLIF(company_full_name, ''), NULLIF(company_name, ''), username) AS name FROM app_user) u
            ON u.id = m.user_id
     ${scoped ? 'INNER JOIN' : 'LEFT JOIN'} ${agg} agg ON agg.n = m.tax_seller_name
     ORDER BY agg.last_invoice_date IS NULL, agg.last_invoice_date DESC, agg.invoice_amount DESC
@@ -2884,8 +2886,8 @@ async function loadMapping(userId, { allUsers = false } = {}) {
            MAX(i.seller_tax_no) AS seller_tax_no,
            MAX(i.remark) AS remark,
            COUNT(DISTINCT i.user_id) AS user_count,
-           GROUP_CONCAT(DISTINCT COALESCE(NULLIF(u.company_name,''), u.username)
-                        ORDER BY COALESCE(NULLIF(u.company_name,''), u.username) SEPARATOR '、') AS owners
+           GROUP_CONCAT(DISTINCT COALESCE(NULLIF(u.company_full_name,''), NULLIF(u.company_name,''), u.username)
+                        ORDER BY COALESCE(NULLIF(u.company_full_name,''), NULLIF(u.company_name,''), u.username) SEPARATOR '、') AS owners
     FROM issued_invoice i
     LEFT JOIN app_user u ON u.id = i.user_id
     LEFT JOIN seller_name_mapping m
@@ -3083,7 +3085,7 @@ async function setOrderState(userId, { orderNo, loginId, action }) {
 // ─────────────────────────────────────────────────────────────────────────
 async function listUsers() {
   const users = await db.query(`
-    SELECT u.id, u.username, u.role, u.status, u.company_name, u.tax_no, u.email, u.display_name, u.note,
+    SELECT u.id, u.username, u.role, u.status, u.company_full_name, u.company_name, u.tax_no, u.email, u.display_name, u.note,
            u.must_change_password, u.last_login_at, u.created_at, u.updated_at,
            u.qnh_refund_enabled, u.qnh_profit_enabled, u.product_enabled, u.market_enabled, u.billing_enabled,
            u.replenish_enabled, u.price_enabled, u.after_sale_enabled, u.brand_id, b.name AS brand_name,
@@ -3100,6 +3102,8 @@ async function listUsers() {
   `);
   return users.map((u) => ({
     id: u.id, username: u.username, role: u.role, status: u.status,
+    // 公司全称（v0.3.32）：与登录账号分开。老库 company_full_name 为空时退回抬头/账号，兼容未升级的库
+    companyFullName: u.company_full_name || u.company_name || u.username || '',
     companyName: u.company_name || '', taxNo: u.tax_no || '', email: u.email || '',
     displayName: u.display_name || '', note: u.note || '',
     mustChangePassword: !!u.must_change_password,
@@ -3141,11 +3145,12 @@ async function listUsers() {
 }
 
 /**
- * 登录账号规则。
- * 口径：**账号即公司全称**（开票抬头），所以必须允许中文；同时保留字母/数字/下划线/点/中划线/括号。
- * admin 是内置账号，不受"账号=公司全称"约束（其抬头会被清空，见下方 updateUser 的说明）。
+ * 登录账号规则（v0.3.32 起与公司全称解耦）。
+ * 账号只管登录，公司全称单独存 app_user.company_full_name；
+ * 因为历史账号就是中文公司名，规则仍允许中文，同时保留字母/数字/下划线/点/中划线/括号。
+ * admin 是内置账号，账号名固定不可改。
  */
-const USERNAME_RULE = '登录账号（公司全称）需 2~64 位，可用中文、字母、数字、下划线、点、中划线、括号';
+const USERNAME_RULE = '登录账号需 2~64 位，可用中文、字母、数字、下划线、点、中划线、括号';
 function validUsername(name) {
   return typeof name === 'string' && /^[\u4e00-\u9fa5A-Za-z0-9_.·()（）-]{2,64}$/.test(name);
 }
@@ -3160,17 +3165,19 @@ async function assertBrand(brandId) {
   return id;
 }
 
-async function createUser({ username, password, companyName, taxNo, email, role, displayName, note, brandId, expiresAt }, byUser) {
-  // 账号 = 公司全称：前端只填一个「公司全称」字段，这里做兜底（未传 username 时直接取 companyName）
-  const uname = String(username || companyName || '').trim();
-  const cname = String(companyName || uname || '').trim();
+async function createUser({ username, password, companyFullName, companyName, taxNo, email, role, displayName, note, brandId, expiresAt }, byUser) {
+  // 登录账号与公司全称分开（v0.3.32）。兼容旧调用：没传 username 时退回公司名，没传公司全称时退回账号。
+  const uname = String(username || companyFullName || companyName || '').trim();
+  const cfull = String(companyFullName || companyName || uname || '').trim();
   if (!validUsername(uname)) throw new Error(USERNAME_RULE);
+  if (!cfull) throw new Error('公司全称不能为空');
+  if (cfull.length > 255) throw new Error('公司全称最多 255 个字符');
   if (!password || String(password).length < 4) throw new Error('密码至少 4 位');
   const dup = await db.query('SELECT id FROM app_user WHERE username = ?', [uname]);
   if (dup.length) throw new Error('账号已存在: ' + uname);
   // 所属品牌方（商品数据按品牌方共享；不传默认优购哆）
   const bid = await assertBrand(brandId);
-  // 超级管理员是纯系统账号，不承载业务数据 → 不落开票抬头
+  // 超级管理员是纯系统账号，不承载业务数据 → 不落开票抬头（公司全称仍存，用于列表显示）
   const isAdminRole = role === 'admin';
   // 使用期限（v0.2.97）：不传 = 默认 1 个月；'permanent'/空 = 永久；'YYYY-MM-DD' = 当天 23:59:59
   //   超级管理员是系统账号，一律永久，不接受外部传入。默认值交给 MySQL 的 DATE_ADD，
@@ -3180,10 +3187,11 @@ async function createUser({ username, password, companyName, taxNo, email, role,
   const expSql = exp.value === undefined ? 'DATE_ADD(NOW(), INTERVAL 1 MONTH)' : '?';
   const expArgs = exp.value === undefined ? [] : [exp.value];
   const r = await db.exec(
-    `INSERT INTO app_user (username, password_hash, role, status, company_name, tax_no, email, display_name, note, created_by, brand_id, expires_at)
-     VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ${expSql})`,
+    `INSERT INTO app_user (username, password_hash, role, status, company_full_name, company_name, tax_no, email, display_name, note, created_by, brand_id, expires_at)
+     VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ${expSql})`,
     [uname, auth.hashPassword(password), isAdminRole ? 'admin' : 'user',
-      isAdminRole ? null : (cname || null),
+      cfull,
+      isAdminRole ? null : cfull,
       isAdminRole ? null : (taxNo || null),
       isAdminRole ? null : (email || null),
       displayName || null, note || null, byUser.id, bid, ...expArgs]
@@ -3193,20 +3201,20 @@ async function createUser({ username, password, companyName, taxNo, email, role,
     `SELECT u.expires_at, ${EXPIRY_COLS} FROM app_user u WHERE u.id = ?`, [r.insertId]
   ))[0] || {};
   return {
-    ok: true, id: r.insertId, username: uname, brandId: bid,
+    ok: true, id: r.insertId, username: uname, companyFullName: cfull, brandId: bid,
     expiresAt: isAdminRole ? null : (fresh.expires_at_text || null),
     expired: false,
     daysLeft: (isAdminRole || fresh.days_left == null) ? null : Number(fresh.days_left),
   };
 }
 
-async function updateUser({ id, username, companyName, taxNo, email, role, displayName, note, brandId, expiresAt }) {
+async function updateUser({ id, username, companyFullName, companyName, taxNo, email, role, displayName, note, brandId, expiresAt }) {
   const rows = await db.query('SELECT * FROM app_user WHERE id = ?', [id]);
   if (!rows.length) throw new Error('用户不存在');
   const u = rows[0];
   if (u.username === 'admin' && role === 'user') throw new Error('内置超级管理员 admin 不能降级为普通用户');
 
-  // 改「公司全称」= 改登录账号（两者同源）。admin 的内置账号名固定，不参与改名。
+  // 登录账号：只改账号，不再联动公司全称（v0.3.32）。admin 的内置账号名固定，不参与改名。
   let nextUsername = u.username;
   const wantUsername = String(username === undefined ? '' : username).trim();
   if (wantUsername && wantUsername !== u.username) {
@@ -3217,15 +3225,27 @@ async function updateUser({ id, username, companyName, taxNo, email, role, displ
     nextUsername = wantUsername;
   }
 
-  // 开票抬头：传了就按传的写（允许清空）；没传但账号改了 → 跟随账号；否则保持原值
+  // 公司全称（v0.3.32）：独立字段，传了就必须非空；没传沿用原值（老库可能只有 company_name）
+  const curFull = String(u.company_full_name || u.company_name || u.username || '').trim();
+  let nextFull = curFull;
+  if (companyFullName !== undefined) {
+    nextFull = String(companyFullName).trim();
+    if (!nextFull) throw new Error('公司全称不能为空');
+    if (nextFull.length > 255) throw new Error('公司全称最多 255 个字符');
+  } else if (companyName !== undefined) {
+    // 兼容旧调用：只传 companyName 时，它同时作为公司全称与开票抬头
+    nextFull = String(companyName).trim() || curFull;
+  }
+
+  // 开票抬头公司名：默认跟随公司全称（口径统一，催收话术 {companyName} 不变）
   let nextCompany;
-  if (companyName !== undefined) nextCompany = String(companyName).trim();
-  else if (nextUsername !== u.username) nextCompany = nextUsername;
-  else nextCompany = u.company_name || '';
+  if (companyName !== undefined && companyFullName === undefined) nextCompany = String(companyName).trim();
+  else nextCompany = nextFull;
 
   const nextRole = role === 'admin' ? 'admin' : (u.role === 'admin' ? 'admin' : 'user');
   // 超级管理员是纯系统账号，不承载业务数据 → 不维护开票抬头（用户列表中只保留「重置密码」）。
   // 这里对 admin 账号强制清空抬头，避免通过接口绕过界面停住一个与设计相悖的状态。
+  // 公司全称仍然保留（列表里要显示是谁），所以 admin 的 company_full_name 不会被清空。
   const isAdminAccount = nextRole === 'admin';
   // 所属品牌方：传了就按传的改（校验存在），没传保持原值
   const nextBrand = brandId === undefined ? (Number(u.brand_id) || 1) : await assertBrand(brandId);
@@ -3236,8 +3256,8 @@ async function updateUser({ id, username, companyName, taxNo, email, role, displ
   if (!exp.ok) throw new Error(exp.error);
   const nextExpires = exp.value === undefined ? (u.expires_at || null) : exp.value;
   await db.exec(
-    `UPDATE app_user SET username = ?, company_name = ?, tax_no = ?, email = ?, display_name = ?, note = ?, role = ?, brand_id = ?, expires_at = ? WHERE id = ?`,
-    [nextUsername,
+    `UPDATE app_user SET username = ?, company_full_name = ?, company_name = ?, tax_no = ?, email = ?, display_name = ?, note = ?, role = ?, brand_id = ?, expires_at = ? WHERE id = ?`,
+    [nextUsername, nextFull || null,
       isAdminAccount ? null : (nextCompany || null),
       isAdminAccount ? null : (taxNo === undefined ? u.tax_no : (String(taxNo).trim() || null)),
       isAdminAccount ? null : (email === undefined ? u.email : (String(email).trim() || null)),
@@ -3246,7 +3266,8 @@ async function updateUser({ id, username, companyName, taxNo, email, role, displ
       nextRole, nextBrand, nextExpires, id]
   );
   return {
-    ok: true, username: nextUsername, companyName: isAdminAccount ? '' : nextCompany, brandId: nextBrand,
+    ok: true, username: nextUsername, companyFullName: nextFull,
+    companyName: isAdminAccount ? '' : nextCompany, brandId: nextBrand,
   };
 }
 
@@ -3967,7 +3988,7 @@ const server = http.createServer(async (req, res) => {
       const unmatched = await db.query('SELECT COUNT(*) AS n FROM v_unmatched_seller_name WHERE user_id = ?', [tenantId]);
       const ignoredCnt = await db.query('SELECT COUNT(*) AS n FROM seller_name_mapping WHERE is_ignored = 1');
       const manual = await db.query("SELECT COUNT(*) AS n FROM invoice_order WHERE user_id = ? AND state_source = 'manual'", [tenantId]);
-      const tenant = (await db.query('SELECT id, username, company_name FROM app_user WHERE id = ?', [tenantId]))[0] || null;
+      const tenant = (await db.query('SELECT id, username, company_full_name, company_name FROM app_user WHERE id = ?', [tenantId]))[0] || null;
       return sendJson(res, 200, {
         companies,
         sentList,
@@ -3976,7 +3997,11 @@ const server = http.createServer(async (req, res) => {
         unmatchedNameCount: unmatched[0] ? unmatched[0].n : 0,
         ignoredNameCount: ignoredCnt[0] ? ignoredCnt[0].n : 0,
         manualIssuedCount: manual[0] ? manual[0].n : 0,
-        tenant: tenant ? { id: tenant.id, username: tenant.username, companyName: tenant.company_name || '' } : null,
+        tenant: tenant ? {
+          id: tenant.id, username: tenant.username,
+          companyFullName: tenant.company_full_name || tenant.company_name || tenant.username || '',
+          companyName: tenant.company_name || '',
+        } : null,
         viewer: { id: user.id, role: user.role },
         isOtherTenant: Number(tenantId) !== Number(user.id),
         generatedAt: new Date().toLocaleString('zh-CN', { hour12: false }),
@@ -4232,7 +4257,10 @@ const server = http.createServer(async (req, res) => {
           (r.autoMapped ? ` · 自动匹配 ${r.autoMapped} 个销方` : '') +
           (r.unmatchedNames && r.unmatchedNames.length ? ` · 待人工匹配 ${r.unmatchedNames.length} 个销方` : ''));
       } else {
-        taskLog(t, `✓ 订单导入完成：新增 ${r.inserted} 单 · 更新 ${r.updated} 单`);
+        // 订单导入后服务端会补跑一次销方自动匹配（v0.3.32）：先导发票后导订单的账号靠它补齐税名
+        taskLog(t, `✓ 订单导入完成：新增 ${r.inserted} 单 · 更新 ${r.updated} 单`
+          + (kind === 'orders' && r.rematch && r.rematch.autoMapped
+            ? ` · 补匹配税名 ${r.rematch.autoMapped} 个` : ''));
       }
       // 操作日志：记录导入（旁路）
       logOp(user, kind === 'invoices' ? 'import.invoice' : 'import.order', {
@@ -7270,10 +7298,13 @@ const server = http.createServer(async (req, res) => {
         if (dup.length) return sendJson(res, 400, { error: '账号已存在: ' + uname });
         // 员工不单独设使用期限：跟着主体账号走（currentUser 会校验主体是否到期/停用）
         const r = await db.exec(
-          `INSERT INTO app_user (username, password_hash, role, status, company_name, display_name, note,
+          `INSERT INTO app_user (username, password_hash, role, status, company_full_name, company_name, display_name, note,
                                  created_by, owner_id, brand_id)
-           VALUES (?, ?, 'user', 'active', ?, ?, ?, ?, ?, ?)`,
-          [uname, auth.hashPassword(pwd), user.company_name || null,
+           VALUES (?, ?, 'user', 'active', ?, ?, ?, ?, ?, ?, ?)`,
+          [uname, auth.hashPassword(pwd),
+            // 员工不单独维护公司名，直接跟着主体账号走（v0.3.32 起公司全称单独一列）
+            user.company_full_name || user.company_name || null,
+            user.company_name || null,
             String(b.displayName || '').trim().slice(0, 64) || null,
             String(b.note || '').trim().slice(0, 255) || null,
             ownerId, ownerId, Number(user.brand_id) || 1]
@@ -7438,13 +7469,14 @@ const server = http.createServer(async (req, res) => {
         const kw = (url.searchParams.get('username') || '').trim();
         if (!kw) return sendJson(res, 400, { error: '缺少 username' });
         const rows = await db.query(
-          `SELECT id, username, role, status, company_name, tax_no, email FROM app_user
-           WHERE username = ? OR username LIKE ? ORDER BY username LIMIT 20`,
-          [kw, `%${kw}%`]
+          `SELECT id, username, role, status, company_full_name, company_name, tax_no, email FROM app_user
+           WHERE username = ? OR username LIKE ? OR company_full_name LIKE ? ORDER BY username LIMIT 20`,
+          [kw, `%${kw}%`, `%${kw}%`]
         );
         return sendJson(res, 200, {
           users: rows.map((u) => ({
             id: u.id, username: u.username, role: u.role, status: u.status,
+            companyFullName: u.company_full_name || u.company_name || u.username || '',
             companyName: u.company_name || '', taxNo: u.tax_no || '', email: u.email || '',
           })),
         });

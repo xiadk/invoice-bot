@@ -2358,18 +2358,18 @@
             <b>用户列表</b> <span class="loginid">（{{ users.length }} 个账号）</span>
             <el-button size="mini" style="margin-left:10px" @click="loadUsers">刷新</el-button>
           </div>
-          <!-- 搜索：公司名称 / 税号 / 账号，三者任一模糊命中即显示 -->
+          <!-- 搜索：公司全称 / 登录账号 / 税号，三者任一模糊命中即显示 -->
           <div class="filter-bar">
             <span class="fb-label">搜索</span>
             <el-input v-model="userKw" size="small" style="width:300px" clearable
-                      placeholder="公司名称 / 税号 / 账号（模糊匹配）"></el-input>
+                      placeholder="公司全称 / 登录账号 / 税号（模糊匹配）"></el-input>
             <el-button size="small" @click="userKw = ''">重置</el-button>
             <span class="fb-spacer"></span>
             <span class="loginid">显示 {{ filteredUsers.length }} / {{ users.length }} 个账号</span>
           </div>
           <el-table :data="filteredUsers" size="small" border style="width:100%" empty-text="加载中...">
             <el-table-column prop="id" label="ID" width="56"></el-table-column>
-            <el-table-column label="账号" width="150">
+            <el-table-column label="登录账号" width="150">
               <template slot-scope="p"><b>{{ p.row.username }}</b><div v-if="p.row.mustChangePassword" class="loginid">需改密</div></template>
             </el-table-column>
             <el-table-column label="角色" width="130"><template slot-scope="p">
@@ -2395,7 +2395,7 @@
                 </template>
               </template>
             </el-table-column>
-            <el-table-column label="公司名称 / 抬头" min-width="170"><template slot-scope="p">{{ p.row.companyName || '—' }}<div v-if="p.row.note" class="loginid">{{ p.row.note }}</div></template></el-table-column>
+            <el-table-column label="公司全称" min-width="170"><template slot-scope="p">{{ p.row.companyFullName || '—' }}<div v-if="p.row.note" class="loginid">{{ p.row.note }}</div></template></el-table-column>
             <el-table-column label="税号" width="170"><template slot-scope="p"><span class="loginid">{{ p.row.taxNo || '—' }}</span></template></el-table-column>
             <el-table-column label="收票邮箱" width="170"><template slot-scope="p"><span class="loginid">{{ p.row.email || '—' }}</span></template></el-table-column>
             <el-table-column label="数据量" width="130"><template slot-scope="p"><span class="loginid">{{ p.row.role === 'admin' ? '系统账号 · 不承载业务数据' : p.row.orderCount + ' 单 / ' + p.row.mappingCount + ' 映射' }}</span></template></el-table-column>
@@ -2439,7 +2439,8 @@
         <el-dialog title="新增用户" :visible.sync="newUserDlg" width="640px" top="10vh" append-to-body>
           <el-form label-position="top" size="small">
             <el-row :gutter="12">
-              <el-col :xs="24" :md="16"><el-form-item label="公司全称（= 登录账号）*"><el-input v-model="newUser.company" placeholder="如：中山仕赫贸易有限公司"></el-input></el-form-item></el-col>
+              <el-col :xs="24" :md="8"><el-form-item label="登录账号 *"><el-input v-model="newUser.username" maxlength="64" placeholder="如：shanghe（也可用中文）"></el-input></el-form-item></el-col>
+              <el-col :xs="24" :md="8"><el-form-item label="公司全称 *"><el-input v-model="newUser.company" maxlength="255" placeholder="如：中山仕赫贸易有限公司"></el-input></el-form-item></el-col>
               <el-col :xs="24" :md="8"><el-form-item label="初始密码 *"><el-input v-model="newUser.password" placeholder="至少 4 位"></el-input></el-form-item></el-col>
               <el-col :xs="24" :md="8"><el-form-item label="角色">
                 <el-select v-model="newUser.role" style="width:100%"><el-option label="普通用户" value="user"></el-option><el-option label="超级管理员" value="admin"></el-option></el-select>
@@ -2468,7 +2469,7 @@
               <el-col :xs="24"><el-form-item label="备注"><el-input v-model="newUser.note" placeholder="可选"></el-input></el-form-item></el-col>
             </el-row>
           </el-form>
-          <div class="form-tip">账号 = 公司全称（业务账号才需要抬头）。若「角色」选<b>超级管理员</b>，只需填「公司全称」与初始密码，税号 / 邮箱会被忽略。
+          <div class="form-tip">登录账号只管登录，公司全称用于列表显示与开票抬头（催收话术里的 {companyName}），两者互不影响。若「角色」选<b>超级管理员</b>，税号 / 邮箱会被忽略。
             <br>使用期限到期后该账号<b>无法登录</b>，已登录的会话调用任何接口都会被拒绝；需要继续使用请到列表点「续期」。</div>
           <span slot="footer">
             <el-tag v-if="createOk" type="success" size="small" style="margin-right:10px">✓ 已创建</el-tag>
@@ -4528,10 +4529,11 @@
     </el-table>
   </el-dialog>
 
-  <!-- ══════════ 编辑用户（账号 + 开票抬头） ══════════ -->
+  <!-- ══════════ 编辑用户（登录账号 / 公司全称 / 开票抬头） ══════════ -->
   <el-dialog :title="userEdit.title" :visible.sync="userEdit.visible" width="460px" append-to-body>
     <el-form label-position="top" size="small">
-      <el-form-item label="公司全称（= 登录账号）"><el-input v-model="userEdit.company" :disabled="userEdit.lockCompany" placeholder="如：中山仕赫贸易有限公司"></el-input></el-form-item>
+      <el-form-item label="登录账号"><el-input v-model="userEdit.username" maxlength="64" :disabled="userEdit.lockCompany" placeholder="登录用，如：shanghe"></el-input></el-form-item>
+      <el-form-item label="公司全称"><el-input v-model="userEdit.company" maxlength="255" placeholder="如：中山仕赫贸易有限公司"></el-input></el-form-item>
       <el-form-item label="纳税人识别号"><el-input v-model="userEdit.taxNo"></el-input></el-form-item>
       <el-form-item label="收票邮箱"><el-input v-model="userEdit.email" placeholder="发票接收邮箱"></el-input></el-form-item>
       <el-form-item label="品牌方（决定能看到哪套商品数据）">
@@ -4822,7 +4824,7 @@ Vue.component('qnh-tenant-picker', {
   },
   methods: {
     labelOf(u) {
-      const name = (u.companyName || u.username || ('#' + u.id));
+      const name = (u.companyFullName || u.companyName || u.username || ('#' + u.id));
       const tags = [];
       if (Number(u.id) === Number(this.selfId)) tags.push('我自己');
       if ((this.sessions || []).some((s) => Number(s) === Number(u.id))) tags.push('已登录' + this.service);
@@ -5033,7 +5035,7 @@ const vm = new Vue({
       defaultPddChat: '你好，麻烦尽快开一下发票，在平台都已经申请！！！如需线下开票，我的抬头：{companyName}，'
         + '税号：{taxNo}，邮箱：{email}，非常感谢，已经在平台申请！！！',
       previewText: '', saveOk: false,
-      users: [], newUser: { company: '', password: '', role: 'user', taxNo: '', email: '', note: '', brandId: 1, expiryMode: '1m', expiresAt: '' },
+      users: [], newUser: { username: '', company: '', password: '', role: 'user', taxNo: '', email: '', note: '', brandId: 1, expiryMode: '1m', expiresAt: '' },
       // 品牌方（商品数据按品牌方共享）：列表 + 管理弹框
       brands: [],
       brandDlg: { visible: false, loading: false, saving: false, newName: '', newNote: '', rows: [] },
@@ -5042,7 +5044,7 @@ const vm = new Vue({
       build: { running: false, ok: null, error: '', version: '', installer: null, installers: [], platform: '', log: [] },
       uploading: false, uploadProgress: 0, uploadMsg: '',
       creatingUser: false, createOk: false,
-      userEdit: { visible: false, id: null, title: '', company: '', taxNo: '', email: '', note: '', brandId: 1, hint: '', lockCompany: false, saving: false, expiryMode: 'permanent', expiresAt: '' },
+      userEdit: { visible: false, id: null, title: '', username: '', company: '', taxNo: '', email: '', note: '', brandId: 1, hint: '', lockCompany: false, saving: false, expiryMode: 'permanent', expiresAt: '' },
       // 菜单权限弹窗（退单列表 / 实时毛利监控）
       menuPermit: { visible: false, id: null, username: '', scope: 'admin', refund: false, profit: false, product: false, market: false, billing: false, replenish: false, price: false, after: false, supplier: false, waybill: false, replenishOrder: false, staff: false, saving: false,
                     origin: { refund: false, profit: false, product: false, market: false, billing: false, replenish: false, price: false, after: false, supplier: false, waybill: false, replenishOrder: false, staff: false } },
@@ -5467,17 +5469,17 @@ const vm = new Vue({
         return '<div style="color:' + color + '">' + this.esc(l.t) + ' ' + this.esc(l.text) + '</div>';
       }).join('');
     },
-    // 当前查看的账号名（展示用）
+    // 当前查看的账号名（展示用）：公司全称优先（v0.3.32 起与登录账号分开）
     qnhWhoLabel() {
       if (!this.me) return '';
-      if (!this.isAdmin) return this.me.companyName || this.me.username || '';
+      if (!this.isAdmin) return this.me.companyFullName || this.me.companyName || this.me.username || '';
       const u = (this.qnhUsers || []).find((x) => Number(x.id) === Number(this.qnhTenant));
-      return u ? (u.companyName || u.username || ('#' + u.id)) : '';
+      return u ? (u.companyFullName || u.companyName || u.username || ('#' + u.id)) : '';
     },
     // 配置归属提示
     qnhConfigOwner() {
       if (!this.me) return '';
-      if (!this.isAdmin) return (this.me.companyName || this.me.username) + '（我自己）';
+      if (!this.isAdmin) return (this.me.companyFullName || this.me.companyName || this.me.username) + '（我自己）';
       return this.qnhWhoLabel || '未选择账号';
     },
     // 毛利告警「发不出去」的阻断项（只看毛利专用机器人，与退单提醒通道无关）
@@ -5550,12 +5552,12 @@ const vm = new Vue({
           sub: '启用 ' + this.users.filter((u) => u.status === 'active').length + ' 个' },
       ];
     },
-    /** 用户列表搜索：公司名称 / 税号 / 账号，任一模糊命中即保留（不区分大小写） */
+    /** 用户列表搜索：公司全称 / 税号 / 登录账号，任一模糊命中即保留（不区分大小写） */
     filteredUsers() {
       const kw = String(this.userKw || '').trim().toLowerCase();
       const list = this.users || [];
       if (!kw) return list;
-      return list.filter((u) => [u.username, u.companyName, u.taxNo]
+      return list.filter((u) => [u.username, u.companyFullName, u.companyName, u.taxNo]
         .some((v) => String(v || '').toLowerCase().includes(kw)));
     },
     /** 操作日志统计卡：后端全量只读汇总，不随筛选变化 */
@@ -5684,7 +5686,8 @@ const vm = new Vue({
     userName() { return (this.me && (this.me.displayName || this.me.username)) || '—'; },
     userRoleText() {
       if (!this.me) return '';
-      return (this.me.role === 'admin' ? '超级管理员' : '普通用户') + (this.me.companyName ? ' · ' + this.me.companyName : '');
+      const cn = this.me.companyFullName || this.me.companyName || '';
+      return (this.me.role === 'admin' ? '超级管理员' : '普通用户') + (cn ? ' · ' + cn : '');
     },
     selectedCount() { return Object.keys(this.selected).length; },
     expandedKeys() { return Object.keys(this.expanded); },
@@ -6007,7 +6010,7 @@ const vm = new Vue({
         const memberCnt = this.companies.reduce((a, c) => a + c.memberCount, 0);
         this.meta = '数据: ' + d.generatedAt + ' · ' + this.companies.length + ' 家公司 / ' + memberCnt + ' 个会员名'
           + (d.tenant ? ' · 租户: ' + d.tenant.username : '');
-        this.tenantLabel = d.tenant ? (d.tenant.companyName || d.tenant.username) : '';
+        this.tenantLabel = d.tenant ? (d.tenant.companyFullName || d.tenant.companyName || d.tenant.username) : '';
         this.loadTrend();
         // 丢弃已折叠会员名的过期明细缓存；仍展开的强制刷新
         const open = this.orderOpen, next = {};
@@ -8888,7 +8891,9 @@ const vm = new Vue({
     },
     async createUser() {
       const payload = {
-        companyName: (this.newUser.company || '').trim(), username: (this.newUser.company || '').trim(),
+        // 登录账号与公司全称分开（v0.3.32）：账号只管登录，公司全称用于显示/开票抬头
+        username: (this.newUser.username || '').trim(),
+        companyFullName: (this.newUser.company || '').trim(),
         password: this.newUser.password, role: this.newUser.role,
         taxNo: (this.newUser.taxNo || '').trim(), email: (this.newUser.email || '').trim(), note: (this.newUser.note || '').trim(),
         brandId: Number(this.newUser.brandId) || 1,   // 所属品牌方（默认优购哆）
@@ -8899,12 +8904,14 @@ const vm = new Vue({
         const exp = this.expiryParam(this.newUser.expiryMode, this.newUser.expiresAt);
         if (exp !== undefined) payload.expiresAt = exp;
       }
-      if (!payload.username || !payload.password) { this.$message.warning('请填写「公司全称（= 登录账号）」与初始密码'); return; }
+      if (!payload.username) { this.$message.warning('请填写登录账号'); return; }
+      if (!payload.companyFullName) { this.$message.warning('请填写公司全称'); return; }
+      if (!payload.password) { this.$message.warning('请填写初始密码'); return; }
       this.creatingUser = true;
       try {
         const d = await this.api('/api/admin/users/create', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) });
         if (d.error) { this.$message.error('创建失败: ' + d.error); this.creatingUser = false; return; }
-        this.newUser = { company: '', password: '', role: 'user', taxNo: '', email: '', note: '', brandId: (this.brands[0] && this.brands[0].id) || 1, expiryMode: '1m', expiresAt: '' };
+        this.newUser = { username: '', company: '', password: '', role: 'user', taxNo: '', email: '', note: '', brandId: (this.brands[0] && this.brands[0].id) || 1, expiryMode: '1m', expiresAt: '' };
         this.createOk = true; setTimeout(() => { this.createOk = false; }, 2500);
         this.newUserDlg = false;       // 创建成功即关弹框，列表在下方已刷新
         await this.loadUsers();
@@ -8949,24 +8956,26 @@ const vm = new Vue({
       await this.loadUsers();
     },
     openUserCreate() {
-      this.newUser = { company: '', password: '', role: 'user', taxNo: '', email: '', note: '', brandId: (this.brands[0] && this.brands[0].id) || 1, expiryMode: '1m', expiresAt: '' };
+      this.newUser = { username: '', company: '', password: '', role: 'user', taxNo: '', email: '', note: '', brandId: (this.brands[0] && this.brands[0].id) || 1, expiryMode: '1m', expiresAt: '' };
       this.createOk = false;
       this.newUserDlg = true;
       if (!this.brands.length) this.loadBrands();
     },
-    viewUserData(u) { this.setTenantView(u.id, u.companyName || u.username); },
+    viewUserData(u) { this.setTenantView(u.id, u.companyFullName || u.companyName || u.username); },
     openUserEdit(u) {
       this.userEdit = {
         visible: true, id: u.id, title: `编辑用户 #${u.id}（${u.username}）`,
-        company: u.companyName || u.username || '', taxNo: u.taxNo || '', email: u.email || '', note: u.note || '',
+        username: u.username,
+        company: u.companyFullName || u.companyName || u.username || '',
+        taxNo: u.taxNo || '', email: u.email || '', note: u.note || '',
         brandId: Number(u.brandId) || 1,
         // 使用期限（v0.2.97）：有到期日 → 自定义并回填日期；无 → 永久
         expiryMode: u.expiresAt ? 'custom' : 'permanent',
         expiresAt: u.expiresAt ? String(u.expiresAt).slice(0, 10) : '',
         lockCompany: u.username === 'admin',
         hint: u.username === 'admin'
-          ? '内置超级管理员 <b>admin</b> 的登录账号名固定，这里只改它的开票抬头。'
-          : '公司全称即<b>登录账号</b>，改这里会同时改掉该账号的登录名（当前：<b>' + this.esc(u.username) + '</b>）。',
+          ? '内置超级管理员 <b>admin</b> 的登录账号固定不可改，这里只改它的公司全称。'
+          : '登录账号与公司全称互不影响：改账号只影响登录名；改公司全称只影响列表显示与开票抬头（催收话术里的 {companyName}）。',
         saving: false,
       };
       if (!this.brands.length) this.loadBrands();
@@ -8975,12 +8984,14 @@ const vm = new Vue({
       const ue = this.userEdit;
       const u = (this.users || []).find(x => x.id === ue.id) || {};
       const company = (ue.company || '').trim();
+      const username = (ue.username || '').trim();
+      if (u.username !== 'admin' && !username) { this.$message.warning('登录账号不能为空'); return; }
       if (!company) { this.$message.warning('公司全称不能为空'); return; }
       const payload = {
-        id: ue.id, companyName: company, taxNo: (ue.taxNo || '').trim(), email: (ue.email || '').trim(),
+        id: ue.id, companyFullName: company, taxNo: (ue.taxNo || '').trim(), email: (ue.email || '').trim(),
         note: (ue.note || '').trim(), role: u.role, brandId: Number(ue.brandId) || 1,
       };
-      if (u.username !== 'admin') payload.username = company;
+      if (u.username !== 'admin') payload.username = username;
       // 使用期限（v0.2.97）：不传 = 保持原值；permanent = 改永久；日期 = 当天 23:59:59
       if (u.role !== 'admin') {
         if (ue.expiryMode === 'custom' && !ue.expiresAt) { this.$message.warning('请选择到期日'); return; }
@@ -9040,7 +9051,7 @@ const vm = new Vue({
       this.switchPage('board');
       this.loadData();
     },
-    exitTenantView() { this.setTenantView(this.me.id, this.me.companyName || this.me.username); },
+    exitTenantView() { this.setTenantView(this.me.id, this.me.companyFullName || this.me.companyName || this.me.username); },
 
     // ══════ 操作日志 ══════
     /**

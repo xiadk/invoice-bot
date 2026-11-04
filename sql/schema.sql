@@ -34,12 +34,13 @@ USE `invoice_bot`;
 -- ----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS `app_user` (
   `id`                   INT           NOT NULL AUTO_INCREMENT COMMENT '用户ID（同时也是数据归属的 user_id）',
-  `username`             VARCHAR(64)   NOT NULL                COMMENT '登录账号（唯一）',
+  `username`             VARCHAR(64)   NOT NULL                COMMENT '登录账号（唯一；与公司全称解耦，v0.3.32 起不再要求等于公司名）',
   `password_hash`        VARCHAR(255)  NOT NULL                COMMENT '密码哈希（scrypt，格式 scrypt:盐:哈希）',
   `role`                 ENUM('admin','user') NOT NULL DEFAULT 'user' COMMENT '角色：admin=超级管理员，user=普通用户',
   `status`               ENUM('active','disabled') NOT NULL DEFAULT 'active' COMMENT '账号状态：active=正常，disabled=已禁用（禁用后无法登录，已登录会话立即失效）',
   `expires_at`           DATETIME      NULL DEFAULT NULL      COMMENT '使用到期时间（NULL=永久有效；超过后禁止登录与所有接口）',
-  `company_name`         VARCHAR(255)  DEFAULT NULL            COMMENT '开票抬头：公司名称（催收消息 {companyName}）',
+  `company_full_name`    VARCHAR(255)  DEFAULT NULL            COMMENT '公司全称（v0.3.32；与登录账号分开，列表/选择/显示优先用它）',
+  `company_name`         VARCHAR(255)  DEFAULT NULL            COMMENT '开票抬头：公司名称（催收消息 {companyName}；默认跟随公司全称）',
   `tax_no`               VARCHAR(64)   DEFAULT NULL            COMMENT '开票抬头：纳税人识别号（催收消息 {taxNo}）',
   `email`                VARCHAR(160)  DEFAULT NULL            COMMENT '开票抬头：收票邮箱（催收消息 {email}）',
   `display_name`         VARCHAR(64)   DEFAULT NULL            COMMENT '显示名（可选，看板右上角展示）',

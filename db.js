@@ -868,6 +868,21 @@ async function migrate(conn, dbName) {
   if (!(await idxExists('app_user', 'idx_app_user_owner'))) {
     await q('ALTER TABLE `app_user` ADD KEY `idx_app_user_owner` (`owner_id`)');
   }
+  // ── 公司全称（v0.3.32）────────────────────────────────────────────────────
+  //   以前「登录账号 = 公司全称」写死（账号必须是中文公司名），改账号名就等于改公司名。
+  //   现在拆成两个字段：username 只做登录账号，company_full_name 存公司全称。
+  //   老库回填口径：沿用现有「开票抬头公司名」，没有才退回登录账号 —— 升级后界面显示与之前完全一致。
+  //   （WHERE 只填空值，反复启动幂等；公司全称在后端是必填，不存在「故意清空后被回填」的场景）
+  if (!(await colExists('app_user', 'company_full_name'))) {
+    await q(
+      "ALTER TABLE `app_user` ADD COLUMN `company_full_name` VARCHAR(255) DEFAULT NULL " +
+      "COMMENT '公司全称（与登录账号分开；列表/选择/显示优先用它）' AFTER `expires_at`"
+    );
+  }
+  await q(
+    "UPDATE `app_user` SET `company_full_name` = COALESCE(NULLIF(`company_name`, ''), `username`) " +
+    "WHERE `company_full_name` IS NULL OR `company_full_name` = ''"
+  );
   // 售后管理菜单（v0.2.104）：默认 0，与其它菜单一样由超管逐个开启
   if (!(await colExists('app_user', 'after_sale_enabled'))) {
     await q(
@@ -1802,6 +1817,12 @@ async function seedAdmin(conn, dbName) {
       }
     }
   } catch (e) { /* 忽略：表不存在或已迁移 */ }
+  // 公司全称（v0.3.32）：首次建库时 admin 是在 migrate() 之后才 seed 的，赶不上 migrate 里的回填；
+  // 老库也可能是「列刚加上、还没回填」。这里补一次（只填空值，幂等）。
+  try {
+    await q("UPDATE app_user SET company_full_name = COALESCE(NULLIF(company_name, ''), username) "
+      + "WHERE company_full_name IS NULL OR company_full_name = ''");
+  } catch (e) { /* 列不存在时忽略（正常不会发生，migrate 已先加列） */ }
   return adminId;
 }
 

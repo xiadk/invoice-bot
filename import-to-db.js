@@ -351,6 +351,65 @@ async function autoMapSellers(sellers, taxNames, userId) {
   return { autoMapped, unmatched };
 }
 
+/**
+ * 订单侧补跑销方自动匹配（v0.3.32，方案A）
+ *
+ * 背景：自动匹配原本只在「导入发票」那一步跑一次，候选卖家取自 invoice_order。
+ *   先导发票、后导订单时，导发票那一刻订单表还是空的 → 该文件所有销方都落「待比对」，
+ *   之后再导订单也不会补匹配（发票页按 seller_company 汇总，这批发票等于看不见）。
+ * 现在订单入库后补跑一次：对本账号「发票里出现过、但还没映射也没被忽略」的销方重新匹配。
+ *   命中就写 seller_name_mapping（全员共享）并回填 issued_invoice.seller_company，
+ *   于是「先导订单」与「先导发票」两种顺序结果一致。
+ *
+ * 只做补匹配，不动任何已有映射/已忽略项（autoMapSellers 内部会跳过）。
+ */
+async function rematchSellers(userId) {
+  const empty = { autoMapped: 0, unmatched: 0, backfilled: 0 };
+  if (!userId) return { ...empty, skipped: '缺少 userId' };
+
+  // 1) 候选卖家：本账号订单里出现过的 1688 卖家（口径与 importInvoiceUpload 完全一致）
+  const sellers = await db.query(
+    `SELECT seller_login, MAX(seller_company) AS seller_company, COUNT(*) AS order_cnt
+     FROM invoice_order
+     WHERE user_id = ? AND seller_company IS NOT NULL
+     GROUP BY seller_login
+     ORDER BY seller_login`,
+    [userId]
+  );
+  if (!sellers.length) return { ...empty, skipped: '本账号还没有可用的 1688 卖家' };
+
+  // 2) 待比对销方：本账号发票里出现、映射表里没有公司名、也没被忽略的
+  //    （m.id 存在但 seller_company 为空 = 之前被清空过，这种也要重试，所以不能只判 m.id IS NULL）
+  const names = await db.query(
+    `SELECT i.seller_name AS tax_seller_name, MAX(i.remark) AS remark
+       FROM issued_invoice i
+       LEFT JOIN seller_name_mapping m ON m.tax_seller_name = i.seller_name
+      WHERE i.user_id = ? AND i.seller_name IS NOT NULL AND i.seller_name <> ''
+        AND (m.id IS NULL OR (m.seller_company IS NULL AND COALESCE(m.is_ignored, 0) = 0))
+      GROUP BY i.seller_name`,
+    [userId]
+  );
+  if (!names.length) return { ...empty, skipped: '没有待比对的销方' };
+
+  // 3) 复用导入发票时的同一套匹配规则（精确/规范化/包含/登录ID/备注线索）
+  const mapped = await autoMapSellers(sellers, names, userId);
+
+  // 4) 回填本次与历史所有发票行的 seller_company（与导入发票时的回填语句一致）
+  const backfilled = await db.exec(
+    `UPDATE issued_invoice i JOIN seller_name_mapping m
+       ON m.tax_seller_name = i.seller_name AND m.seller_company IS NOT NULL
+     SET i.seller_company = m.seller_company
+     WHERE i.user_id = ? AND (i.seller_company IS NULL OR i.seller_company <> m.seller_company)`,
+    [userId]
+  ).catch(() => ({ affectedRows: 0 }));
+
+  return {
+    autoMapped: mapped.autoMapped.length,
+    unmatched: mapped.unmatched.length,
+    backfilled: backfilled.affectedRows || 0,
+  };
+}
+
 // ──────────────────────── 写库 ────────────────────────
 
 const ORDER_FIELDS = [
@@ -639,11 +698,16 @@ async function importOrderUpload(userId, filePath, displayName) {
   );
   const affected = await bulkUpsert('invoice_order', ORDER_FIELDS, rows, updateFields);
 
+  // 订单数据到位后补跑一次销方自动匹配（v0.3.32）：先导发票后导订单也能补上。
+  // 失败不影响订单导入本身，只把原因带回前端。
+  const rematch = await rematchSellers(userId).catch((e) => ({ autoMapped: 0, unmatched: 0, error: e.message }));
+  const rematchTip = rematch.autoMapped ? ` · 补匹配 ${rematch.autoMapped} 个销方` : '';
+
   await logImport(userId, {
     kind: 'order', source_file: name, total_rows: totalRows, inserted, skipped: updated,
-    status: 'ok', message: `上传导入：新增 ${inserted} · 更新 ${updated}（affected=${affected}）`,
+    status: 'ok', message: `上传导入：新增 ${inserted} · 更新 ${updated}（affected=${affected}）${rematchTip}`,
   });
-  return { file: name, ok: true, totalRows, kept: rows.length, inserted, updated, affected };
+  return { file: name, ok: true, totalRows, kept: rows.length, inserted, updated, affected, rematch };
 }
 
 /**
@@ -785,6 +849,10 @@ async function runImport(opts) {
     const st = await applyInvoiceStatus(userId);
     out.invoiceStatus = st;
     if (st.applied) out.steps.push(`平台开票状态同步：更新 ${st.applied} 单`);
+    // 订单到位后补跑销方匹配（v0.3.32）：先导发票后导订单的账号靠这一步补齐
+    const rm = await rematchSellers(userId).catch((e) => ({ autoMapped: 0, unmatched: 0, error: e.message }));
+    out.rematch = rm;
+    if (rm.autoMapped) out.steps.push(`销方名称补匹配：${rm.autoMapped} 个（订单到位后重跑）`);
   }
   if (doInvoices) {
     const r = await importInvoices(userId);
@@ -806,7 +874,7 @@ async function runImport(opts) {
 module.exports = {
   runImport, importOrders, importInvoices, applyInvoiceStatus, migrateLegacySentLog,
   importOrderUpload, importInvoiceUpload,
-  matchSeller, autoMapSellers, normName, toDateTime,
+  matchSeller, autoMapSellers, rematchSellers, normName, toDateTime,
 };
 
 // ──────────────────────── CLI ────────────────────────
