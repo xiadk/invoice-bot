@@ -6337,8 +6337,10 @@ const server = http.createServer(async (req, res) => {
         const sent = agentHub.send(aUid, {
           type: 'pdd_login',
           taskId,
-          // 发票助手页：未登录会自动跳登录，登录完正好停在订单页，方便确认身份
-          url: (process.env.PDD_LOGIN_URL || 'https://mobile.yangkeduo.com/commercial_pre_orders.html'),
+          // 落地页 = 买家「消息」列表（chat_list）。原来给的是发票助手页，但那个页面里没有
+          // 任何入口能进到消息页，用户想看后台发出的催收消息只能停在消息列表。
+          // 助手收到登录成功后也会自己跳到同一页（老助手只要给它这个 url 也能落地）。
+          url: (process.env.PDD_LOGIN_URL || 'https://mobile.yangkeduo.com/chat_list.html'),
           timeoutMs: PDD_LOGIN_TIMEOUT_MS,
         });
         if (!sent) {

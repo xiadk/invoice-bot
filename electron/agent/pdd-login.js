@@ -23,7 +23,11 @@ const PARTITION = 'persist:pdd';
 const MOBILE_UA = 'Mozilla/5.0 (Linux; Android 16; Pixel 10) AppleWebKit/537.36 '
   + '(KHTML, like Gecko) Chrome/158.0.0.0 Mobile Safari/537.36';
 const PROBE_PATH = '/proxy/api/api/omaisapi/invoice_assistant/list_invoice_order';
-const DEFAULT_URL = 'https://mobile.yangkeduo.com/commercial_pre_orders.html';
+// 落地页：买家「消息」列表。
+// 为什么不是发票订单页：订单页（commercial_pre_orders.html）里没有任何入口能进到消息页，
+// 用户要看「后台到底发出去了什么催收消息」只能停在消息列表这里。登录成功后也会主动跳到这个页面。
+const CHAT_LIST_URL = 'https://mobile.yangkeduo.com/chat_list.html';
+const DEFAULT_URL = CHAT_LIST_URL;
 
 let win = null;
 
@@ -126,8 +130,11 @@ async function runLogin(task, api) {
 
   api.log('已在本机打开拼多多窗口，请在窗口里完成登录（支持扫码 / 短信验证）');
   try {
+    // 只要当前页不是目标页（登录窗口可能停在别的拼多多页面）就导航过去，
+    // 别再沿用「只在非拼多多域名时才加载」的老判断，否则窗口停在上次的旧页面。
     const cur = w.webContents.getURL();
-    if (!isPdd(cur)) await w.loadURL(url).catch(() => {});
+    const pathOf = (u) => String(u || '').replace(/^https?:\/\/[^/]+/, '').split('?')[0];
+    if (!isPdd(cur) || pathOf(cur) !== pathOf(url)) await w.loadURL(url).catch(() => {});
   } catch (e) { /* 加载慢不影响后面的轮询 */ }
   w.show();
   w.focus();
@@ -170,6 +177,9 @@ async function runLogin(task, api) {
         agentVer: currentVersion(),
       });
       api.log(`登录成功，已回传 ${c.count} 个 Cookie`);
+      // 登录完成后把窗口停到「消息」列表：用户能直接看到后台发出的催收消息，
+      // 也方便随时按刷新（工具栏 ⟳）确认商家有没有回话。不 await，别拖慢回传。
+      try { w.webContents.loadURL(CHAT_LIST_URL).catch(() => {}); } catch (e) { /* 跳转失败不影响登录结果 */ }
       return;
     }
     if (now - lastNote > 20000) {
