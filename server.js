@@ -5746,7 +5746,13 @@ const server = http.createServer(async (req, res) => {
       }
 
       if (method === 'GET' && p === '/api/replenish-order/detail') {
-        const out = await replenishOrder.getOrder({ userId: roUid, id: url.searchParams.get('id') });
+        // brandId 参与「实时库存」读取（brand_product 按品牌共享；0=超管看全部品牌）
+        const brandId = user.role === 'admin'
+          ? (brandOf(req, url, user).brandId || 0)
+          : await brandIdOfUser(roUid);
+        const out = await replenishOrder.getOrder({
+          userId: roUid, id: url.searchParams.get('id'), brandId,
+        });
         return sendJson(res, out.ok ? 200 : 404, out);
       }
 
@@ -5804,7 +5810,8 @@ const server = http.createServer(async (req, res) => {
         writeGuard();
         const body = await readBody(req);
         const out = await replenishOrder.saveItem({
-          userId: roUid, orderId: body.orderId, itemId: body.itemId,
+          userId: roUid, brandId: brandFromBody(user, body).brandId || (Number(user.brand_id) || 0),
+          orderId: body.orderId, itemId: body.itemId,
           sku: body.sku, goodsName: body.goodsName, channel: body.channel, channelLabel: body.channelLabel,
           qtyPack: body.qtyPack, specQty: body.specQty, unitPrice: body.unitPrice, suggestQty: body.suggestQty,
         });
@@ -5821,7 +5828,8 @@ const server = http.createServer(async (req, res) => {
         writeGuard();
         const body = await readBody(req);
         const out = await replenishOrder.deleteItem({
-          userId: roUid, orderId: body.orderId, itemId: body.itemId,
+          userId: roUid, brandId: brandFromBody(user, body).brandId || (Number(user.brand_id) || 0),
+          orderId: body.orderId, itemId: body.itemId,
         });
         if (out.ok) {
           await logOp(user, 'replenish.item_delete', {
@@ -5833,17 +5841,32 @@ const server = http.createServer(async (req, res) => {
 
       // 换供应商（v0.3.33 起是**行级**）：把这一行的补货数量搬到目标供应商的补货单，
       // 本行删除、源单搬空即软删。整单改名已去掉，避免与搬行混淆。
+      // v0.3.35：搬之前先算「目标供应商有没有价」，没价（无货）不许搬，见下面 item-move-check。
+      if (method === 'POST' && p === '/api/replenish-order/item-move-check') {
+        const body = await readBody(req);
+        const brandId = brandFromBody(user, body).brandId || (Number(user.brand_id) || 0);
+        const out = await replenishOrder.checkItemMove({
+          userId: roUid, brandId,
+          orderId: body.orderId, itemId: body.itemId, supplierId: body.supplierId,
+        });
+        // 预检是「查一下能不能搬」，无货/未关联都是正常结论不是请求错误 → 一律 200，
+        // 用 body.ok 表达结果（否则前端控制台每次都红一条 400，看着像故障）
+        return sendJson(res, 200, out);
+      }
+
       if (method === 'POST' && p === '/api/replenish-order/item-move') {
         writeGuard();
         const body = await readBody(req);
+        const brandId = brandFromBody(user, body).brandId || (Number(user.brand_id) || 0);
         const out = await replenishOrder.moveItemToSupplier({
-          userId: roUid, orderId: body.orderId, itemId: body.itemId,
+          userId: roUid, brandId,
+          orderId: body.orderId, itemId: body.itemId,
           supplierId: body.supplierId, operator: user.username,
         });
         if (out.ok) {
           await logOp(user, 'replenish.item_move', {
             tenantId: roUid, orderId: Number(body.orderId), sku: body.sku || '',
-            qtyPack: body.qtyPack, supplierName: out.targetSupplierName,
+            qtyPack: out.moved && out.moved.qtyPack, supplierName: out.targetSupplierName,
             targetOrderId: out.targetOrderId, merged: out.merged, sourceDeleted: out.sourceDeleted,
           });
         }
