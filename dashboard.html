@@ -3023,18 +3023,18 @@
                   <span class="loginid" style="float:right;margin-left:12px">{{ p.sku }}</span>
                 </el-option>
               </el-select>
-              <div class="loginid" style="margin-top:4px">商品库里没有也可以直接手填名称和 SKU。</div>
             </el-form-item>
 
             <el-row :gutter="12">
               <el-col :span="16">
-                <el-form-item label="商品名称（必填）">
-                  <el-input v-model="afNew.goodsName" maxlength="255" clearable placeholder="选中商品后自动填入"></el-input>
+                <el-form-item label="商品名称（搜索选中后自动回填）">
+                  <el-input v-model="afNew.goodsName" maxlength="255" disabled
+                            placeholder="从上面搜索选中商品后自动填入"></el-input>
                 </el-form-item>
               </el-col>
               <el-col :span="8">
-                <el-form-item label="商品SKU（必填）">
-                  <el-input v-model="afNew.sku" maxlength="64" clearable placeholder="自动填入"></el-input>
+                <el-form-item label="商品SKU（自动回填）">
+                  <el-input v-model="afNew.sku" maxlength="64" disabled placeholder="自动填入"></el-input>
                 </el-form-item>
               </el-col>
             </el-row>
@@ -5276,6 +5276,9 @@ const vm = new Vue({
     },
     /** 一张货单最多传几张图（与 lib/waybill.js 的 MAX_IMAGES 保持一致） */
     wbImgMax() { return 9; },
+    // ⚠ 必须放 computed：模板里 `{{ afImgMax }} 张` 是当值用的，写进 methods 会渲染成
+    //   "function () { [native code] }"（0.3.28 就栽过这个），上限判断 this.afImgMax 也拿不到数字
+    afImgMax() { return 6; },
     // 员工管理（v0.2.104）：只有「主体账号」且已开通「员工管理」权限才看得到（v0.3.13）
     canStaff() { return !!(this.me && this.me.canStaff); },
     /**
@@ -6744,8 +6747,6 @@ const vm = new Vue({
       const hit = (this.af.statuses || []).find((x) => Number(x.value) === Number(s));
       return hit ? hit.label : '';
     },
-    /** 一条售后最多几张图（新增实物图 / 退款截图共用；服务端上限 6） */
-    afImgMax() { return 6; },
     toggleAfStatus(key) {
       this.af.status = this.af.status === key ? '' : key;
       this.af.page = 1;
@@ -7006,8 +7007,8 @@ const vm = new Vue({
       const d0 = this.afNew;
       if (d0.saving) return;
       d0.error = '';
-      if (!String(d0.goodsName || '').trim()) { d0.error = '请填写商品名称（或从商品库里搜一个）'; return; }
-      if (!String(d0.sku || '').trim()) { d0.error = '请填写商品 SKU（或从商品库里搜一个）'; return; }
+      if (!String(d0.goodsName || '').trim()) { d0.error = '请先在搜索框选中商品（名称与 SKU 自动回填）'; return; }
+      if (!String(d0.sku || '').trim()) { d0.error = '请先在搜索框选中商品（名称与 SKU 自动回填）'; return; }
       if (!String(d0.afterReason || '').trim()) { d0.error = '请填写售后原因'; return; }
       if (!Number.isInteger(Number(d0.qty)) || Number(d0.qty) < 1) { d0.error = '数量要填不小于 1 的整数'; return; }
       if (!(d0.up.images || []).length) { d0.error = '请上传至少 1 张商品实物图片'; return; }
