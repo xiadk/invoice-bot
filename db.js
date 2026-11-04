@@ -1393,6 +1393,35 @@ async function migrate(conn, dbName) {
     );
   }
 
+  // ── 商品手工价（v0.3.28）──
+  //    平台取价错了 / 没关联平台商品时，人工填一份齐货通价（单价 + 整件价 + 规格）。
+  //    唯一键 brand_id+sku+kind，优先级高于 goods_price_cache；比价与补货单都读它。
+  //    与 sql/schema.sql 的 5.3b 同源，改一处就要改另一处。
+  if (!(await tableExists('product_price_manual'))) {
+    await q(
+      'CREATE TABLE `product_price_manual` (' +
+      '  `id`          BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,' +
+      "  `brand_id`    INT           NOT NULL DEFAULT 0    COMMENT '品牌方（brand.id）：同品牌共用一份'," +
+      "  `sku`         VARCHAR(64)   NOT NULL              COMMENT '商品SKU'," +
+      "  `kind`        VARCHAR(8)    NOT NULL DEFAULT 'qht' COMMENT '价格来源：qht=齐货通'," +
+      "  `goods_name`  VARCHAR(512)  NOT NULL DEFAULT ''   COMMENT '商品名称快照'," +
+      "  `unit_price`  DECIMAL(12,4) DEFAULT NULL          COMMENT '手工单价（折合小单位，元）'," +
+      "  `pack_price`  DECIMAL(12,2) DEFAULT NULL          COMMENT '手工整件价（元/件）'," +
+      "  `pack_qty`    DECIMAL(12,2) DEFAULT NULL          COMMENT '一件含多少小单位'," +
+      "  `spec`        VARCHAR(64)   DEFAULT NULL          COMMENT '规格文案'," +
+      "  `small_unit`  VARCHAR(16)   DEFAULT NULL          COMMENT '小单位（瓶/罐/支）'," +
+      "  `note`        VARCHAR(255)  DEFAULT NULL          COMMENT '改价原因'," +
+      "  `updated_by`  VARCHAR(64)   DEFAULT NULL          COMMENT '最后改价人'," +
+      '  `created_at`  DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT \'首次填写时间\',' +
+      '  `updated_at`  DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,' +
+      '  PRIMARY KEY (`id`),' +
+      '  UNIQUE KEY `uk_ppm_scope` (`brand_id`, `sku`, `kind`),' +
+      '  KEY `idx_ppm_kind` (`kind`, `brand_id`)' +
+      ') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci' +
+      "  COMMENT='商品手工价（人工覆盖平台取价，比价与补货单优先用它）'"
+    );
+  }
+
   // ── 供应商 / 货单管理（v0.3.0）──
   //   两个新菜单沿用 app_user 逐列开关；supplier / waybill / waybill_image / waybill_upload_token
   //   是普通业务表。下面的 DDL 与 sql/schema.sql 必须同源（改一处就要改另一处）。

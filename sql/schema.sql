@@ -559,6 +559,34 @@ CREATE TABLE IF NOT EXISTS `goods_price_cache` (
   COMMENT='平台商品价格缓存（取一次即持久化，按品牌方共用）';
 
 -- ----------------------------------------------------------------------------
+-- 表 5.3b: product_price_manual —— 商品手工价（v0.3.28）
+--   平台取到的价错了（或没关联到平台商品）时，允许人工填一份齐货通价：
+--   单价 / 整件价 / 规格，按「品牌方 + SKU + 来源」唯一，**优先级高于 goods_price_cache**。
+--   比价分析与补货单都按这份手工价算；页面用「手工」标签明示，避免看不出是人填的。
+--   kind 目前只放行 qht（阿发/京东暂不做），字段留通用以便以后扩展。
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `product_price_manual` (
+  `id`          BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `brand_id`    INT           NOT NULL DEFAULT 0    COMMENT '品牌方（brand.id）：同品牌共用一份',
+  `sku`         VARCHAR(64)   NOT NULL              COMMENT '商品SKU',
+  `kind`        VARCHAR(8)    NOT NULL DEFAULT 'qht' COMMENT '价格来源：qht=齐货通（暂时只有这一种）',
+  `goods_name`  VARCHAR(512)  NOT NULL DEFAULT ''   COMMENT '商品名称快照（改价时带出，便于核对）',
+  `unit_price`  DECIMAL(12,4) DEFAULT NULL          COMMENT '手工单价（折合小单位，元）',
+  `pack_price`  DECIMAL(12,2) DEFAULT NULL          COMMENT '手工整件价（元/件）',
+  `pack_qty`    DECIMAL(12,2) DEFAULT NULL          COMMENT '一件含多少小单位（规格数量）',
+  `spec`        VARCHAR(64)   DEFAULT NULL          COMMENT '规格文案（没有规格数量时直接显示它）',
+  `small_unit`  VARCHAR(16)   DEFAULT NULL          COMMENT '小单位（瓶/罐/支）',
+  `note`        VARCHAR(255)  DEFAULT NULL          COMMENT '改价原因（备注）',
+  `updated_by`  VARCHAR(64)   DEFAULT NULL          COMMENT '最后改价人（登录账号）',
+  `created_at`  DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '首次填写时间',
+  `updated_at`  DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_ppm_scope` (`brand_id`, `sku`, `kind`),
+  KEY `idx_ppm_kind` (`kind`, `brand_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  COMMENT='商品手工价（人工覆盖平台取价，比价与补货单优先用它）';
+
+-- ----------------------------------------------------------------------------
 -- 售后管理（牵牛花模块）
 --   ⚠ 其余 qnh_* 表（退单、明细、日志、同步批次、毛利等）历来由 db.js 的
 --     ensureQnhSchema() 建，这里是 v0.2.108 起补上的两张售后表，保证全新部署

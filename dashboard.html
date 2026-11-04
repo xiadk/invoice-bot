@@ -1150,36 +1150,57 @@
             <el-table-column label="采购价" width="80">
               <template slot-scope="p"><span class="amount">{{ yuan(p.row.purchase_price) }}</span></template>
             </el-table-column>
+            <!-- 齐货通价（v0.3.28）：平台价 + 手工价（手工优先）；可「修改/解除」关联，也可「改价」手填 -->
             <el-table-column label="齐货通价" min-width="215" class-name="col-price">
               <template slot-scope="p">
-                <template v-if="p.row.qht_goods_id">
-                  <template v-if="rp.prices[pkey(p.row, 'qht')] && rp.prices[pkey(p.row, 'qht')].ok">
-                    <div style="display:flex;flex-direction:column;gap:2px;min-width:120px">
-                      <img v-if="rp.prices[pkey(p.row, 'qht')].picture || p.row.image_url"
-                           :src="imgThumb(rp.prices[pkey(p.row, 'qht')].picture || p.row.image_url, 80)" :alt="p.row.goods_name"
-                           width="40" height="40" loading="lazy" decoding="async"
-                           style="width:40px;height:40px;object-fit:cover;border-radius:4px;display:block"
-                           @error="imgError($event, rp.prices[pkey(p.row, 'qht')].picture || p.row.image_url)" />
-                      <div style="display:flex;justify-content:space-between;gap:8px;font-size:12px;line-height:18px">
-                        <span class="loginid">单价</span><b class="amount ok">¥{{ rp.prices[pkey(p.row, 'qht')].unitPrice }}</b>
-                      </div>
-                      <div style="display:flex;justify-content:space-between;gap:8px;font-size:12px;line-height:18px">
-                        <span class="loginid">整件价</span><b>¥{{ rp.prices[pkey(p.row, 'qht')].saleIP }}</b>
-                      </div>
-                      <div style="display:flex;justify-content:space-between;gap:8px;font-size:12px;line-height:18px">
-                        <span class="loginid">规格</span><span class="loginid">{{ rp.prices[pkey(p.row, 'qht')].packingSpecification }}{{ rp.prices[pkey(p.row, 'qht')].smallUnit }}</span>
-                      <div v-if="rp.prices[pkey(p.row, 'qht')].fetchedAt"
-                           style="font-size:11px;line-height:14px;color:#909399">
-                        缓存于 {{ rp.prices[pkey(p.row, 'qht')].fetchedAt }}
-                      </div>
-                      </div>
+                <template v-if="qhtPrice(p.row) && qhtPrice(p.row).ok">
+                  <div style="display:flex;flex-direction:column;gap:2px;min-width:120px">
+                    <img v-if="qhtPrice(p.row).picture || p.row.image_url"
+                         :src="imgThumb(qhtPrice(p.row).picture || p.row.image_url, 80)" :alt="p.row.goods_name"
+                         width="40" height="40" loading="lazy" decoding="async"
+                         style="width:40px;height:40px;object-fit:cover;border-radius:4px;display:block"
+                         @error="imgError($event, qhtPrice(p.row).picture || p.row.image_url)" />
+                    <div style="display:flex;justify-content:space-between;gap:8px;font-size:12px;line-height:18px">
+                      <span class="loginid">单价</span><b class="amount ok">¥{{ qhtPrice(p.row).unitPrice }}</b>
                     </div>
-                    <el-button v-if="canPrice" size="mini" type="primary" plain style="margin-top:4px" @click="openBuy(p.row)">选购</el-button>
-                  </template>
-                  <span v-else-if="rp.prices[pkey(p.row, 'qht')]" class="loginid" style="color:#f56c6c">取价失败</span>
-                  <span v-else class="loginid">未取价</span>
+                    <div style="display:flex;justify-content:space-between;gap:8px;font-size:12px;line-height:18px">
+                      <span class="loginid">整件价</span><b>¥{{ qhtPrice(p.row).saleIP }}</b>
+                    </div>
+                    <div style="display:flex;justify-content:space-between;gap:8px;font-size:12px;line-height:18px">
+                      <span class="loginid">规格</span><span class="loginid">{{ qhtPrice(p.row).packingSpecification }}{{ qhtPrice(p.row).smallUnit }}</span>
+                    <div v-if="qhtPrice(p.row).fetchedAt || qhtPrice(p.row).manual"
+                         style="font-size:11px;line-height:14px;color:#909399">
+                      <el-tag v-if="qhtPrice(p.row).manual" size="mini" type="warning"
+                              style="height:16px;line-height:16px;padding:0 4px;margin-right:4px">手工</el-tag>
+                      <span :title="qhtPrice(p.row).note || ''">
+                        {{ qhtPrice(p.row).manual ? ((qhtPrice(p.row).updatedBy || '') + ' 改于 ' + (qhtPrice(p.row).fetchedAt || '—')) : ('缓存于 ' + qhtPrice(p.row).fetchedAt) }}
+                      </span>
+                    </div>
+                    </div>
+                  </div>
+                  <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:4px">
+                    <el-button v-if="canPrice && p.row.qht_goods_id" size="mini" type="primary" plain @click="openBuy(p.row)">选购</el-button>
+                    <el-button v-if="canPrice" size="mini" type="primary" plain @click="openQhtManual(p.row)">改价</el-button>
+                    <el-button size="mini" type="primary" plain @click="openLinkDlg(p.row)">修改</el-button>
+                    <el-button v-if="p.row.qht_goods_id" size="mini" type="danger" plain @click="unlinkQhtRow(p.row)">解除</el-button>
+                    <el-button v-if="canPrice && qhtPrice(p.row).manual" size="mini" plain @click="clearQhtManual(p.row)">取消手工</el-button>
+                  </div>
                 </template>
-                <el-button v-else size="mini" type="warning" plain @click="openLinkDlg(p.row)">关联</el-button>
+                <template v-else-if="p.row.qht_goods_id">
+                  <span class="loginid" :style="{ color: qhtPrice(p.row) ? '#f56c6c' : '' }">
+                    {{ qhtPrice(p.row) ? '取价失败' : '未取价' }}
+                  </span>
+                  <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:4px">
+                    <el-button v-if="canPrice" size="mini" type="primary" plain @click="openQhtManual(p.row)">改价</el-button>
+                    <el-button size="mini" type="primary" plain @click="openLinkDlg(p.row)">修改</el-button>
+                    <el-button size="mini" type="danger" plain @click="unlinkQhtRow(p.row)">解除</el-button>
+                  </div>
+                </template>
+                <template v-else>
+                  <el-button size="mini" type="warning" plain @click="openLinkDlg(p.row)">关联</el-button>
+                  <el-button v-if="canPrice" size="mini" type="primary" plain @click="openQhtManual(p.row)">手工价</el-button>
+                  <div v-if="!canPrice" class="loginid" style="font-size:11px;margin-top:4px">没有平台取价权限，无法手填价</div>
+                </template>
               </template>
             </el-table-column>
             <el-table-column label="阿发价" min-width="215" class-name="col-price">
@@ -1343,6 +1364,58 @@
             <el-button size="small" type="danger" plain :disabled="localDlg.saving" @click="clearLocalPrice">清空本地价</el-button>
             <el-button size="small" @click="localDlg.visible = false">取消</el-button>
             <el-button size="small" type="primary" :loading="localDlg.saving" @click="saveLocalPriceDlg">保存</el-button>
+          </div>
+        </el-dialog>
+
+        <!-- 齐货通手工价（v0.3.28）：平台取价错了 / 没关联上商品时，人工填一份，比价与补货单优先用它 -->
+        <el-dialog title="齐货通手工价" :visible.sync="mpDlg.visible" width="520px" top="8vh" append-to-body>
+          <div class="loginid" style="margin-bottom:8px">
+            {{ mpDlg.sku }}<span v-if="mpDlg.goodsName"> · {{ mpDlg.goodsName }}</span>
+          </div>
+          <el-alert type="warning" :closable="false" show-icon style="margin-bottom:10px"
+                    title="手工价优先于平台取价"
+                    description="保存后比价分析与补货单都按这个价算，点「重新取价」也不会把它覆盖；要回到平台价点下面的「取消手工价」。"></el-alert>
+          <el-form label-position="top" size="small" :inline="false">
+            <el-row :gutter="12">
+              <el-col :span="12">
+                <el-form-item label="规格数量（一件含多少个，可留空）">
+                  <el-input v-model="mpDlg.specQty" type="number" min="0" placeholder="如 24（1 件 = 24 罐）"
+                            @input="onMpCalc('qty')"></el-input>
+                </el-form-item>
+              </el-col>
+              <el-col :span="12">
+                <el-form-item label="小单位（选填）">
+                  <el-input v-model="mpDlg.smallUnit" maxlength="8" placeholder="瓶 / 罐 / 袋"></el-input>
+                </el-form-item>
+              </el-col>
+            </el-row>
+            <el-row :gutter="12">
+              <el-col :span="12">
+                <el-form-item label="整件价（元/件）">
+                  <el-input v-model="mpDlg.packPrice" type="number" min="0" placeholder="如 99.96"
+                            @input="onMpCalc('pack')"></el-input>
+                </el-form-item>
+              </el-col>
+              <el-col :span="12">
+                <el-form-item label="单价（元/个）">
+                  <el-input v-model="mpDlg.unitPrice" type="number" min="0" placeholder="如 4.17"
+                            @input="onMpCalc('unit')"></el-input>
+                </el-form-item>
+              </el-col>
+            </el-row>
+            <el-form-item label="改价原因（选填，方便以后核对）">
+              <el-input v-model="mpDlg.note" maxlength="255" clearable placeholder="如：平台价含运费 / 平台规格录错"></el-input>
+            </el-form-item>
+            <el-alert v-if="mpDlg.hint" :title="mpDlg.hint" type="info" :closable="false" show-icon></el-alert>
+            <div class="loginid" style="margin-top:8px">
+              两个价格都是四舍五入到分；只填一个也会把另一个算出来（规格数量留空时只存单价）。
+            </div>
+          </el-form>
+          <div slot="footer">
+            <el-button v-if="mpDlg.hasManual" size="small" type="danger" plain :disabled="mpDlg.saving"
+                       @click="clearQhtManual(mpDlg.row)">取消手工价</el-button>
+            <el-button size="small" @click="mpDlg.visible = false">取消</el-button>
+            <el-button size="small" type="primary" :loading="mpDlg.saving" @click="saveQhtManual">保存</el-button>
           </div>
         </el-dialog>
 
@@ -3474,11 +3547,22 @@
           </div>
         </el-dialog>
 
-        <!-- 补货单详情：明细每行都留了折算依据（建议量 / 规格 / 件数 / 单价） -->
-        <el-dialog title="补货单详情" :visible.sync="roView.visible" width="1080px" top="5vh" append-to-body>
-          <div v-if="roView.order" class="loginid" style="display:flex;gap:18px;flex-wrap:wrap;margin-bottom:10px">
+        <!-- 补货单详情（v0.3.28 起可编辑）：改数量/规格/单价、删行、搜商品加行、换供应商 -->
+        <el-dialog title="补货单详情" :visible.sync="roView.visible" width="1080px" top="5vh" append-to-body
+                   @closed="onRoViewClosed">
+          <div v-if="roView.order" class="loginid" style="display:flex;gap:18px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
             <span>补货单 <b>#{{ roView.order.id }}</b></span>
-            <span>供应商 <b>{{ roView.order.supplierName }}</b></span>
+            <span v-if="!roView.editing">供应商 <b>{{ roView.order.supplierName }}</b></span>
+            <span v-else style="display:inline-flex;align-items:center;gap:6px">
+              供应商
+              <el-select v-model="roView.supplierId" size="mini" filterable style="width:170px"
+                         :disabled="!!roView.order.waybillId"
+                         :title="roView.order.waybillId ? '已关联货单，先取消关联才能换供应商' : '换供应商（台账里没有会自动建）'">
+                <el-option v-for="s in ro.suppliers" :key="s.id" :label="s.name" :value="s.id"></el-option>
+              </el-select>
+              <el-button size="mini" type="primary" plain :loading="roView.saving" :disabled="!!roView.order.waybillId"
+                         @click="saveRoSupplier">改</el-button>
+            </span>
             <span>金额 <b style="color:#f56c6c">{{ wbMoney(roView.order.amount) }}</b></span>
             <span>商品 {{ roView.order.itemCount }} 个 · {{ roView.order.qtyTotal }} 件</span>
             <span>生成 {{ roView.order.createdAt }}</span>
@@ -3487,7 +3571,15 @@
               <b v-if="Math.abs(roView.order.diff) < 0.005" class="ro-diff-ok">（一致）</b>
               <b v-else class="ro-diff-bad">（相差 {{ wbMoney(roView.order.diff) }}）</b>
             </span>
+            <span class="fb-spacer" style="flex:1"></span>
+            <el-button v-if="roView.editing" size="mini" type="primary" icon="el-icon-plus"
+                       @click="openRoAdd">添加商品</el-button>
+            <el-button size="mini" :type="roView.editing ? 'success' : 'primary'" plain @click="toggleRoEdit">
+              {{ roView.editing ? '完成编辑' : '编辑' }}
+            </el-button>
           </div>
+          <el-alert v-if="roView.editing" type="info" :closable="false" show-icon style="margin-bottom:8px"
+                    title="改完记得点每行的「保存」：金额一律服务端按「补货数量 × 规格 × 单价」重算，单头金额与货单差额跟着变。"></el-alert>
           <el-table :data="roView.items" size="small" border :max-height="tblH.cmp"
                     style="width:100%" v-loading="roView.loading" empty-text="没有明细">
             <el-table-column label="商品SKU" width="140">
@@ -3517,9 +3609,71 @@
             <el-table-column label="行总额" width="100" align="right">
               <template slot-scope="p"><b class="amount">{{ wbMoney(p.row.amount) }}</b></template>
             </el-table-column>
+            <el-table-column v-if="roView.editing" label="操作" width="112" align="center">
+              <template slot-scope="p">
+                <el-button type="text" size="mini" @click="openRoItem(p.row)">改</el-button>
+                <el-button type="text" size="mini" style="color:#f56c6c" @click="deleteRoItem(p.row)">删除</el-button>
+              </template>
+            </el-table-column>
           </el-table>
           <div slot="footer">
             <el-button size="small" @click="roView.visible = false">关闭</el-button>
+          </div>
+        </el-dialog>
+
+        <!-- 补货单明细行编辑（新增/修改共用）：数量 × 规格 × 单价 = 行总额，服务端再算一遍 -->
+        <el-dialog :title="roItem.itemId ? '修改补货明细' : '新增补货明细'" :visible.sync="roItem.visible"
+                   width="520px" top="8vh" append-to-body>
+          <div class="loginid" style="margin-bottom:10px">
+            {{ roItem.sku }}<span v-if="roItem.goodsName"> · {{ roItem.goodsName }}</span>
+          </div>
+          <el-form label-position="top" size="small" :inline="false">
+            <el-row :gutter="12">
+              <el-col :span="8">
+                <el-form-item label="补货数量（件）">
+                  <el-input-number v-model="roItem.qtyPack" :min="1" :max="999999" size="small"
+                                   controls-position="right" style="width:100%"></el-input-number>
+                </el-form-item>
+              </el-col>
+              <el-col :span="8">
+                <el-form-item label="规格（件含多少个）">
+                  <el-input v-model="roItem.specQty" type="number" min="0" placeholder="1"></el-input>
+                </el-form-item>
+              </el-col>
+              <el-col :span="8">
+                <el-form-item label="单价（元/个）">
+                  <el-input v-model="roItem.unitPrice" type="number" min="0" placeholder="0.00"></el-input>
+                </el-form-item>
+              </el-col>
+            </el-row>
+            <el-alert :title="'行总额 = ' + (roItem.qtyPack || 0) + ' 件 × ' + (roItem.specQty || 1) + ' × '
+                       + (roItem.unitPrice === '' ? '0' : roItem.unitPrice) + ' = ' + wbMoney(roItemPreview)"
+                      type="info" :closable="false" show-icon></el-alert>
+          </el-form>
+          <el-alert v-if="roItem.error" type="error" :closable="false" show-icon :title="roItem.error"
+                    style="margin-top:8px"></el-alert>
+          <div slot="footer">
+            <el-button size="small" @click="roItem.visible = false">取消</el-button>
+            <el-button size="small" type="primary" :loading="roItem.saving" @click="saveRoItem">保存</el-button>
+          </div>
+        </el-dialog>
+
+        <!-- 补货单加行：搜品牌商品库，选中带出名称/规格/参考价，再进上面的行编辑 -->
+        <el-dialog title="添加商品到补货单" :visible.sync="roAdd.visible" width="680px" top="8vh" append-to-body>
+          <el-select v-model="roAdd.keyword" filterable remote clearable style="width:100%"
+                     placeholder="输入商品名称或 SKU 搜索"
+                     :remote-method="searchRoProducts" :loading="roAdd.loading" @change="onRoAddPick">
+            <el-option v-for="it in roAdd.rows" :key="it.brandId + '|' + it.sku"
+                       :label="it.goodsName + ' · ' + it.sku" :value="it.brandId + '|' + it.sku">
+              <span>{{ it.goodsName }}</span>
+              <span class="loginid" style="float:right;margin-left:12px">{{ it.sku }}</span>
+            </el-option>
+          </el-select>
+          <div class="loginid" style="margin-top:8px">
+            选中后按本地价 / 采购价预填单价与规格，可以再改；同一张单里同一 SKU 只能有一行。
+          </div>
+          <div slot="footer">
+            <el-button size="small" @click="roAdd.visible = false">取消</el-button>
           </div>
         </el-dialog>
       </div>
@@ -4775,7 +4929,7 @@ const vm = new Vue({
       // 补货界面（导入完成后进入）+ 关联的齐货通弹窗
       // 补货默认 20 条/页（页码可翻）；页大小最多 100 条
       // 上限 100 是硬约束：el-table（Element UI 2.x）无虚拟滚动，一次渲染上千行会把主线程卡死十几秒
-      rp: { visible: false, loading: false, pricing: false, afaPricing: false, jdPricing: false, batchId: null, rows: [], prices: {}, afaPrices: {}, jdPrices: {}, total: 0, page: 1, size: 20, expect: 0, filteredValue: 0,
+      rp: { visible: false, loading: false, pricing: false, afaPricing: false, jdPricing: false, batchId: null, rows: [], prices: {}, qhtManual: {}, afaPrices: {}, jdPrices: {}, total: 0, page: 1, size: 20, expect: 0, filteredValue: 0,
             // 筛选（v0.2.92）：默认展示当前品牌方全部商品；draftQ 是输入框，q 是「已生效」的关键词
             draftQ: '', q: '', status: '', brand: '', brandStats: [],
             session: { configured: false, tokenMasked: '', xUser: '' }, afaSession: { configured: false, tokenMasked: '', storeId: '', appId: '' },
@@ -4784,6 +4938,10 @@ const vm = new Vue({
       // 弹窗表格高度按视口动态算（写死 vh 在小屏笔记本上会把弹窗撑出屏幕）
       tblH: { rp: 500, link: 320, cmp: 460 },
       // 本地价（v0.3.11）：弹框里整件价 / 单价 / 规格数量互算，mode 记住最后改的是哪个价格
+      // 齐货通手工价（v0.3.28）：平台价错了直接改，比价与补货单优先用它
+      mpDlg: { visible: false, saving: false, row: null, hasManual: false,
+               sku: '', goodsName: '', brandId: 0, specQty: '', smallUnit: '', unitPrice: '', packPrice: '',
+               note: '', mode: 'unit', hint: '' },
       localDlg: { visible: false, saving: false, row: null, sku: '', goodsName: '', brandId: 0,
                   specQty: '', unitPrice: '', packPrice: '', supplierId: '', mode: 'unit', hint: '' },
       // 本地价弹框的供应商下拉（/api/products/suppliers 只读，避免要求供应商管理权限）
@@ -4793,10 +4951,16 @@ const vm = new Vue({
              onlyCheaper: false, q: '', error: '', truncated: false },
       // 补货单管理（v0.3.12）
       ro: { loading: false, rows: [], total: 0, sumAmount: 0, page: 1, size: 20,
-            supplier: '', range: null, linked: '' },
+            supplier: '', range: null, linked: '', suppliers: [] },
       roLink: { visible: false, loading: false, saving: false, error: '',
                 orderId: 0, order: {}, rows: [], picked: null },
-      roView: { visible: false, loading: false, order: null, items: [] },
+      // 补货单详情（v0.3.28 起可编辑）：editing 打开行内「改/删」与「添加商品」
+      roView: { visible: false, loading: false, order: null, items: [], editing: false, saving: false, supplierId: null },
+      // 补货单明细行编辑（itemId=0 表示新增）
+      roItem: { visible: false, saving: false, error: '', orderId: 0, itemId: 0, sku: '', goodsName: '',
+                channel: '', channelLabel: '', qtyPack: 1, specQty: '1', unitPrice: '' },
+      // 补货单加行：搜品牌商品库
+      roAdd: { visible: false, loading: false, keyword: '', rows: [] },
       rpLink: { visible: false, sku: '', keyword: '', rows: [], loading: false, error: '', picked: null, total: 0, page: 1, size: 20 },
       rpBuy: { visible: false, sku: '', goodsId: null, goodsName: '', qty: 1, saving: false },
       qhtDlg: { visible: false, account: '', password: '', saving: false },
@@ -5092,6 +5256,15 @@ const vm = new Vue({
     canWaybill() { return !!(this.me && (this.me.role === 'admin' || this.me.waybillEnabled)); },
     canReplenishOrder() { return !!(this.me && (this.me.role === 'admin' || this.me.replenishOrderEnabled)); },
     /** 比价弹窗里实际显示的行（只看买贵了 + 关键词），服务端已把买贵的排在最前 */
+    /** 补货单明细行编辑的金额预览（与服务端 lineOf 同口径：件数 × 规格 × 单价，四舍五入到分） */
+    roItemPreview() {
+      const d = this.roItem || {};
+      const q = Number(d.qtyPack) || 0;
+      const spec = Number(d.specQty) > 0 ? Number(d.specQty) : 1;
+      const unit = String(d.unitPrice == null ? '' : d.unitPrice).trim() === '' ? 0 : Number(d.unitPrice);
+      if (!Number.isFinite(unit) || unit < 0) return 0;
+      return Math.round((q * spec * unit + Number.EPSILON) * 100) / 100;
+    },
     cmpRows() {
       const kw = String(this.cmp.q || '').trim().toLowerCase();
       return (this.cmp.rows || []).filter((r) => {
@@ -9183,6 +9356,7 @@ const vm = new Vue({
       // 三个接口互不依赖（各写各的 prices/afaPrices/jdPrices），并发跑：串行时 200 条要多等 100ms 以上
       await Promise.all([
         this.loadQhtPrices(this.rp.rows, { mode: 'cache' }),
+        this.loadManualPrices(this.rp.rows),
         this.loadAfaPrices(this.rp.rows, { mode: 'cache' }),
         this.loadJdPrices(this.rp.rows, { mode: 'cache' }),
       ]);
@@ -9956,6 +10130,7 @@ const vm = new Vue({
         this.ro.rows = (d && d.rows) || [];
         this.ro.total = Number(d && d.total) || 0;
         this.ro.sumAmount = Number(d && d.sumAmount) || 0;
+        if (d && d.suppliers) this.ro.suppliers = d.suppliers;   // 详情里「换供应商」的下拉就靠它
         const maxPage = Math.max(1, Math.ceil(this.ro.total / this.ro.size));
         if (this.ro.page > maxPage) { this.ro.page = maxPage; await this.loadReplenishOrders(); }
       } catch (e) { this.$message.error('补货单加载失败: ' + e.message); }
@@ -10019,6 +10194,130 @@ const vm = new Vue({
         this.roView.items = d.items || [];
       } catch (e) { this.$message.error('加载详情失败：' + e.message); }
       finally { this.roView.loading = false; }
+    },
+    /** 重拉当前详情（编辑后金额/条数都变了，以服务端为准），保留编辑态 */
+    async refreshRoView(orderId) {
+      const keepEditing = this.roView.editing;
+      const d = await this.api('/api/replenish-order/detail?id=' + orderId).catch(() => null);
+      if (!d || !d.ok) return;
+      this.roView.order = d.order;
+      this.roView.items = d.items || [];
+      this.roView.editing = keepEditing;
+      this.roView.supplierId = Number(d.order.supplierId) > 0 ? Number(d.order.supplierId) : null;
+      this.loadReplenishOrders();
+    },
+    toggleRoEdit() {
+      this.roView.editing = !this.roView.editing;
+      if (this.roView.editing && this.roView.order) {
+        this.roView.supplierId = Number(this.roView.order.supplierId) > 0 ? Number(this.roView.order.supplierId) : null;
+      }
+    },
+    onRoViewClosed() {
+      this.roView.editing = false;
+      this.roView.supplierId = null;
+    },
+    /** 换供应商：服务端会拒掉「已关联货单」的单，前端也把下拉禁用了 */
+    async saveRoSupplier() {
+      const o = this.roView.order;
+      if (!o) return;
+      if (!this.roView.supplierId) return this.$message.warning('先选一个供应商');
+      this.roView.saving = true;
+      try {
+        const d = await this.api('/api/replenish-order/supplier', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ id: o.id, supplierId: this.roView.supplierId }),
+        });
+        if (!d.ok) return this.$message.error(d.error || '换供应商失败');
+        this.$message.success('供应商已改为「' + (d.order && d.order.supplierName) + '」');
+        await this.refreshRoView(o.id);
+      } catch (e) { this.$message.error('换供应商失败：' + e.message); }
+      finally { this.roView.saving = false; }
+    },
+    /** 打开行编辑（row 为空 = 新增，需先带 sku/goodsName/默认价） */
+    openRoItem(row) {
+      const o = this.roView.order;
+      if (!o) return;
+      this.roItem = {
+        visible: true, saving: false, error: '', orderId: o.id,
+        itemId: row && row.id ? Number(row.id) : 0,
+        sku: (row && row.sku) || '',
+        goodsName: (row && row.goodsName) || '',
+        channel: (row && row.channel) || 'qht',
+        channelLabel: (row && row.channelLabel) || '齐货通',
+        qtyPack: row && row.qtyPack ? Number(row.qtyPack) : 1,
+        specQty: row && row.specQty != null ? String(row.specQty) : '1',
+        unitPrice: row && row.unitPrice != null ? String(row.unitPrice) : '',
+      };
+    },
+    async saveRoItem() {
+      const d = this.roItem;
+      if (!d.sku) return this.$message.warning('缺少商品SKU');
+      if (!(Number(d.qtyPack) >= 1)) { d.error = '补货数量必须 ≥ 1 件'; return; }
+      if (String(d.unitPrice).trim() === '' || !(Number(d.unitPrice) >= 0)) { d.error = '请填单价（元/个）'; return; }
+      d.saving = true; d.error = '';
+      try {
+        const r = await this.api('/api/replenish-order/item-save', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            orderId: d.orderId, itemId: d.itemId || 0, sku: d.sku, goodsName: d.goodsName,
+            channel: d.channel, channelLabel: d.channelLabel,
+            qtyPack: d.qtyPack, specQty: d.specQty, unitPrice: d.unitPrice,
+          }),
+        });
+        if (!r.ok) { d.error = r.error || '保存失败'; return; }
+        this.roView.order = r.order;
+        this.roView.items = r.items || [];
+        this.$message.success(d.itemId ? '已保存这一行' : '已加入补货单');
+        d.visible = false;
+        this.loadReplenishOrders();
+      } catch (e) { d.error = '保存失败：' + e.message; }
+      finally { d.saving = false; }
+    },
+    async deleteRoItem(row) {
+      if (!row || !row.id) return;
+      try {
+        await this.$confirm('从补货单里删除「' + (row.goodsName || row.sku) + '」这一行？\n金额会按剩余明细重算，删除后不可恢复。',
+          '删除明细', { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' });
+      } catch (e) { return; }
+      try {
+        const d = await this.api('/api/replenish-order/item-delete', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ orderId: this.roView.order.id, itemId: row.id, sku: row.sku }),
+        });
+        if (!d.ok) return this.$message.error(d.error || '删除失败');
+        this.roView.order = d.order;
+        this.roView.items = d.items || [];
+        this.$message.success('已删除这一行');
+        this.loadReplenishOrders();
+      } catch (e) { this.$message.error('删除失败：' + e.message); }
+    },
+    openRoAdd() {
+      this.roAdd = { visible: true, loading: false, keyword: '', rows: [] };
+    },
+    /** 加行的商品搜索（远程）：空关键词给前 20 个，便于直接挑 */
+    async searchRoProducts(kw) {
+      this.roAdd.loading = true;
+      try {
+        const d = await this.api('/api/replenish-order/products?q=' + encodeURIComponent(String(kw || '')));
+        this.roAdd.rows = (d && d.rows) || [];
+      } catch (e) { this.roAdd.rows = []; }
+      finally { this.roAdd.loading = false; }
+    },
+    /** 选中商品 → 直接进行编辑，按本地价 / 采购价预填单价与规格 */
+    onRoAddPick(val) {
+      const key = String(val || '');
+      const it = (this.roAdd.rows || []).find((x) => x.brandId + '|' + x.sku === key);
+      if (!it) return;
+      this.roAdd.visible = false;
+      const unit = it.localPrice != null ? it.localPrice : (it.purchasePrice != null ? it.purchasePrice : '');
+      const spec = it.localSpecQty != null ? it.localSpecQty : 1;
+      this.openRoItem(null);
+      this.roItem.sku = it.sku;
+      this.roItem.goodsName = it.goodsName || '';
+      this.roItem.channel = 'local';
+      this.roItem.channelLabel = '手工录入';
+      this.roItem.specQty = String(spec);
+      this.roItem.unitPrice = unit === '' ? '' : String(unit);
     },
     async deleteRo(row) {
       try {
@@ -10296,6 +10595,143 @@ const vm = new Vue({
         d.visible = false;
       } catch (e) { this.$message.error('清空失败: ' + e.message); }
       finally { d.saving = false; }
+    },
+    // ══════ 齐货通手工价（v0.3.28）：平台价错了直接改，比价与补货单优先用它 ══════
+    /**
+     * 某行的齐货通价：**手工价优先**，其次平台缓存。
+     * 键都带品牌前缀（同一 SKU 在不同品牌方价格不同）。
+     */
+    qhtPrice(row) {
+      if (!row) return null;
+      const b = Number(row.brand_id) || Number(this.me && this.me.brandId) || 1;
+      const man = (this.rp.qhtManual || {})[b + ':' + row.sku];
+      if (man && man.ok) return man;
+      const k = this.pkey(row, 'qht');
+      return k ? (this.rp.prices[k] || null) : null;
+    },
+    /** 拉本页商品的手工价（只读，按品牌分组批量取；取不到就当没有，不影响看平台价） */
+    async loadManualPrices(rows) {
+      const src = Array.isArray(rows) ? rows : (this.rp.rows || []);
+      const groups = new Map();
+      for (const r of src) {
+        if (!r || !r.sku) continue;
+        const b = Number(r.brand_id) || Number(this.me && this.me.brandId) || 1;
+        if (!groups.has(b)) groups.set(b, new Set());
+        groups.get(b).add(String(r.sku));
+      }
+      const acc = {};
+      for (const [brandId, set] of groups) {
+        const list = [...set];
+        for (let i = 0; i < list.length; i += 300) {
+          const part = list.slice(i, i + 300);
+          try {
+            const d = await this.api('/api/products/manual-prices?brand=' + brandId
+              + '&kind=qht&skus=' + encodeURIComponent(part.join(',')));
+            Object.assign(acc, (d && d.prices) || {});
+          } catch (e) { /* 手工价属于附加信息，取不到不必打扰用户 */ }
+        }
+      }
+      // 整体替换：Vue2 对对象新增属性不响应，逐个加键会「存了但页面不刷新」
+      this.rp.qhtManual = acc;
+    },
+    /** 打开改价弹窗：有手工价带手工价，没有就用平台价预填（多数场景只是在平台价上微调） */
+    openQhtManual(row) {
+      const cur = this.qhtPrice(row);
+      const man = cur && cur.manual ? cur : null;
+      const specOf = (v) => (v == null || v === '' ? '' : String(v));
+      this.mpDlg = {
+        visible: true, saving: false, row, hasManual: !!man,
+        sku: row.sku, goodsName: row.goods_name || '',
+        brandId: Number(row.brand_id) || Number(this.me && this.me.brandId) || 1,
+        specQty: man ? specOf(man.packingSpecification) : (cur ? specOf(cur.packingSpecification) : ''),
+        smallUnit: (man || cur || {}).smallUnit || '',
+        unitPrice: cur && cur.unitPrice != null ? String(cur.unitPrice) : '',
+        packPrice: cur && cur.saleIP != null ? String(cur.saleIP) : '',
+        note: man ? (man.note || '') : '',
+        mode: 'unit', hint: '',
+      };
+    },
+    /** 互算：与「本地价」同一套规则（改单价 → 整件价 = 单价 × 规格；改整件价 → 单价 = 整件价 ÷ 规格） */
+    onMpCalc(src) {
+      const d = this.mpDlg;
+      if (src !== 'qty') d.mode = src === 'pack' ? 'pack' : 'unit';
+      const r2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
+      const qtyRaw = String(d.specQty == null ? '' : d.specQty).trim();
+      const qty = qtyRaw === '' ? null : Number(qtyRaw);
+      const hasQty = qty != null && Number.isFinite(qty) && qty > 0;
+      if (d.mode === 'pack') {
+        const pack = String(d.packPrice == null ? '' : d.packPrice).trim() === '' ? null : Number(d.packPrice);
+        if (pack == null || !Number.isFinite(pack)) { d.unitPrice = ''; d.hint = ''; return; }
+        if (!hasQty) { d.unitPrice = ''; d.hint = '填整件价需要同时填规格数量（一件多少个），否则算不出单价'; return; }
+        d.unitPrice = String(r2(pack / qty));
+        d.hint = '整件价 ' + r2(pack) + ' ÷ 规格 ' + qty + ' = 单价 ' + r2(pack / qty);
+        return;
+      }
+      const unit = String(d.unitPrice == null ? '' : d.unitPrice).trim() === '' ? null : Number(d.unitPrice);
+      if (unit == null || !Number.isFinite(unit)) { d.packPrice = ''; d.hint = ''; return; }
+      if (!hasQty) { d.packPrice = ''; d.hint = '未填规格数量 → 只保存单价，没有整件价'; return; }
+      d.packPrice = String(r2(unit * qty));
+      d.hint = '单价 ' + r2(unit) + ' × 规格 ' + qty + ' = 整件价 ' + r2(unit * qty);
+    },
+    async saveQhtManual() {
+      const d = this.mpDlg;
+      if (!d.sku) return;
+      d.saving = true;
+      try {
+        const r = await this.api('/api/products/manual-price', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            brandId: d.brandId, sku: d.sku, goodsName: d.goodsName, kind: 'qht',
+            mode: d.mode, unitPrice: d.unitPrice, packPrice: d.packPrice, specQty: d.specQty,
+            smallUnit: d.smallUnit, note: d.note,
+          }),
+        });
+        if (r.error) { this.$message.error('手工价保存失败: ' + r.error); return; }
+        // 以服务端返回为准（四舍五入、反推规格都只认一处），就地更新，列表不用重拉
+        const key = Number(r.brandId || d.brandId) + ':' + (r.sku || d.sku);
+        this.rp.qhtManual = Object.assign({}, this.rp.qhtManual, { [key]: r.price });
+        this.$message.success('手工价已保存：比价分析与补货单都按它算');
+        d.visible = false;
+      } catch (e) { this.$message.error('手工价保存失败: ' + e.message); }
+      finally { d.saving = false; }
+    },
+    /** 取消手工价（回到平台取价）。row 可传可不传（弹窗里的按钮用 mpDlg.row） */
+    async clearQhtManual(row) {
+      const r0 = row || (this.mpDlg && this.mpDlg.row);
+      if (!r0) return;
+      try {
+        await this.$confirm('取消「' + (r0.goods_name || r0.sku) + '」的齐货通手工价？取消后回到平台取价（平台没取到就显示未取价）。',
+          '取消手工价', { confirmButtonText: '取消手工价', cancelButtonText: '返回', type: 'warning' });
+      } catch (e) { return; }
+      const brandId = Number(r0.brand_id) || Number(this.me && this.me.brandId) || 1;
+      try {
+        const r = await this.api('/api/products/manual-price/clear', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ brandId, sku: r0.sku, kind: 'qht' }),
+        });
+        if (r.error) { this.$message.error('取消失败: ' + r.error); return; }
+        const next = Object.assign({}, this.rp.qhtManual);
+        delete next[brandId + ':' + r0.sku];
+        this.rp.qhtManual = next;
+        if (this.mpDlg.visible) this.mpDlg.visible = false;
+        this.$message.success('已取消手工价');
+      } catch (e) { this.$message.error('取消失败: ' + e.message); }
+    },
+    /** 解除齐货通关联（与阿发「解除」同口径：写空值，之后可重新关联；手工价不受影响） */
+    async unlinkQhtRow(row) {
+      try {
+        await this.$confirm('解除「' + (row.goods_name || row.sku) + '」与齐货通商品的关联？解除后可以重新关联。',
+          '解除关联', { confirmButtonText: '解除关联', cancelButtonText: '取消', type: 'warning' });
+      } catch (e) { return; }
+      try {
+        const d = await this.api('/api/products/link', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ sku: row.sku, goodsId: '', brandId: row.brand_id || null }),
+        });
+        if (d.error) { this.$message.error('解除失败: ' + d.error); return; }
+        row.qht_goods_id = '';
+        this.$message.success('已解除关联');
+      } catch (e) { this.$message.error('解除失败: ' + e.message); }
     },
     // ══════ 比价分析（v0.3.11）══════
     /** 按当前筛选范围（与列表同一份参数）拉比价结果；跨页，不受分页影响 */

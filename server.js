@@ -64,6 +64,7 @@ const afa = require('./lib/afa');
 const jd = require('./lib/jd-bmall');
 const priceCache = require('./lib/price-cache');
 const products = require('./lib/products');
+const productPrice = require('./lib/product-price');
 const billing = require('./lib/billing');
 const { loadConfig, CONFIG_PATH } = require('./lib/config');
 const { AgentHub } = require('./lib/agent-hub');
@@ -1200,6 +1201,14 @@ const OP_ACTIONS = {
   'after.create': (d) => `新增商品售后（「${d.goodsName || ''}」SKU ${d.sku || ''}，数量 ${d.qty == null ? '' : d.qty}，${d.afterDate || ''}）`,
   'after.delete': (d) => `删除商品售后（「${d.goodsName || ''}」SKU ${d.sku || ''}，${d.afterDate || ''}）`,
   'after.status': (d) => `商品售后状态改为「${d.statusLabel || ''}」（「${d.goodsName || ''}」SKU ${d.sku || ''}${d.waybillNo ? '，运单号 ' + d.waybillNo : ''}）`,
+  'product.manual_price': (d) => `手工改齐货通价（SKU ${d.sku || ''}：单价 ${d.unitPrice == null ? '—' : d.unitPrice}、`
+    + `整件价 ${d.packPrice == null ? '—' : d.packPrice}、规格 ${d.packQty == null ? '—' : d.packQty}）`,
+  'product.manual_price_clear': (d) => `取消了 SKU ${d.sku || ''} 的齐货通手工价（回到平台取价）`,
+  'replenish.item_save': (d) => d.created
+    ? `补货单 #${d.orderId} 新增明细（SKU ${d.sku || ''}，${d.qtyPack || 0} 件）`
+    : `补货单 #${d.orderId} 改明细（SKU ${d.sku || ''}，${d.qtyPack || 0} 件 × ${d.unitPrice == null ? '—' : d.unitPrice}）`,
+  'replenish.item_delete': (d) => `补货单 #${d.orderId} 删明细（SKU ${d.sku || ''}）`,
+  'replenish.supplier': (d) => `补货单 #${d.orderId} 换供应商为「${d.supplierName || ''}」`,
   'qnh.view': () => '打开了退单列表页',
   'pdd.apply.start': (d) => `发起了批量申请发票任务（${d.total || 0} 单${d.invalid ? `，跳过 ${d.invalid} 单` : ''}）`,
   'pdd.apply': (d) => d.ok === false
@@ -4799,6 +4808,54 @@ const server = http.createServer(async (req, res) => {
       });
     }
 
+    // ── 商品手工价（v0.3.28）────────────────────────────────────────────
+    //   平台取价错了 / 没关联上平台商品时，人工填一份齐货通价（单价 + 整件价 + 规格）。
+    //   优先级高于 goods_price_cache：比价分析与补货单都按它算，「重新取价」也不会覆盖；
+    //   要回平台价就点「取消手工价」。按品牌方共用（同品牌看到的是同一份价）。
+    //   读随商品列表权限；写要「平台取价」权限（改的是参比价，会影响别人的补货结论）。
+    if (method === 'GET' && p === '/api/products/manual-prices') {
+      if (!canProduct) return denyProduct();
+      const bo = brandOf(req, url, user);
+      const skus = String(url.searchParams.get('skus') || '').split(',').map((x) => x.trim()).filter(Boolean);
+      const prices = await productPrice.readManual({
+        brandId: bo.brandId || (Number(user.brand_id) || 1), skus,
+        kind: url.searchParams.get('kind') || 'qht',
+      }).catch(() => ({}));
+      return sendJson(res, 200, { ok: true, prices });
+    }
+    if (method === 'POST' && p === '/api/products/manual-price') {
+      if (!canProduct) return denyProduct();
+      if (!canPrice) return denyPrice();
+      writeGuard();
+      const b = await readBody(req);
+      const bo = brandFromBody(user, b);
+      const brandId = bo.brandId || (Number(user.brand_id) || 1);
+      const out = await productPrice.saveManual({
+        brandId,
+        sku: b.sku, kind: b.kind, goodsName: b.goodsName,
+        mode: b.mode, unitPrice: b.unitPrice, packPrice: b.packPrice, specQty: b.specQty,
+        spec: b.spec, smallUnit: b.smallUnit, note: b.note,
+        operator: user.username,
+      });
+      if (out.ok) await logOp(user, 'product.manual_price', {
+        tenantId, brandId, sku: out.sku,
+        unitPrice: out.price && out.price.unitPrice, packPrice: out.price && out.price.packPrice,
+        packQty: out.price && out.price.packingSpecification, kind: out.kind,
+      });
+      return sendJson(res, out.ok ? 200 : 400, out);
+    }
+    if (method === 'POST' && p === '/api/products/manual-price/clear') {
+      if (!canProduct) return denyProduct();
+      if (!canPrice) return denyPrice();
+      writeGuard();
+      const b = await readBody(req);
+      const bo = brandFromBody(user, b);
+      const brandId = bo.brandId || (Number(user.brand_id) || 1);
+      const out = await productPrice.clearManual({ brandId, sku: b.sku, kind: b.kind });
+      if (out.ok) await logOp(user, 'product.manual_price_clear', { tenantId, brandId, sku: out.sku });
+      return sendJson(res, out.ok ? 200 : 400, out);
+    }
+
     // ── 供应商下拉（v0.3.12）────────────────────────────────────────────
     // 本地价要选供应商，但补货页用户不一定有「供应商管理 / 货单管理」权限，
     // 所以单开一个只读接口：有商品或补货权限就能拿到自己的供应商名单（只读，不能增删改）。
@@ -4885,7 +4942,12 @@ const server = http.createServer(async (req, res) => {
       const supNameById = {};
       const supIdByName = {};
       for (const r of supRows) { supNameById[r.id] = r.name; supIdByName[r.name] = r.id; }
-      const out = products.comparePrices({ rows: use, priceMap, supNameById, supIdByName });
+      // 手工价（v0.3.28）：按品牌 + SKU 取，优先级高于平台缓存（关联错了也能靠手工价纠错）
+      let manualMap = {};
+      try {
+        manualMap = await productPrice.readManualMap({ rows: use, kind: 'qht' });
+      } catch (e) { manualMap = {}; }
+      const out = products.comparePrices({ rows: use, priceMap, manualMap, supNameById, supIdByName });
       return sendJson(res, 200, Object.assign({ truncated, batch: batch || null }, out));
     }
     // ── 自动匹配阿发商品（v0.2.92）────────────────────────────────────────
@@ -5637,6 +5699,65 @@ const server = http.createServer(async (req, res) => {
           await logOp(user, 'replenish.order_link', {
             tenantId: roUid, id: out.id, waybillId: out.waybillId,
             waybillAmount: out.waybillAmount, diff: out.diff,
+          });
+        }
+        return sendJson(res, out.ok ? 200 : 400, out);
+      }
+
+      // 补货单里「加一行」用的商品搜索（按账号所属品牌方商品库，名称/SKU 模糊）
+      if (method === 'GET' && p === '/api/replenish-order/products') {
+        const brandId = user.role === 'admin'
+          ? (brandOf(req, url, user).brandId || 0)
+          : await brandIdOfUser(roUid);
+        return sendJson(res, 200, await replenishOrder.searchProducts({
+          brandId, keyword: url.searchParams.get('q') || '', limit: url.searchParams.get('limit'),
+        }));
+      }
+
+      // 保存一行明细（itemId 为空 = 新增；有值 = 改这一行）。金额服务端重算，不信前端传的总额
+      if (method === 'POST' && p === '/api/replenish-order/item-save') {
+        writeGuard();
+        const body = await readBody(req);
+        const out = await replenishOrder.saveItem({
+          userId: roUid, orderId: body.orderId, itemId: body.itemId,
+          sku: body.sku, goodsName: body.goodsName, channel: body.channel, channelLabel: body.channelLabel,
+          qtyPack: body.qtyPack, specQty: body.specQty, unitPrice: body.unitPrice, suggestQty: body.suggestQty,
+        });
+        if (out.ok) {
+          await logOp(user, 'replenish.item_save', {
+            tenantId: roUid, orderId: Number(body.orderId), created: !Number(body.itemId),
+            sku: body.sku, qtyPack: body.qtyPack, unitPrice: body.unitPrice,
+          });
+        }
+        return sendJson(res, out.ok ? 200 : 400, out);
+      }
+
+      if (method === 'POST' && p === '/api/replenish-order/item-delete') {
+        writeGuard();
+        const body = await readBody(req);
+        const out = await replenishOrder.deleteItem({
+          userId: roUid, orderId: body.orderId, itemId: body.itemId,
+        });
+        if (out.ok) {
+          await logOp(user, 'replenish.item_delete', {
+            tenantId: roUid, orderId: Number(body.orderId), sku: body.sku || '',
+          });
+        }
+        return sendJson(res, out.ok ? 200 : 400, out);
+      }
+
+      // 换供应商（单头）：已关联货单时服务端会拒，避免一张单跟货单对不上供应商
+      if (method === 'POST' && p === '/api/replenish-order/supplier') {
+        writeGuard();
+        const body = await readBody(req);
+        const out = await replenishOrder.setSupplier({
+          userId: roUid, id: body.id, supplierId: body.supplierId,
+          supplierName: body.supplierName, operator: user.username,
+        });
+        if (out.ok) {
+          await logOp(user, 'replenish.supplier', {
+            tenantId: roUid, orderId: out.order && out.order.id,
+            supplierName: out.order && out.order.supplierName,
           });
         }
         return sendJson(res, out.ok ? 200 : 400, out);
