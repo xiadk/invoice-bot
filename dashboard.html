@@ -226,6 +226,16 @@
   .wb-qr { width: 132px; height: 132px; flex: 0 0 132px; background: #fff; padding: 6px;
            border-radius: 6px; border: 1px solid #ebeef5; }
   .wb-qr svg { display: block; width: 100%; height: 100%; }
+  /* 拼多多人工催收：二维码弹窗（左码右文）。码按容器宽度自适应 —— 扫码链接很长时
+     qrcode 生成的 SVG 会到 260px 以上，写死宽度会溢出压到右侧文字上。 */
+  .pc-dlg { display: flex; gap: 18px; align-items: flex-start; }
+  .pc-qr { width: 190px; flex: 0 0 190px; background: #fff; padding: 8px; box-sizing: border-box;
+           border: 1px solid var(--line); border-radius: 8px; }
+  .pc-qr svg { display: block; width: 100%; height: auto; }
+  .pc-qr-tip { font-size: 11px; color: var(--sub); line-height: 1.7; margin-top: 8px; text-align: center; }
+  .pc-main { flex: 1 1 320px; min-width: 0; }
+  .pc-main .el-textarea__inner { font-size: 13px; line-height: 1.7; }
+  @media (max-width: 720px) { .pc-dlg { flex-wrap: wrap; } }
   .wb-left { font-size: 12px; color: var(--text-2); margin-left: 8px; }
   .wb-left.is-warn { color: #e6a23c; }
   /* 员工新增弹窗里的菜单开关：两列网格，省高度 */
@@ -847,6 +857,13 @@
               <el-radio-button label="unmatched">未核对（{{ map.unmatched.length }}）</el-radio-button>
               <el-radio-button label="matched">已核对（{{ map.mappings.length }}）</el-radio-button>
             </el-radio-group>
+            <span class="fb-label" style="margin-left:6px">搜索</span>
+            <!-- 销方名称 / 销方税号模糊搜索（本页数据量小，纯前端过滤，逐字即时生效） -->
+            <el-input v-model="mapKw" size="small" clearable prefix-icon="el-icon-search"
+                      placeholder="销方名称 / 税号，模糊匹配" style="width:260px"></el-input>
+            <span v-if="mapKwTrim" class="loginid">
+              匹配：未核对 {{ mapUnmatchedFiltered.length }} 个 · 已核对 {{ mapMatchedFiltered.length }} 条
+            </span>
             <span class="fb-spacer"></span>
             <span class="loginid">默认只看未核对，核对完的会移到「已核对」</span>
           </div>
@@ -855,6 +872,8 @@
           <template v-if="mapFilter === 'unmatched'">
             <el-alert v-if="!map.unmatched.length" type="success" :closable="false" show-icon
                       title="✓ 所有销方名称都已处理（已匹配或已忽略）"></el-alert>
+            <el-alert v-else-if="!mapUnmatchedFiltered.length" type="info" :closable="false" show-icon
+                      :title="'没有匹配「' + mapKwTrim + '」的销方名称或税号，换个关键词试试（可只输入两三个字或税号片段）'"></el-alert>
             <template v-else>
             <el-table :data="unmatchedPage" size="small" border style="width:100%">
               <el-table-column label="税务局销方名称" min-width="180"><template slot-scope="p"><span class="company">{{ p.row.tax_seller_name }}</span></template></el-table-column>
@@ -890,7 +909,7 @@
               </el-table-column>
             </el-table>
             <div class="pager-wrap">
-              <el-pagination background layout="sizes, prev, pager, next" :total="map.unmatched.length"
+              <el-pagination background layout="sizes, prev, pager, next" :total="mapUnmatchedFiltered.length"
                              :page-size="unSize" :current-page="unPage" :page-sizes="pageSizes"
                              @size-change="v => { unSize = v; unPage = 1; }" @current-change="v => unPage = v"></el-pagination>
             </div>
@@ -901,8 +920,11 @@
           <template v-else>
             <el-alert v-if="!map.mappings.length" type="info" :closable="false" show-icon
                       title="暂无已核对的销方名称"></el-alert>
+            <el-alert v-else-if="!mapMatchedFiltered.length" type="info" :closable="false" show-icon
+                      :title="'没有匹配「' + mapKwTrim + '」的已核对记录，换个关键词试试'"></el-alert>
             <el-table v-else :data="mappingPage" size="small" border style="width:100%">
               <el-table-column prop="tax_seller_name" label="税务局销方名称" min-width="170"></el-table-column>
+              <el-table-column label="销方税号" width="150"><template slot-scope="p"><span class="loginid">{{ p.row.seller_tax_no || '' }}</span></template></el-table-column>
               <el-table-column label="对应的 1688 商家" min-width="170">
                 <template slot-scope="p"><span class="company" v-if="p.row.seller_company">{{ p.row.seller_company }}</span><el-tag v-else size="mini" type="danger">未映射</el-tag></template>
               </el-table-column>
@@ -933,8 +955,8 @@
                 </template>
               </el-table-column>
             </el-table>
-            <div class="pager-wrap" v-if="map.mappings.length">
-              <el-pagination background layout="sizes, prev, pager, next" :total="map.mappings.length"
+            <div class="pager-wrap" v-if="mapMatchedFiltered.length">
+              <el-pagination background layout="sizes, prev, pager, next" :total="mapMatchedFiltered.length"
                              :page-size="mapSize" :current-page="mapPage" :page-sizes="pageSizes"
                              @size-change="v => { mapSize = v; mapPage = 1; }" @current-change="v => mapPage = v"></el-pagination>
             </div>
@@ -944,8 +966,9 @@
         <el-card shadow="never" class="section-card" v-if="map.ignored.length">
           <el-collapse>
             <el-collapse-item :title="'已忽略 ' + map.ignored.length + ' 条（点击展开可恢复）'" name="ignored">
-              <el-table :data="ignoredPage" size="small" border style="width:100%">
+              <el-table :data="ignoredPage" size="small" border style="width:100%" empty-text="没有匹配的记录">
                 <el-table-column label="税务局销方名称" min-width="200"><template slot-scope="p"><span class="company">{{ p.row.tax_seller_name }}</span></template></el-table-column>
+                <el-table-column label="销方税号" width="150"><template slot-scope="p"><span class="loginid">{{ p.row.seller_tax_no || '' }}</span></template></el-table-column>
                 <el-table-column label="说明" width="200"><template slot-scope="p"><span class="loginid">{{ p.row.note || '' }}</span></template></el-table-column>
                 <el-table-column label="开票金额" width="110"><template slot-scope="p"><span class="amount ok">{{ yuan(p.row.invoice_amount) }}</span></template></el-table-column>
                 <el-table-column label="更新时间" width="140"><template slot-scope="p"><span class="loginid">{{ fmtMinute(p.row.updated_at) }}</span></template></el-table-column>
@@ -956,7 +979,7 @@
                 </el-table-column>
               </el-table>
               <div class="pager-wrap">
-                <el-pagination background layout="prev, pager, next" :total="map.ignored.length" :page-size="igSize"
+                <el-pagination background layout="prev, pager, next" :total="mapIgnoredFiltered.length" :page-size="igSize"
                                :current-page="igPage" @current-change="v => igPage = v"></el-pagination>
               </div>
             </el-collapse-item>
@@ -3596,13 +3619,29 @@
               <template slot-scope="p"><span class="loginid" style="font-family:Consolas,monospace">{{ p.row.sku }}</span></template>
             </el-table-column>
             <el-table-column label="商品名称" min-width="200">
-              <template slot-scope="p"><span :title="p.row.goodsName">{{ p.row.goodsName || '—' }}</span></template>
+              <template slot-scope="p">
+                <!-- v0.3.35：库存 0 或一键加购失败的，名称标红打 ×，表示这家供应商无货 -->
+                <span :title="roBadReason(p.row) || p.row.goodsName"
+                      :style="roBadRow(p.row) ? 'color:#f56c6c;font-weight:600' : ''">
+                  {{ p.row.goodsName || '—' }}<b v-if="roBadRow(p.row)" style="margin-left:4px">×</b>
+                </span>
+              </template>
             </el-table-column>
             <el-table-column label="价源" width="104" align="center">
               <template slot-scope="p"><el-tag size="mini" type="success">{{ p.row.channelLabel }}</el-tag></template>
             </el-table-column>
             <el-table-column label="建议量" width="80" align="right">
               <template slot-scope="p"><span class="loginid">{{ p.row.suggestQty }}</span></template>
+            </el-table-column>
+            <!-- 实时库存（v0.3.35）：读商品库可用库存，不打平台接口；null=库里没这个 SKU 的数据 -->
+            <el-table-column label="实时库存" width="96" align="right">
+              <template slot-scope="p">
+                <span v-if="p.row.availStock == null" class="loginid" style="color:#c0c4cc"
+                      title="商品库里没有这个 SKU 的库存数据（可能还没同步）">—</span>
+                <span v-else-if="p.row.availStock <= 0" style="color:#f56c6c;font-weight:600"
+                      title="商品库可用库存为 0，视为这家供应商无货">0</span>
+                <span v-else style="color:#67c23a">{{ p.row.availStock }}</span>
+              </template>
             </el-table-column>
             <el-table-column label="规格" width="76" align="right">
               <template slot-scope="p"><span class="loginid">{{ p.row.specQty }}/件</span></template>
@@ -3671,30 +3710,59 @@
           </div>
         </el-dialog>
 
-        <!-- 换供应商（v0.3.33 行级）：把这一行的补货数量搬到目标供应商的补货单，本行删除 -->
-        <el-dialog title="换供应商（搬这一行）" :visible.sync="roMove.visible" width="560px" top="8vh" append-to-body>
+        <!-- 换供应商（v0.3.33 行级；v0.3.35 起选完供应商先查价：无价=无货不许搬，
+             齐货通/永源顺没关联商品时可就地关联；搬过去按目标供应商价重算） -->
+        <el-dialog title="换供应商（搬这一行）" :visible.sync="roMove.visible" width="620px" top="8vh" append-to-body>
           <div class="loginid" style="margin-bottom:10px">
             SKU <b style="font-family:Consolas,monospace">{{ roMove.sku }}</b>
             <span v-if="roMove.goodsName"> · {{ roMove.goodsName }}</span><br>
-            补货数量 <b>{{ roMove.qtyPack }}</b> 件 · 规格 {{ roMove.specQty }}/件 ·
+            当前：<b>{{ roMove.qtyPack }}</b> 件 · 规格 {{ roMove.specQty }}/件 ·
             单价 {{ yuan4(roMove.unitPrice) }} · 行总额 <b>{{ wbMoney(roMove.amount) }}</b>
           </div>
           <el-form label-position="top" size="small">
             <el-form-item label="搬到哪个供应商的补货单">
-              <el-select v-model="roMove.supplierId" filterable placeholder="选择目标供应商" style="width:100%">
+              <el-select v-model="roMove.supplierId" filterable placeholder="选择目标供应商" style="width:100%"
+                         @change="checkRoMove">
                 <el-option v-for="s in ro.suppliers" :key="s.id" :label="s.name" :value="s.id"
                            :disabled="s.id === roMove.fromSupplierId"></el-option>
               </el-select>
             </el-form-item>
           </el-form>
-          <el-alert type="warning" :closable="false" show-icon
-                    title="这一行的补货数量会并入目标供应商最新一张未关联货单（没有就新建，同 SKU 则累加数量），本行删除；源单搬空后自动删除。">
-          </el-alert>
+          <!-- 选完供应商立刻查目标价：无价 = 该供应商无货，直接拦住 -->
+          <div v-if="roMove.checking" class="loginid" style="color:#909399">正在查目标供应商的价…</div>
+          <template v-else-if="roMove.check">
+            <el-alert v-if="roMove.check.ok && roMove.check.platform" type="success" :closable="false" show-icon
+                      :title="'目标供应商有价：' + yuan4(roMove.check.unitPrice) + ' 元/个 · 规格 '
+                              + roMove.check.specQty + '/件 · 来源' + roMoveSourceText">
+            </el-alert>
+            <div v-if="roMove.check.ok" class="loginid" style="margin-top:8px">
+              搬过去：<b style="color:#409eff">{{ roMove.check.qtyPack }}</b> 件（原 {{ roMove.qtyPack }} 件）·
+              规格 {{ roMove.check.specQty }}/件 · 单价 {{ yuan4(roMove.check.unitPrice) }} ·
+              行总额 <b style="color:#f56c6c">{{ wbMoney(roMove.check.amount) }}</b>
+              <span v-if="roMove.check.packPrice != null">（整件 {{ yuan(roMove.check.packPrice) }}）</span>
+              <div style="color:#909399;margin-top:2px">
+                建议量 {{ roMove.check.suggestQty }} 不变，件数按目标供应商规格重算；
+                {{ roMove.check.note || '价源改成目标供应商' }}
+              </div>
+            </div>
+            <el-alert v-else type="error" :closable="false" show-icon
+                      :title="roMove.check.error || '该供应商没有此商品的价格（无货），不能迁移'"></el-alert>
+            <div v-if="roMove.check.needLink" style="margin-top:8px">
+              <el-button size="small" type="primary" plain icon="el-icon-link" @click="openRoMoveLink">
+                去关联{{ roMove.check.linkKind === 'afa' ? '永源顺' : '齐货通' }}商品
+              </el-button>
+              <span class="loginid" style="color:#909399;margin-left:8px">搜到并关联上才有价，搜不到就无法迁移</span>
+            </div>
+          </template>
           <el-alert v-if="roMove.error" type="error" :closable="false" show-icon :title="roMove.error"
                     style="margin-top:8px"></el-alert>
+          <el-alert v-if="!roMove.error" type="warning" :closable="false" show-icon style="margin-top:8px"
+                    title="搬过去的数量会并入目标供应商最新一张未关联货单（没有就新建，同 SKU 则累加），本行删除；源单搬空后自动删除。">
+          </el-alert>
           <div slot="footer">
             <el-button size="small" @click="roMove.visible = false">取消</el-button>
-            <el-button size="small" type="primary" :loading="roMove.saving" :disabled="!roMove.supplierId"
+            <el-button size="small" type="primary" :loading="roMove.saving"
+                       :disabled="!roMove.supplierId || !roMove.check || !roMove.check.ok"
                        @click="confirmRoMove">确认搬迁</el-button>
           </div>
         </el-dialog>
@@ -4245,6 +4313,122 @@
             <span class="total">共 {{ pd.total }} 条</span>
           </div>
         </el-card>
+      </div>
+
+      <!-- ══════════ 拼多多人工催收（v0.3.38） ══════════ -->
+      <!-- 口径：交易成功(order_status=4) 且 开票状态=暂不可开票(0)/未同步开票(9)。
+           这两类在拼多多上没有申请/催收入口，只能人工把订单号发给商家。
+           按商家聚合（店铺聊天与线下沟通都是商家维度），金额一律按实付金额合计。 -->
+      <div v-show="page === 'pddCollect'" id="page-pdd-collect">
+        <div class="page-head">
+          <h2>拼多多人工催收</h2>
+        </div>
+
+        <qnh-tenant-picker v-if="isAdmin" service="拼多多" :users="pddUsers" :value="qnhTenant"
+                           :sessions="pddSessions" :self-id="me && me.id"
+                           @change="onQnhTenantChange"></qnh-tenant-picker>
+
+        <div class="stat-row">
+          <el-card v-for="s in pdColStatCards" :key="s.label" shadow="never" class="stat-card"
+                   :body-style="{ padding: '14px 16px' }" style="flex:1;min-width:150px">
+            <div class="num">{{ s.value }}</div>
+            <div class="label">{{ s.label }}</div>
+            <div class="sub">{{ s.sub }}</div>
+          </el-card>
+        </div>
+
+        <el-card class="section-card" shadow="never">
+          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px">
+            <el-input v-model="pdCol.keyword" size="small" clearable style="width:260px"
+                      placeholder="商家名称 / 订单号"></el-input>
+            <el-button size="small" type="primary" :loading="pdCol.loading" @click="loadPddCollect">刷新</el-button>
+            <span style="flex:1"></span>
+            <span class="loginid">共 {{ pdColRows.length }} 个商家</span>
+          </div>
+
+          <el-table :data="pdColRows" size="small" border v-loading="pdCol.loading" row-key="key"
+                    empty-text="没有需要人工催收的订单（交易成功且暂不可开票 / 未同步开票）">
+            <el-table-column type="expand">
+              <template slot-scope="p">
+                <div style="padding:4px 12px 10px">
+                  <el-table :data="p.row.orders" size="mini" border empty-text="没有订单">
+                    <el-table-column label="订单号" min-width="180">
+                      <template slot-scope="o"><span class="loginid">{{ o.row.orderSn }}</span></template>
+                    </el-table-column>
+                    <el-table-column label="下单时间" width="140">
+                      <template slot-scope="o">{{ shortDate(o.row.orderTime) }}</template>
+                    </el-table-column>
+                    <el-table-column label="实付金额" width="110" align="right">
+                      <template slot-scope="o">
+                        <span class="amount">{{ o.row.payAmount == null ? '—' : yuan(o.row.payAmount) }}</span>
+                      </template>
+                    </el-table-column>
+                    <el-table-column label="开票状态" width="110">
+                      <template slot-scope="o">
+                        <el-tag size="mini" :type="o.row.invoiceStatus === 9 ? 'info' : 'warning'">{{ o.row.statusText }}</el-tag>
+                      </template>
+                    </el-table-column>
+                    <el-table-column label="商品" min-width="200">
+                      <template slot-scope="o">{{ o.row.goodsName || '—' }}</template>
+                    </el-table-column>
+                  </el-table>
+                </div>
+              </template>
+            </el-table-column>
+            <el-table-column label="商家" min-width="260">
+              <template slot-scope="p">
+                <div style="font-weight:500">{{ p.row.displayName }}</div>
+                <div class="loginid" v-if="p.row.mallId">店铺 ID {{ p.row.mallId }}</div>
+              </template>
+            </el-table-column>
+            <el-table-column label="订单数" width="90" align="center" prop="orderCount"></el-table-column>
+            <el-table-column label="总金额" width="130" align="right">
+              <template slot-scope="p"><span class="amount">{{ yuan(p.row.amount) }}</span></template>
+            </el-table-column>
+            <el-table-column label="最近订单" min-width="230">
+              <template slot-scope="p">
+                <div class="loginid">{{ p.row.latestOrderSn }}</div>
+                <div class="loginid">{{ shortDate(p.row.latestOrderTime) }}</div>
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" width="120" fixed="right">
+              <template slot-scope="p">
+                <el-button type="text" size="mini" @click="openPddCollectQr(p.row)">二维码催收</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+        </el-card>
+
+        <!-- 二维码 + 可编辑催收文字：电脑上直接改/复制，也可以手机扫码在手机上改 -->
+        <el-dialog title="拼多多人工催收 · 扫码或直接复制" :visible.sync="pdCol.dlg.visible"
+                   width="720px" append-to-body>
+          <div class="pc-dlg">
+            <div>
+              <div class="pc-qr" v-if="pdCol.dlg.qr" v-html="pdCol.dlg.qr"></div>
+              <div class="pc-qr" v-else
+                   style="display:flex;align-items:center;justify-content:center;min-height:190px;
+                          color:#c0c4cc;font-size:12px;text-align:center">
+                {{ pdCol.dlg.loading ? '正在生成…' : '二维码生成失败' }}
+              </div>
+              <div class="pc-qr-tip">手机扫码打开，可直接改字并复制<br>链接 {{ pdCol.dlg.ttlDays }} 天内有效</div>
+            </div>
+            <div class="pc-main">
+              <div style="margin-bottom:8px;line-height:1.5">
+                <div style="font-weight:600">{{ pdCol.dlg.mallName }}</div>
+                <div class="loginid">
+                  {{ pdCol.dlg.orderCount }} 笔 · 总金额 ¥{{ Number(pdCol.dlg.amount || 0).toFixed(2) }}
+                </div>
+              </div>
+              <el-input type="textarea" v-model="pdCol.dlg.text" :rows="10" resize="vertical"
+                        placeholder="催收文字"></el-input>
+              <div style="margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+                <el-button size="small" type="primary" @click="copyPdColText">一键复制文字</el-button>
+                <el-button size="small" @click="copyPdColSn">复制最近订单号</el-button>
+                <el-button size="small" type="text" @click="copyPlain(pdCol.dlg.link, '已复制扫码链接')">复制链接</el-button>
+              </div>
+            </div>
+          </div>
+        </el-dialog>
       </div>
 
       <!-- ══════════ 闪电帮帮发票（对所有用户开放） ══════════ -->
@@ -4929,6 +5113,17 @@ const vm = new Vue({
         selected: [], picked: {}, applying: false, applyTaskId: '',
         applyDialog: { visible: false, running: false, kind: '', status: '', message: '', progress: null, log: [], startedAt: 0 },
       },
+      // 线下催收（v0.3.38）：把「交易成功 + 暂不可开票/未同步开票」的订单按商家汇总，
+      // 平台没有催收入口，只能线下把订单号发给商家。金额一律按实付金额合计。
+      pdCol: {
+        loading: false, rows: [], keyword: '',
+        totals: { malls: 0, orders: 0, amount: 0, missingAmount: 0 },
+        // 二维码弹窗：text 是可编辑的催收文字，qr 是 link 生成的 SVG（vendor/qrcode.min.js 离线生成）
+        dlg: {
+          visible: false, loading: false, mallName: '', orderCount: 0, amount: 0,
+          latestOrderSn: '', text: '', qr: '', link: '', ttlDays: 7,
+        },
+      },
       // 闪电帮帮发票：同样用 pd.picked 那套跨页多选（selected 是当前选中行数组）
       sd: {
         loading: false, syncing: false, sending: false,
@@ -4997,10 +5192,14 @@ const vm = new Vue({
       roLink: { visible: false, loading: false, saving: false, error: '',
                 orderId: 0, order: {}, rows: [], picked: null },
       // 补货单详情（v0.3.33）：未关联货单才可编辑；已关联 = 只读；carting 是一键加购的进度锁
-      roView: { visible: false, loading: false, order: null, items: [], editing: false, saving: false, carting: false },
-      // 换供应商（行级搬迁）：选目标供应商，把这一行的补货数量并入对方补货单
+      roView: { visible: false, loading: false, order: null, items: [], editing: false, saving: false,
+                carting: false, noStockSkus: [] },
+      // 换供应商（行级搬迁）：选目标供应商 → checkRoMove 查目标价（无价=无货不许搬）
       roMove: { visible: false, saving: false, error: '', orderId: 0, itemId: 0, sku: '', goodsName: '',
-                qtyPack: 0, specQty: 1, unitPrice: 0, amount: 0, fromSupplierId: 0, supplierId: null },
+                qtyPack: 0, specQty: 1, unitPrice: 0, amount: 0, fromSupplierId: 0, supplierId: null,
+                check: null, checking: false },
+      // 关联弹窗完成后要回到哪个操作（换供应商没价时，关联完自动重查）
+      rpLinkAfter: null,
       // 补货单明细行编辑（itemId=0 表示新增）
       roItem: { visible: false, saving: false, error: '', orderId: 0, itemId: 0, sku: '', goodsName: '',
                 channel: '', channelLabel: '', qtyPack: 1, specQty: '1', unitPrice: '' },
@@ -5059,6 +5258,8 @@ const vm = new Vue({
       mapDraft: {}, unPage: 1, unSize: 20, mapPage: 1, mapSize: 20, igPage: 1, igSize: 20,
       // 税名核对表默认只看「未核对」；已核对 = 原「已维护映射」那批数据
       mapFilter: 'unmatched',
+      // 税名核对搜索框：按销方名称 / 销方税号模糊过滤（纯前端，数据已全部在此）
+      mapKw: '',
       // 系统管理
       cfg: {
         gapMin: 15, gapMax: 30, chunkMax: 450, orderItem: '', reminder: '', serverUrl: '',
@@ -5212,6 +5413,7 @@ const vm = new Vue({
         { title: '发票', items: this.isStaff ? [] : [
           { key: 'board', label: '1688发票', icon: 'el-icon-document' },
           { key: 'pdd', label: '拼多多发票', icon: 'el-icon-s-order' },
+          { key: 'pddCollect', label: '拼多多人工催收', icon: 'el-icon-chat-dot-round' },
           { key: 'sdc', label: '闪电帮帮发票', icon: 'el-icon-truck' },
           { key: 'mapping', label: '税名核对', icon: 'el-icon-edit-outline' },
         ] },
@@ -5311,6 +5513,15 @@ const vm = new Vue({
       return Math.round((q * spec * unit + Number.EPSILON) * 100) / 100;
     },
     /** 一键加购走哪个平台：只看供应商名（齐货通 / 永源顺·城配速达），且要有「平台取价」权限 */
+    /** 换供应商预检里的「价从哪来」文案（模板当值用 → 必须 computed，不能放 methods） */
+    roMoveSourceText() {
+      const c = this.roMove && this.roMove.check;
+      const src = c && c.source;
+      if (src === 'manual') return '手工价';
+      if (src === 'cache') return '价格缓存';
+      if (src === 'live') return '平台实时价';
+      return '';
+    },
     roCartKind() {
       const o = this.roView && this.roView.order;
       if (!o || !this.canPrice) return '';
@@ -5643,8 +5854,25 @@ const vm = new Vue({
           sub: '待申请 ' + n(s.pending) + ' · 开票中 ' + n(s.issuing) + ' · 商家处理 ' + n(s.mallProcessing) },
       ];
     },
-    /** 闪电帮帮：金额三卡（可申请 / 已申请 / 合计），口径与拼多多页保持一致 */
-    sdcStats() {
+    /** 线下催收：统计卡（商家数 / 订单数 / 总金额 / 缺实付金额提示） */
+    pdColStatCards() {
+      const t = this.pdCol.totals || {};
+      return [
+        { label: '涉及商家', value: String(t.malls || 0), sub: '按店铺聚合，同店多单只算一家' },
+        { label: '待人工催收订单', value: String(t.orders || 0), sub: '交易成功 · 暂不可开票 / 未同步开票' },
+        { label: '总金额', value: yuan(t.amount || 0), sub: 'Σ 实付金额' },
+        { label: '缺实付金额', value: String(t.missingAmount || 0), sub: '这些单没有实付金额，按 0 计入总额' },
+      ];
+    },
+    /** 线下催收：关键字过滤（商家名 / 订单号），纯前端过滤，数据量在千级以内 */
+    pdColRows() {
+      const kw = String(this.pdCol.keyword || '').trim().toLowerCase();
+      const rows = this.pdCol.rows || [];
+      if (!kw) return rows;
+      return rows.filter((g) => String(g.displayName || '').toLowerCase().includes(kw)
+        || (g.orders || []).some((o) => String(o.orderSn || '').toLowerCase().includes(kw)));
+    },
+    /** 闪电帮帮：金额三卡（可申请 / 已申请 / 合计），口径与拼多多页保持一致 */    sdcStats() {
       const s = this.sd.summary || {};
       const a = (o) => Number((o && o.amount) || 0);
       const n = (o) => Number((o && o.count) || 0);
@@ -5804,9 +6032,14 @@ const vm = new Vue({
       const n = sendable.filter(m => this.selected[m.loginId]).length;
       return n > 0 && n < sendable.length;
     },
-    unmatchedPage() { return this.map.unmatched.slice((this.unPage - 1) * this.unSize, this.unPage * this.unSize); },
-    mappingPage() { return this.map.mappings.slice((this.mapPage - 1) * this.mapSize, this.mapPage * this.mapSize); },
-    ignoredPage() { return this.map.ignored.slice((this.igPage - 1) * this.igSize, this.igPage * this.igSize); },
+    // ── 税名核对：销方名称 / 税号模糊搜索（三个列表共用一套匹配规则，翻页基于过滤后的集合）──
+    mapKwTrim() { return String(this.mapKw || '').trim(); },
+    mapUnmatchedFiltered() { return this.filterMapRows(this.map.unmatched); },
+    mapMatchedFiltered() { return this.filterMapRows(this.map.mappings); },
+    mapIgnoredFiltered() { return this.filterMapRows(this.map.ignored); },
+    unmatchedPage() { return this.mapUnmatchedFiltered.slice((this.unPage - 1) * this.unSize, this.unPage * this.unSize); },
+    mappingPage() { return this.mapMatchedFiltered.slice((this.mapPage - 1) * this.mapSize, this.mapPage * this.mapSize); },
+    ignoredPage() { return this.mapIgnoredFiltered.slice((this.igPage - 1) * this.igSize, this.igPage * this.igSize); },
     detailTitle() {
       const base = this.detail.kind === 'orders' ? '订单明细' : '发票明细（税务局）';
       return this.detail.date ? `${this.detail.date} · ${base}` : base;
@@ -5846,6 +6079,8 @@ const vm = new Vue({
   },
   watch: {
     trendDays() { this.$nextTick(() => this.renderTrend()); },
+    /** 税名核对搜索：关键词一变就回第 1 页，否则可能停在超出范围的空页 */
+    mapKw() { this.unPage = 1; this.mapPage = 1; this.igPage = 1; },
     page(p) {
       // v-show 切页：隐藏期间容器宽高为 0，切回来后 ECharts 还按旧宽度画 → 图表被压成一条。
       // 等一帧（display 生效、动画起步）再统一 resize 所有图表实例；
@@ -6039,7 +6274,8 @@ const vm = new Vue({
       if (p === 'waybill') this.loadWaybills();
       if (p === 'replenishOrder') this.loadReplenishOrders();
       if (p === 'audit') this.loadOpLog();
-      if (p === 'profit' || p === 'refund' || p === 'after' || p === 'pdd' || p === 'qnhcfg' || p === 'refundalert') {
+      if (p === 'profit' || p === 'refund' || p === 'after' || p === 'pdd' || p === 'pddCollect'
+          || p === 'qnhcfg' || p === 'refundalert') {
         if (p === 'refund') this.reportOp('qnh.view');
         this.enterQnhPage(p);
       }
@@ -6691,6 +6927,8 @@ const vm = new Vue({
     qnhReload() {
       // 拼多多与牵牛花是两套独立登录态，进拼多多页不该去请求牵牛花状态
       if (this.page === 'pdd') { this.loadPddStatus(); this.loadPddOrders(); return; }
+      // 线下催收与拼多多发票同源（同一套登录/租户），只读库、不打平台接口，所以不需要先探活登录态
+      if (this.page === 'pddCollect') { this.loadPddCollect(); return; }
       if (this.page === 'sdc') { this.loadSdcStatus(); this.loadSdcOrders(); return; }
       this.loadRefundStatus();
       if (this.page === 'refund') { this.loadRefunds(); this.loadRefundTrend(); }
@@ -7495,6 +7733,79 @@ const vm = new Vue({
       }
     },
     applyPddFilter() { this.pd.page = 1; this.clearPddPicked(); this.loadPddOrders(); },
+    // ── 线下催收（v0.3.38）──
+    /** 按商家汇总「交易成功 + 暂不可开票/未同步开票」的订单；只读库，不打拼多多接口 */
+    async loadPddCollect() {
+      if (this.qnhNeedPick) return;
+      this.pdCol.loading = true;
+      try {
+        const d = await this.pddApi('/api/pdd/offline-collect');
+        if (d.error) { this.$message.error(d.error); return; }
+        this.pdCol.rows = d.groups || [];
+        this.pdCol.totals = d.totals || { malls: 0, orders: 0, amount: 0, missingAmount: 0 };
+      } catch (e) {
+        this.$message.error('加载人工催收失败：' + e.message);
+      } finally {
+        this.pdCol.loading = false;
+      }
+    },
+    /** 打开某商家的二维码弹窗：先生成 7 天有效的手机链接，再用离线二维码库画成 SVG */
+    async openPddCollectQr(row) {
+      const dlg = this.pdCol.dlg;
+      dlg.visible = true; dlg.loading = true;
+      dlg.mallName = row.displayName || '';
+      dlg.orderCount = row.orderCount || 0;
+      dlg.amount = row.amount || 0;
+      dlg.latestOrderSn = row.latestOrderSn || '';
+      dlg.text = row.text || '';
+      dlg.qr = ''; dlg.link = '';
+      try {
+        const d = await this.pddApi('/api/pdd/offline-collect/share', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ key: row.key }),
+        });
+        if (!d.ok) { this.$message.error(d.error || '生成扫码链接失败'); return; }
+        dlg.link = d.link || '';
+        dlg.text = d.text || dlg.text;
+        dlg.latestOrderSn = d.latestOrderSn || dlg.latestOrderSn;
+        dlg.ttlDays = Number(d.ttlDays) || 7;
+        dlg.qr = this.qrSvg(dlg.link, { scalable: true });
+      } catch (e) {
+        this.$message.error('生成扫码链接失败：' + e.message);
+      } finally {
+        dlg.loading = false;
+      }
+    },
+    /**
+     * 通用复制：优先 Clipboard API；内网 http 下它不可用（非安全上下文），
+     * 退回 textarea + execCommand —— 与 m-upload 页同一套兜底。
+     */
+    copyPlain(text, okMsg) {
+      const s = String(text == null ? '' : text);
+      if (!s) { this.$message.warning('没有可复制的内容'); return; }
+      const done = () => this.$message.success(okMsg || '已复制');
+      const legacy = () => {
+        const ta = document.createElement('textarea');
+        ta.value = s; ta.setAttribute('readonly', '');
+        ta.style.position = 'fixed'; ta.style.top = '-1000px'; ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select(); ta.setSelectionRange(0, s.length);
+        let ok = false;
+        try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+        document.body.removeChild(ta);
+        if (ok) done(); else this.$message.warning('复制失败，请手动选中内容复制');
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText && window.isSecureContext) {
+        navigator.clipboard.writeText(s).then(done).catch(legacy);
+        return;
+      }
+      legacy();
+    },
+    copyPdColText() { this.copyPlain(this.pdCol.dlg.text, '已复制催收文字，粘贴到微信发给商家即可'); },
+    /** 复制「时间最近的一笔」订单号（列表按下单时间倒序，分组里的 latestOrderSn 就是它） */
+    copyPdColSn() {
+      this.copyPlain(this.pdCol.dlg.latestOrderSn, '已复制最近一笔订单号：' + (this.pdCol.dlg.latestOrderSn || ''));
+    },
     // 表头排序（下单时间 / 开票金额）：点一次降序、再点升序、第三次取消 → 回落到默认（时间倒序）
     onPddSortChange({ prop, order }) {
       const key = prop === 'invoiceAmount' ? 'amount' : 'time';
@@ -8453,16 +8764,31 @@ const vm = new Vue({
     },
 
     // ══════ 税名核对（所有人可用；普通用户只见自己发票里的销方，映射全平台共享） ══════
+    /**
+     * 税名核对模糊搜索：销方名称 / 销方税号为主，顺带匹配已映射的商家名、会员名与说明。
+     * 关键词用空格拆成多个词时要求「全部命中」（例如「深圳 1234」= 名称含深圳且税号含1234）；
+     * 大小写不敏感，全角空格也算分隔。
+     */
+    filterMapRows(rows) {
+      const kw = this.mapKwTrim.toLowerCase();
+      if (!kw) return rows || [];
+      const parts = kw.split(/[\s\u3000]+/).filter(Boolean);
+      return (rows || []).filter((r) => {
+        const hay = [r.tax_seller_name, r.seller_tax_no, r.seller_company, r.seller_login, r.note]
+          .map((x) => String(x == null ? '' : x).toLowerCase()).join(' ');
+        return parts.every((p) => hay.indexOf(p) >= 0);
+      });
+    },
     async loadMapping() {
       this.map.loading = true;
       try {
         const d = await this.api('/api/mapping');
         this.map = Object.assign({}, this.map, d);
         this.mapDraft = {};
-        // 页码回正：处理掉若干条后再刷新，原来的页码可能已经超出（会停在空页）
-        this.unPage = Math.min(this.unPage, Math.max(1, Math.ceil((this.map.unmatched || []).length / this.unSize)));
-        this.mapPage = Math.min(this.mapPage, Math.max(1, Math.ceil((this.map.mappings || []).length / this.mapSize)));
-        this.igPage = Math.min(this.igPage, Math.max(1, Math.ceil((this.map.ignored || []).length / this.igSize)));
+        // 页码回正：处理掉若干条后再刷新，原来的页码可能已经超出（会停在空页）；按「搜索过滤后」的条数算
+        this.unPage = Math.min(this.unPage, Math.max(1, Math.ceil(this.mapUnmatchedFiltered.length / this.unSize)));
+        this.mapPage = Math.min(this.mapPage, Math.max(1, Math.ceil(this.mapMatchedFiltered.length / this.mapSize)));
+        this.igPage = Math.min(this.igPage, Math.max(1, Math.ceil(this.mapIgnoredFiltered.length / this.igSize)));
         // 预热候选商家（前 50 条），下拉一打开就有内容
         this.mapSeller.q = '';
         this.fetchSellerOpts();
@@ -10048,14 +10374,19 @@ const vm = new Vue({
       this.resetWbUpload();
       this.wbNew.saving = false;
     },
-    /** 生成二维码 SVG（vendor/qrcode.min.js 暴露全局 qrcode()，纯离线，不依赖外网） */
-    qrSvg(text) {
+    /**
+     * 生成二维码 SVG（vendor/qrcode.min.js 暴露全局 qrcode()，纯离线，不依赖外网）
+     * opts.scalable：不写死 width/height，交给 CSS 撑满容器。
+     * 扫码链接很长时模块数会到 60+，按 4px 单元格算出来 260px 以上，
+     * 塞进 190px 的框里就会溢出压到右边的文字（人工催收弹窗踩过这个坑）。
+     */
+    qrSvg(text, opts) {
       try {
         if (typeof qrcode !== 'function') return '';
         const q = qrcode(0, 'M');
         q.addData(String(text || ''));
         q.make();
-        return q.createSvgTag(4, 2);
+        return q.createSvgTag({ cellSize: 4, margin: 2, scalable: !!(opts && opts.scalable) });
       } catch (e) { return ''; }
     },
     /**
@@ -10315,7 +10646,7 @@ const vm = new Vue({
       } catch (e) { this.$message.error('取消关联失败：' + e.message); }
     },
     async openRoView(row) {
-      this.roView = { visible: true, loading: true, order: null, items: [], editing: false, saving: false, carting: false };
+      this.roView = { visible: true, loading: true, order: null, items: [], editing: false, saving: false, carting: false, noStockSkus: [] };
       try {
         const d = await this.api('/api/replenish-order/detail?id=' + row.id);
         if (!d.ok) { this.$message.error(d.error || '加载详情失败'); this.roView.visible = false; return; }
@@ -10323,6 +10654,16 @@ const vm = new Vue({
         this.roView.items = d.items || [];
       } catch (e) { this.$message.error('加载详情失败：' + e.message); }
       finally { this.roView.loading = false; }
+    },
+    /** 重拉当前详情（改价/搬行/关联后金额、库存、条数都变了），保留编辑态与加购失败标记 */
+    async refreshRoView(orderId) {
+      const keepEditing = this.roView.editing && !Number(this.roView.order && this.roView.order.waybillId);
+      const d = await this.api('/api/replenish-order/detail?id=' + orderId).catch(() => null);
+      if (!d || !d.ok) return;
+      this.roView.order = d.order;
+      this.roView.items = d.items || [];
+      this.roView.editing = keepEditing;
+      this.loadReplenishOrders();
     },
     toggleRoEdit() {
       const o = this.roView.order;
@@ -10359,7 +10700,14 @@ const vm = new Vue({
           body: JSON.stringify({ id: o.id }),
         });
         if (d.needLogin) { await this.promptCartLogin(kind, d.error); return; }
-        if (!d.ok) { this.$message.error(d.error || '加购失败'); return; }
+        // v0.3.35：失败的行在明细里标红打 ×（失败多半是没货；库里库存为 0 的本来就会标）。
+        // ⚠ 必须放在 d.ok 判断**之前**：全部失败时 d.ok 也是 false，提前 return 就标不上了
+        this.roView.noStockSkus = (d.failed || []).map((x) => String(x.sku || '')).filter(Boolean);
+        if (!d.ok) {
+          const extra = this.roView.noStockSkus.length ? '（失败的行已在明细里标红打 ×）' : '';
+          this.$message.error((d.error || '加购失败') + extra);
+          return;
+        }
         const lines = ['已加入' + label + '购物车：' + d.added + ' 个商品、' + d.qtyTotal + ' 件'];
         if ((d.skipped || []).length) {
           lines.push('', '跳过 ' + d.skipped.length + ' 个（未关联' + label + '商品）：');
@@ -10367,7 +10715,7 @@ const vm = new Vue({
           if (d.skipped.length > 12) lines.push('· …… 还有 ' + (d.skipped.length - 12) + ' 个');
         }
         if ((d.failed || []).length) {
-          lines.push('', '失败 ' + d.failed.length + ' 个：');
+          lines.push('', '失败 ' + d.failed.length + ' 个（可能没货，明细里已标红打 ×）：');
           d.failed.slice(0, 12).forEach((x) => lines.push('· ' + (x.sku || '') + ' ' + (x.qty || 0) + ' 件 —— ' + x.error));
           if (d.failed.length > 12) lines.push('· …… 还有 ' + (d.failed.length - 12) + ' 个');
         }
@@ -10392,7 +10740,8 @@ const vm = new Vue({
         if (kind === 'qht') this.onQhtBtn(); else this.onAfaBtn();
       }, 200));
     },
-    /** 换供应商（行级）：把这一行搬到目标供应商的补货单，本行删除 */
+    /** 换供应商（行级）：把这一行搬到目标供应商的补货单，本行删除。
+     *  v0.3.35：选完供应商先查目标价，没有价（无货）时确认按钮直接禁用 */
     openRoMove(row) {
       const o = this.roView.order;
       if (!o || !row || !row.id) return;
@@ -10402,20 +10751,68 @@ const vm = new Vue({
         specQty: Number(row.specQty) || 1, unitPrice: Number(row.unitPrice) || 0,
         amount: Number(row.amount) || 0,
         fromSupplierId: Number(o.supplierId) || 0, supplierId: null,
+        check: null, checking: false,
       };
+    },
+    /** 选完目标供应商 → 问服务端「搬过去什么价、几件、多少钱、有没有货」 */
+    async checkRoMove() {
+      const m = this.roMove;
+      if (!m.supplierId) { m.check = null; m.error = ''; return; }
+      m.checking = true; m.check = null; m.error = '';
+      try {
+        const d = await this.api('/api/replenish-order/item-move-check', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ orderId: m.orderId, itemId: m.itemId, supplierId: m.supplierId }),
+        });
+        if (d.error && !d.supplierName) { m.error = d.error; return; }
+        // 无价/未关联的情况放在 check 里展示（它自带 needLink 与关联按钮），不占用 error 位置
+        m.check = d;
+      } catch (e) { m.error = '查目标价失败：' + e.message; }
+      finally { m.checking = false; }
+    },
+    /** 目标供应商没关联平台商品 → 打开关联弹窗，关联成功后回来重查 */
+    openRoMoveLink() {
+      const m = this.roMove;
+      const kind = (m.check && m.check.linkKind) || '';
+      if (!kind) return;
+      const row = { sku: m.sku, goods_name: m.goodsName || m.sku, brand_id: null, src: 'ro' };
+      if (kind === 'afa') this.openAfaLinkDlg(row, 'ro', () => this.afterRoMoveLink());
+      else this.openLinkDlg(row, 'ro', () => this.afterRoMoveLink());
+    },
+    /** 关联完成：把换供应商弹窗拉回前台并重查一次价格 */
+    async afterRoMoveLink() {
+      const m = this.roMove;
+      if (!m || !m.itemId) return;
+      const keep = { orderId: m.orderId, itemId: m.itemId, supplierId: m.supplierId, sku: m.sku, goodsName: m.goodsName,
+        qtyPack: m.qtyPack, specQty: m.specQty, unitPrice: m.unitPrice, amount: m.amount,
+        fromSupplierId: m.fromSupplierId };
+      this.roMove = Object.assign({ visible: true, saving: false, error: '', check: null, checking: false }, keep);
+      await this.checkRoMove();
+      // 关联接口写了品牌商品/个人商品的 goodsId，详情里的关联信息也刷一下
+      if (this.roView.order) this.refreshRoView(this.roView.order.id);
     },
     async confirmRoMove() {
       const m = this.roMove;
       if (!m.supplierId) return this.$message.warning('先选目标供应商');
+      if (!m.check || !m.check.ok) return this.$message.warning('目标供应商没有可用的价（无货），不能迁移');
       m.saving = true; m.error = '';
       try {
         const d = await this.api('/api/replenish-order/item-move', {
           method: 'POST', headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ orderId: m.orderId, itemId: m.itemId, supplierId: m.supplierId, sku: m.sku, qtyPack: m.qtyPack }),
+          body: JSON.stringify({ orderId: m.orderId, itemId: m.itemId, supplierId: m.supplierId, sku: m.sku }),
         });
-        if (!d.ok) { m.error = d.error || '换供应商失败'; return; }
+        if (!d.ok) {
+          m.error = d.error || '换供应商失败';
+          if (d.needLink) m.check = Object.assign({}, m.check || {}, { ok: false, error: d.error, needLink: true, linkKind: d.kind });
+          return;
+        }
         m.visible = false;
+        const mv = d.moved || {};
         const bits = ['已搬到「' + d.targetSupplierName + '」的补货单 #' + d.targetOrderId];
+        if (mv.qtyPack != null) {
+          bits.push('按目标价 ' + yuan4(mv.unitPrice) + '/个、规格 ' + mv.specQty + '/件 重算：'
+            + (mv.fromQtyPack != null ? mv.fromQtyPack + ' 件 → ' : '') + mv.qtyPack + ' 件');
+        }
         if (d.merged) bits.push('目标单已有该 SKU，数量已累加');
         bits.push('本行已删除');
         if (d.sourceDeleted) bits.push('源单已没有明细，已一并删除');
@@ -10429,6 +10826,18 @@ const vm = new Vue({
         }
       } catch (e) { m.error = '换供应商失败：' + e.message; }
       finally { m.saving = false; }
+    },
+    /** 这一行要不要标红打 ×：库存为 0，或本次一键加购失败（用户口径：失败很可能是没货） */
+    roBadRow(row) {
+      if (!row) return false;
+      if (row.noStock) return true;
+      return (this.roView.noStockSkus || []).indexOf(String(row.sku || '')) >= 0;
+    },
+    roBadReason(row) {
+      if (!row) return '';
+      if (row.noStock) return '商品库可用库存为 0（无货）';
+      if ((this.roView.noStockSkus || []).indexOf(String(row.sku || '')) >= 0) return '一键加购失败，可能无货';
+      return '';
     },
     /** 打开行编辑（row 为空 = 新增，需先带 sku/goodsName/默认价） */
     openRoItem(row) {
@@ -10639,7 +11048,8 @@ const vm = new Vue({
     },
     /** 关联弹窗的数据源：src='rp' 补货页行，src='product' 商品列表行 */
     rowsOf(src) { return src === 'product' ? (this.product.rows || []) : (this.rp.rows || []); },
-    openLinkDlg(row, src) {
+    openLinkDlg(row, src, after) {
+      this.rpLinkAfter = typeof after === 'function' ? after : null;
       this.rpLink = {
         visible: true, sku: row.sku, brandId: row.brand_id || null, src: src || 'rp',
         keyword: row.goods_name || '', rows: [], loading: false, error: '', picked: null, total: 0, page: 1, size: 20,
@@ -10694,6 +11104,9 @@ const vm = new Vue({
           }
         }
         this.$message.success('已关联：' + pick.goodsName);
+        const after = this.rpLinkAfter;
+        this.rpLinkAfter = null;
+        if (after) await after(pick);
       } catch (e) { this.$message.error('关联失败: ' + e.message); }
     },
     openBuy(row) {
@@ -11145,7 +11558,8 @@ const vm = new Vue({
       }
       return { cached, fetched };
     },
-    openAfaLinkDlg(row, src) {
+    openAfaLinkDlg(row, src, after) {
+      this.rpLinkAfter = typeof after === 'function' ? after : null;
       this.rpAfaLink = {
         visible: true, sku: row.sku, brandId: row.brand_id || null, src: src || 'rp',
         keyword: row.goods_name || '', rows: [], loading: false, error: '', picked: null, total: 0, page: 1, size: 20,
@@ -11200,6 +11614,9 @@ const vm = new Vue({
         }
         this.rpAfaLink.visible = false;
         this.$message.success('已关联城配速达：' + pick.goodsName);
+        const after = this.rpLinkAfter;
+        this.rpLinkAfter = null;
+        if (after) await after(pick);
       } catch (e) { this.$message.error('关联失败: ' + e.message); }
     },
     // ══════ 自动匹配（按商品名称搜索 → 取第一条直接关联）══════

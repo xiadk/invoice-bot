@@ -66,7 +66,9 @@ const priceCache = require('./lib/price-cache');
 const products = require('./lib/products');
 const productPrice = require('./lib/product-price');
 const billing = require('./lib/billing');
-const { loadConfig, CONFIG_PATH } = require('./lib/config');
+const configStore = require('./lib/config');
+const { loadConfig } = configStore;
+const collectShare = require('./lib/collect-share');
 const { AgentHub } = require('./lib/agent-hub');
 const { buildMessages } = require('./lib/sender');
 const qnh = require('./lib/qnh');
@@ -2887,7 +2889,8 @@ async function loadMapping(userId, { allUsers = false } = {}) {
       SELECT seller_name AS n,
              ROUND(SUM(total_amount), 2) AS invoice_amount,
              COUNT(*) AS invoice_rows,
-             MAX(invoice_date) AS last_invoice_date
+             MAX(invoice_date) AS last_invoice_date,
+             MAX(seller_tax_no) AS seller_tax_no
         FROM issued_invoice
         ${scoped ? 'WHERE user_id = ?' : ''}
        GROUP BY seller_name
@@ -2898,7 +2901,7 @@ async function loadMapping(userId, { allUsers = false } = {}) {
            m.match_type, m.match_rule, m.is_confirmed, m.is_ignored, m.note, m.updated_at,
            (m.user_id = ?) AS maintainer_is_me,
            u.name AS maintainer,
-           agg.invoice_amount, agg.invoice_rows, agg.last_invoice_date
+           agg.invoice_amount, agg.invoice_rows, agg.last_invoice_date, agg.seller_tax_no
     FROM seller_name_mapping m
     LEFT JOIN (SELECT id, COALESCE(NULLIF(company_full_name, ''), NULLIF(company_name, ''), username) AS name FROM app_user) u
            ON u.id = m.user_id
@@ -3382,6 +3385,33 @@ const server = http.createServer(async (req, res) => {
     // 手机扫码上传页（v0.3.0）：**不需要登录**，凭证是 URL 里的 5 分钟一次性令牌。
     // 扫码的人多半是仓库/司机，没有账号；所以这里刻意放在鉴权之前，且只暴露上传能力。
     if (method === 'GET' && (p === '/m-upload' || p === '/m-upload.html')) return sendHtml(res, 'm-upload.html');
+    // 线下催收手机页（v0.3.38）：**不需要登录**，凭据是 URL 里 7 天有效的签名令牌。
+    // 扫码的人多半是老板/业务员本人的手机，未在看板登录过；令牌只读、只覆盖一个商家。
+    if (method === 'GET' && (p === '/m-collect' || p === '/m-collect.html')) return sendHtml(res, 'm-collect.html');
+    if (method === 'GET' && p === '/api/pub/pdd-collect') {
+      const tk = collectShare.verifyCollectToken(url.searchParams.get('t') || '');
+      if (!tk) {
+        return sendJson(res, 200, { ok: false, error: '链接已失效（有效期 7 天），请回到电脑上重新点「二维码」生成' });
+      }
+      const data = await pdd.offlineCollect(tk.u);
+      const g = pdd.offlineGroupOf(data, tk.k);
+      if (!g) {
+        return sendJson(res, 200, { ok: false, error: '该商家的订单已全部处理，没有需要人工催收的了' });
+      }
+      const buyer = await buyerInfoOf(tk.u);
+      return sendJson(res, 200, {
+        ok: true,
+        mallName: g.displayName,
+        orderCount: g.orderCount,
+        amount: g.amount,
+        latestOrderSn: g.latestOrderSn,
+        text: pdd.offlineCollectText(loadConfig(), buyer, g),
+        orders: g.orders.map((o) => ({
+          orderSn: o.orderSn, orderTime: o.orderTime, payAmount: o.payAmount,
+          statusText: o.statusText, goodsName: o.goodsName,
+        })),
+      });
+    }
     if (p === '/api/pub/waybill-upload') {
       if (method === 'GET') {
         const s = await waybill.uploadSession(url.searchParams.get('t') || '');
@@ -4184,12 +4214,10 @@ const server = http.createServer(async (req, res) => {
       if (!isAdmin) return sendJson(res, 403, { error: '仅超级管理员可修改系统配置' });
       const { config } = await readBody(req);
       if (!config || typeof config !== 'object') throw new Error('缺少 config');
-      // 与 lib/config.js 同源：优先 APP_CONFIG_FILE（容器部署把配置挂载到可写目录），
-      // 否则项目根目录。此前写死 path.join(ROOT, 'config.json')，容器里 /app 不可写时保存必挂
-      const filePath = CONFIG_PATH;
-      let old = {};
-      try { old = JSON.parse(fs.readFileSync(filePath, 'utf-8')); }
-      catch (e) { if (e.code !== 'ENOENT') throw e; }
+      // v0.3.37：业务配置一律存 app_config（key = config.<段>），不再读写 config.json。
+      // 原来这里 fs.writeFileSync 回 /app/config.json，容器里属主是 root、进程是 node，
+      // 保存「拼多多 · 翻页上限」必然 EACCES；入库后只读挂载也能正常保存。
+      const old = loadConfig() || {};
       const merged = { ...old };
       merged.runtime = { ...(old.runtime || {}), ...(config.runtime || {}) };
       // 拼多多翻页上限（发票刷新与订单同步共用）：夹在 20~2000，非法值回默认值（v0.3.14 起 1000，改完下次同步即生效）
@@ -4233,16 +4261,23 @@ const server = http.createServer(async (req, res) => {
         const u = String(config.runtime.agentInstallerUrl || '').trim();
         merged.runtime.agentInstallerUrl = /^https?:\/\//i.test(u) ? u : '';
       }
+      // 只落客户端真正提交过的段：没提交的段保持库里原值，避免把文件兜底值反向覆盖进库
+      const changed = {};
+      if (config.runtime) changed.runtime = merged.runtime;
+      if (config.messages) changed.messages = merged.messages;
+      if (config.pddMessage !== undefined) changed.pddMessage = merged.pddMessage;
+      if (config.server_url !== undefined) changed.server_url = merged.server_url;
+      if (Object.prototype.hasOwnProperty.call(config, 'copyright')) {
+        merged.copyright = String(config.copyright || '').trim();
+        changed.copyright = merged.copyright;
+      }
+      if (config.qiniu !== undefined) changed.qiniu = merged.qiniu;
       try {
-        fs.writeFileSync(filePath, JSON.stringify(merged, null, 2), 'utf-8');
+        // 写库成功即生效（saveSections 会同步刷新本进程缓存），无需重启、无需重启容器
+        await configStore.saveSections(changed);
       } catch (e) {
-        if (e.code === 'EACCES' || e.code === 'EROFS' || e.code === 'EPERM') {
-          throw new Error('配置文件不可写（' + e.code + '）：' + filePath
-            + '。容器部署请把配置挂载到可写目录并用环境变量 APP_CONFIG_FILE 指向它'
-            + '（如 docker-compose 加 volumes: "./data/config.json:/data/config.json" 且 APP_CONFIG_FILE=/data/config.json），'
-            + '或进入容器执行 chown $(id -u):$(id -g) ' + filePath + ' 修正属主。');
-        }
-        throw e;
+        throw new Error('配置保存失败（写入 app_config 表出错）：' + String((e && e.message) || e)
+          + '。该错误与容器文件权限无关；请确认数据库连接正常后重试');
       }
       // 兼容旧调用：允许随配置一起提交本人抬头。看板已不再走这条路
       // （抬头属于用户信息，统一在「系统管理 → 用户管理」里按账号维护）
@@ -5746,7 +5781,13 @@ const server = http.createServer(async (req, res) => {
       }
 
       if (method === 'GET' && p === '/api/replenish-order/detail') {
-        const out = await replenishOrder.getOrder({ userId: roUid, id: url.searchParams.get('id') });
+        // brandId 参与「实时库存」读取（brand_product 按品牌共享；0=超管看全部品牌）
+        const brandId = user.role === 'admin'
+          ? (brandOf(req, url, user).brandId || 0)
+          : await brandIdOfUser(roUid);
+        const out = await replenishOrder.getOrder({
+          userId: roUid, id: url.searchParams.get('id'), brandId,
+        });
         return sendJson(res, out.ok ? 200 : 404, out);
       }
 
@@ -5804,7 +5845,8 @@ const server = http.createServer(async (req, res) => {
         writeGuard();
         const body = await readBody(req);
         const out = await replenishOrder.saveItem({
-          userId: roUid, orderId: body.orderId, itemId: body.itemId,
+          userId: roUid, brandId: brandFromBody(user, body).brandId || (Number(user.brand_id) || 0),
+          orderId: body.orderId, itemId: body.itemId,
           sku: body.sku, goodsName: body.goodsName, channel: body.channel, channelLabel: body.channelLabel,
           qtyPack: body.qtyPack, specQty: body.specQty, unitPrice: body.unitPrice, suggestQty: body.suggestQty,
         });
@@ -5821,7 +5863,8 @@ const server = http.createServer(async (req, res) => {
         writeGuard();
         const body = await readBody(req);
         const out = await replenishOrder.deleteItem({
-          userId: roUid, orderId: body.orderId, itemId: body.itemId,
+          userId: roUid, brandId: brandFromBody(user, body).brandId || (Number(user.brand_id) || 0),
+          orderId: body.orderId, itemId: body.itemId,
         });
         if (out.ok) {
           await logOp(user, 'replenish.item_delete', {
@@ -5833,17 +5876,32 @@ const server = http.createServer(async (req, res) => {
 
       // 换供应商（v0.3.33 起是**行级**）：把这一行的补货数量搬到目标供应商的补货单，
       // 本行删除、源单搬空即软删。整单改名已去掉，避免与搬行混淆。
+      // v0.3.35：搬之前先算「目标供应商有没有价」，没价（无货）不许搬，见下面 item-move-check。
+      if (method === 'POST' && p === '/api/replenish-order/item-move-check') {
+        const body = await readBody(req);
+        const brandId = brandFromBody(user, body).brandId || (Number(user.brand_id) || 0);
+        const out = await replenishOrder.checkItemMove({
+          userId: roUid, brandId,
+          orderId: body.orderId, itemId: body.itemId, supplierId: body.supplierId,
+        });
+        // 预检是「查一下能不能搬」，无货/未关联都是正常结论不是请求错误 → 一律 200，
+        // 用 body.ok 表达结果（否则前端控制台每次都红一条 400，看着像故障）
+        return sendJson(res, 200, out);
+      }
+
       if (method === 'POST' && p === '/api/replenish-order/item-move') {
         writeGuard();
         const body = await readBody(req);
+        const brandId = brandFromBody(user, body).brandId || (Number(user.brand_id) || 0);
         const out = await replenishOrder.moveItemToSupplier({
-          userId: roUid, orderId: body.orderId, itemId: body.itemId,
+          userId: roUid, brandId,
+          orderId: body.orderId, itemId: body.itemId,
           supplierId: body.supplierId, operator: user.username,
         });
         if (out.ok) {
           await logOp(user, 'replenish.item_move', {
             tenantId: roUid, orderId: Number(body.orderId), sku: body.sku || '',
-            qtyPack: body.qtyPack, supplierName: out.targetSupplierName,
+            qtyPack: out.moved && out.moved.qtyPack, supplierName: out.targetSupplierName,
             targetOrderId: out.targetOrderId, merged: out.merged, sourceDeleted: out.sourceDeleted,
           });
         }
@@ -6425,6 +6483,43 @@ const server = http.createServer(async (req, res) => {
         await logOp(user, 'pdd.sync', { ok: !!out.ok, total: out.total, tenantId: pddUid });
         return sendJson(res, 200, out);
       }
+
+      // 线下催收（v0.3.38）：按商家汇总「交易成功 + 暂不可开票/未同步开票」的订单。
+      // 这两类在平台上没有可用入口，只能线下把订单号发给商家催，故单独成页。
+      // 金额口径 = 实付金额（pay_amount），缺实付的单计入 missingAmount 提示，不静默算成 0。
+      if (method === 'GET' && p === '/api/pdd/offline-collect') {
+        const out = await pdd.offlineCollect(pddUid);
+        const buyer = await buyerInfoOf(pddUid);
+        const cfg = loadConfig();
+        out.groups = out.groups.map((g) => ({
+          ...g,
+          text: pdd.offlineCollectText(cfg, buyer, g),
+        }));
+        return sendJson(res, 200, out);
+      }
+
+      // 生成手机扫码链接：只读、7 天有效、只覆盖一个商家（无状态签名，不建表）
+      if (method === 'POST' && p === '/api/pdd/offline-collect/share') {
+        const body = await readBody(req);
+        const data = await pdd.offlineCollect(pddUid);
+        const g = pdd.offlineGroupOf(data, body.key);
+        if (!g) return sendJson(res, 400, { ok: false, error: '该商家已没有需要人工催收的订单' });
+        const t = collectShare.createCollectToken({ userId: pddUid, key: g.key });
+        const link = serverUrlOf(req) + '/m-collect?t=' + encodeURIComponent(t.token);
+        const buyer = await buyerInfoOf(pddUid);
+        return sendJson(res, 200, {
+          ok: true,
+          link,
+          exp: t.exp,
+          ttlDays: Math.round(t.ttlMs / 86400000),
+          mallName: g.displayName,
+          orderCount: g.orderCount,
+          amount: g.amount,
+          latestOrderSn: g.latestOrderSn,
+          text: pdd.offlineCollectText(loadConfig(), buyer, g),
+        });
+      }
+
 
       // 店铺 ID 解析进度：多少家店还没解析出来（催收按钮能否点亮就看这个）
       if (method === 'GET' && p === '/api/pdd/mall-id/stats') {
@@ -7687,6 +7782,20 @@ server.listen(PORT, async () => {
   // 抓包取 Token 已独立成 tools/afa-token 小工具（v0.2.89），服务端不再涉及证书与系统代理
   try {
     await db.ensureSchema();
+    // v0.3.37：业务配置入库。首次启动把 config.json 的业务段（runtime/messages/pddMessage/
+    // qiniu/server_url/copyright）搬进 app_config，之后读写全部走库 —— 系统管理保存配置
+    // 不再写文件，容器里 /app 只读也不会再报 EACCES。mysql 段仍只由 db.js 解析（R1）。
+    const cfgInit = await configStore.initConfigStore();
+    if (cfgInit.migrated.length) {
+      console.log('  [配置] 已从 config.json 迁入 app_config：' + cfgInit.migrated.join('、'));
+    }
+    if (!cfgInit.refreshed) {
+      console.log('  [配置] 数据库配置暂不可用，继续用 config.json 兜底：' + cfgInit.error);
+    } else {
+      const src = configStore.configSource();
+      const fromDb = Object.keys(src).filter((k) => src[k] === 'db');
+      console.log('  [配置] 已从 app_config 加载：' + (fromDb.length ? fromDb.join('、') : '暂无，使用文件默认值'));
+    }
     const admin = (await db.query("SELECT id FROM app_user WHERE username = 'admin'"))[0];
     if (admin) {
       const notes = tenancy.migrateLegacyData(admin.id);

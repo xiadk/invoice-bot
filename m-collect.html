@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="format-detection" content="telephone=no">
+<title>拼多多人工催收</title>
+<style>
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  :root { --bg:#f5f7fa; --card:#fff; --text:#1f2d3d; --text2:#7b8794; --line:#e4e7ed;
+          --pri:#409eff; --ok:#52c41a; --err:#f56c6c; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text);
+    font: 16px/1.6 -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif; }
+  .wrap { max-width: 560px; margin: 0 auto;
+    padding: 18px 14px calc(28px + env(safe-area-inset-bottom)); }
+  header { padding: 6px 4px 14px; }
+  h1 { margin: 0 0 4px; font-size: 19px; font-weight: 600; }
+  .sub { margin: 0; font-size: 13px; color: var(--text2); }
+  .sub.bad { color: var(--err); }
+  .card { background: var(--card); border-radius: 12px; padding: 16px;
+    box-shadow: 0 1px 3px rgba(0,0,0,.06); margin-bottom: 12px; }
+  .meta { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+  .meta b { font-size: 17px; }
+  .meta span { font-size: 13px; color: var(--text2); font-variant-numeric: tabular-nums; }
+  .lbl { display: block; font-size: 13px; color: var(--text2); margin: 0 0 8px; }
+  textarea { width: 100%; min-height: 220px; padding: 12px; border: 1px solid var(--line);
+    border-radius: 10px; font: 15px/1.7 inherit; color: var(--text); background: #fcfcfd;
+    resize: vertical; }
+  textarea:focus { outline: none; border-color: var(--pri); background: #fff; }
+  .btns { display: flex; gap: 10px; margin-top: 14px; }
+  button { flex: 1; padding: 14px 10px; border: 0; border-radius: 10px; font-size: 16px;
+    font-weight: 600; cursor: pointer; letter-spacing: .5px; }
+  button.pri { background: var(--pri); color: #fff; }
+  button.pri:active { background: #3a8ee6; }
+  button.ghost { background: #eef4ff; color: #2b6cb0; }
+  button.ghost:active { background: #dfeaff; }
+  button[disabled] { background: #c0c4cc; color: #fff; }
+  .tip { margin: 12px 2px 0; font-size: 12.5px; color: var(--text2); line-height: 1.7; }
+  ul { list-style: none; margin: 0; padding: 0; }
+  li { padding: 10px 0; border-top: 1px solid var(--line); }
+  li:first-child { border-top: 0; }
+  .sn { font-size: 14.5px; font-variant-numeric: tabular-nums; word-break: break-all; }
+  .g { font-size: 12.5px; color: var(--text2); margin-top: 2px; }
+  .amt { float: right; font-size: 14.5px; color: #c45656; font-variant-numeric: tabular-nums; }
+  .msg { font-size: 13.5px; padding: 12px 14px; border-radius: 10px; background: #fef0f0;
+    color: #c45656; }
+  .msg.ok { background: #f0f9eb; color: #529b2e; }
+  .msg:empty { display: none; }
+  .foot { text-align: center; font-size: 12px; color: #a8b1bb; margin-top: 18px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>拼多多人工催收</h1>
+    <p class="sub" id="sub">正在校验链接…</p>
+  </header>
+
+  <div class="card" id="card" hidden>
+    <div class="meta">
+      <b id="mall">—</b>
+      <span id="stat"></span>
+    </div>
+    <label class="lbl" for="txt">催收文字（可直接修改，改完点下面按钮复制）</label>
+    <textarea id="txt" spellcheck="false"></textarea>
+    <div class="btns">
+      <button class="pri" id="copyAll" type="button">一键复制文字</button>
+      <button class="ghost" id="copySn" type="button">复制最近订单号</button>
+    </div>
+    <p class="tip">总金额按实付金额合计；订单号已按时间倒序，第一条就是最近的一笔。</p>
+  </div>
+
+  <div class="card" id="listCard" hidden>
+    <label class="lbl">订单清单 <span id="cnt"></span></label>
+    <ul id="list"></ul>
+  </div>
+
+  <div class="msg" id="msg"></div>
+  <div class="foot">本链接 7 天内有效 · 只读，不会改动任何订单</div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+  var QS = new URLSearchParams(location.search);
+  var T = QS.get('t') || '';
+  var $ = function (id) { return document.getElementById(id); };
+  var DATA = null;
+
+  function msg(text, ok) {
+    var el = $('msg');
+    el.textContent = text || '';
+    el.className = 'msg' + (ok ? ' ok' : '');
+  }
+
+  /**
+   * 复制文本：优先 Clipboard API（https/localhost 才有），
+   * 否则退回 selection + execCommand —— 内网 http 用手机打开时只有这条能走通，
+   * 而且必须在用户点击的同步调用栈里执行，不能放进 Promise.then。
+   */
+  function copyText(text) {
+    var s = String(text == null ? '' : text);
+    if (!s) return Promise.resolve(false);
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText && window.isSecureContext) {
+        return navigator.clipboard.writeText(s).then(function () { return true; })
+          .catch(function () { return legacyCopy(s); });
+      }
+    } catch (e) { /* 落到 legacy */ }
+    return Promise.resolve(legacyCopy(s));
+  }
+
+  function legacyCopy(s) {
+    var ta = document.createElement('textarea');
+    ta.value = s;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.top = '-1000px';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    ta.setSelectionRange(0, s.length);
+    var ok = false;
+    try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+    document.body.removeChild(ta);
+    return ok;
+  }
+
+  function yuan(v) {
+    var n = Number(v);
+    return Number.isFinite(n) ? n.toFixed(2) : '—';
+  }
+
+  function fmtTime(t) {
+    var s = String(t || '');
+    return s.length >= 16 ? s.slice(0, 16) : s;
+  }
+
+  function render(d) {
+    DATA = d;
+    $('sub').textContent = '扫码打开的是这台手机看到的实时数据，可以改文字再复制发给商家';
+    $('sub').className = 'sub';
+    $('mall').textContent = d.mallName || '未知店铺';
+    $('stat').textContent = d.orderCount + ' 笔订单 · 总金额 ¥' + yuan(d.amount);
+    $('txt').value = d.text || '';
+    $('card').hidden = false;
+
+    var list = $('list');
+    list.innerHTML = '';
+    (d.orders || []).forEach(function (o) {
+      var li = document.createElement('li');
+      var amt = document.createElement('span');
+      amt.className = 'amt';
+      amt.textContent = o.payAmount == null ? '—' : '¥' + yuan(o.payAmount);
+      var sn = document.createElement('div');
+      sn.className = 'sn';
+      sn.textContent = o.orderSn || '';
+      var g = document.createElement('div');
+      g.className = 'g';
+      g.textContent = [fmtTime(o.orderTime), o.statusText, o.goodsName].filter(Boolean).join(' · ');
+      li.appendChild(amt);
+      li.appendChild(sn);
+      li.appendChild(g);
+      list.appendChild(li);
+    });
+    $('cnt').textContent = '（' + (d.orders || []).length + ' 笔）';
+    $('listCard').hidden = !(d.orders || []).length;
+  }
+
+  function load() {
+    if (!T) {
+      $('sub').textContent = '链接不完整';
+      $('sub').className = 'sub bad';
+      msg('请回到电脑上重新点商家的「二维码」生成链接');
+      return;
+    }
+    fetch('/api/pub/pdd-collect?t=' + encodeURIComponent(T), { credentials: 'omit' })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (!d || !d.ok) {
+          $('sub').textContent = '链接不可用';
+          $('sub').className = 'sub bad';
+          msg((d && d.error) || '链接已失效');
+          return;
+        }
+        render(d);
+      })
+      .catch(function () {
+        $('sub').textContent = '网络异常';
+        $('sub').className = 'sub bad';
+        msg('加载失败，请检查手机是否和服务器在同一网络后重试');
+      });
+  }
+
+  $('copyAll').addEventListener('click', function () {
+    copyText($('txt').value).then(function (ok) {
+      msg(ok ? '已复制催收文字，去微信粘贴给商家即可' : '复制失败：请长按文本框手动全选复制', ok);
+    });
+  });
+
+  $('copySn').addEventListener('click', function () {
+    var sn = (DATA && DATA.latestOrderSn) || '';
+    if (!sn) { msg('没有可复制的订单号'); return; }
+    copyText(sn).then(function (ok) {
+      msg(ok ? '已复制最近一笔订单号：' + sn : '复制失败：请长按下方订单号手动复制', ok);
+    });
+  });
+
+  load();
+})();
+</script>
+</body>
+</html>

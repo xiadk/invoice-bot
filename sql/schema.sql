@@ -381,6 +381,25 @@ CREATE TABLE IF NOT EXISTS `operation_log` (
   COMMENT='操作日志（仅超级管理员可查看）';
 
 -- ----------------------------------------------------------------------------
+-- app_config —— 全局配置（键值对）
+--   v0.3.37 起业务配置全部存这里，不再依赖项目根的 config.json：
+--     key = 'config.runtime'    → 运行参数（翻页上限、发送间隔、助手版本治理）
+--     key = 'config.messages'   → 1688 催收话术
+--     key = 'config.pddMessage' → 拼多多催收话术
+--     key = 'config.qiniu'      → 七牛存储参数
+--     key = 'config.server_url' / 'config.copyright' → 标量（value 仍是 JSON 文本）
+--   value 统一存 JSON 文本；退单定时同步（qnh_schedule_times 等）也在这张表。
+--   容器里 /app 只读时，保存配置写这张表即可，不写文件（原 EACCES 的根治点）。
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `app_config` (
+  `key`        VARCHAR(64) NOT NULL        COMMENT '配置项（config.<段> 或业务自有键）',
+  `value`      TEXT        DEFAULT NULL    COMMENT '配置值（JSON 文本或纯字符串）',
+  `updated_at` DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+  PRIMARY KEY (`key`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  COMMENT='全局配置（业务配置与退单定时同步共用）';
+
+-- ----------------------------------------------------------------------------
 -- brand_product —— 品牌商品主数据（「商品同步」写入；同品牌方全员共享）
 --   一个品牌方一套商品，品牌内所有用户看到的是同一份数据（采购价/库存/在途/销量/状态/主图）。
 --   数据源：牵牛花 前置仓补货参考（store-warehouse/page-query），字段映射见 lib/qnh.js。
