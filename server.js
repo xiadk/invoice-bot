@@ -3396,7 +3396,7 @@ const server = http.createServer(async (req, res) => {
       const data = await pdd.offlineCollect(tk.u);
       const g = pdd.offlineGroupOf(data, tk.k);
       if (!g) {
-        return sendJson(res, 200, { ok: false, error: '该商家的订单已全部处理，没有需要线下催收的了' });
+        return sendJson(res, 200, { ok: false, error: '该商家的订单已全部处理，没有需要人工催收的了' });
       }
       const buyer = await buyerInfoOf(tk.u);
       return sendJson(res, 200, {
@@ -6503,7 +6503,7 @@ const server = http.createServer(async (req, res) => {
         const body = await readBody(req);
         const data = await pdd.offlineCollect(pddUid);
         const g = pdd.offlineGroupOf(data, body.key);
-        if (!g) return sendJson(res, 400, { ok: false, error: '该商家已没有需要线下催收的订单' });
+        if (!g) return sendJson(res, 400, { ok: false, error: '该商家已没有需要人工催收的订单' });
         const t = collectShare.createCollectToken({ userId: pddUid, key: g.key });
         const link = serverUrlOf(req) + '/m-collect?t=' + encodeURIComponent(t.token);
         const buyer = await buyerInfoOf(pddUid);
