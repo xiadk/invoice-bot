@@ -236,6 +236,9 @@
   .pc-main { flex: 1 1 320px; min-width: 0; }
   .pc-main .el-textarea__inner { font-size: 13px; line-height: 1.7; }
   @media (max-width: 720px) { .pc-dlg { flex-wrap: wrap; } }
+  /* 空闲预挂载用：先把 dialog 的 DOM 建好但不显示。Element 首次渲染要 ~200ms，
+     挪到这里之后，用户点「二维码催收」时只切一次 display，不再卡在点击之后。 */
+  .pc-dlg-warming { display: none !important; }
   .wb-left { font-size: 12px; color: var(--text-2); margin-left: 8px; }
   .wb-left.is-warn { color: #e6a23c; }
   /* 员工新增弹窗里的菜单开关：两列网格，省高度 */
@@ -4340,10 +4343,10 @@
         <el-card class="section-card" shadow="never">
           <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px">
             <el-input v-model="pdCol.keyword" size="small" clearable style="width:260px"
-                      placeholder="商家名称 / 订单号"></el-input>
+                      placeholder="商家名称 / 订单号" @input="pdCol.page = 1"></el-input>
             <el-button size="small" type="primary" :loading="pdCol.loading" @click="loadPddCollect(true)">刷新</el-button>
             <span style="flex:1"></span>
-            <span class="loginid">共 {{ pdColRows.length }} 个商家</span>
+            <span class="loginid">共 {{ pdColAll.length }} 个商家</span>
           </div>
 
           <el-table :data="pdColRows" size="small" border v-loading="pdCol.loading" row-key="key"
@@ -4397,38 +4400,22 @@
               </template>
             </el-table-column>
           </el-table>
+
+          <!-- 分页（v0.3.40）：金额大的排前面，翻页按当前排序切片，不重新请求 -->
+          <div style="margin-top:12px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+            <span class="loginid">金额从高到低 · 每页 {{ pdCol.size }} 家</span>
+            <span style="flex:1"></span>
+            <el-pagination background small :total="pdColAll.length" :page-size="pdCol.size"
+                           :current-page="pdCol.page" :page-sizes="[20, 100]"
+                           layout="total, sizes, prev, pager, next, jumper"
+                           @size-change="onPdColSizeChange" @current-change="onPdColPageChange">
+            </el-pagination>
+          </div>
         </el-card>
 
         <!-- 二维码 + 可编辑催收文字：电脑上直接改/复制，也可以手机扫码在手机上改 -->
-        <el-dialog title="拼多多人工催收 · 扫码或直接复制" :visible.sync="pdCol.dlg.visible"
-                   width="720px" append-to-body>
-          <div class="pc-dlg">
-            <div>
-              <div class="pc-qr" v-if="pdCol.dlg.qr" v-html="pdCol.dlg.qr"></div>
-              <div class="pc-qr" v-else
-                   style="display:flex;align-items:center;justify-content:center;min-height:190px;
-                          color:#c0c4cc;font-size:12px;text-align:center">
-                {{ pdCol.dlg.loading ? '正在生成…' : '二维码生成失败' }}
-              </div>
-              <div class="pc-qr-tip">手机扫码打开，可直接改字并复制<br>链接 {{ pdCol.dlg.ttlDays }} 天内有效</div>
-            </div>
-            <div class="pc-main">
-              <div style="margin-bottom:8px;line-height:1.5">
-                <div style="font-weight:600">{{ pdCol.dlg.mallName }}</div>
-                <div class="loginid">
-                  {{ pdCol.dlg.orderCount }} 笔 · 总金额 ¥{{ Number(pdCol.dlg.amount || 0).toFixed(2) }}
-                </div>
-              </div>
-              <el-input type="textarea" v-model="pdCol.dlg.text" :rows="10" resize="vertical"
-                        placeholder="催收文字"></el-input>
-              <div style="margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-                <el-button size="small" type="primary" @click="copyPdColText">一键复制文字</el-button>
-                <el-button size="small" @click="copyPdColSn">复制最近订单号</el-button>
-                <el-button size="small" type="text" @click="copyPlain(pdCol.dlg.link, '已复制扫码链接')">复制链接</el-button>
-              </div>
-            </div>
-          </div>
-        </el-dialog>
+        <!-- 弹窗拆成子组件（pdd-collect-dlg）：开关它不再触发根实例全树 diff（v0.3.40） -->
+        <pdd-collect-dlg ref="pdColDlg"></pdd-collect-dlg>
       </div>
 
       <!-- ══════════ 闪电帮帮发票（对所有用户开放） ══════════ -->
@@ -4939,6 +4926,164 @@ const UP_GUIDES = {
 // 操作日志：这些按钮文案不含有效信息（弹框的确定/取消等），不记入操作日志
 const OP_SKIP_BTN = ['确定', '取消', '确 定', '取 消', '关闭', '×', 'OK', 'Cancel', '知道了'];
 
+/** 离线二维码（vendor/qrcode.min.js）：返回 SVG 字符串，失败返回空串 */
+function qrSvgOf(text, opts) {
+  try {
+    if (typeof qrcode !== 'function') return '';
+    const q = qrcode(0, 'M');
+    q.addData(String(text || ''));
+    q.make();
+    return q.createSvgTag({ cellSize: 4, margin: 2, scalable: !!(opts && opts.scalable) });
+  } catch (e) { return ''; }
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 拼多多人工催收 · 二维码弹窗（v0.3.40）
+//   为什么不写在根模板里：根模板 27 万字符，改一次弹窗绑定就会让 App 的
+//   render watcher 重跑 + 全树 diff（实测 ~160ms），而这 160ms 正好落在
+//   「点二维码」之后，看起来就是码迟迟不出来。拆成子组件后开关弹窗只重渲染
+//   这一小块（<1ms），根实例完全不参与。
+//   数据也不再请求：列表接口已带 text + shareUrl（7 天有效签名），点开即可画码。
+// ════════════════════════════════════════════════════════════════════
+Vue.component('pdd-collect-dlg', {
+  template: `
+    <el-dialog title="拼多多人工催收 · 扫码或直接复制" :visible.sync="visible" append-to-body
+               width="720px" :modal="!warming" :class="{ 'pc-dlg-warming': warming }">
+      <div class="pc-dlg">
+        <div>
+          <div class="pc-qr" v-if="qr" v-html="qr"></div>
+          <div class="pc-qr" v-else
+               style="display:flex;align-items:center;justify-content:center;min-height:190px;
+                      color:#c0c4cc;font-size:12px;text-align:center">
+            {{ loading ? '正在生成…' : '二维码生成失败' }}
+          </div>
+          <div class="pc-qr-tip">手机扫码打开，可直接改字并复制<br>链接 {{ ttlDays }} 天内有效</div>
+        </div>
+        <div class="pc-main">
+          <div style="margin-bottom:8px;line-height:1.5">
+            <div style="font-weight:600">{{ mallName }}</div>
+            <div class="loginid">{{ orderCount }} 笔 · 总金额 ¥{{ Number(amount || 0).toFixed(2) }}</div>
+          </div>
+          <el-input type="textarea" v-model="text" :rows="10" resize="vertical" placeholder="催收文字"></el-input>
+          <div style="margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <el-button size="small" type="primary" @click="copyBody">一键复制文字</el-button>
+            <el-button size="small" @click="copySn">复制最近订单号</el-button>
+            <el-button size="small" type="text" @click="copyPlain(link, '已复制扫码链接')">复制链接</el-button>
+          </div>
+        </div>
+      </div>
+    </el-dialog>`,
+  data() {
+    return {
+      visible: false, warming: false, loading: false, mallName: '', orderCount: 0,
+      amount: 0, latestOrderSn: '', text: '', qr: '', link: '', ttlDays: 7,
+    };
+  },
+  mounted() {
+    this._cache = new Map();      // 商家键 → { at, svg }：同一家再点开直接复用
+    // 空闲时把弹窗渲染好并藏起来：el-dialog 首次挂载要 ~200ms，不能让它落在点击之后
+    const warm = () => this.warmUp();
+    if (window.requestIdleCallback) requestIdleCallback(warm, { timeout: 3000 });
+    else setTimeout(warm, 1500);
+  },
+  methods: {
+    /** 打开某个商家：row 来自 /api/pdd/offline-collect（含 text 与 shareUrl） */
+    open(row, opts) {
+      const o = opts || {};
+      this._opening = true;
+      this.warming = false;
+      this.visible = true;
+      this.mallName = row.displayName || '';
+      this.orderCount = row.orderCount || 0;
+      this.amount = row.amount || 0;
+      this.latestOrderSn = row.latestOrderSn || '';
+      this.text = row.text || '';
+      this.link = row.shareUrl || '';
+      this.ttlDays = Number(o.ttlDays) || 7;
+      this.qr = '';
+      this.loading = true;
+      const key = String(row.key || '');
+      const hit = key ? this._cache.get(key) : null;
+      if (hit && Date.now() - hit.at < 3600 * 1000) {
+        this.qr = hit.svg;
+        this.loading = false;
+        return;
+      }
+      // 兜底：服务端还是 0.3.39（列表没带 shareUrl）时现签一次
+      if (!this.link) { this.fetchLink(key); return; }
+      this.paint(key, this.link);
+    },
+    /** 真正画码：下一帧执行，先让弹窗和文字出现（make() 是同步的） */
+    paint(key, link) {
+      setTimeout(() => {
+        if (!this.visible || this.link !== link) return;   // 已切到别的商家 / 已关闭
+        const svg = qrSvgOf(link, { scalable: true });
+        this.qr = svg;
+        this.loading = false;
+        if (svg && key) {
+          if (this._cache.size >= 200) this._cache.clear();
+          this._cache.set(key, { at: Date.now(), svg });
+        }
+      }, 16);
+    },
+    async fetchLink(key) {
+      try {
+        const d = await this.$root.pddApi('/api/pdd/offline-collect/share', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ key }),
+        });
+        if (!d.ok) { this.$message.error(d.error || '生成扫码链接失败'); this.loading = false; return; }
+        this.link = d.link || '';
+        this.text = d.text || this.text;
+        this.latestOrderSn = d.latestOrderSn || this.latestOrderSn;
+        this.ttlDays = Number(d.ttlDays) || this.ttlDays;
+        this.paint(String(key || ''), this.link);
+      } catch (e) {
+        this.$message.error('生成扫码链接失败：' + (e.message || e));
+        this.loading = false;
+      }
+    },
+    warmUp() {
+      if (this._warmed || this.visible) return;
+      this._warmed = true;
+      this.warming = true;
+      this.visible = true;
+      this.$nextTick(() => {
+        if (this._opening) return;     // 用户恰好在这几毫秒点了二维码 → 保持打开
+        this.visible = false;
+        this.warming = false;
+      });
+    },
+    /** 通用复制：优先 Clipboard API，内网 http（非安全上下文）退回 execCommand */
+    copyPlain(text, okMsg) {
+      const s = String(text == null ? '' : text);
+      if (!s) { this.$message.warning('没有可复制的内容'); return; }
+      const done = () => this.$message.success(okMsg || '已复制');
+      const legacy = () => {
+        const ta = document.createElement('textarea');
+        ta.value = s; ta.setAttribute('readonly', '');
+        ta.style.position = 'fixed'; ta.style.top = '-1000px'; ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select(); ta.setSelectionRange(0, s.length);
+        let ok = false;
+        try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+        document.body.removeChild(ta);
+        if (ok) done(); else this.$message.warning('复制失败，请手动选中内容复制');
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText && window.isSecureContext) {
+        navigator.clipboard.writeText(s).then(done).catch(legacy);
+        return;
+      }
+      legacy();
+    },
+    copyBody() { this.copyPlain(this.text, '已复制催收文字，粘贴到微信发给商家即可'); },
+    copySn() { this.copyPlain(this.latestOrderSn, '已复制最近一笔订单号：' + (this.latestOrderSn || '')); },
+  },
+  watch: {
+    visible(v) { if (!v) this._opening = false; },
+  },
+});
+
 // ════════════════════════════════════════════════════════════════════
 // 登录状态条（退单列表 / 实时毛利监控 / 拼多多发票 三页共用同一组件与同一套交互）
 //   · 登录按钮：未登录 → 发起登录（本机助手弹窗）；已登录 → 刷新状态
@@ -5117,12 +5262,10 @@ const vm = new Vue({
       // 平台没有催收入口，只能线下把订单号发给商家。金额一律按实付金额合计。
       pdCol: {
         loading: false, rows: [], keyword: '',
+        // 分页（v0.3.40）：商家维度通常几十到几百行，前端切片即可；20 是默认，100 给大客户一次看全
+        page: 1, size: 20, shareTtlDays: 7,
         totals: { malls: 0, orders: 0, amount: 0, missingAmount: 0 },
-        // 二维码弹窗：text 是可编辑的催收文字，qr 是 link 生成的 SVG（vendor/qrcode.min.js 离线生成）
-        dlg: {
-          visible: false, loading: false, mallName: '', orderCount: 0, amount: 0,
-          latestOrderSn: '', text: '', qr: '', link: '', ttlDays: 7,
-        },
+        // 二维码弹窗状态在子组件 pdd-collect-dlg 里（见该组件注释）
       },
       // 闪电帮帮发票：同样用 pd.picked 那套跨页多选（selected 是当前选中行数组）
       sd: {
@@ -5864,13 +6007,21 @@ const vm = new Vue({
         { label: '缺实付金额', value: String(t.missingAmount || 0), sub: '这些单没有实付金额，按 0 计入总额' },
       ];
     },
-    /** 线下催收：关键字过滤（商家名 / 订单号），纯前端过滤，数据量在千级以内 */
-    pdColRows() {
+    /**
+     * 线下催收：关键字过滤（商家名 / 订单号），纯前端过滤，数据量在千级以内。
+     * v0.3.40 起拆成「过滤后的全量」与「当前页」两层：统计卡走接口 totals，表格走 pdColRows。
+     */
+    pdColAll() {
       const kw = String(this.pdCol.keyword || '').trim().toLowerCase();
       const rows = this.pdCol.rows || [];
       if (!kw) return rows;
       return rows.filter((g) => String(g.displayName || '').toLowerCase().includes(kw)
         || (g.orders || []).some((o) => String(o.orderSn || '').toLowerCase().includes(kw)));
+    },
+    pdColRows() {
+      const size = Math.max(1, Number(this.pdCol.size) || 20);
+      const start = (Math.max(1, Number(this.pdCol.page) || 1) - 1) * size;
+      return this.pdColAll.slice(start, start + size);
     },
     /** 闪电帮帮：金额三卡（可申请 / 已申请 / 合计），口径与拼多多页保持一致 */    sdcStats() {
       const s = this.sd.summary || {};
@@ -6114,6 +6265,11 @@ const vm = new Vue({
     window.addEventListener('scroll', this.onAnyScroll, { passive: true });
     // 助手连接状态：导航栏常驻展示，每 10 秒轻量刷新一次
     this.agentTimer = setInterval(() => { this.refreshAgent(); }, 10000);
+    // 二维码库首次 make() 要 ~40ms（含 JIT 预热），趁空闲先跑一次；
+    // 催收弹窗的预挂载在 pdd-collect-dlg 自己的 mounted 里（v0.3.40）
+    const warm = () => { this.qrSvg('warmup', { scalable: true }); };
+    if (window.requestIdleCallback) requestIdleCallback(warm, { timeout: 3000 });
+    else setTimeout(warm, 1500);
     this.loadAliSession();
     this.boot();
   },
@@ -7744,68 +7900,38 @@ const vm = new Vue({
         if (d.error) { this.$message.error(d.error); return; }
         this.pdCol.rows = d.groups || [];
         this.pdCol.totals = d.totals || { malls: 0, orders: 0, amount: 0, missingAmount: 0 };
+        this.pdCol.shareTtlDays = Number(d.shareTtlDays) || 7;
+        this.clampPdColPage();
       } catch (e) {
         this.$message.error('加载人工催收失败：' + e.message);
       } finally {
         this.pdCol.loading = false;
       }
     },
-    /** 打开某商家的二维码弹窗：先生成 7 天有效的手机链接，再用离线二维码库画成 SVG */
-    async openPddCollectQr(row) {
-      const dlg = this.pdCol.dlg;
-      dlg.visible = true; dlg.loading = true;
-      dlg.mallName = row.displayName || '';
-      dlg.orderCount = row.orderCount || 0;
-      dlg.amount = row.amount || 0;
-      dlg.latestOrderSn = row.latestOrderSn || '';
-      dlg.text = row.text || '';
-      dlg.qr = ''; dlg.link = '';
-      try {
-        const d = await this.pddApi('/api/pdd/offline-collect/share', {
-          method: 'POST', headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ key: row.key }),
-        });
-        if (!d.ok) { this.$message.error(d.error || '生成扫码链接失败'); return; }
-        dlg.link = d.link || '';
-        dlg.text = d.text || dlg.text;
-        dlg.latestOrderSn = d.latestOrderSn || dlg.latestOrderSn;
-        dlg.ttlDays = Number(d.ttlDays) || 7;
-        dlg.qr = this.qrSvg(dlg.link, { scalable: true });
-      } catch (e) {
-        this.$message.error('生成扫码链接失败：' + e.message);
-      } finally {
-        dlg.loading = false;
-      }
+    // ── 分页：纯前端切片，翻页不重新请求（v0.3.40）──
+    onPdColSizeChange(n) {
+      this.pdCol.size = Number(n) || 20;
+      this.pdCol.page = 1;
+    },
+    onPdColPageChange(p) {
+      this.pdCol.page = Math.max(1, Number(p) || 1);
+    },
+    /** 刷新/过滤后行数变少，当前页可能越界 → 收敛到最后一页，避免出现空表格 */
+    clampPdColPage() {
+      const size = Math.max(1, Number(this.pdCol.size) || 20);
+      const max = Math.max(1, Math.ceil(this.pdColAll.length / size));
+      if (this.pdCol.page > max) this.pdCol.page = max;
+      if (this.pdCol.page < 1) this.pdCol.page = 1;
     },
     /**
-     * 通用复制：优先 Clipboard API；内网 http 下它不可用（非安全上下文），
-     * 退回 textarea + execCommand —— 与 m-upload 页同一套兜底。
+     * 打开某商家的二维码弹窗（v0.3.40）：弹窗本体是子组件 pdd-collect-dlg，
+     * 它自带状态与二维码缓存，这里只负责把行数据递过去。
+     * 放在子组件里的原因见组件注释 —— 根模板太大，改一个 visible 就要全树 diff ~160ms。
      */
-    copyPlain(text, okMsg) {
-      const s = String(text == null ? '' : text);
-      if (!s) { this.$message.warning('没有可复制的内容'); return; }
-      const done = () => this.$message.success(okMsg || '已复制');
-      const legacy = () => {
-        const ta = document.createElement('textarea');
-        ta.value = s; ta.setAttribute('readonly', '');
-        ta.style.position = 'fixed'; ta.style.top = '-1000px'; ta.style.opacity = '0';
-        document.body.appendChild(ta);
-        ta.select(); ta.setSelectionRange(0, s.length);
-        let ok = false;
-        try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
-        document.body.removeChild(ta);
-        if (ok) done(); else this.$message.warning('复制失败，请手动选中内容复制');
-      };
-      if (navigator.clipboard && navigator.clipboard.writeText && window.isSecureContext) {
-        navigator.clipboard.writeText(s).then(done).catch(legacy);
-        return;
-      }
-      legacy();
-    },
-    copyPdColText() { this.copyPlain(this.pdCol.dlg.text, '已复制催收文字，粘贴到微信发给商家即可'); },
-    /** 复制「时间最近的一笔」订单号（列表按下单时间倒序，分组里的 latestOrderSn 就是它） */
-    copyPdColSn() {
-      this.copyPlain(this.pdCol.dlg.latestOrderSn, '已复制最近一笔订单号：' + (this.pdCol.dlg.latestOrderSn || ''));
+    openPddCollectQr(row) {
+      const dlg = this.$refs.pdColDlg;
+      if (!dlg) return;
+      dlg.open(row, { ttlDays: this.pdCol.shareTtlDays || 7 });
     },
     // 表头排序（下单时间 / 开票金额）：点一次降序、再点升序、第三次取消 → 回落到默认（时间倒序）
     onPddSortChange({ prop, order }) {
@@ -10381,15 +10507,8 @@ const vm = new Vue({
      * 扫码链接很长时模块数会到 60+，按 4px 单元格算出来 260px 以上，
      * 塞进 190px 的框里就会溢出压到右边的文字（人工催收弹窗踩过这个坑）。
      */
-    qrSvg(text, opts) {
-      try {
-        if (typeof qrcode !== 'function') return '';
-        const q = qrcode(0, 'M');
-        q.addData(String(text || ''));
-        q.make();
-        return q.createSvgTag({ cellSize: 4, margin: 2, scalable: !!(opts && opts.scalable) });
-      } catch (e) { return ''; }
-    },
+    /** 二维码 SVG（与催收弹窗子组件共用 qrSvgOf，避免两份实现） */
+    qrSvg(text, opts) { return qrSvgOf(text, opts); },
     /**
      * 生成手机上传链接：5 分钟有效的 token，手机打开 m-upload 页直接拍照上传。
      * 生成后开轮询刷新「已传张数 + 缩略图」，用户不用回电脑上点任何东西。
