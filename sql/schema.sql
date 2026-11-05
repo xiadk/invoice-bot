@@ -853,3 +853,30 @@ CREATE TABLE IF NOT EXISTS `replenish_order_item` (
   KEY `idx_roi_sku`   (`user_id`, `sku`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   COMMENT='补货单明细（每个 SKU 一行，含价源与折算依据）';
+
+-- ============================================================================
+-- 表 5.8: pdd_collect_summary —— 拼多多人工催收汇总（v0.3.42）
+--   一行 = 一个商家（同店铺的多笔待催收订单聚合）。
+--   写入方：订单同步 / 发票同步 / 店铺 ID 解析完成后各重建一次（lib/pdd.js rebuildCollectSummary）。
+--   读取方：催收列表直接 ORDER BY amount LIMIT/OFFSET 走 idx_pdcs_amount 分页；
+--          订单明细不再随列表返回，点「详情」时按 collect_key 单查 pdd_order。
+--   collect_key 与扫码链接里的键同源，重建不影响已发出的链接。
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS `pdd_collect_summary` (
+  `user_id`           INT           NOT NULL DEFAULT 1  COMMENT '数据归属用户',
+  `collect_key`       VARCHAR(64)   NOT NULL            COMMENT '商家分组键（m<mall_id> / n<店铺名哈希> / s<mall_sn>）',
+  `mall_id`           BIGINT        DEFAULT NULL        COMMENT '店铺 ID（能解析到才有）',
+  `mall_sn`           VARCHAR(128)  DEFAULT NULL        COMMENT '店铺加密串',
+  `mall_name`         VARCHAR(128)  DEFAULT NULL        COMMENT '店铺名快照',
+  `order_count`       INT           NOT NULL DEFAULT 0  COMMENT '待人工催收订单数',
+  `amount`            DECIMAL(14,2) NOT NULL DEFAULT 0.00 COMMENT '实付金额合计（元）',
+  `missing_amount`    INT           NOT NULL DEFAULT 0  COMMENT '缺实付金额的订单数',
+  `latest_order_sn`   VARCHAR(64)   DEFAULT NULL        COMMENT '最近一笔订单号',
+  `latest_order_time` DATETIME      DEFAULT NULL        COMMENT '最近一笔下单时间',
+  `sn_text`           TEXT                              COMMENT '该商家全部订单号（逗号分隔，供列表按订单号搜索）',
+  `updated_at`        DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`user_id`, `collect_key`),
+  KEY `idx_pdcs_amount` (`user_id`, `amount`),
+  KEY `idx_pdcs_name`   (`user_id`, `mall_name`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  COMMENT='拼多多人工催收汇总（商家维度，同步后重建；列表分页直接查它）';

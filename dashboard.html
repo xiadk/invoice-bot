@@ -4363,41 +4363,19 @@
         <el-card class="section-card" shadow="never">
           <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px">
             <el-input v-model="pdCol.keyword" size="small" clearable style="width:260px"
-                      placeholder="商家名称 / 订单号" @input="pdCol.page = 1"></el-input>
+                      placeholder="商家名称 / 订单号（回车搜索）"
+                      @keyup.enter.native="searchPddCollect"
+                      @clear="searchPddCollect"
+                      @input="onPdColKeyword"></el-input>
             <el-button size="small" type="primary" :loading="pdCol.loading" @click="loadPddCollect(true)">刷新</el-button>
             <span style="flex:1"></span>
-            <span class="loginid">共 {{ pdColAll.length }} 个商家</span>
+            <span class="loginid">共 {{ pdCol.total }} 个商家</span>
           </div>
 
-          <el-table :data="pdColRows" size="small" border v-loading="pdCol.loading" row-key="key"
+          <!-- v0.3.42：列表只查汇总表（服务端分页），不再带订单明细；
+               明细点「详情」时才按商家请求，避免一次把几千行订单连同文字全部塞进列表接口 -->
+          <el-table :data="pdCol.rows" size="small" border v-loading="pdCol.loading" row-key="key"
                     empty-text="没有需要人工催收的订单（交易成功且暂不可开票 / 未同步开票）">
-            <el-table-column type="expand">
-              <template slot-scope="p">
-                <div style="padding:4px 12px 10px">
-                  <el-table :data="p.row.orders" size="mini" border empty-text="没有订单">
-                    <el-table-column label="订单号" min-width="180">
-                      <template slot-scope="o"><span class="loginid">{{ o.row.orderSn }}</span></template>
-                    </el-table-column>
-                    <el-table-column label="下单时间" width="140">
-                      <template slot-scope="o">{{ shortDate(o.row.orderTime) }}</template>
-                    </el-table-column>
-                    <el-table-column label="实付金额" width="110" align="right">
-                      <template slot-scope="o">
-                        <span class="amount">{{ o.row.payAmount == null ? '—' : yuan(o.row.payAmount) }}</span>
-                      </template>
-                    </el-table-column>
-                    <el-table-column label="开票状态" width="110">
-                      <template slot-scope="o">
-                        <el-tag size="mini" :type="o.row.invoiceStatus === 9 ? 'info' : 'warning'">{{ o.row.statusText }}</el-tag>
-                      </template>
-                    </el-table-column>
-                    <el-table-column label="商品" min-width="200">
-                      <template slot-scope="o">{{ o.row.goodsName || '—' }}</template>
-                    </el-table-column>
-                  </el-table>
-                </div>
-              </template>
-            </el-table-column>
             <el-table-column label="商家" min-width="260">
               <template slot-scope="p">
                 <div style="font-weight:500">{{ p.row.displayName }}</div>
@@ -4414,18 +4392,18 @@
                 <div class="loginid">{{ shortDate(p.row.latestOrderTime) }}</div>
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="120" fixed="right">
+            <el-table-column label="操作" width="170" fixed="right">
               <template slot-scope="p">
+                <el-button type="text" size="mini" @click="openPddCollectOrders(p.row)">详情</el-button>
                 <el-button type="text" size="mini" @click="openPddCollectQr(p.row)">二维码催收</el-button>
               </template>
             </el-table-column>
           </el-table>
 
-          <!-- 分页（v0.3.40）：金额大的排前面，翻页按当前排序切片，不重新请求 -->
           <div style="margin-top:12px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-            <span class="loginid">金额从高到低 · 每页 {{ pdCol.size }} 家</span>
+            <span class="loginid">金额从高到低 · 服务端分页（每页 {{ pdCol.size }} 家）</span>
             <span style="flex:1"></span>
-            <el-pagination background small :total="pdColAll.length" :page-size="pdCol.size"
+            <el-pagination background small :total="pdCol.total" :page-size="pdCol.size"
                            :current-page="pdCol.page" :page-sizes="[20, 100]"
                            layout="total, sizes, prev, pager, next, jumper"
                            @size-change="onPdColSizeChange" @current-change="onPdColPageChange">
@@ -4433,6 +4411,8 @@
           </div>
         </el-card>
 
+        <!-- 明细弹窗（v0.3.42）：点「详情」才请求该商家的订单，列表本身不带明细 -->
+        <pdd-collect-orders ref="pdColOrders" @qr="openPddCollectQr"></pdd-collect-orders>
         <!-- 二维码 + 可编辑催收文字：电脑上直接改/复制，也可以手机扫码在手机上改 -->
         <!-- 弹窗拆成子组件（pdd-collect-dlg）：开关它不再触发根实例全树 diff（v0.3.40） -->
         <pdd-collect-dlg ref="pdColDlg"></pdd-collect-dlg>
@@ -5018,8 +4998,12 @@ Vue.component('pdd-collect-dlg', {
     else setTimeout(warm, 1500);
   },
   methods: {
-    /** 打开某个商家：row 来自 /api/pdd/offline-collect（含 text 与 shareUrl） */
-    open(row, opts) {
+    /**
+     * 打开某个商家（v0.3.42）：列表不再下发 text/shareUrl，
+     * 文字与扫码链接在打开时按需取一次（同一行复用 $root.fetchCollectDetail 的缓存，
+     * 先点「详情」再点二维码时不会重复请求）。
+     */
+    async open(row, opts) {
       const o = opts || {};
       this._opening = true;
       this.warming = false;
@@ -5032,17 +5016,52 @@ Vue.component('pdd-collect-dlg', {
       this.link = row.shareUrl || '';
       this.ttlDays = Number(o.ttlDays) || 7;
       this.qr = '';
-      this.loading = true;
       const key = String(row.key || '');
       const hit = key ? this._cache.get(key) : null;
       if (hit && Date.now() - hit.at < 3600 * 1000) {
+        // 二维码缓存命中：立刻出码；文字若还没有（缓存里只存码）再补一次
         this.qr = hit.svg;
+        this.loading = false;
+        if (!this.text || !this.link) this.fetchDetailThenPaint(key, row, false);
+        return;
+      }
+      this.loading = true;
+      this.fetchDetailThenPaint(key, row, true);
+    },
+    /** 取详情 → 填文字/链接 → 画码（paintNow=false 时只补文字，不重画已缓存的码） */
+    async fetchDetailThenPaint(key, row, paintNow) {
+      const d = await this.fetchDetail(row);
+      if (!this.visible) return;          // 请求回来前已经关掉了
+      if (!d || !d.ok) {
+        this.$message.error((d && d.error) || '加载催收信息失败');
         this.loading = false;
         return;
       }
-      // 兜底：服务端还是 0.3.39（列表没带 shareUrl）时现签一次
-      if (!this.link) { this.fetchLink(key); return; }
-      this.paint(key, this.link);
+      this.applyDetail(d);
+      if (paintNow) {
+        if (this.link) this.paint(key, this.link);
+        else this.loading = false;
+      }
+    },
+    /** 有行级缓存就走缓存；老版本行的 shareUrl 也能直接用 */
+    fetchDetail(row) {
+      if (row && row.shareUrl && row.text) {
+        return Promise.resolve({
+          ok: true, text: row.text, shareUrl: row.shareUrl, latestOrderSn: row.latestOrderSn,
+          mallName: row.displayName, orderCount: row.orderCount, amount: row.amount, ttlDays: 7,
+        });
+      }
+      if (typeof this.$root.fetchCollectDetail !== 'function') return Promise.resolve(null);
+      return this.$root.fetchCollectDetail(row);
+    },
+    applyDetail(d) {
+      this.text = d.text || this.text;
+      this.link = d.shareUrl || this.link;
+      this.latestOrderSn = d.latestOrderSn || this.latestOrderSn;
+      this.mallName = d.mallName || this.mallName;
+      this.orderCount = d.orderCount || this.orderCount;
+      this.amount = d.amount == null ? this.amount : d.amount;
+      this.ttlDays = Number(d.ttlDays) || this.ttlDays;
     },
     /** 真正画码：下一帧执行，先让弹窗和文字出现（make() 是同步的） */
     paint(key, link) {
@@ -5056,23 +5075,6 @@ Vue.component('pdd-collect-dlg', {
           this._cache.set(key, { at: Date.now(), svg });
         }
       }, 16);
-    },
-    async fetchLink(key) {
-      try {
-        const d = await this.$root.pddApi('/api/pdd/offline-collect/share', {
-          method: 'POST', headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ key }),
-        });
-        if (!d.ok) { this.$message.error(d.error || '生成扫码链接失败'); this.loading = false; return; }
-        this.link = d.link || '';
-        this.text = d.text || this.text;
-        this.latestOrderSn = d.latestOrderSn || this.latestOrderSn;
-        this.ttlDays = Number(d.ttlDays) || this.ttlDays;
-        this.paint(String(key || ''), this.link);
-      } catch (e) {
-        this.$message.error('生成扫码链接失败：' + (e.message || e));
-        this.loading = false;
-      }
     },
     warmUp() {
       if (this._warmed || this.visible) return;
@@ -5112,6 +5114,115 @@ Vue.component('pdd-collect-dlg', {
   },
   watch: {
     visible(v) { if (!v) this._opening = false; },
+  },
+});
+
+// ════════════════════════════════════════════════════════════════════
+// 拼多多人工催收 · 订单明细弹窗（v0.3.42）
+//   列表只查汇总表，订单明细在点「详情」时才按这一家请求（列表接口不再背明细）。
+//   做成子组件的原因同 pdd-collect-dlg：根模板 27 万字符，弹窗状态放进去，
+//   开关弹窗才不会触发整棵树重渲染。
+// ════════════════════════════════════════════════════════════════════
+Vue.component('pdd-collect-orders', {
+  template: `
+    <el-dialog title="催收订单明细" :visible.sync="visible" width="780px" append-to-body>
+      <div v-loading="loading" style="min-height:120px">
+        <div style="margin-bottom:10px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <span style="font-weight:600">{{ mallName }}</span>
+          <span class="loginid">{{ orderCount }} 笔 · 总金额 ¥{{ Number(amount || 0).toFixed(2) }}</span>
+          <span class="loginid" v-if="missingAmount">其中 {{ missingAmount }} 笔缺实付金额（按 0 计）</span>
+        </div>
+        <el-table :data="orders" size="mini" border max-height="420" empty-text="没有订单">
+          <el-table-column label="订单号" min-width="190">
+            <template slot-scope="o"><span class="loginid">{{ o.row.orderSn }}</span></template>
+          </el-table-column>
+          <el-table-column label="下单时间" width="130">
+            <template slot-scope="o">{{ $root.shortDate(o.row.orderTime) }}</template>
+          </el-table-column>
+          <el-table-column label="实付金额" width="110" align="right">
+            <template slot-scope="o">
+              <span class="amount">{{ o.row.payAmount == null ? '—' : '¥' + Number(o.row.payAmount).toFixed(2) }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="开票状态" width="110">
+            <template slot-scope="o">
+              <el-tag size="mini" :type="o.row.invoiceStatus === 9 ? 'info' : 'warning'">{{ o.row.statusText }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="商品" min-width="200">
+            <template slot-scope="o">{{ o.row.goodsName || '—' }}</template>
+          </el-table-column>
+        </el-table>
+      </div>
+      <div slot="footer" style="display:flex;align-items:center;gap:8px">
+        <el-button size="small" :disabled="loading || !orders.length" @click="copySns">复制全部订单号</el-button>
+        <span style="flex:1"></span>
+        <el-button size="small" @click="visible = false">关闭</el-button>
+        <el-button size="small" type="primary" @click="toQr">二维码催收</el-button>
+      </div>
+    </el-dialog>`,
+  data() {
+    return {
+      visible: false, loading: false, row: null,
+      mallName: '', orderCount: 0, amount: 0, missingAmount: 0, orders: [],
+    };
+  },
+  methods: {
+    async open(row) {
+      this.row = row;
+      this.visible = true;
+      this.loading = true;
+      this.mallName = row.displayName || '';
+      this.orderCount = row.orderCount || 0;
+      this.amount = row.amount || 0;
+      this.missingAmount = row.missingAmount || 0;
+      this.orders = [];
+      try {
+        // 与二维码弹窗共用同一份行级缓存：先点详情再点二维码只请求一次
+        const d = await this.$root.fetchCollectDetail(row);
+        if (!d || !d.ok) { this.$message.error((d && d.error) || '加载订单明细失败'); return; }
+        this.mallName = d.mallName || this.mallName;
+        this.orderCount = d.orderCount || 0;
+        this.amount = d.amount || 0;
+        this.missingAmount = d.missingAmount || 0;
+        this.orders = d.orders || [];
+      } catch (e) {
+        this.$message.error('加载订单明细失败：' + ((e && e.message) || e));
+      } finally {
+        this.loading = false;
+      }
+    },
+    copySns() {
+      const sns = (this.orders || []).map((o) => o.orderSn).filter(Boolean);
+      if (!sns.length) { this.$message.warning('没有可复制的订单号'); return; }
+      this.copyPlain(sns.join('，'), '已复制 ' + sns.length + ' 个订单号');
+    },
+    toQr() {
+      this.visible = false;
+      this.$emit('qr', this.row);
+    },
+    /** 与催收弹窗同一套复制实现：优先 Clipboard，内网 http 退回 execCommand */
+    copyPlain(text, okMsg) {
+      const s = String(text == null ? '' : text);
+      if (!s) { this.$message.warning('没有可复制的内容'); return; }
+      const done = () => this.$message.success(okMsg || '已复制');
+      const legacy = () => {
+        const ta = document.createElement('textarea');
+        ta.value = s; ta.setAttribute('readonly', '');
+        ta.style.position = 'fixed'; ta.style.top = '-1000px'; ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select(); ta.setSelectionRange(0, s.length);
+        let ok = false;
+        try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+        document.body.removeChild(ta);
+        if (ok) done(); else this.$message.warning('复制失败，请手动选中内容复制');
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText && window.isSecureContext) {
+        navigator.clipboard.writeText(s).then(done).catch(legacy);
+        return;
+      }
+      legacy();
+    },
   },
 });
 
@@ -5299,10 +5410,11 @@ const vm = new Vue({
       // 平台没有催收入口，只能线下把订单号发给商家。金额一律按实付金额合计。
       pdCol: {
         loading: false, rows: [], keyword: '',
-        // 分页（v0.3.40）：商家维度通常几十到几百行，前端切片即可；20 是默认，100 给大客户一次看全
-        page: 1, size: 20, shareTtlDays: 7,
+        // v0.3.42：服务端分页（列表直接查汇总表 pdd_collect_summary），
+        // total = 当前筛选条件下的商家总数；订单明细不再随列表下发
+        total: 0, page: 1, size: 20, shareTtlDays: 7,
         totals: { malls: 0, orders: 0, amount: 0, missingAmount: 0 },
-        // 二维码弹窗状态在子组件 pdd-collect-dlg 里（见该组件注释）
+        // 明细弹窗 / 二维码弹窗都是子组件（pdd-collect-orders、pdd-collect-dlg）
       },
       // 闪电帮帮发票：同样用 pd.picked 那套跨页多选（selected 是当前选中行数组）
       sd: {
@@ -6044,23 +6156,8 @@ const vm = new Vue({
         { label: '缺实付金额', value: String(t.missingAmount || 0), sub: '这些单没有实付金额，按 0 计入总额' },
       ];
     },
-    /**
-     * 线下催收：关键字过滤（商家名 / 订单号），纯前端过滤，数据量在千级以内。
-     * v0.3.40 起拆成「过滤后的全量」与「当前页」两层：统计卡走接口 totals，表格走 pdColRows。
-     */
-    pdColAll() {
-      const kw = String(this.pdCol.keyword || '').trim().toLowerCase();
-      const rows = this.pdCol.rows || [];
-      if (!kw) return rows;
-      return rows.filter((g) => String(g.displayName || '').toLowerCase().includes(kw)
-        || (g.orders || []).some((o) => String(o.orderSn || '').toLowerCase().includes(kw)));
-    },
-    pdColRows() {
-      const size = Math.max(1, Number(this.pdCol.size) || 20);
-      const start = (Math.max(1, Number(this.pdCol.page) || 1) - 1) * size;
-      return this.pdColAll.slice(start, start + size);
-    },
-    /** 闪电帮帮：金额三卡（可申请 / 已申请 / 合计），口径与拼多多页保持一致 */    sdcStats() {
+    /** 闪电帮帮：金额三卡（可申请 / 已申请 / 合计），口径与拼多多页保持一致 */
+    sdcStats() {
       const s = this.sd.summary || {};
       const a = (o) => Number((o && o.amount) || 0);
       const n = (o) => Number((o && o.count) || 0);
@@ -7932,45 +8029,98 @@ const vm = new Vue({
       }
     },
     applyPddFilter() { this.pd.page = 1; this.clearPddPicked(); this.loadPddOrders(); },
-    // ── 线下催收（v0.3.38）──
-    /** 按商家汇总「交易成功 + 暂不可开票/未同步开票」的订单；只读库，不打拼多多接口 */
+    // ── 线下催收（v0.3.38；v0.3.42 改服务端分页 + 明细按需查）──
+    /**
+     * 列表：只查汇总表（服务端分页，每页 20/100），不再带订单明细。
+     * @param {boolean} force true = 页面「刷新」按钮：让服务端按订单表现况重算一次汇总
+     */
     async loadPddCollect(force) {
       if (this.qnhNeedPick) return;
       this.pdCol.loading = true;
       try {
-        // force=true（点「刷新」）跳过服务端 60 秒缓存；切页进来走缓存，省一次重查询
-        const d = await this.pddApi('/api/pdd/offline-collect' + (force === true ? '?nocache=1' : ''));
+        const qs = new URLSearchParams();
+        qs.set('page', String(this.pdCol.page || 1));
+        qs.set('size', String(this.pdCol.size || 20));
+        const kw = String(this.pdCol.keyword || '').trim();
+        if (kw) qs.set('keyword', kw);
+        if (force === true) qs.set('nocache', '1');
+        const d = await this.pddApi('/api/pdd/offline-collect?' + qs.toString());
         if (d.error) { this.$message.error(d.error); return; }
-        this.pdCol.rows = d.groups || [];
+        this.pdCol.rows = d.rows || [];
+        this.pdCol.total = Number(d.total) || 0;
+        this.pdCol.page = Number(d.page) || this.pdCol.page;
+        this.pdCol.size = Number(d.size) || this.pdCol.size;
         this.pdCol.totals = d.totals || { malls: 0, orders: 0, amount: 0, missingAmount: 0 };
         this.pdCol.shareTtlDays = Number(d.shareTtlDays) || 7;
         this.clampPdColPage();
       } catch (e) {
-        this.$message.error('加载人工催收失败：' + e.message);
+        this.$message.error('加载人工催收失败：' + (e.message || e));
       } finally {
         this.pdCol.loading = false;
       }
     },
-    // ── 分页：纯前端切片，翻页不重新请求（v0.3.40）──
+    /** 输入防抖 400ms：避免每敲一个字都打一次库 */
+    onPdColKeyword() {
+      clearTimeout(this._pdColKwTimer);
+      this._pdColKwTimer = setTimeout(() => this.searchPddCollect(), 400);
+    },
+    /** 回车 / 清空 / 防抖结束：回到第 1 页重新查 */
+    searchPddCollect() {
+      clearTimeout(this._pdColKwTimer);
+      this.pdCol.page = 1;
+      this.loadPddCollect(false);
+    },
+    // ── 分页：服务端分页，翻页 / 改每页都重新请求（v0.3.42）──
     onPdColSizeChange(n) {
       this.pdCol.size = Number(n) || 20;
       this.pdCol.page = 1;
+      this.loadPddCollect(false);
     },
     onPdColPageChange(p) {
       this.pdCol.page = Math.max(1, Number(p) || 1);
-    },
-    /** 刷新/过滤后行数变少，当前页可能越界 → 收敛到最后一页，避免出现空表格 */
-    clampPdColPage() {
-      const size = Math.max(1, Number(this.pdCol.size) || 20);
-      const max = Math.max(1, Math.ceil(this.pdColAll.length / size));
-      if (this.pdCol.page > max) this.pdCol.page = max;
-      if (this.pdCol.page < 1) this.pdCol.page = 1;
+      this.loadPddCollect(false);
     },
     /**
-     * 打开某商家的二维码弹窗（v0.3.40）：弹窗本体是子组件 pdd-collect-dlg，
-     * 它自带状态与二维码缓存，这里只负责把行数据递过去。
-     * 放在子组件里的原因见组件注释 —— 根模板太大，改一个 visible 就要全树 diff ~160ms。
+     * 返回后若当前页越界（刷新后商家变少）→ 收敛到最后一页并重查一次，避免空表格。
+     * 递归最多一层：重查后 page 已收敛，不会再触发。
      */
+    clampPdColPage() {
+      const size = Math.max(1, Number(this.pdCol.size) || 20);
+      const max = Math.max(1, Math.ceil((Number(this.pdCol.total) || 0) / size));
+      if (this.pdCol.page > max) {
+        this.pdCol.page = max;
+        this.loadPddCollect(false);
+        return true;
+      }
+      if (this.pdCol.page < 1) {
+        this.pdCol.page = 1;
+        this.loadPddCollect(false);
+        return true;
+      }
+      return false;
+    },
+    /**
+     * 按需取某商家的明细（订单 + 催收文字 + 扫码链接）。
+     * 结果挂在 row._detail 上，连点「详情」和「二维码」只请求一次。
+     * 列表接口从 v0.3.42 起不再下发这些内容。
+     */
+    fetchCollectDetail(row) {
+      if (!row || !row.key) return Promise.resolve(null);
+      if (row._detail) return Promise.resolve(row._detail);
+      if (row._detailP) return row._detailP;
+      const p = this.pddApi('/api/pdd/offline-collect/orders?key=' + encodeURIComponent(row.key))
+        .then((d) => { if (d && d.ok) row._detail = d; return d; })
+        .catch((e) => ({ ok: false, error: (e && e.message) || String(e) }))
+        .finally(() => { row._detailP = null; });
+      row._detailP = p;
+      return p;
+    },
+    /** 打开明细弹窗（子组件：根模板太大，弹窗状态放进去免得全树 diff） */
+    openPddCollectOrders(row) {
+      const dlg = this.$refs.pdColOrders;
+      if (dlg) dlg.open(row);
+    },
+    /** 打开二维码弹窗：文字与链接由子组件按需取（复用上面的行级缓存） */
     openPddCollectQr(row) {
       const dlg = this.$refs.pdColDlg;
       if (!dlg) return;

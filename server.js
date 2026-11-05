@@ -1202,14 +1202,9 @@ function serverUrlOf(req) {
 }
 /**
  * 人工催收的手机扫码链接（v0.3.40）：短路径 /c/<令牌>。
- * 二维码内容每多一个字符都可能抬高版本，生成一次要多花几毫秒、SVG 也更大；
- * 列表接口直接把这串带出去，前端点二维码就不必再发一次请求（见 lib/collect-share.js）。
+ * 二维码内容每多一个字符都可能抬高版本，生成一次要多花几毫秒、SVG 也更大。
+ * v0.3.42 起只在「详情 / 二维码」接口里签（列表不再带链接），见 lib/collect-share.js。
  */
-function collectShareUrlOf(req, uid, key) {
-  if (!key) return '';
-  const t = collectShare.createCollectToken({ userId: uid, key });
-  return serverUrlOf(req) + '/c/' + t.token;
-}
 
 // ─────────────────────────────────────────────────────────────────────────
 // 操作日志（旁路设施：任何写入失败都只打印日志，绝不影响主流程）
@@ -3405,8 +3400,7 @@ const server = http.createServer(async (req, res) => {
       if (!tk) {
         return sendJson(res, 200, { ok: false, error: '链接已失效（有效期 7 天），请回到电脑上重新点「二维码」生成' });
       }
-      const data = await pdd.offlineCollect(tk.u);
-      const g = pdd.offlineGroupOf(data, tk.k);
+      const g = await pdd.collectDetail(tk.u, tk.k);
       if (!g) {
         return sendJson(res, 200, { ok: false, error: '该商家的订单已全部处理，没有需要人工催收的了' });
       }
@@ -6500,7 +6494,7 @@ const server = http.createServer(async (req, res) => {
       // 「立即刷新数据」：服务器直连拼多多接口，不需要助手在线
       if (method === 'POST' && p === '/api/pdd/sync') {
         const out = await pdd.sync({ userId: pddUid, trigger: 'manual' });
-        pdd.invalidateOfflineCache(pddUid);   // v0.3.39：同步后人工催收列表不能还吃旧缓存
+        // v0.3.42：重建与缓存刷新已在 pdd.sync 内部完成（rebuildCollectSummary）
         await logOp(user, 'pdd.sync', { ok: !!out.ok, total: out.total, tenantId: pddUid });
         return sendJson(res, 200, out);
       }
@@ -6508,32 +6502,57 @@ const server = http.createServer(async (req, res) => {
       // 线下催收（v0.3.38）：按商家汇总「交易成功 + 暂不可开票/未同步开票」的订单。
       // 这两类在平台上没有可用入口，只能线下把订单号发给商家催，故单独成页。
       // 金额口径 = 实付金额（pay_amount），缺实付的单计入 missingAmount 提示，不静默算成 0。
+      //
+      // v0.3.42：列表改查汇总表 pdd_collect_summary（SQL 分页），**不再带订单明细与催收文字**。
+      // 明细/文字只在点「详情」或「二维码」时按单个商家查（/offline-collect/orders）。
       if (method === 'GET' && p === '/api/pdd/offline-collect') {
-        // nocache=1 只给页面「刷新」用；其余走 60 秒缓存（切页/连点二维码不再打库）
-        const noCache = url.searchParams.get('nocache') === '1';
-        const base = await pdd.offlineCollect(pddUid, { noCache });
-        const buyer = await buyerInfoOf(pddUid);
-        const cfg = loadConfig();
-        // 展开拷贝：缓存里的 base 是共享引用，直接改 out.groups 会污染下一次命中
-        // shareUrl 一并下发：签一次 HMAC 是微秒级，换来前端点二维码时零请求（v0.3.40）
-        const out = {
-          ...base,
+        // nocache=1 只给页面「刷新」用：强制按订单表现况重算一次汇总再查
+        if (url.searchParams.get('nocache') === '1') {
+          await pdd.rebuildCollectSummary(pddUid).catch((e) => {
+            console.warn('[pdd] 刷新催收汇总失败：' + ((e && e.message) || e));
+          });
+        }
+        const out = await pdd.collectSummaryPage(pddUid, {
+          page: url.searchParams.get('page'),
+          size: url.searchParams.get('size'),
+          keyword: url.searchParams.get('keyword') || '',
+        });
+        return sendJson(res, 200, {
+          ...out,
           // 有效期跟着令牌常量走，页面提示文案不再硬编码 7 天
           shareTtlDays: Math.round(collectShare.DEFAULT_TTL_MS / 86400000),
-          groups: base.groups.map((g) => ({
-            ...g,
-            text: pdd.offlineCollectText(cfg, buyer, g),
-            shareUrl: collectShareUrlOf(req, pddUid, g.key),
-          })),
-        };
-        return sendJson(res, 200, out);
+        });
+      }
+
+      // 单商家明细（v0.3.42）：列表不带明细，点「详情」/「二维码」时才查这一家
+      if (method === 'GET' && p === '/api/pdd/offline-collect/orders') {
+        const key = url.searchParams.get('key') || '';
+        const g = await pdd.collectDetail(pddUid, key);
+        if (!g) return sendJson(res, 200, { ok: false, error: '该商家已没有需要人工催收的订单' });
+        const buyer = await buyerInfoOf(pddUid);
+        const t = collectShare.createCollectToken({ userId: pddUid, key: g.key });
+        return sendJson(res, 200, {
+          ok: true,
+          key: g.key,
+          mallName: g.displayName,
+          mallId: g.mallId,
+          orderCount: g.orderCount,
+          amount: g.amount,
+          missingAmount: g.missingAmount,
+          latestOrderSn: g.latestOrderSn,
+          latestOrderTime: g.latestOrderTime,
+          text: pdd.offlineCollectText(loadConfig(), buyer, g),
+          // 二维码链接一并下发，页面点开时不用再请求一次
+          shareUrl: serverUrlOf(req) + '/c/' + t.token,
+          ttlDays: Math.round(t.ttlMs / 86400000),
+          orders: g.orders,
+        });
       }
 
       // 生成手机扫码链接：只读、7 天有效、只覆盖一个商家（无状态签名，不建表）
       if (method === 'POST' && p === '/api/pdd/offline-collect/share') {
         const body = await readBody(req);
-        const data = await pdd.offlineCollect(pddUid);
-        const g = pdd.offlineGroupOf(data, body.key);
+        const g = await pdd.collectDetail(pddUid, body.key);
         if (!g) return sendJson(res, 400, { ok: false, error: '该商家已没有需要人工催收的订单' });
         const t = collectShare.createCollectToken({ userId: pddUid, key: g.key });
         const link = serverUrlOf(req) + '/c/' + t.token;
@@ -6691,7 +6710,11 @@ const server = http.createServer(async (req, res) => {
           },
           shouldStop: () => !!ctx.stopping,
         }).then(async (out) => {
-          pdd.invalidateOfflineCache(pddUid);   // v0.3.39：订单同步后人工催收列表立即用新数据
+          // v0.3.42：订单明细变了要重算催收汇总表（列表直接查它），
+          // 顺带刷新分组缓存，点「详情」立即是最新明细
+          await pdd.rebuildCollectSummary(pddUid).catch((e) => {
+            console.warn('[pdd] 订单同步后重建催收汇总失败：' + ((e && e.message) || e));
+          });
           ctx.truncated = !!out.truncated;
           ctx.maxPages = out.maxPages || null;
           ctx.progress = Object.assign({}, ctx.progress, {
