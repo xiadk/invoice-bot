@@ -4305,6 +4305,129 @@
         </el-card>
       </div>
 
+      <!-- ══════════ 线下催收（v0.3.38） ══════════ -->
+      <!-- 口径：交易成功(order_status=4) 且 开票状态=暂不可开票(0)/未同步开票(9)。
+           这两类在拼多多上没有申请/催收入口，只能线下把订单号发给商家。
+           按商家聚合（店铺聊天与线下沟通都是商家维度），金额一律按实付金额合计。 -->
+      <div v-show="page === 'pddCollect'" id="page-pdd-collect">
+        <div class="page-head">
+          <h2>线下催收</h2>
+          <div class="meta-line">
+            按<b>商家</b>汇总「交易成功、但暂不可开票 / 未同步开票」的订单 —— 这两类在平台上没有催收入口，
+            只能把订单号线下发给商家催。名单取自已同步的订单，先在「拼多多发票」页点「同步订单与发票」刷新。
+          </div>
+        </div>
+
+        <qnh-tenant-picker v-if="isAdmin" service="拼多多" :users="pddUsers" :value="qnhTenant"
+                           :sessions="pddSessions" :self-id="me && me.id"
+                           @change="onQnhTenantChange"></qnh-tenant-picker>
+
+        <div class="stat-row">
+          <el-card v-for="s in pdColStatCards" :key="s.label" shadow="never" class="stat-card"
+                   :body-style="{ padding: '14px 16px' }" style="flex:1;min-width:150px">
+            <div class="num">{{ s.value }}</div>
+            <div class="label">{{ s.label }}</div>
+            <div class="sub">{{ s.sub }}</div>
+          </el-card>
+        </div>
+
+        <el-card class="section-card" shadow="never">
+          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px">
+            <el-input v-model="pdCol.keyword" size="small" clearable style="width:260px"
+                      placeholder="商家名称 / 订单号"></el-input>
+            <el-button size="small" type="primary" :loading="pdCol.loading" @click="loadPddCollect">刷新</el-button>
+            <span style="flex:1"></span>
+            <span class="loginid">共 {{ pdColRows.length }} 个商家</span>
+          </div>
+
+          <el-table :data="pdColRows" size="small" border v-loading="pdCol.loading" row-key="key"
+                    empty-text="没有需要线下催收的订单（交易成功且暂不可开票 / 未同步开票）">
+            <el-table-column type="expand">
+              <template slot-scope="p">
+                <div style="padding:4px 12px 10px">
+                  <el-table :data="p.row.orders" size="mini" border empty-text="没有订单">
+                    <el-table-column label="订单号" min-width="180">
+                      <template slot-scope="o"><span class="loginid">{{ o.row.orderSn }}</span></template>
+                    </el-table-column>
+                    <el-table-column label="下单时间" width="140">
+                      <template slot-scope="o">{{ shortDate(o.row.orderTime) }}</template>
+                    </el-table-column>
+                    <el-table-column label="实付金额" width="110" align="right">
+                      <template slot-scope="o">
+                        <span class="amount">{{ o.row.payAmount == null ? '—' : yuan(o.row.payAmount) }}</span>
+                      </template>
+                    </el-table-column>
+                    <el-table-column label="开票状态" width="110">
+                      <template slot-scope="o">
+                        <el-tag size="mini" :type="o.row.invoiceStatus === 9 ? 'info' : 'warning'">{{ o.row.statusText }}</el-tag>
+                      </template>
+                    </el-table-column>
+                    <el-table-column label="商品" min-width="200">
+                      <template slot-scope="o">{{ o.row.goodsName || '—' }}</template>
+                    </el-table-column>
+                  </el-table>
+                </div>
+              </template>
+            </el-table-column>
+            <el-table-column label="商家" min-width="220">
+              <template slot-scope="p">
+                <div>{{ p.row.displayName }}</div>
+                <div class="loginid">
+                  {{ p.row.mallId ? ('店铺 ID ' + p.row.mallId)
+                    : (p.row.mallSn ? '店铺串 ····' + String(p.row.mallSn).slice(-8) : '没有店铺标识') }}
+                </div>
+              </template>
+            </el-table-column>
+            <el-table-column label="订单数" width="90" align="center" prop="orderCount"></el-table-column>
+            <el-table-column label="总金额" width="130" align="right">
+              <template slot-scope="p"><span class="amount">{{ yuan(p.row.amount) }}</span></template>
+            </el-table-column>
+            <el-table-column label="最近订单" width="200">
+              <template slot-scope="p">
+                <div class="loginid">{{ p.row.latestOrderSn }}</div>
+                <div class="loginid">{{ shortDate(p.row.latestOrderTime) }}</div>
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" width="120" fixed="right">
+              <template slot-scope="p">
+                <el-button type="text" size="mini" @click="openPddCollectQr(p.row)">二维码催收</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+        </el-card>
+
+        <!-- 二维码 + 可编辑催收文字：电脑上直接改/复制，也可以手机扫码在手机上改 -->
+        <el-dialog title="线下催收 · 扫码或直接复制" :visible.sync="pdCol.dlg.visible" width="720px" append-to-body>
+          <div style="display:flex;gap:18px;align-items:flex-start">
+            <div style="width:210px;flex:none;text-align:center">
+              <div v-if="pdCol.dlg.qr" v-html="pdCol.dlg.qr" style="line-height:0"></div>
+              <div v-else style="height:200px;display:flex;align-items:center;justify-content:center;
+                                 color:#909399;font-size:12px">
+                {{ pdCol.dlg.loading ? '正在生成…' : '二维码生成失败' }}
+              </div>
+              <div class="loginid" style="margin-top:8px">手机扫码打开，可直接改文字并复制</div>
+              <div class="loginid">链接 {{ pdCol.dlg.ttlDays }} 天内有效</div>
+            </div>
+            <div style="flex:1;min-width:0">
+              <div style="margin-bottom:6px">
+                <b>{{ pdCol.dlg.mallName }}</b>
+                <span class="loginid"> · {{ pdCol.dlg.orderCount }} 笔 · 总金额 ¥{{ Number(pdCol.dlg.amount || 0).toFixed(2) }}</span>
+              </div>
+              <el-input type="textarea" v-model="pdCol.dlg.text" :rows="9" resize="vertical"
+                        placeholder="催收文字"></el-input>
+              <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+                <el-button size="small" type="primary" @click="copyPdColText">一键复制文字</el-button>
+                <el-button size="small" @click="copyPdColSn">复制最近订单号</el-button>
+                <el-button size="small" type="text" @click="copyPlain(pdCol.dlg.link, '已复制扫码链接')">复制链接</el-button>
+              </div>
+              <div class="loginid" style="margin-top:8px">
+                文字结构：全部订单号（逗号分隔）→ 拼多多催收模板 → 总金额（Σ 实付金额）
+              </div>
+            </div>
+          </div>
+        </el-dialog>
+      </div>
+
       <!-- ══════════ 闪电帮帮发票（对所有用户开放） ══════════ -->
       <div v-show="page === 'sdc'" id="page-sdc">
         <div class="page-head">
@@ -4987,6 +5110,17 @@ const vm = new Vue({
         selected: [], picked: {}, applying: false, applyTaskId: '',
         applyDialog: { visible: false, running: false, kind: '', status: '', message: '', progress: null, log: [], startedAt: 0 },
       },
+      // 线下催收（v0.3.38）：把「交易成功 + 暂不可开票/未同步开票」的订单按商家汇总，
+      // 平台没有催收入口，只能线下把订单号发给商家。金额一律按实付金额合计。
+      pdCol: {
+        loading: false, rows: [], keyword: '',
+        totals: { malls: 0, orders: 0, amount: 0, missingAmount: 0 },
+        // 二维码弹窗：text 是可编辑的催收文字，qr 是 link 生成的 SVG（vendor/qrcode.min.js 离线生成）
+        dlg: {
+          visible: false, loading: false, mallName: '', orderCount: 0, amount: 0,
+          latestOrderSn: '', text: '', qr: '', link: '', ttlDays: 7,
+        },
+      },
       // 闪电帮帮发票：同样用 pd.picked 那套跨页多选（selected 是当前选中行数组）
       sd: {
         loading: false, syncing: false, sending: false,
@@ -5276,6 +5410,7 @@ const vm = new Vue({
         { title: '发票', items: this.isStaff ? [] : [
           { key: 'board', label: '1688发票', icon: 'el-icon-document' },
           { key: 'pdd', label: '拼多多发票', icon: 'el-icon-s-order' },
+          { key: 'pddCollect', label: '线下催收', icon: 'el-icon-chat-dot-round' },
           { key: 'sdc', label: '闪电帮帮发票', icon: 'el-icon-truck' },
           { key: 'mapping', label: '税名核对', icon: 'el-icon-edit-outline' },
         ] },
@@ -5716,8 +5851,25 @@ const vm = new Vue({
           sub: '待申请 ' + n(s.pending) + ' · 开票中 ' + n(s.issuing) + ' · 商家处理 ' + n(s.mallProcessing) },
       ];
     },
-    /** 闪电帮帮：金额三卡（可申请 / 已申请 / 合计），口径与拼多多页保持一致 */
-    sdcStats() {
+    /** 线下催收：统计卡（商家数 / 订单数 / 总金额 / 缺实付金额提示） */
+    pdColStatCards() {
+      const t = this.pdCol.totals || {};
+      return [
+        { label: '涉及商家', value: String(t.malls || 0), sub: '按店铺聚合，同店多单只算一家' },
+        { label: '待线下催收订单', value: String(t.orders || 0), sub: '交易成功 · 暂不可开票 / 未同步开票' },
+        { label: '总金额', value: yuan(t.amount || 0), sub: 'Σ 实付金额' },
+        { label: '缺实付金额', value: String(t.missingAmount || 0), sub: '这些单没有实付金额，按 0 计入总额' },
+      ];
+    },
+    /** 线下催收：关键字过滤（商家名 / 订单号），纯前端过滤，数据量在千级以内 */
+    pdColRows() {
+      const kw = String(this.pdCol.keyword || '').trim().toLowerCase();
+      const rows = this.pdCol.rows || [];
+      if (!kw) return rows;
+      return rows.filter((g) => String(g.displayName || '').toLowerCase().includes(kw)
+        || (g.orders || []).some((o) => String(o.orderSn || '').toLowerCase().includes(kw)));
+    },
+    /** 闪电帮帮：金额三卡（可申请 / 已申请 / 合计），口径与拼多多页保持一致 */    sdcStats() {
       const s = this.sd.summary || {};
       const a = (o) => Number((o && o.amount) || 0);
       const n = (o) => Number((o && o.count) || 0);
@@ -6119,7 +6271,8 @@ const vm = new Vue({
       if (p === 'waybill') this.loadWaybills();
       if (p === 'replenishOrder') this.loadReplenishOrders();
       if (p === 'audit') this.loadOpLog();
-      if (p === 'profit' || p === 'refund' || p === 'after' || p === 'pdd' || p === 'qnhcfg' || p === 'refundalert') {
+      if (p === 'profit' || p === 'refund' || p === 'after' || p === 'pdd' || p === 'pddCollect'
+          || p === 'qnhcfg' || p === 'refundalert') {
         if (p === 'refund') this.reportOp('qnh.view');
         this.enterQnhPage(p);
       }
@@ -6771,6 +6924,8 @@ const vm = new Vue({
     qnhReload() {
       // 拼多多与牵牛花是两套独立登录态，进拼多多页不该去请求牵牛花状态
       if (this.page === 'pdd') { this.loadPddStatus(); this.loadPddOrders(); return; }
+      // 线下催收与拼多多发票同源（同一套登录/租户），只读库、不打平台接口，所以不需要先探活登录态
+      if (this.page === 'pddCollect') { this.loadPddCollect(); return; }
       if (this.page === 'sdc') { this.loadSdcStatus(); this.loadSdcOrders(); return; }
       this.loadRefundStatus();
       if (this.page === 'refund') { this.loadRefunds(); this.loadRefundTrend(); }
@@ -7575,6 +7730,79 @@ const vm = new Vue({
       }
     },
     applyPddFilter() { this.pd.page = 1; this.clearPddPicked(); this.loadPddOrders(); },
+    // ── 线下催收（v0.3.38）──
+    /** 按商家汇总「交易成功 + 暂不可开票/未同步开票」的订单；只读库，不打拼多多接口 */
+    async loadPddCollect() {
+      if (this.qnhNeedPick) return;
+      this.pdCol.loading = true;
+      try {
+        const d = await this.pddApi('/api/pdd/offline-collect');
+        if (d.error) { this.$message.error(d.error); return; }
+        this.pdCol.rows = d.groups || [];
+        this.pdCol.totals = d.totals || { malls: 0, orders: 0, amount: 0, missingAmount: 0 };
+      } catch (e) {
+        this.$message.error('加载线下催收失败：' + e.message);
+      } finally {
+        this.pdCol.loading = false;
+      }
+    },
+    /** 打开某商家的二维码弹窗：先生成 7 天有效的手机链接，再用离线二维码库画成 SVG */
+    async openPddCollectQr(row) {
+      const dlg = this.pdCol.dlg;
+      dlg.visible = true; dlg.loading = true;
+      dlg.mallName = row.displayName || '';
+      dlg.orderCount = row.orderCount || 0;
+      dlg.amount = row.amount || 0;
+      dlg.latestOrderSn = row.latestOrderSn || '';
+      dlg.text = row.text || '';
+      dlg.qr = ''; dlg.link = '';
+      try {
+        const d = await this.pddApi('/api/pdd/offline-collect/share', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ key: row.key }),
+        });
+        if (!d.ok) { this.$message.error(d.error || '生成扫码链接失败'); return; }
+        dlg.link = d.link || '';
+        dlg.text = d.text || dlg.text;
+        dlg.latestOrderSn = d.latestOrderSn || dlg.latestOrderSn;
+        dlg.ttlDays = Number(d.ttlDays) || 7;
+        dlg.qr = this.qrSvg(dlg.link);
+      } catch (e) {
+        this.$message.error('生成扫码链接失败：' + e.message);
+      } finally {
+        dlg.loading = false;
+      }
+    },
+    /**
+     * 通用复制：优先 Clipboard API；内网 http 下它不可用（非安全上下文），
+     * 退回 textarea + execCommand —— 与 m-upload 页同一套兜底。
+     */
+    copyPlain(text, okMsg) {
+      const s = String(text == null ? '' : text);
+      if (!s) { this.$message.warning('没有可复制的内容'); return; }
+      const done = () => this.$message.success(okMsg || '已复制');
+      const legacy = () => {
+        const ta = document.createElement('textarea');
+        ta.value = s; ta.setAttribute('readonly', '');
+        ta.style.position = 'fixed'; ta.style.top = '-1000px'; ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select(); ta.setSelectionRange(0, s.length);
+        let ok = false;
+        try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+        document.body.removeChild(ta);
+        if (ok) done(); else this.$message.warning('复制失败，请手动选中内容复制');
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText && window.isSecureContext) {
+        navigator.clipboard.writeText(s).then(done).catch(legacy);
+        return;
+      }
+      legacy();
+    },
+    copyPdColText() { this.copyPlain(this.pdCol.dlg.text, '已复制催收文字，粘贴到微信发给商家即可'); },
+    /** 复制「时间最近的一笔」订单号（列表按下单时间倒序，分组里的 latestOrderSn 就是它） */
+    copyPdColSn() {
+      this.copyPlain(this.pdCol.dlg.latestOrderSn, '已复制最近一笔订单号：' + (this.pdCol.dlg.latestOrderSn || ''));
+    },
     // 表头排序（下单时间 / 开票金额）：点一次降序、再点升序、第三次取消 → 回落到默认（时间倒序）
     onPddSortChange({ prop, order }) {
       const key = prop === 'invoiceAmount' ? 'amount' : 'time';
