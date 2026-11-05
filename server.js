@@ -6475,6 +6475,14 @@ const server = http.createServer(async (req, res) => {
       if (method === 'GET' && p === '/api/pdd/orders') {
         const q = url.searchParams;
         const status = q.get('status');
+        // 表头「全选」：按同一筛选条件返回全部结果（跨页）的精简行，v0.3.41
+        if (q.get('selectAll') === '1') {
+          return sendJson(res, 200, await pdd.listSelectable({
+            status: (status === null || status === 'all') ? '' : status,
+            keyword: q.get('keyword') || '',
+            userId: pddUid,
+          }));
+        }
         return sendJson(res, 200, await pdd.list({
           status: (status === null || status === 'all') ? '' : status,
           keyword: q.get('keyword') || '',
@@ -7116,6 +7124,15 @@ const server = http.createServer(async (req, res) => {
           page: q.get('page'),
           size: q.get('size'),
         };
+        // 表头「全选」：按同一筛选返回全部店铺 key（跨页），v0.3.41。
+        // 家数取 countShops，与列表底部「共 N 家店铺」同一个口径。
+        if (q.get('selectAll') === '1') {
+          const [keys, cnt] = await Promise.all([sdc.shopKeys(base), sdc.countShops(base)]);
+          return sendJson(res, 200, {
+            rows: keys.rows, total: cnt.count, truncated: keys.truncated,
+            amount: cnt.amount, pending: cnt.pending, selectAll: true,
+          });
+        }
         const [rows, cnt] = await Promise.all([
           sdc.shops(base),
           sdc.countShops(base),

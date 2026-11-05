@@ -151,6 +151,15 @@
   .el-main { padding: 20px 20px 40px; background: var(--bg); }
   .banner { margin: 0; padding: 10px 20px; font-size: 13px; }
   .section-card { margin-bottom: 14px; }
+  /* 跨页全选提示条（v0.3.41）：淡蓝底 + 深蓝字，只在「勾选跨越了分页」时出现 */
+  .bulk-sel-tip {
+    margin: 0 0 8px; padding: 6px 10px; border-radius: 4px;
+    background: #eef4ff; border: 1px solid #cfe0ff; color: #1d4ed8; font-size: 12px;
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  }
+  .bulk-sel-tip b { color: #1e40af; }
+  .bulk-sel-tip a { color: #1d4ed8; cursor: pointer; text-decoration: underline; }
+  .bulk-sel-tip a:hover { color: #1e40af; }
   .stat-card { cursor: pointer; transition: .15s; border-radius: var(--radius); }
   .stat-card .num { font-size: 24px; font-weight: 700; color: var(--text-1); line-height: 1.4; }
   .stat-card .label { font-size: 12px; color: var(--text-2); margin-top: 2px; }
@@ -757,7 +766,7 @@
             <!-- slot-scope 声明为作用域插槽：表头内容在 table-header 渲染上下文求值，状态才能响应式更新 -->
             <template slot="header" slot-scope="scope">
               <el-checkbox :value="headerChecked" :indeterminate="headerIndeterminate" :disabled="readonly"
-                           title="勾选 = 全选当前页可催收会员名；取消 = 清空全部已选"
+                           title="勾选 = 全选当前查询结果的全部可催收会员名（跨页）；取消 = 清空全部已选"
                            @change="toggleSelAll"></el-checkbox>
             </template>
             <template slot-scope="p">
@@ -4212,12 +4221,23 @@
             <span class="loginid">共 {{ pd.total }} 条</span>
           </div>
 
+          <!-- 跨页全选提示（v0.3.41）：选中数超过当前页行数时才出现，说明勾选已跨越分页 -->
+          <div v-if="pd.selected.length > (pd.rows || []).length" class="bulk-sel-tip">
+            已选中 <b>{{ pd.selected.length }}</b> 条查询结果（含其它页）
+            <a @click="keepPddPageSelection">只选本页</a>
+            <a @click="clearPddPicked">取消全选</a>
+          </div>
+
           <!-- row-key + reserve-selection：翻页/排序后回来仍记得哪些行被勾过（跨页多选靠它恢复勾选态，
-               计数与批量操作则由 pd.picked 跨页累积维护） -->
-          <el-table ref="pddTable" :data="pd.rows" size="small" border style="width:100%" v-loading="pd.loading"
+               计数与批量操作则由 pd.picked 跨页累积维护）
+               select-all：表头全选 = 选中当前筛选条件下的**全部查询结果**（v0.3.41），不只是本页 -->
+          <el-table ref="pddTable" :data="pd.rows" size="small" border style="width:100%"
+                    v-loading="pd.loading || pd.selAllLoading"
                     row-key="orderSn"
                     :default-sort="pddDefaultSort"
-                    empty-text="暂无订单数据" @selection-change="onPddSelChange" @sort-change="onPddSortChange">
+                    empty-text="暂无订单数据" @selection-change="onPddSelChange" @select-all="onPddSelectAll"
+                    @select="onPddRowSelect"
+                    @sort-change="onPddSortChange">
             <el-table-column type="selection" width="42" :reserve-selection="true"
                              :selectable="(row) => !!(row.applyable || row.chatable)"></el-table-column>
             <el-table-column label="商品" min-width="260">
@@ -4513,12 +4533,23 @@
             <span class="loginid">共 {{ sd.total }} 家店铺 · 待开票 {{ sdcPendingTotal }} 元</span>
           </div>
 
+          <!-- 跨页全选提示（v0.3.41）：选中家数超过当前页行数时才出现 -->
+          <div v-if="sd.selected.length > (sd.rows || []).length" class="bulk-sel-tip">
+            已选中 <b>{{ sd.selected.length }}</b> 家店铺（含其它页）
+            <a @click="keepSdcPageSelection">只选本页</a>
+            <a @click="clearSdcPicked">取消全选</a>
+          </div>
+
           <!-- row-key + reserve-selection：与拼多多列表同一套多选（表头有全选/半选，翻页后仍记得勾过哪些店，
-               计数与发送范围则由 sd.picked 跨页累积维护） -->
-          <el-table ref="sdcTable" :data="sd.rows" size="small" border style="width:100%" v-loading="sd.loading"
+               计数与发送范围则由 sd.picked 跨页累积维护）
+               select-all：表头全选 = 选中当前筛选条件下的**全部店铺**（v0.3.41），不只是本页 -->
+          <el-table ref="sdcTable" :data="sd.rows" size="small" border style="width:100%"
+                    v-loading="sd.loading || sd.selAllLoading"
                     row-key="key" :default-sort="sdcDefaultSort" empty-text="暂无店铺数据"
                     @sort-change="onSdcSortChange"
                     @selection-change="onSdcSelChange"
+                    @select-all="onSdcSelectAll"
+                    @select="onSdcRowSelect"
                     @expand-change="onSdcExpandChange">
             <el-table-column type="expand">
               <template slot-scope="p">
@@ -4638,7 +4669,7 @@
                            @current-change="onSdcPage" @size-change="onSdcSize"></el-pagination>
             <span class="total">共 {{ sd.total }} 家店铺</span>
             <span style="flex:1"></span>
-            <span class="loginid">表头复选框 = 全选当前页（翻页后已勾选的仍保留）；未勾选店铺时点「发送催收消息」= 对所有店铺的<b>可申请开票 + 已申请开票 + 不支持线上开票</b>订单批量催收（已开票的不催）</span>
+            <span class="loginid">表头复选框 = 全选当前查询结果的全部店铺（跨页）；未勾选店铺时点「发送催收消息」= 对所有店铺的<b>可申请开票 + 已申请开票 + 不支持线上开票</b>订单批量催收（已开票的不催）</span>
           </div>
         </el-card>
       </div>
@@ -5255,7 +5286,13 @@ const vm = new Vue({
         // 批量申请发票
         // selected = 跨页累计的已勾选行（翻页不清空）；picked 是它的 {orderSn: row} 索引，
         // 用来在 data 整页替换（后端分页）时把「本页取消勾选」的行摘掉、其余页的保留
-        selected: [], picked: {}, applying: false, applyTaskId: '',
+        // selAllLoading = 表头全选正在拉取「全部查询结果」（v0.3.41）
+        // syncing = 程序批量写勾选态期间为 true，避免 Element 逐行 emit 被当成用户操作误删 picked
+        selected: [], picked: {}, applying: false, applyTaskId: '', selAllLoading: false, syncing: false,
+        // allPicked = 当前是否处在「已全选全部查询结果」状态。
+        // 表头 checkbox 在页内有不可勾选行时永远是半选，Element 只按「半选→全选」处理，
+        // 所以「再点一次取消」必须自己判：只有这个标志为真时，点表头才当成取消。
+        allPicked: false,
         applyDialog: { visible: false, running: false, kind: '', status: '', message: '', progress: null, log: [], startedAt: 0 },
       },
       // 线下催收（v0.3.38）：把「交易成功 + 暂不可开票/未同步开票」的订单按商家汇总，
@@ -5275,7 +5312,7 @@ const vm = new Vue({
         // 主表是店铺维度：sort 用 SHOP_SORTS 那套（默认按可开票金额从高到低）
         // 档位不再作为筛选条件（2026-10-29 按要求删除），要看档位分布直接看列表里的「开票档位」列
         filter: { sent: '', invoice: '', keyword: '', sort: 'amount_desc' },
-        selected: [], picked: {},
+        selected: [], picked: {}, selAllLoading: false, syncing: false, allPicked: false,
         login: { logined: false, accountName: '', subUserId: '', lastSyncAt: null, writtenAt: null },
         agent: { online: false, agentVer: '', minVer: '', outdated: false },
         users: [], sessions: [],
@@ -6175,11 +6212,13 @@ const vm = new Vue({
       return all.slice((page - 1) * this.dashSize, page * this.dashSize);
     },
     headerChecked() {
-      const sendable = this.pagedCompanies.flatMap(c => c.members.filter(m => m.canSend));
+      // v0.3.41：表头全选的范围 = 当前筛选条件下的**全部公司**（不只当前页），
+      // 否则翻页后表头状态会跟实际勾选对不上
+      const sendable = this.visibleCompanies.flatMap(c => c.members.filter(m => m.canSend));
       return sendable.length > 0 && sendable.every(m => this.selected[m.loginId]);
     },
     headerIndeterminate() {
-      const sendable = this.pagedCompanies.flatMap(c => c.members.filter(m => m.canSend));
+      const sendable = this.visibleCompanies.flatMap(c => c.members.filter(m => m.canSend));
       const n = sendable.filter(m => this.selected[m.loginId]).length;
       return n > 0 && n < sendable.length;
     },
@@ -6721,7 +6760,11 @@ const vm = new Vue({
     toggleSelAll(on) {
       if (this.readonly) return;
       if (on) {
-        this.pagedCompanies.forEach(c => c.members.forEach(m => { if (m.canSend) this.$set(this.selected, m.loginId, true); }));
+        // v0.3.41：勾选表头 = 全选**当前查询结果**里的全部可催收会员名（跨页），
+        // 不再只选当前页 20 家；一次性生成新对象再赋值，避免几千次 $set 触发重复渲染
+        const next = Object.assign({}, this.selected);
+        this.visibleCompanies.forEach(c => c.members.forEach(m => { if (m.canSend) next[m.loginId] = true; }));
+        this.selected = next;
       } else {
         this.selected = {};
       }
@@ -8162,17 +8205,109 @@ const vm = new Vue({
      *   当前页里没被选中的 → 从 picked 摘掉；当前页选中的 → 写入 picked；其余页的一律保留。
      */
     onPddSelChange(rows) {
+      // 程序在批量写勾选态（全选 / 只选本页）时 Element 会逐行 emit，
+      // 那不是用户操作，不能按「当前页未选中的摘掉」处理，否则刚灌进去的其它页会被删光
+      if (this.pd.syncing) return;
       const picked = this.pd.picked || (this.pd.picked = {});
       const pageRows = this.pd.rows || [];
       const selSns = new Set((rows || []).map((r) => r && r.orderSn).filter(Boolean));
       pageRows.forEach((r) => { if (r && r.orderSn && !selSns.has(r.orderSn)) delete picked[r.orderSn]; });
       (rows || []).forEach((r) => { if (r && r.orderSn) picked[r.orderSn] = r; });
       this.pd.selected = Object.keys(picked).map((k) => picked[k]);
+      // 注意：这里**不能**重置 allPicked。Element 点表头取消时先 emit selection-change、
+      // 后 emit select-all，如果在这里复位，onPddSelectAll 就看不到「刚才处于全选状态」，
+      // 会把取消又当成一次全选（踩过）。用户手动改动只走 @select（onPddRowSelect）。
+    },
+    /** 单行勾选/取消（表头全选不走这里）→ 已不是「全部结果」状态 */
+    onPddRowSelect() {
+      if (this.pd.syncing) return;
+      this.pd.allPicked = false;
+    },
+    /**
+     * 表头全选（v0.3.41）：点一次 = 选中**当前筛选条件下的全部查询结果**，不只是当前页。
+     * Element 的表头全选只处理 :data（当前页 20 行），所以这里向服务端要一次全量精简行，
+     * 再灌进表格内部选中态 —— reserve-selection 靠 row-key，翻页后才能把对应行重新勾上。
+     * 全选状态下再点一次表头（取消全选）→ 清空全部。
+     */
+    async onPddSelectAll(rows) {
+      // 页内若含不可勾选行（已开票等），表头复选框永远停在「半选」，
+      // Element 只按「半选 → 全选」处理 —— 不在这里判一下，用户全选后就再也点不掉。
+      // 判据用显式标志（不用条数比较：只选了本页 19 条也可能比另一页的可勾选数多）。
+      if (this.pd.allPicked) { this.clearPddPicked(); return; }
+      if (!rows || !rows.length) { this.clearPddPicked(); return; }
+      await this.selectAllPddRows();
+    },
+    async selectAllPddRows() {
+      if (this.pd.selAllLoading) return;
+      if (this.qnhNeedPick) { this.$message.warning('请先选择要以哪个账号的身份操作'); return; }
+      const q = new URLSearchParams();
+      const f = this.pd.filter || {};
+      if (f.status !== '') q.set('status', f.status);
+      if (f.keyword) q.set('keyword', f.keyword);
+      q.set('selectAll', '1');
+      this.pd.selAllLoading = true;
+      try {
+        const d = await this.pddApi('/api/pdd/orders?' + q.toString());
+        if (d.error) { this.$message.error(d.error); return; }
+        // 与表格 :selectable 同一把尺子：既不能申请也不能催的行本来就勾不上，不纳入
+        const all = (d.rows || []).filter((r) => r && r.orderSn && (r.applyable || r.chatable));
+        if (!all.length) {
+          this.$message.warning('当前查询结果里没有可勾选的订单（需为待申请或商家处理中）');
+          this.clearPddPicked();
+          return;
+        }
+        if (d.truncated) {
+          this.$message.warning('查询结果共 ' + d.total + ' 条，超过单次全选上限，已纳入前 '
+            + all.length + ' 条；请用筛选条件收窄后重试');
+        }
+        const picked = {};
+        all.forEach((r) => { picked[r.orderSn] = r; });
+        this.pd.picked = picked;
+        this.pd.selected = all.slice();
+        this.pd.allPicked = true;
+        this.syncPddTableSelection(all);
+        this.$message.success('已选择全部 ' + all.length + ' 条查询结果（跨页）');
+      } catch (e) {
+        this.$message.error('全选失败：' + e.message);
+      } finally {
+        this.pd.selAllLoading = false;
+      }
+    },
+    /** 把跨页行写进 el-table 内部选中态：当前页用本页对象（避免同 key 两个对象），其余页用精简行 */
+    syncPddTableSelection(all) {
+      const t = this.$refs.pddTable;
+      if (!t || typeof t.toggleRowSelection !== 'function') return;
+      const cur = new Map((this.pd.rows || []).map((r) => [r.orderSn, r]));
+      this.pd.syncing = true;
+      try {
+        all.forEach((r) => t.toggleRowSelection(cur.get(r.orderSn) || r, true));
+      } finally {
+        this.pd.syncing = false;
+      }
+    },
+    /** 提示条上的「只选本页」：把跨页选中收敛回当前页，其它页的勾选摘掉 */
+    keepPddPageSelection() {
+      const picked = {};
+      (this.pd.rows || []).forEach((r) => { if (r && r.orderSn && this.pd.picked[r.orderSn]) picked[r.orderSn] = r; });
+      this.pd.picked = picked;
+      this.pd.selected = Object.keys(picked).map((k) => picked[k]);
+      this.pd.allPicked = false;
+      const t = this.$refs.pddTable;
+      if (t && typeof t.clearSelection === 'function') {
+        this.pd.syncing = true;
+        try {
+          t.clearSelection();
+          this.pd.selected.forEach((r) => t.toggleRowSelection(r, true));
+        } finally {
+          this.pd.syncing = false;
+        }
+      }
     },
     /** 清空拼多多跨页选中（换筛选条件/换账号/批量任务跑完后调用，避免「看不见的行还选着」） */
     clearPddPicked() {
       this.pd.picked = {};
       this.pd.selected = [];
+      this.pd.allPicked = false;
       const t = this.$refs.pddTable;
       if (t && typeof t.clearSelection === 'function') t.clearSelection();
     },
@@ -8828,6 +8963,7 @@ const vm = new Vue({
     clearSdcPicked() {
       this.sd.picked = {};
       this.sd.selected = [];
+      this.sd.allPicked = false;
       const t = this.$refs.sdcTable;
       if (t && typeof t.clearSelection === 'function') t.clearSelection();
     },
@@ -8849,12 +8985,97 @@ const vm = new Vue({
      * picked 用 row.key（无店铺 ID 的那组是 __none__），与 row-key 一致。
      */
     onSdcSelChange(rows) {
+      // 程序批量写勾选态期间跳过（同拼多多：那不是用户操作，会误删其它页）
+      if (this.sd.syncing) return;
       const picked = this.sd.picked || (this.sd.picked = {});
       const pageRows = this.sd.rows || [];
       const selKeys = new Set((rows || []).map((r) => r && r.key).filter(Boolean));
       pageRows.forEach((r) => { if (r && r.key && !selKeys.has(r.key)) delete picked[r.key]; });
       (rows || []).forEach((r) => { if (r && r.key) picked[r.key] = r; });
       this.sd.selected = Object.keys(picked).map((k) => picked[k]);
+      // 同拼多多：不能在这里重置 allPicked（表头取消是 selection-change 先于 select-all）
+    },
+    /** 单行勾选/取消（表头不走这里）→ 已不是「全部结果」状态 */
+    onSdcRowSelect() {
+      if (this.sd.syncing) return;
+      this.sd.allPicked = false;
+    },
+    /**
+     * 表头全选（v0.3.41）：点一次 = 选中**当前筛选条件下的全部店铺**（跨页），
+     * 与拼多多同构。再点一次表头 = 取消全选。
+     */
+    async onSdcSelectAll(rows) {
+      // 同拼多多：页内有「无店铺 ID」这种不可勾选行时表头停在半选态，
+      // 所以「再点一次取消」靠显式标志判断，而不是靠 Element 的复选框状态。
+      if (this.sd.allPicked) { this.clearSdcPicked(); return; }
+      if (!rows || !rows.length) { this.clearSdcPicked(); return; }
+      await this.selectAllSdcRows();
+    },
+    async selectAllSdcRows() {
+      if (this.sd.selAllLoading) return;
+      if (this.qnhNeedPick) { this.$message.warning('请先选择要以哪个账号的身份操作'); return; }
+      const q = new URLSearchParams();
+      const f = this.sd.filter || {};
+      if (f.sent) q.set('sent', f.sent);
+      if (f.invoice) q.set('invoice', f.invoice);
+      if (f.keyword) q.set('keyword', f.keyword);
+      q.set('selectAll', '1');
+      this.sd.selAllLoading = true;
+      try {
+        const d = await this.sdcApi('/api/sdc/shops?' + q.toString());
+        if (d.error) { this.$message.error(d.error); return; }
+        // 与表格 :selectable 一致：没有店铺 ID 的组换不到会话，勾不上
+        const all = (d.rows || []).filter((r) => r && r.key && r.chatable);
+        if (!all.length) {
+          this.$message.warning('当前查询结果里没有可勾选的店铺（缺店铺 ID 的无法催收）');
+          this.clearSdcPicked();
+          return;
+        }
+        if (d.truncated) {
+          this.$message.warning('查询结果超过单次全选上限，已纳入前 ' + all.length + ' 家；请用筛选条件收窄后重试');
+        }
+        const picked = {};
+        all.forEach((r) => { picked[r.key] = r; });
+        this.sd.picked = picked;
+        this.sd.selected = all.slice();
+        this.sd.allPicked = true;
+        this.syncSdcTableSelection(all);
+        this.$message.success('已选择全部 ' + all.length + ' 家店铺（跨页）');
+      } catch (e) {
+        this.$message.error('全选失败：' + e.message);
+      } finally {
+        this.sd.selAllLoading = false;
+      }
+    },
+    /** 把跨页店铺写进 el-table 内部选中态（当前页用本页对象，其它页用精简行） */
+    syncSdcTableSelection(all) {
+      const t = this.$refs.sdcTable;
+      if (!t || typeof t.toggleRowSelection !== 'function') return;
+      const cur = new Map((this.sd.rows || []).map((r) => [r.key, r]));
+      this.sd.syncing = true;
+      try {
+        all.forEach((r) => t.toggleRowSelection(cur.get(r.key) || r, true));
+      } finally {
+        this.sd.syncing = false;
+      }
+    },
+    /** 提示条上的「只选本页」：跨页选中收敛回当前页 */
+    keepSdcPageSelection() {
+      const picked = {};
+      (this.sd.rows || []).forEach((r) => { if (r && r.key && this.sd.picked[r.key]) picked[r.key] = r; });
+      this.sd.picked = picked;
+      this.sd.selected = Object.keys(picked).map((k) => picked[k]);
+      this.sd.allPicked = false;
+      const t = this.$refs.sdcTable;
+      if (t && typeof t.clearSelection === 'function') {
+        this.sd.syncing = true;
+        try {
+          t.clearSelection();
+          this.sd.selected.forEach((r) => t.toggleRowSelection(r, true));
+        } finally {
+          this.sd.syncing = false;
+        }
+      }
     },
 
     /**
