@@ -847,6 +847,13 @@
               <el-radio-button label="unmatched">未核对（{{ map.unmatched.length }}）</el-radio-button>
               <el-radio-button label="matched">已核对（{{ map.mappings.length }}）</el-radio-button>
             </el-radio-group>
+            <span class="fb-label" style="margin-left:6px">搜索</span>
+            <!-- 销方名称 / 销方税号模糊搜索（本页数据量小，纯前端过滤，逐字即时生效） -->
+            <el-input v-model="mapKw" size="small" clearable prefix-icon="el-icon-search"
+                      placeholder="销方名称 / 税号，模糊匹配" style="width:260px"></el-input>
+            <span v-if="mapKwTrim" class="loginid">
+              匹配：未核对 {{ mapUnmatchedFiltered.length }} 个 · 已核对 {{ mapMatchedFiltered.length }} 条
+            </span>
             <span class="fb-spacer"></span>
             <span class="loginid">默认只看未核对，核对完的会移到「已核对」</span>
           </div>
@@ -855,6 +862,8 @@
           <template v-if="mapFilter === 'unmatched'">
             <el-alert v-if="!map.unmatched.length" type="success" :closable="false" show-icon
                       title="✓ 所有销方名称都已处理（已匹配或已忽略）"></el-alert>
+            <el-alert v-else-if="!mapUnmatchedFiltered.length" type="info" :closable="false" show-icon
+                      :title="'没有匹配「' + mapKwTrim + '」的销方名称或税号，换个关键词试试（可只输入两三个字或税号片段）'"></el-alert>
             <template v-else>
             <el-table :data="unmatchedPage" size="small" border style="width:100%">
               <el-table-column label="税务局销方名称" min-width="180"><template slot-scope="p"><span class="company">{{ p.row.tax_seller_name }}</span></template></el-table-column>
@@ -890,7 +899,7 @@
               </el-table-column>
             </el-table>
             <div class="pager-wrap">
-              <el-pagination background layout="sizes, prev, pager, next" :total="map.unmatched.length"
+              <el-pagination background layout="sizes, prev, pager, next" :total="mapUnmatchedFiltered.length"
                              :page-size="unSize" :current-page="unPage" :page-sizes="pageSizes"
                              @size-change="v => { unSize = v; unPage = 1; }" @current-change="v => unPage = v"></el-pagination>
             </div>
@@ -901,8 +910,11 @@
           <template v-else>
             <el-alert v-if="!map.mappings.length" type="info" :closable="false" show-icon
                       title="暂无已核对的销方名称"></el-alert>
+            <el-alert v-else-if="!mapMatchedFiltered.length" type="info" :closable="false" show-icon
+                      :title="'没有匹配「' + mapKwTrim + '」的已核对记录，换个关键词试试'"></el-alert>
             <el-table v-else :data="mappingPage" size="small" border style="width:100%">
               <el-table-column prop="tax_seller_name" label="税务局销方名称" min-width="170"></el-table-column>
+              <el-table-column label="销方税号" width="150"><template slot-scope="p"><span class="loginid">{{ p.row.seller_tax_no || '' }}</span></template></el-table-column>
               <el-table-column label="对应的 1688 商家" min-width="170">
                 <template slot-scope="p"><span class="company" v-if="p.row.seller_company">{{ p.row.seller_company }}</span><el-tag v-else size="mini" type="danger">未映射</el-tag></template>
               </el-table-column>
@@ -933,8 +945,8 @@
                 </template>
               </el-table-column>
             </el-table>
-            <div class="pager-wrap" v-if="map.mappings.length">
-              <el-pagination background layout="sizes, prev, pager, next" :total="map.mappings.length"
+            <div class="pager-wrap" v-if="mapMatchedFiltered.length">
+              <el-pagination background layout="sizes, prev, pager, next" :total="mapMatchedFiltered.length"
                              :page-size="mapSize" :current-page="mapPage" :page-sizes="pageSizes"
                              @size-change="v => { mapSize = v; mapPage = 1; }" @current-change="v => mapPage = v"></el-pagination>
             </div>
@@ -944,8 +956,9 @@
         <el-card shadow="never" class="section-card" v-if="map.ignored.length">
           <el-collapse>
             <el-collapse-item :title="'已忽略 ' + map.ignored.length + ' 条（点击展开可恢复）'" name="ignored">
-              <el-table :data="ignoredPage" size="small" border style="width:100%">
+              <el-table :data="ignoredPage" size="small" border style="width:100%" empty-text="没有匹配的记录">
                 <el-table-column label="税务局销方名称" min-width="200"><template slot-scope="p"><span class="company">{{ p.row.tax_seller_name }}</span></template></el-table-column>
+                <el-table-column label="销方税号" width="150"><template slot-scope="p"><span class="loginid">{{ p.row.seller_tax_no || '' }}</span></template></el-table-column>
                 <el-table-column label="说明" width="200"><template slot-scope="p"><span class="loginid">{{ p.row.note || '' }}</span></template></el-table-column>
                 <el-table-column label="开票金额" width="110"><template slot-scope="p"><span class="amount ok">{{ yuan(p.row.invoice_amount) }}</span></template></el-table-column>
                 <el-table-column label="更新时间" width="140"><template slot-scope="p"><span class="loginid">{{ fmtMinute(p.row.updated_at) }}</span></template></el-table-column>
@@ -956,7 +969,7 @@
                 </el-table-column>
               </el-table>
               <div class="pager-wrap">
-                <el-pagination background layout="prev, pager, next" :total="map.ignored.length" :page-size="igSize"
+                <el-pagination background layout="prev, pager, next" :total="mapIgnoredFiltered.length" :page-size="igSize"
                                :current-page="igPage" @current-change="v => igPage = v"></el-pagination>
               </div>
             </el-collapse-item>
@@ -5108,6 +5121,8 @@ const vm = new Vue({
       mapDraft: {}, unPage: 1, unSize: 20, mapPage: 1, mapSize: 20, igPage: 1, igSize: 20,
       // 税名核对表默认只看「未核对」；已核对 = 原「已维护映射」那批数据
       mapFilter: 'unmatched',
+      // 税名核对搜索框：按销方名称 / 销方税号模糊过滤（纯前端，数据已全部在此）
+      mapKw: '',
       // 系统管理
       cfg: {
         gapMin: 15, gapMax: 30, chunkMax: 450, orderItem: '', reminder: '', serverUrl: '',
@@ -5862,9 +5877,14 @@ const vm = new Vue({
       const n = sendable.filter(m => this.selected[m.loginId]).length;
       return n > 0 && n < sendable.length;
     },
-    unmatchedPage() { return this.map.unmatched.slice((this.unPage - 1) * this.unSize, this.unPage * this.unSize); },
-    mappingPage() { return this.map.mappings.slice((this.mapPage - 1) * this.mapSize, this.mapPage * this.mapSize); },
-    ignoredPage() { return this.map.ignored.slice((this.igPage - 1) * this.igSize, this.igPage * this.igSize); },
+    // ── 税名核对：销方名称 / 税号模糊搜索（三个列表共用一套匹配规则，翻页基于过滤后的集合）──
+    mapKwTrim() { return String(this.mapKw || '').trim(); },
+    mapUnmatchedFiltered() { return this.filterMapRows(this.map.unmatched); },
+    mapMatchedFiltered() { return this.filterMapRows(this.map.mappings); },
+    mapIgnoredFiltered() { return this.filterMapRows(this.map.ignored); },
+    unmatchedPage() { return this.mapUnmatchedFiltered.slice((this.unPage - 1) * this.unSize, this.unPage * this.unSize); },
+    mappingPage() { return this.mapMatchedFiltered.slice((this.mapPage - 1) * this.mapSize, this.mapPage * this.mapSize); },
+    ignoredPage() { return this.mapIgnoredFiltered.slice((this.igPage - 1) * this.igSize, this.igPage * this.igSize); },
     detailTitle() {
       const base = this.detail.kind === 'orders' ? '订单明细' : '发票明细（税务局）';
       return this.detail.date ? `${this.detail.date} · ${base}` : base;
@@ -5904,6 +5924,8 @@ const vm = new Vue({
   },
   watch: {
     trendDays() { this.$nextTick(() => this.renderTrend()); },
+    /** 税名核对搜索：关键词一变就回第 1 页，否则可能停在超出范围的空页 */
+    mapKw() { this.unPage = 1; this.mapPage = 1; this.igPage = 1; },
     page(p) {
       // v-show 切页：隐藏期间容器宽高为 0，切回来后 ECharts 还按旧宽度画 → 图表被压成一条。
       // 等一帧（display 生效、动画起步）再统一 resize 所有图表实例；
@@ -8511,16 +8533,31 @@ const vm = new Vue({
     },
 
     // ══════ 税名核对（所有人可用；普通用户只见自己发票里的销方，映射全平台共享） ══════
+    /**
+     * 税名核对模糊搜索：销方名称 / 销方税号为主，顺带匹配已映射的商家名、会员名与说明。
+     * 关键词用空格拆成多个词时要求「全部命中」（例如「深圳 1234」= 名称含深圳且税号含1234）；
+     * 大小写不敏感，全角空格也算分隔。
+     */
+    filterMapRows(rows) {
+      const kw = this.mapKwTrim.toLowerCase();
+      if (!kw) return rows || [];
+      const parts = kw.split(/[\s\u3000]+/).filter(Boolean);
+      return (rows || []).filter((r) => {
+        const hay = [r.tax_seller_name, r.seller_tax_no, r.seller_company, r.seller_login, r.note]
+          .map((x) => String(x == null ? '' : x).toLowerCase()).join(' ');
+        return parts.every((p) => hay.indexOf(p) >= 0);
+      });
+    },
     async loadMapping() {
       this.map.loading = true;
       try {
         const d = await this.api('/api/mapping');
         this.map = Object.assign({}, this.map, d);
         this.mapDraft = {};
-        // 页码回正：处理掉若干条后再刷新，原来的页码可能已经超出（会停在空页）
-        this.unPage = Math.min(this.unPage, Math.max(1, Math.ceil((this.map.unmatched || []).length / this.unSize)));
-        this.mapPage = Math.min(this.mapPage, Math.max(1, Math.ceil((this.map.mappings || []).length / this.mapSize)));
-        this.igPage = Math.min(this.igPage, Math.max(1, Math.ceil((this.map.ignored || []).length / this.igSize)));
+        // 页码回正：处理掉若干条后再刷新，原来的页码可能已经超出（会停在空页）；按「搜索过滤后」的条数算
+        this.unPage = Math.min(this.unPage, Math.max(1, Math.ceil(this.mapUnmatchedFiltered.length / this.unSize)));
+        this.mapPage = Math.min(this.mapPage, Math.max(1, Math.ceil(this.mapMatchedFiltered.length / this.mapSize)));
+        this.igPage = Math.min(this.igPage, Math.max(1, Math.ceil(this.mapIgnoredFiltered.length / this.igSize)));
         // 预热候选商家（前 50 条），下拉一打开就有内容
         this.mapSeller.q = '';
         this.fetchSellerOpts();

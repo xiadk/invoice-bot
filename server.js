@@ -2887,7 +2887,8 @@ async function loadMapping(userId, { allUsers = false } = {}) {
       SELECT seller_name AS n,
              ROUND(SUM(total_amount), 2) AS invoice_amount,
              COUNT(*) AS invoice_rows,
-             MAX(invoice_date) AS last_invoice_date
+             MAX(invoice_date) AS last_invoice_date,
+             MAX(seller_tax_no) AS seller_tax_no
         FROM issued_invoice
         ${scoped ? 'WHERE user_id = ?' : ''}
        GROUP BY seller_name
@@ -2898,7 +2899,7 @@ async function loadMapping(userId, { allUsers = false } = {}) {
            m.match_type, m.match_rule, m.is_confirmed, m.is_ignored, m.note, m.updated_at,
            (m.user_id = ?) AS maintainer_is_me,
            u.name AS maintainer,
-           agg.invoice_amount, agg.invoice_rows, agg.last_invoice_date
+           agg.invoice_amount, agg.invoice_rows, agg.last_invoice_date, agg.seller_tax_no
     FROM seller_name_mapping m
     LEFT JOIN (SELECT id, COALESCE(NULLIF(company_full_name, ''), NULLIF(company_name, ''), username) AS name FROM app_user) u
            ON u.id = m.user_id
