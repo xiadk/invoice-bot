@@ -4341,7 +4341,7 @@
           <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px">
             <el-input v-model="pdCol.keyword" size="small" clearable style="width:260px"
                       placeholder="商家名称 / 订单号"></el-input>
-            <el-button size="small" type="primary" :loading="pdCol.loading" @click="loadPddCollect">刷新</el-button>
+            <el-button size="small" type="primary" :loading="pdCol.loading" @click="loadPddCollect(true)">刷新</el-button>
             <span style="flex:1"></span>
             <span class="loginid">共 {{ pdColRows.length }} 个商家</span>
           </div>
@@ -7735,11 +7735,12 @@ const vm = new Vue({
     applyPddFilter() { this.pd.page = 1; this.clearPddPicked(); this.loadPddOrders(); },
     // ── 线下催收（v0.3.38）──
     /** 按商家汇总「交易成功 + 暂不可开票/未同步开票」的订单；只读库，不打拼多多接口 */
-    async loadPddCollect() {
+    async loadPddCollect(force) {
       if (this.qnhNeedPick) return;
       this.pdCol.loading = true;
       try {
-        const d = await this.pddApi('/api/pdd/offline-collect');
+        // force=true（点「刷新」）跳过服务端 60 秒缓存；切页进来走缓存，省一次重查询
+        const d = await this.pddApi('/api/pdd/offline-collect' + (force === true ? '?nocache=1' : ''));
         if (d.error) { this.$message.error(d.error); return; }
         this.pdCol.rows = d.groups || [];
         this.pdCol.totals = d.totals || { malls: 0, orders: 0, amount: 0, missingAmount: 0 };

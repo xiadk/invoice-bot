@@ -6480,6 +6480,7 @@ const server = http.createServer(async (req, res) => {
       // 「立即刷新数据」：服务器直连拼多多接口，不需要助手在线
       if (method === 'POST' && p === '/api/pdd/sync') {
         const out = await pdd.sync({ userId: pddUid, trigger: 'manual' });
+        pdd.invalidateOfflineCache(pddUid);   // v0.3.39：同步后人工催收列表不能还吃旧缓存
         await logOp(user, 'pdd.sync', { ok: !!out.ok, total: out.total, tenantId: pddUid });
         return sendJson(res, 200, out);
       }
@@ -6488,13 +6489,16 @@ const server = http.createServer(async (req, res) => {
       // 这两类在平台上没有可用入口，只能线下把订单号发给商家催，故单独成页。
       // 金额口径 = 实付金额（pay_amount），缺实付的单计入 missingAmount 提示，不静默算成 0。
       if (method === 'GET' && p === '/api/pdd/offline-collect') {
-        const out = await pdd.offlineCollect(pddUid);
+        // nocache=1 只给页面「刷新」用；其余走 60 秒缓存（切页/连点二维码不再打库）
+        const noCache = url.searchParams.get('nocache') === '1';
+        const base = await pdd.offlineCollect(pddUid, { noCache });
         const buyer = await buyerInfoOf(pddUid);
         const cfg = loadConfig();
-        out.groups = out.groups.map((g) => ({
-          ...g,
-          text: pdd.offlineCollectText(cfg, buyer, g),
-        }));
+        // 展开拷贝：缓存里的 base 是共享引用，直接改 out.groups 会污染下一次命中
+        const out = {
+          ...base,
+          groups: base.groups.map((g) => ({ ...g, text: pdd.offlineCollectText(cfg, buyer, g) })),
+        };
         return sendJson(res, 200, out);
       }
 
@@ -6660,6 +6664,7 @@ const server = http.createServer(async (req, res) => {
           },
           shouldStop: () => !!ctx.stopping,
         }).then(async (out) => {
+          pdd.invalidateOfflineCache(pddUid);   // v0.3.39：订单同步后人工催收列表立即用新数据
           ctx.truncated = !!out.truncated;
           ctx.maxPages = out.maxPages || null;
           ctx.progress = Object.assign({}, ctx.progress, {

@@ -326,6 +326,9 @@ async function ensureQnhSchema(q) {
       "  `order_sn` VARCHAR(64) NOT NULL COMMENT '订单号'," +
       "  `mall_id` BIGINT DEFAULT NULL COMMENT '店铺 ID'," +
       "  `mall_sn` VARCHAR(128) DEFAULT NULL COMMENT '店铺加密串（mall_url 里的 mall_sn，用于反解 mall_id）'," +
+      // v0.3.39：店铺名快照。人工催收按商家聚合，原来每行用 JSON_EXTRACT(raw_json) 现解析，
+      // 命中行多时占查询耗时 74%；落列后查询完全不碰 longtext。
+      "  `mall_name` VARCHAR(128) DEFAULT NULL COMMENT '店铺名（下单时快照，人工催收按它分组展示）'," +
       "  `goods_name` VARCHAR(255) DEFAULT NULL COMMENT '商品名'," +
       "  `spec` VARCHAR(255) DEFAULT NULL COMMENT '规格'," +
       "  `thumb_url` VARCHAR(512) DEFAULT NULL COMMENT '商品图'," +
@@ -359,7 +362,10 @@ async function ensureQnhSchema(q) {
       "  KEY `idx_pdo_status` (`user_id`,`invoice_status`)," +
       "  KEY `idx_pdo_ostatus` (`user_id`,`order_status`)," +
       "  KEY `idx_pdo_msn` (`user_id`,`mall_sn`)," +
-      "  KEY `idx_pdo_time` (`order_time`)" +
+      "  KEY `idx_pdo_time` (`order_time`)," +
+      // v0.3.39：人工催收口径专用（user_id + 交易成功 + 暂不可开票/未同步开票，按时间倒序）。
+      // 新库直接带上；老库由 migrate() 的 idxExists 分支补建。
+      "  KEY `idx_pdo_collect` (`user_id`,`order_status`,`invoice_status`,`order_time`)" +
       ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='拼多多订单与开票状态'",
 
     // 拼多多「店铺加密串 → 数字 mall_id」解析缓存（v0.3.16）
@@ -992,6 +998,8 @@ async function migrate(conn, dbName) {
       ['mall_sn', "VARCHAR(128) DEFAULT NULL COMMENT '店铺加密串（mall_url 里的 mall_sn）'"],
       // v0.3.24：本地「说明」备注（订单超时没有申请入口 / 申请失败原因 / 无法开启聊天，线下处理）
       ['note', "VARCHAR(255) DEFAULT NULL COMMENT '本地说明备注（超期未申请/申请失败原因/聊天打不开原因）'"],
+      // v0.3.39：店铺名落列（人工催收按商家聚合，见下方回填与 idx_pdo_collect）
+      ['mall_name', "VARCHAR(128) DEFAULT NULL COMMENT '店铺名（下单时快照）'"],
     ]) {
       if (!(await colExists('pdd_order', col))) {
         await q(`ALTER TABLE \`pdd_order\` ADD COLUMN \`${col}\` ${decl}`);
@@ -1028,6 +1036,24 @@ async function migrate(conn, dbName) {
       ).catch(() => null);
       if (filled && filled.affectedRows) {
         console.log(`[db] 回填 pdd_order.mall_sn：${filled.affectedRows} 行`);
+      }
+    }
+    // v0.3.39：人工催收专用组合索引。
+    // 口径固定为「某用户 + 交易成功 + 暂不可开票/未同步开票」，按 order_time 倒序。
+    // 没有它时优化器会走 idx_pdo_ostatus（只用到 user_id+order_status 前缀）或直接全表扫。
+    if (!(await idxExists('pdd_order', 'idx_pdo_collect'))) {
+      await q('ALTER TABLE `pdd_order` ADD KEY `idx_pdo_collect` (`user_id`,`order_status`,`invoice_status`,`order_time`)');
+    }
+    // v0.3.39：回填存量店铺名（新数据由同步时写入）。
+    // 只补 NULL，反复执行安全；LIKE 前置让不匹配的行不必解析 JSON；
+    // LIMIT 3 万避免超大表首次启动时长时间锁表，剩余的下次启动继续补。
+    if (await colExists('pdd_order', 'mall_name')) {
+      const nameFilled = await q(
+        "UPDATE `pdd_order` SET `mall_name` = LEFT(JSON_UNQUOTE(JSON_EXTRACT(`raw_json`, '$.mall.mall_name')), 128)" +
+        " WHERE `mall_name` IS NULL AND `raw_json` LIKE '%mall_name%' LIMIT 30000"
+      ).catch(() => null);
+      if (nameFilled && nameFilled.affectedRows) {
+        console.log(`[db] 回填 pdd_order.mall_name：${nameFilled.affectedRows} 行`);
       }
     }
   }
