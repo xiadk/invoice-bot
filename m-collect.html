@@ -84,6 +84,11 @@
   'use strict';
   var QS = new URLSearchParams(location.search);
   var T = QS.get('t') || '';
+  // v0.3.40 短链：/c/<令牌>（链接越短二维码版本越低，扫码与生成都快一半）
+  if (!T) {
+    var m = /^\/c\/([\w.-]+)$/.exec(location.pathname || '');
+    if (m) T = m[1];
+  }
   var $ = function (id) { return document.getElementById(id); };
   var DATA = null;
 

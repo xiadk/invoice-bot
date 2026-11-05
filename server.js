@@ -1200,6 +1200,16 @@ function serverUrlOf(req) {
   const proto = String((req.headers['x-forwarded-proto'] || 'http')).split(',')[0].trim();
   return `${proto}://${host}`;
 }
+/**
+ * 人工催收的手机扫码链接（v0.3.40）：短路径 /c/<令牌>。
+ * 二维码内容每多一个字符都可能抬高版本，生成一次要多花几毫秒、SVG 也更大；
+ * 列表接口直接把这串带出去，前端点二维码就不必再发一次请求（见 lib/collect-share.js）。
+ */
+function collectShareUrlOf(req, uid, key) {
+  if (!key) return '';
+  const t = collectShare.createCollectToken({ userId: uid, key });
+  return serverUrlOf(req) + '/c/' + t.token;
+}
 
 // ─────────────────────────────────────────────────────────────────────────
 // 操作日志（旁路设施：任何写入失败都只打印日志，绝不影响主流程）
@@ -3387,7 +3397,9 @@ const server = http.createServer(async (req, res) => {
     if (method === 'GET' && (p === '/m-upload' || p === '/m-upload.html')) return sendHtml(res, 'm-upload.html');
     // 线下催收手机页（v0.3.38）：**不需要登录**，凭据是 URL 里 7 天有效的签名令牌。
     // 扫码的人多半是老板/业务员本人的手机，未在看板登录过；令牌只读、只覆盖一个商家。
-    if (method === 'GET' && (p === '/m-collect' || p === '/m-collect.html')) return sendHtml(res, 'm-collect.html');
+    // v0.3.40 起短链走 /c/<令牌>（老链接 /m-collect?t=... 继续可用，已验证过的 7 天链接不作废）。
+    if (method === 'GET' && (p === '/m-collect' || p === '/m-collect.html'
+      || /^\/c\/[\w.-]{1,200}$/.test(p))) return sendHtml(res, 'm-collect.html');
     if (method === 'GET' && p === '/api/pub/pdd-collect') {
       const tk = collectShare.verifyCollectToken(url.searchParams.get('t') || '');
       if (!tk) {
@@ -6480,6 +6492,7 @@ const server = http.createServer(async (req, res) => {
       // 「立即刷新数据」：服务器直连拼多多接口，不需要助手在线
       if (method === 'POST' && p === '/api/pdd/sync') {
         const out = await pdd.sync({ userId: pddUid, trigger: 'manual' });
+        pdd.invalidateOfflineCache(pddUid);   // v0.3.39：同步后人工催收列表不能还吃旧缓存
         await logOp(user, 'pdd.sync', { ok: !!out.ok, total: out.total, tenantId: pddUid });
         return sendJson(res, 200, out);
       }
@@ -6488,13 +6501,23 @@ const server = http.createServer(async (req, res) => {
       // 这两类在平台上没有可用入口，只能线下把订单号发给商家催，故单独成页。
       // 金额口径 = 实付金额（pay_amount），缺实付的单计入 missingAmount 提示，不静默算成 0。
       if (method === 'GET' && p === '/api/pdd/offline-collect') {
-        const out = await pdd.offlineCollect(pddUid);
+        // nocache=1 只给页面「刷新」用；其余走 60 秒缓存（切页/连点二维码不再打库）
+        const noCache = url.searchParams.get('nocache') === '1';
+        const base = await pdd.offlineCollect(pddUid, { noCache });
         const buyer = await buyerInfoOf(pddUid);
         const cfg = loadConfig();
-        out.groups = out.groups.map((g) => ({
-          ...g,
-          text: pdd.offlineCollectText(cfg, buyer, g),
-        }));
+        // 展开拷贝：缓存里的 base 是共享引用，直接改 out.groups 会污染下一次命中
+        // shareUrl 一并下发：签一次 HMAC 是微秒级，换来前端点二维码时零请求（v0.3.40）
+        const out = {
+          ...base,
+          // 有效期跟着令牌常量走，页面提示文案不再硬编码 7 天
+          shareTtlDays: Math.round(collectShare.DEFAULT_TTL_MS / 86400000),
+          groups: base.groups.map((g) => ({
+            ...g,
+            text: pdd.offlineCollectText(cfg, buyer, g),
+            shareUrl: collectShareUrlOf(req, pddUid, g.key),
+          })),
+        };
         return sendJson(res, 200, out);
       }
 
@@ -6505,7 +6528,7 @@ const server = http.createServer(async (req, res) => {
         const g = pdd.offlineGroupOf(data, body.key);
         if (!g) return sendJson(res, 400, { ok: false, error: '该商家已没有需要人工催收的订单' });
         const t = collectShare.createCollectToken({ userId: pddUid, key: g.key });
-        const link = serverUrlOf(req) + '/m-collect?t=' + encodeURIComponent(t.token);
+        const link = serverUrlOf(req) + '/c/' + t.token;
         const buyer = await buyerInfoOf(pddUid);
         return sendJson(res, 200, {
           ok: true,
@@ -6660,6 +6683,7 @@ const server = http.createServer(async (req, res) => {
           },
           shouldStop: () => !!ctx.stopping,
         }).then(async (out) => {
+          pdd.invalidateOfflineCache(pddUid);   // v0.3.39：订单同步后人工催收列表立即用新数据
           ctx.truncated = !!out.truncated;
           ctx.maxPages = out.maxPages || null;
           ctx.progress = Object.assign({}, ctx.progress, {
