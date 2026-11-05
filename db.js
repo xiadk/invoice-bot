@@ -387,6 +387,33 @@ async function ensureQnhSchema(q) {
       "  KEY `idx_pm_mallid` (`user_id`,`mall_id`)" +
       ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='拼多多店铺 mall_sn→mall_id 解析缓存'",
 
+    // 拼多多人工催收汇总（v0.3.42）
+    // 为什么单独一张表：原来列表每次都要把命中订单全部读出来、在 Node 里按商家分组再全量返回
+    // （真实库 153 单还好，3 万单的库要 60ms+，响应 70KB+）。改成同步时把商家维度的
+    // 汇总落到这张表，列表直接 ORDER BY amount LIMIT/OFFSET 走索引分页；
+    // 订单明细只在点「详情」/「二维码」时按商家单查，列表不再背明细。
+    // collect_key 与扫码链接里的键同源（m<mall_id> / n<店铺名哈希> / s<mall_sn>），
+    // 已发出的 7 天链接在重建后依然能对上。
+    'CREATE TABLE IF NOT EXISTS `pdd_collect_summary` (' +
+      "  `user_id` INT NOT NULL DEFAULT 1 COMMENT '数据归属用户'," +
+      "  `collect_key` VARCHAR(64) NOT NULL COMMENT '商家分组键（m<mall_id> / n<店铺名哈希> / s<mall_sn>）'," +
+      "  `mall_id` BIGINT DEFAULT NULL COMMENT '店铺 ID（能解析到才有）'," +
+      "  `mall_sn` VARCHAR(128) DEFAULT NULL COMMENT '店铺加密串'," +
+      "  `mall_name` VARCHAR(128) DEFAULT NULL COMMENT '店铺名快照'," +
+      "  `order_count` INT NOT NULL DEFAULT 0 COMMENT '待人工催收订单数'," +
+      "  `amount` DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT '实付金额合计（元）'," +
+      "  `missing_amount` INT NOT NULL DEFAULT 0 COMMENT '缺实付金额的订单数'," +
+      "  `latest_order_sn` VARCHAR(64) DEFAULT NULL COMMENT '最近一笔订单号'," +
+      "  `latest_order_time` DATETIME DEFAULT NULL COMMENT '最近一笔下单时间'," +
+      // 订单号串（逗号分隔）：列表按订单号搜索时直接在汇总表 LIKE，不必回明细表 EXISTS
+      "  `sn_text` TEXT COMMENT '该商家全部订单号（逗号分隔）'," +
+      "  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP," +
+      "  PRIMARY KEY (`user_id`,`collect_key`)," +
+      // 列表默认「金额高的在前」→ 这两列构成分页的覆盖索引
+      "  KEY `idx_pdcs_amount` (`user_id`,`amount`)," +
+      "  KEY `idx_pdcs_name` (`user_id`,`mall_name`)" +
+      ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='拼多多人工催收汇总（商家维度，同步后重建；列表分页直接查它）'",
+
     // 拼多多登录态（Cookie 串）。与 qnh_session 同样的思路：入库不落盘。
     // 只需要 Cookie 头，不需要 Playwright storageState（接口是纯 HTTP 调用）。
     'CREATE TABLE IF NOT EXISTS `pdd_session` (' +
