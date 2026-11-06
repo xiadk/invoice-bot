@@ -30,6 +30,7 @@ const pddApply = require('./agent/pdd-apply');
 const pddSend = require('./agent/pdd-send');
 const pddMall = require('./agent/pdd-mall');
 const sdc = require('./agent/sdc');
+const price1688 = require('./agent/price-1688');
 const logoutKernel = require('./agent/logout');
 
 // 隐藏自动化特征（navigator.webdriver=false），降低 1688 风控识别 Electron 的概率。
@@ -337,6 +338,14 @@ function startAgent() {
     log: (m) => { log(m); pushState(); },
   }));
   client.setSdcSendHandler(sdc.createSendHandler({
+    log: (m) => { log(m); pushState(); },
+  }));
+  // 「1688比价」两个内核：先抓待付款订单 → 服务器比价判定 → 再逐单打开备忘上色。
+  // 复用发送窗口的 persist:1688 分区（登录态与发消息共用）；只动本机真实页面。
+  client.setPriceFetchHandler(price1688.createFetchHandler({
+    log: (m) => { log(m); pushState(); },
+  }));
+  client.setPriceApplyHandler(price1688.createApplyHandler({
     log: (m) => { log(m); pushState(); },
   }));
   // 「清除本机登录态」内核：看板点「退出拼多多 / 退出牵牛花账号」时，

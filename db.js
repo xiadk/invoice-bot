@@ -769,6 +769,14 @@ async function migrate(conn, dbName) {
       "COMMENT '是否允许平台取价操作（齐货通登录/重新取价、阿发Token/自动匹配/取价、选购加购；1=开启，超级管理员始终可见）'"
     );
   }
+  // ── 1688比价菜单权限（v0.3.43）：独立菜单，需超级管理员在「用户管理/员工管理」授权。
+  //    默认 0 = 非超管一律不可见（成品审核，与商品/补货解耦）。
+  if (!(await colExists('app_user', 'price1688_enabled'))) {
+    await q(
+      'ALTER TABLE `app_user` ADD COLUMN `price1688_enabled` TINYINT(1) NOT NULL DEFAULT 0 ' +
+      "COMMENT '是否允许查看「1688比价」页（1688待付款订单采购价核对；1=开启，超级管理员始终可见）'"
+    );
+  }
   // ── 使用期限（v0.2.97）：新建用户默认 1 个月，到期后禁止登录、任何接口都不放行
   //    NULL = 永久有效。存量账号升级时一律为 NULL（永久），避免上线瞬间把现有客户踢下线。
   if (!(await colExists('app_user', 'expires_at'))) {
@@ -855,6 +863,64 @@ async function migrate(conn, dbName) {
     if (!(await idxExists('product_item', 'idx_pi_brand'))) {
       await q('ALTER TABLE `product_item` ADD KEY `idx_pi_brand` (`brand_id`)');
     }
+    // ── 1688 采购价核对补列（v0.3.43）：待付款订单端只有 1688 供应商维度，
+    //    要拿补货参考当目标价，必须按「供应商商品链接/名称/规格 + 下单比例」对得上号。
+    //    supplier_link 是稳定键；name/spec/order_ratio 在 1688 页面核对/折算单价都要用。
+    for (const [col, decl] of [
+      ['supplier_name', "VARCHAR(512) NOT NULL DEFAULT '' COMMENT '供应商商品名称（来自补货参考文件，「供应商商品名称」列）'"],
+      ['supplier_spec', "VARCHAR(512) NOT NULL DEFAULT '' COMMENT '供应商商品规格（来自补货参考文件，「供应商商品规格」列）'"],
+      ['supplier_link', "VARCHAR(512) NOT NULL DEFAULT '' COMMENT '供应商商品链接（detail.1688.com/offer，待付款订单匹配键）'"],
+      ['order_ratio',   "DECIMAL(12,2) NOT NULL DEFAULT 1 COMMENT '供应商下单比例（一个销售单位含基础单位数，如一箱12桶=12）'"],
+    ]) {
+      if (!(await colExists('product_item', col))) {
+        await q(`ALTER TABLE \`product_item\` ADD COLUMN \`${col}\` ${decl}`);
+      }
+    }
+    if (!(await idxExists('product_item', 'idx_pi_supplier_link'))) {
+      await q('ALTER TABLE `product_item` ADD KEY `idx_pi_supplier_link` (`supplier_link`)');
+    }
+  }
+  // ── 1688 待付款订单价格检查审计表（v0.3.43）──
+  //   每次「1688 采购价核对」的结果逐条落入此表；run_batch 区分不同运行批次，
+  //   verdict = blue/yellow/green/unmatched；applied_at 标记是否已在 1688 打备注上色（本机助手做）。
+  if (!(await tableExists('price_check'))) {
+    await q(
+      'CREATE TABLE `price_check` (' +
+      '  `id`             BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,' +
+      "  `user_id`        INT           NOT NULL COMMENT '归属用户（app_user.id）'," +
+      "  `brand_id`       INT           NOT NULL DEFAULT 1 COMMENT '用户归属品牌方'," +
+      "  `run_batch`      VARCHAR(64)   NOT NULL COMMENT '本次检查批次（YYYYMMDDHHmmss）'," +
+      "  `batch_id`       BIGINT UNSIGNED NULL COMMENT '目标价来源批次（product_import_batch.id；NULL=品牌方全部）'," +
+      "  `order_id`       VARCHAR(64)   NOT NULL COMMENT '1688订单号'," +
+      "  `order_time`     VARCHAR(64)   NOT NULL DEFAULT '' COMMENT '下单时间（1688页面原文）'," +
+      "  `sku`            VARCHAR(64)   NOT NULL DEFAULT '' COMMENT '匹配到的商品SKU'," +
+      "  `goods_name`     VARCHAR(512)  NOT NULL DEFAULT '' COMMENT '商品名称（品牌方）'," +
+      "  `supplier_name`  VARCHAR(512)  NOT NULL DEFAULT '' COMMENT '供应商商品名称（1688）'," +
+      "  `supplier_spec`  VARCHAR(512)  NOT NULL DEFAULT '' COMMENT '供应商商品规格'," +
+      "  `supplier_link`  VARCHAR(512)  NOT NULL DEFAULT '' COMMENT '供应商商品链接'," +
+      "  `order_ratio`    DECIMAL(12,2) NOT NULL DEFAULT 1 COMMENT '下单比例（一件含基础单位数）'," +
+      "  `quantity`       DECIMAL(12,2) NOT NULL DEFAULT 0 COMMENT '采购数量（规格单位）'," +
+      "  `base_quantity`  DECIMAL(12,2) NOT NULL DEFAULT 0 COMMENT '基础单位数量 = 数量 × order_ratio'," +
+      "  `spec_price`     DECIMAL(12,2) NOT NULL DEFAULT 0 COMMENT '页面规格单价'," +
+      "  `target_price`   DECIMAL(12,2) NOT NULL DEFAULT 0 COMMENT '目标采购单价（基础单位）'," +
+      "  `actual_price`   DECIMAL(12,2) NOT NULL DEFAULT 0 COMMENT '实际到手单价（基础单位，含分摊运费）'," +
+      "  `freight_share`  DECIMAL(12,2) NOT NULL DEFAULT 0 COMMENT '分摊运费（按商品金额占比）'," +
+      "  `paid_amount`    DECIMAL(12,2) NOT NULL DEFAULT 0 COMMENT '实付金额'," +
+      "  `price_diff`     DECIMAL(12,2) NOT NULL DEFAULT 0 COMMENT '差价 = 实际 - 目标'," +
+      "  `price_ratio`    DECIMAL(8,4)  NOT NULL DEFAULT 0 COMMENT '涨幅 = (实际 - 目标) / 目标'," +
+      "  `sales_30d`      INT           NOT NULL DEFAULT 0 COMMENT '目标侧30天销量'," +
+      "  `matched`        TINYINT       NOT NULL DEFAULT 0 COMMENT '是否匹配到目标价'," +
+      "  `verdict`        VARCHAR(16)   NOT NULL DEFAULT '' COMMENT 'blue/yellow/green/unmatched'," +
+      "  `reason`         VARCHAR(32)   NOT NULL DEFAULT '' COMMENT '判定原因(price_issue/qty_too_high/new_product/all_reasonable)'," +
+      "  `is_qty_too_high` TINYINT      NOT NULL DEFAULT 0 COMMENT '采购量过高'," +
+      "  `memo_text`      VARCHAR(2000) NOT NULL DEFAULT '' COMMENT '要写到1688的备忘文本'," +
+      "  `checked_at`     DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '检查时间'," +
+      "  `applied_at`     DATETIME      DEFAULT NULL COMMENT '已在1688打备注上色的时间（NULL=未上色）'," +
+      '  PRIMARY KEY (`id`),' +
+      '  KEY `idx_pc_user_run` (`user_id`, `run_batch`),' +
+      '  KEY `idx_pc_order` (`order_id`)' +
+      ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='1688待付款订单价格检查记录'"
+    );
   }
 
   // ── 品牌方（v0.2.83）──────────────────────────────────────────────────────

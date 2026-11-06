@@ -2218,6 +2218,91 @@
         </el-dialog>
       </div>
 
+      <!-- ══════════ 1688比价 ══════════ -->
+      <div v-show="page === 'price1688'" id="page-price1688">
+        <div class="page-bar">
+          <span class="pb-info">
+            核对 1688「待付款订单」的采购价：按补货参考里的<b>供应商商品</b>匹配目标采购单价，
+            差额/采购量异常标黄、新品标绿、合理标蓝；核完可一键到 1688 打备注上色。
+          </span>
+          <span style="flex:1"></span>
+          <el-button size="small" :loading="price1688.running" type="primary"
+                     icon="el-icon-video-play" @click="runPrice1688()"
+                     title="需要本机助手已登录 1688。助手抓取待付款订单 → 本页算出判定 → 助手去 1688 打备注上色。">开始核对</el-button>
+          <el-button size="small" :loading="price1688.loading" @click="loadPrice1688()">刷新</el-button>
+        </div>
+
+        <!-- 汇总卡 -->
+        <div class="stat-row" v-if="price1688.orders.length">
+          <el-card shadow="never" class="stat-card" :body-style="{ padding: '14px 16px' }" style="flex:1;min-width:120px">
+            <div class="num">{{ price1688.orders.length }}</div><div class="label">订单数</div>
+          </el-card>
+          <el-card shadow="never" class="stat-card" :body-style="{ padding: '14px 16px' }" style="flex:1;min-width:120px">
+            <div class="num blue">{{ price1688.summary.blue }}</div><div class="label">合理(蓝)</div>
+          </el-card>
+          <el-card shadow="never" class="stat-card" :body-style="{ padding: '14px 16px' }" style="flex:1;min-width:120px">
+            <div class="num yellow">{{ price1688.summary.yellow }}</div><div class="label">价格/采购量异常(黄)</div>
+          </el-card>
+          <el-card shadow="never" class="stat-card" :body-style="{ padding: '14px 16px' }" style="flex:1;min-width:120px">
+            <div class="num green">{{ price1688.summary.green }}</div><div class="label">新品(绿)</div>
+          </el-card>
+          <el-card shadow="never" class="stat-card" :body-style="{ padding: '14px 16px' }" style="flex:1;min-width:120px">
+            <div class="num">{{ price1688.summary.unmatched }}</div><div class="label">未匹配到目标价</div>
+          </el-card>
+        </div>
+
+        <el-card shadow="never" class="section-card" v-loading="price1688.loading" v-if="price1688.orders.length">
+          <div slot="header" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+            <b>核对结果</b>
+            <span class="loginid">批次：{{ price1688.runBatch }}{{ price1688.checkedAt ? ' · ' + price1688.checkedAt : '' }}</span>
+            <span style="flex:1"></span>
+            <el-button size="mini" :disabled="!price1688.orders.length || price1688.running"
+                       :loading="price1688.running" type="warning"
+                       @click="applyPrice1688()"
+                       title="本机助手打开每个订单的·备注·，写入判定文本并按 蓝/黄/绿 染色后保存。未上色的行会被回填 applied_at。">到1688打备注上色</el-button>
+          </div>
+          <el-table :data="price1688Rows" size="small" border style="width:100%" empty-text="暂无核对结果"
+                    class="price-table" :default-expand-all="false" :default-sort="{ prop: 'opened', order: null }">
+            <el-table-column type="expand" width="40">
+              <template slot-scope="p">
+                <div class="price-detail">
+                  <div class="pd-k">{{ p.row.memo_text }}</div>
+                  <div class="pd-row"><span class="k">目标采购单价</span><span class="v">{{ yuan(p.row.target_price) }} / 基础单位</span></div>
+                  <div class="pd-row"><span class="k">实际到手单价</span><span class="v">{{ yuan(p.row.actual_price) }}（含分摊运费 {{ yuan(p.row.freight_share) }}）</span></div>
+                  <div class="pd-row"><span class="k">数量 / 基础数量</span><span class="v">{{ p.row.quantity }} / {{ p.row.base_quantity }}（下单比例 {{ p.row.order_ratio }}）</span></div>
+                  <div class="pd-row"><span class="k">差价 / 涨幅</span><span class="v">{{ yuan(p.row.price_diff) }} / {{ ratioPct(p.row.price_ratio) }}</span></div>
+                  <div class="pd-row"><span class="k">目标侧月销</span><span class="v">{{ p.row.sales_30d || 0 }}</span></div>
+                </div>
+              </template>
+            </el-table-column>
+            <el-table-column prop="order_id" label="1688订单号" width="200" sortable></el-table-column>
+            <el-table-column prop="order_time" label="下单时间" width="160"></el-table-column>
+            <el-table-column label="商品" min-width="220">
+              <template slot-scope="p">
+                <div>{{ p.row.goods_name || p.row.item_name }}</div>
+                <div class="sub">{{ p.row.supplier_spec || ('SKU ' + p.row.sku) }}</div>
+              </template>
+            </el-table-column>
+            <el-table-column label="判定" width="110" align="center">
+              <template slot-scope="p"><el-tag :type="verdictTag(p.row.verdict)">{{ verdictLabel(p.row.verdict) }}</el-tag></template>
+            </el-table-column>
+            <el-table-column prop="paid_amount" label="实付" width="90" sortable :formatter="moneyFmt"></el-table-column>
+            <el-table-column prop="target_price" label="目标价" width="90" :formatter="moneyFmt"></el-table-column>
+            <el-table-column prop="actual_price" label="到手价" width="90" :formatter="moneyFmt"></el-table-column>
+            <el-table-column prop="price_diff" label="差价" width="90" sortable :formatter="moneyFmt"></el-table-column>
+            <el-table-column label="上色" width="80" align="center">
+              <template slot-scope="p">
+                <el-tag v-if="p.row.applied_at" type="success" size="mini">已打备注</el-tag>
+                <el-tag v-else type="info" size="mini">未上色</el-tag>
+              </template>
+            </el-table-column>
+          </el-table>
+        </el-card>
+
+        <el-empty v-if="!price1688.loading && !price1688.orders.length"
+                  :description="'暂无核对结果。请先点「开始核对」由本机助手抓取 1688 待付款订单。'"></el-empty>
+      </div>
+
       <!-- ══════════ 系统管理 ══════════ -->
       <div v-show="page === 'admin'" id="page-admin">
         <div class="page-bar">
@@ -3631,6 +3716,8 @@
               <b v-else class="ro-diff-bad">（相差 {{ wbMoney(roView.order.diff) }}）</b>
             </span>
             <span class="fb-spacer" style="flex:1"></span>
+            <el-button size="mini" type="text" icon="el-icon-phone-outline" @click="makeRoShare"
+                       title="生成无须登录、手机可打开查看的补货链接">补货链接</el-button>
             <el-button v-if="roCartKind" size="mini" type="warning" icon="el-icon-shopping-cart-full"
                        :loading="roView.carting" @click="oneKeyCart">
               一键加购到{{ roCartKind === 'afa' ? '永源顺' : '齐货通' }}
@@ -3701,6 +3788,30 @@
           </el-table>
           <div slot="footer">
             <el-button size="small" @click="roView.visible = false">关闭</el-button>
+          </div>
+        </el-dialog>
+
+        <!-- 补货链接（v0.3.44）：扫码在手机上看这一张补货单的明细（不须登录） -->
+        <el-dialog title="补货单 · 手机查看链接" :visible.sync="roShare.visible" width="620px" top="10vh" append-to-body>
+          <div style="display:flex;gap:18px;align-items:flex-start">
+            <div class="wb-qr" style="width:190px;height:190px;flex-shrink:0">
+              <div v-if="roShare.qr" v-html="roShare.qr" style="width:100%;height:100%;display:flex;align-items:center;justify-content:center"></div>
+              <div v-else style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;color:#c0c4cc;font-size:12px;text-align:center">生成中</div>
+            </div>
+            <div style="flex:1;min-width:0">
+              <div style="font-weight:600;margin-bottom:6px">补货单 {{ roShare.supplierName || '#' + roShare.orderId }}
+                <span v-if="roShare.amount != null" class="loginid" style="font-weight:400">· {{ wbMoney(roShare.amount) }}</span>
+              </div>
+              <div class="loginid" style="margin-bottom:8px">手机扫码即打开，显示商品图片 / 名称 / 规格 / 补货数量。<b>不须登录</b>。链接 {{ roShare.ttlDays }} 天内有效。</div>
+              <el-input :value="roShare.url" readonly size="small">
+                <el-button slot="append" size="small" @click="copyRoShare">复制</el-button>
+              </el-input>
+              <el-alert v-if="roShare.error" type="error" :closable="false" show-icon :title="roShare.error"
+                        style="margin-top:10px"></el-alert>
+            </div>
+          </div>
+          <div slot="footer">
+            <el-button size="small" @click="roShare.visible = false">关闭</el-button>
           </div>
         </el-dialog>
 
@@ -5507,6 +5618,9 @@ const vm = new Vue({
       // 补货单详情（v0.3.33）：未关联货单才可编辑；已关联 = 只读；carting 是一键加购的进度锁
       roView: { visible: false, loading: false, order: null, items: [], editing: false, saving: false,
                 carting: false, noStockSkus: [] },
+      // 补货链接分享弹窗（v0.3.44）：签 30 天令牌 → 手机扫 /r/<令牌> 只看这一张单
+      roShare: { visible: false, loading: false, orderId: 0, supplierName: '', amount: null,
+                 url: '', qr: '', ttlDays: 30, error: '' },
       // 换供应商（行级搬迁）：选目标供应商 → checkRoMove 查目标价（无价=无货不许搬）
       roMove: { visible: false, saving: false, error: '', orderId: 0, itemId: 0, sku: '', goodsName: '',
                 qtyPack: 0, specQty: 1, unitPrice: 0, amount: 0, fromSupplierId: 0, supplierId: null,
@@ -5616,6 +5730,7 @@ const vm = new Vue({
         { key: 'profit', label: '实时毛利监控', field: 'qnhProfitEnabled', tip: '查看订单毛利/预计收入，手动拉取当天毛利数据' },
         { key: 'product', label: '商品列表', field: 'productEnabled', tip: '导入补货参考文件、补货、关联齐货通/阿发商品' },
         { key: 'replenish', label: '补货', field: 'replenishEnabled', tip: '导入补货参考文件、查看品牌方商品与价格' },
+        { key: 'price1688', label: '1688比价', field: 'price1688Enabled', tip: '核对 1688 待付款订单采购价，匹配补货参考目标价后打备注上色（独立菜单，需超管授权）' },
         { key: 'market', label: '交易市场', field: 'marketEnabled', tip: '查看别人的商品报价、发布自己的 SKU' },
         { key: 'billing', label: '账单', field: 'billingEnabled', tip: '按月统计总收入/总支出/净利润' },
         { key: 'price', label: '平台取价', field: 'priceEnabled', tip: '登录齐货通、重新取价、配置阿发Token、选购加购' },
@@ -5627,6 +5742,12 @@ const vm = new Vue({
       // 主体自己已开通、可以授给员工的菜单 key（/api/staff/users 下发；员工管理永远不在里面）
       staffAllowed: [],
       staffDlg: { visible: false, id: null, username: '', password: '', displayName: '', note: '', saving: false, menus: {} },
+      // ── 1688比价（v0.3.43：1688 待付款订单采购价核对；需超管在用户/员工管理授权菜单权限）──
+      price1688: {
+        loading: false, running: false, runBatch: '', checkedAt: '',
+        summary: { blue: 0, yellow: 0, green: 0, unmatched: 0 },
+        orders: [], memoText: '',
+      },
       // ── 商品售后（v0.3.25：商品名称/SKU + 数量 + 原因 + 状态 + 凭证）──
       af: {
         loading: false, rows: [], total: 0, page: 1, size: 20,
@@ -5733,6 +5854,7 @@ const vm = new Vue({
         { title: '核对与商品', items: [
           this.canProduct ? { key: 'product', label: '商品列表', icon: 'el-icon-goods' } : null,
           this.canReplenish ? { key: 'replenish', label: '补货', icon: 'el-icon-shopping-cart-full' } : null,
+          this.canPriceCheck ? { key: 'price1688', label: '1688比价', icon: 'el-icon-s-opportunity' } : null,
           this.canMarket ? { key: 'market', label: '交易市场', icon: 'el-icon-s-marketing' } : null,
           this.canBilling ? { key: 'billing', label: '账单', icon: 'el-icon-wallet' } : null,
         ].filter(Boolean) },
@@ -5806,6 +5928,13 @@ const vm = new Vue({
     canBilling() { return !!(this.me && (this.me.role === 'admin' || this.me.billingEnabled)); },
     // 补货权限（独立菜单，默认所有用户不授权；含导入补货参考文件）
     canReplenish() { return !!(this.me && (this.me.role === 'admin' || this.me.replenishEnabled)); },
+    canPriceCheck() { return !!(this.me && (this.me.role === 'admin' || this.me.price1688Enabled)); },
+    /** 1688比价：把本次批次所有订单的行拍平成一张表（每行都是 price_check 记录） */
+    price1688Rows() {
+      const rows = [];
+      for (const o of (this.price1688.orders || [])) for (const r of (o.rows || [])) rows.push(r);
+      return rows;
+    },
     // 平台取价权限（v0.2.95）：登录齐货通 / 重新取价 / 配置阿发Token / 自动匹配阿发 / 阿发重新取价 / 选购加购
     //   这些操作要动平台真实账号，默认只给超级管理员，普通账号由超管在「菜单权限 → 平台取价」里授权
     canPrice() { return !!(this.me && (this.me.role === 'admin' || this.me.priceEnabled)); },
@@ -6443,6 +6572,70 @@ const vm = new Vue({
     fmtMinute(v) { return v ? String(v).slice(0, 16) : ''; },
     fmtDate(v) { return v ? String(v).slice(0, 10) : ''; },
     fmtSize(n) { return n > 1048576 ? (n / 1048576).toFixed(2) + ' MB' : (n / 1024).toFixed(0) + ' KB'; },
+    // ── 1688比价（v0.3.43）──
+    moneyFmt(r, c, v) { return '¥' + Number(v || 0).toFixed(2); },
+    ratioPct(r) { return Number.isFinite(Number(r)) && Number(r) !== 0 ? (Number(r) * 100).toFixed(2) + '%' : '—'; },
+    verdictTag(v) { return v === 'yellow' ? 'warning' : (v === 'green' ? 'success' : (v === 'blue' ? 'primary' : 'info')); },
+    verdictLabel(v) { return { blue: '合理', yellow: '异常', green: '新品', unmatched: '未匹配' }[v] || v; },
+    async loadPrice1688() {
+      if (this.price1688.loading) return;
+      this.price1688.loading = true;
+      try {
+        const d = await this.api('/api/price-check');
+        if (d && d.ok) {
+          this.price1688.runBatch = d.run_batch || '';
+          this.price1688.checkedAt = (d.orders && d.orders.length) ? (d.orders[0].rows || []).map(x => x.checked_at).filter(Boolean)[0] || '' : '';
+          this.price1688.summary = d.summary || this.price1688.summary;
+          this.price1688.orders = d.orders || [];
+          if (!this.price1688.orders.length) this.price1688.runBatch = '';
+        } else if (d && d.error) {
+          this.$message.error(d.error);
+        }
+      } catch (e) { this.$message.error('加载核对结果失败: ' + e.message); }
+      finally { this.price1688.loading = false; }
+    },
+    async runPrice1688() {
+      if (this.price1688.running) return;
+      this.$confirm('将由本机助手登录你的 1688 账号，抓取「待付款订单」进行比价核对。确定开始？', '开始 1688 比价', {
+        confirmButtonText: '开始', cancelButtonText: '取消', type: 'warning',
+      }).then(async () => {
+        this.price1688.running = true;
+        try {
+          const d = await this.dispatchPriceCheck();
+          if (d && d.ok) { this.$message.success('核对完成'); await this.loadPrice1688(); }
+          else if (d && d.error) this.$message.error(d.error);
+          else this.$message.error('未收到核对结果');
+        } catch (e) { this.$message.error('开始核对失败: ' + e.message); }
+        finally { this.price1688.running = false; }
+      }).catch(() => {});
+    },
+    async dispatchPriceCheck() {
+      return await this.api('/api/price-check/run', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ checkSales: true }),
+      });
+    },
+    async applyPrice1688() {
+      if (this.price1688.running) return;
+      this.$confirm('将由本机助手逐个打开上述订单，在 1688 的「订单备注」中写入判定文本并按 蓝/黄/绿 染色保存。确定继续？', '到 1688 打备注上色', {
+        confirmButtonText: '开始上色', cancelButtonText: '取消', type: 'warning',
+      }).then(async () => {
+        this.price1688.running = true;
+        try {
+          const d = await this.dispatchPriceApply();
+          if (d && d.ok) { this.$message.success('上色完成'); await this.loadPrice1688(); }
+          else if (d && d.error) this.$message.error(d.error);
+          else this.$message.error('未收到上色结果');
+        } catch (e) { this.$message.error('上色失败: ' + e.message); }
+        finally { this.price1688.running = false; }
+      }).catch(() => {});
+    },
+    async dispatchPriceApply() {
+      return await this.api('/api/price-check/apply', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: '{}',
+      });
+    },
     isSent(m) { return !!this.sent[sentKey(m)]; },
     // 交易关闭 = 没成交：不计入待开票金额、不进催收消息（服务端口径同此）
     isClosedOrder(st) { return String(st == null ? '' : st).includes('关闭'); },
@@ -6565,6 +6758,7 @@ const vm = new Vue({
       if (p === 'staff' && !this.canStaff) p = 'board';
       if (p === 'product' && !this.canProduct) p = 'board';
       if (p === 'replenish' && !this.canReplenish) p = 'product';
+      if (p === 'price1688' && !this.canPriceCheck) p = 'board';
       if (p === 'market' && !this.canMarket) p = 'board';
       if (p === 'billing' && !this.canBilling) p = 'board';
       if (p === 'supplier' && !this.canSupplier) p = 'board';
@@ -6586,6 +6780,7 @@ const vm = new Vue({
       if (p === 'supplier') this.loadSuppliers();
       if (p === 'waybill') this.loadWaybills();
       if (p === 'replenishOrder') this.loadReplenishOrders();
+      if (p === 'price1688') this.loadPrice1688();
       if (p === 'audit') this.loadOpLog();
       if (p === 'profit' || p === 'refund' || p === 'after' || p === 'pdd' || p === 'pddCollect'
           || p === 'qnhcfg' || p === 'refundalert') {
@@ -11187,6 +11382,43 @@ const vm = new Vue({
     onRoViewClosed() {
       this.roView.editing = false;
       this.roMove.visible = false;
+    },
+    /** 补货单分享链接（v0.3.44）：签 30 天令牌 → 手机扫 /r/<令牌> 只看这一张补货单，不须登录 */
+    async makeRoShare() {
+      const o = this.roView.order;
+      if (!o || !o.id) return;
+      const dlg = this.roShare;
+      dlg.orderId = o.id;
+      dlg.supplierName = o.supplierName || '';
+      dlg.amount = null;
+      dlg.url = ''; dlg.qr = ''; dlg.error = ''; dlg.ttlDays = 30;
+      dlg.visible = true;
+      try {
+        const d = await this.api('/api/replenish-order/share', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ id: o.id }),
+        });
+        if (!d || !d.ok) { dlg.error = (d && d.error) || '生成失败'; return; }
+        dlg.url = d.url;
+        dlg.ttlDays = Number(d.ttlDays) || 30;
+        dlg.amount = Number(o.amount) || 0;
+        dlg.qr = this.qrSvg(d.url);
+      } catch (e) { dlg.error = '生成失败：' + (e.message || e); }
+    },
+    copyRoShare() {
+      const txt = this.roShare.url || '';
+      if (!txt) return;
+      const done = () => this.$message.success('补货链接已复制，发给手机扫码即可');
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(txt).then(done).catch(() => this.$message.warning('复制失败，请手动选中链接复制'));
+        return;
+      }
+      const ta = document.createElement('textarea');
+      ta.value = txt;
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand('copy'); done(); } catch (e) { this.$message.warning('复制失败，请手动选中链接复制'); }
+      document.body.removeChild(ta);
     },
     /** 一键加购：整单明细按补货数量加进用户自己的齐货通 / 永源顺购物车（真实动作） */
     async oneKeyCart() {
