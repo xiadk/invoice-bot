@@ -6116,6 +6116,17 @@ const server = http.createServer(async (req, res) => {
       const profitApi = p === '/api/qnh/profit' || p === '/api/qnh/profit/pull' || p === '/api/qnh/profit/trend';
       // 退款原因在退单列表改（商品售后 v0.3.25 起不再读退单，旧售后页的「改原因」已下线）
       const reasonApi = p === '/api/qnh/refunds/reason';
+      // 员工账号只读退单：页面上的登录/刷新/提醒配置按钮已隐藏，这里做接口层兜底，
+      // 免得拿浏览器控制台直接打接口（同步、改定时配置、退出登录都会影响主体的牵牛花账号）。
+      // 判定只看 owner_id（员工身份），主体账号与超级管理员不受影响。
+      const staffQnh = !isAdmin && Number(user.owner_id) > 0;
+      const STAFF_QNH_ALLOW = new Set([
+        '/api/qnh/status', '/api/qnh/refunds', '/api/qnh/refunds/remark',
+        '/api/qnh/summary', '/api/qnh/trend', '/api/qnh/logs',
+      ]);
+      if (staffQnh && !STAFF_QNH_ALLOW.has(p)) {
+        return sendJson(res, 403, { error: '员工账号只能查看退单列表，其它操作请联系超级管理员' });
+      }
       if (reasonApi) {
         if (!canRefund) return sendJson(res, 403, { error: '未开启退单列表权限，请联系超级管理员' });
       } else if (profitApi) {
@@ -6142,6 +6153,23 @@ const server = http.createServer(async (req, res) => {
           canProfit,
           tenantId: qnhUid,
         };
+        // 员工：页面上只留退单表格，登录条整条不显示，所以不下发账号名、企业微信 webhook、
+        // 提醒模板、毛利配置这些「其它数据」——只给退单数据进度（最近同步批次）。
+        if (staffQnh) {
+          return sendJson(res, 200, {
+            cookie: {
+              logined: !!(cookie && cookie.logined),
+              loading: false,
+              configured: !!(cookie && cookie.configured),
+              tenantId: '', tenantName: '', message: '',
+              lastRun: (cookie && cookie.lastRun) || null,
+            },
+            config: null,
+            sync: qnh.getSyncState(),
+            summary: canRefund ? sum : null,
+            isAdmin, canRefund, canProfit, tenantId: qnhUid, staffLimited: true,
+          });
+        }
         // 管理员需要「以某账号身份进入」：给它账号列表 + 哪些账号已登录牵牛花
         if (isAdmin) {
           try {
@@ -6186,6 +6214,18 @@ const server = http.createServer(async (req, res) => {
         writeGuard();
         const out = await qnh.setRefundReason({ refundNo: body.refundNo, reason: body.reason, userId: qnhUid });
         if (out.ok) await logOp(user, 'qnh.refund_reason', { tenantId: qnhUid, refundNo: out.refundNo });
+        return sendJson(res, out.ok ? 200 : 400, out);
+      }
+
+      // 退单列表的「备注」：写 remark + 最后编辑人 + 时间；传空 = 清空备注（操作人/时间一并清）。
+      // 编辑人取当前登录会话的 username，不接受前端传，避免冒名。
+      if (method === 'POST' && p === '/api/qnh/refunds/remark') {
+        const body = await readBody(req);
+        writeGuard();
+        const out = await qnh.setRefundRemark({
+          refundNo: body.refundNo, remark: body.remark, operator: user.username, userId: qnhUid,
+        });
+        if (out.ok) await logOp(user, 'qnh.refund_remark', { tenantId: qnhUid, refundNo: out.refundNo });
         return sendJson(res, out.ok ? 200 : 400, out);
       }
 

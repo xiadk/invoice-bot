@@ -2699,11 +2699,17 @@
         <!-- 页头操作行：口径说明在左，配置入口在右（标题已由顶栏承担） -->
         <div class="page-bar">
           <span class="pb-info">
-            美团牵牛花退单明细 · 每日自动增量同步，也可随时点「立即刷新数据」。
-            登录由「催收小助手」在<b>该账号自己的电脑</b>上完成（服务器不打开浏览器），登录态存数据库。
-            标记 <el-tag size="mini" type="warning">已取货/送达</el-tag> 表示商品已出库，请重点核查。
+            <template v-if="isStaff">
+              美团牵牛花退单明细 · 由管理员每日自动同步。你只能查看退单数据、填写备注。
+              标记 <el-tag size="mini" type="warning">已取货/送达</el-tag> 表示商品已出库，请重点核查。
+            </template>
+            <template v-else>
+              美团牵牛花退单明细 · 每日自动增量同步，也可随时点「立即刷新数据」。
+              登录由「催收小助手」在<b>该账号自己的电脑</b>上完成（服务器不打开浏览器），登录态存数据库。
+              标记 <el-tag size="mini" type="warning">已取货/送达</el-tag> 表示商品已出库，请重点核查。
+            </template>
           </span>
-          <span class="pb-actions">
+          <span class="pb-actions" v-if="!isStaff">
             <el-button size="small" icon="el-icon-bell" @click="switchPage('refundalert')">提醒配置</el-button>
           </span>
         </div>
@@ -2713,7 +2719,8 @@
                            @change="onQnhTenantChange"></qnh-tenant-picker>
 
         <!-- 顶部状态条：登录 / 刷新 / 定时任务（与实时毛利监控页共用同一组件） -->
-        <el-card class="section-card" shadow="never" :body-style="{ padding: '12px 14px' }">
+        <!-- 员工账号只给退单数据，登录牵牛花 / 立即刷新 / 定时状态一律不给看也不给点 -->
+        <el-card v-if="!isStaff" class="section-card" shadow="never" :body-style="{ padding: '12px 14px' }">
           <qnh-login-bar :cookie="rq.cookie" :last-run="rq.lastRun" :schedule="rq.config"
                          :who-label="qnhWhoLabel" action-text="立即刷新数据"
                          :action-loading="rq.syncing" :can-logout="true"
@@ -2725,7 +2732,7 @@
                   description="超级管理员自己没有独立的牵牛花数据；选定账号后，退单、毛利、登录与告警配置都属于该账号。"></el-alert>
 
         <!-- 统计卡（设计稿 4 卡）：口径全部取自 /api/qnh/summary，未新增统计项 -->
-        <div class="stat-row">
+        <div class="stat-row" v-if="!isStaff">
           <el-card v-for="s in refundStats" :key="s.label" shadow="never" class="stat-card"
                    :body-style="{ padding: '14px 16px' }" style="flex:1;min-width:150px">
             <div class="num">{{ s.value }}</div>
@@ -2734,8 +2741,8 @@
           </el-card>
         </div>
 
-        <!-- 每天退单数量趋势 -->
-        <el-card class="section-card" shadow="never">
+        <!-- 每天退单数量趋势（员工只要表格，这块与统计卡一起隐藏） -->
+        <el-card class="section-card" shadow="never" v-if="!isStaff">
           <div slot="header" style="display:flex;align-items:center;gap:10px">
             <b>每天退单数量趋势</b>
             <el-radio-group v-model="rq.days" size="mini" @change="loadRefundTrend">
@@ -2762,14 +2769,7 @@
               <el-option label="已取货/送达" value="picked"></el-option>
               <el-option label="有配送日志" value="1"></el-option>
             </el-select>
-            <el-select v-model="rq.filter.sort" size="small" style="width:150px">
-              <el-option label="申请时间新→旧" value="apply_desc"></el-option>
-              <el-option label="申请时间旧→新" value="apply_asc"></el-option>
-              <el-option label="退单金额高→低" value="amount_desc"></el-option>
-              <el-option label="退单金额低→高" value="amount_asc"></el-option>
-            </el-select>
             <el-button size="small" type="primary" @click="applyRefundFilter">查询</el-button>
-            <el-button size="small" @click="resetRefundFilter">重置</el-button>
             <span class="fb-spacer"></span>
             <span class="loginid">共 {{ rq.total }} 条</span>
           </div>
@@ -2807,24 +2807,26 @@
             <el-table-column label="已支付时间" width="150">
               <template slot-scope="p">{{ p.row.paidTime || '—' }}</template>
             </el-table-column>
-            <el-table-column label="退单号" width="170">
-              <template slot-scope="p">
-                <el-button type="text" size="mini" @click="openRefundLog(p.row)">{{ p.row.refundNo }}</el-button>
-              </template>
-            </el-table-column>
             <el-table-column label="退单类型" width="130">
               <template slot-scope="p">
                 <el-tag v-if="p.row.isAppeal" size="mini" type="danger" style="margin-right:4px">申诉</el-tag>
                 {{ p.row.refundType || '—' }}
               </template>
             </el-table-column>
-            <el-table-column label="退款原因" min-width="190">
+            <el-table-column label="退款原因" min-width="180">
+              <template slot-scope="p">
+                <span :title="p.row.reasonText || ''">{{ p.row.reasonText || '—' }}</span>
+                <div v-if="p.row.refundReason" class="loginid">（人工填写，同步不覆盖）</div>
+              </template>
+            </el-table-column>
+            <!-- 备注（2026-11-06）：退款原因改为只读后，人工记录写这里；同时回显最后编辑人与时间 -->
+            <el-table-column label="备注" min-width="220">
               <template slot-scope="p">
                 <div style="display:flex;align-items:flex-start;gap:6px">
-                  <span style="flex:1" :title="p.row.reasonText || ''">{{ p.row.reasonText || '—' }}</span>
-                  <el-button type="text" size="mini" @click="openReason(p.row)">编辑</el-button>
+                  <span style="flex:1" :title="p.row.remark || ''">{{ p.row.remark || '—' }}</span>
+                  <el-button type="text" size="mini" :disabled="readonly" @click="openRemark(p.row)">编辑</el-button>
                 </div>
-                <div v-if="p.row.refundReason" class="loginid">（人工填写，同步不覆盖）</div>
+                <div v-if="p.row.remark" class="loginid">{{ p.row.remarkBy || '—' }} · {{ p.row.remarkAt || '—' }}</div>
               </template>
             </el-table-column>
             <el-table-column label="退单金额" width="100" align="right">
@@ -2848,13 +2850,6 @@
                 <span v-if="p.row.deliveryCount" class="loginid"> · {{ p.row.deliveryCount }} 条</span>
               </template>
             </el-table-column>
-            <el-table-column label="门店" min-width="150"><template slot-scope="p">{{ p.row.storeName || '—' }}</template></el-table-column>
-            <el-table-column label="顾客" width="100">
-              <template slot-scope="p">{{ p.row.receiverName || '—' }}</template>
-            </el-table-column>
-            <el-table-column label="配送地址" min-width="200" show-overflow-tooltip>
-              <template slot-scope="p"><span class="loginid">{{ p.row.receiverAddress || '—' }}</span></template>
-            </el-table-column>
             <el-table-column label="申请时间" width="150"><template slot-scope="p">{{ p.row.applyTime || '—' }}</template></el-table-column>
             <el-table-column label="操作" width="90">
               <template slot-scope="p"><el-button size="mini" @click="openRefundLog(p.row)">日志</el-button></template>
@@ -2874,17 +2869,18 @@
         <!-- 定时同步设置 → 独立页「牵牛花配置」（switchPage('qnhcfg')），仅超级管理员可见 -->
 
 
-        <!-- 退款原因编辑（人工列，写 refund_reason；同步不覆盖，传空回落平台原值） -->
-        <el-dialog :title="'退款原因 · ' + (reasonDlg.refundNo || '')"
-                   :visible.sync="reasonDlg.visible" width="560px" append-to-body>
+        <!-- 备注编辑（2026-11-06）：退款原因改为只读，人工记录写这里；保存后记操作人与时间 -->
+        <el-dialog :title="'备注 · ' + (remarkDlg.refundNo || '')"
+                   :visible.sync="remarkDlg.visible" width="560px" append-to-body>
           <div class="form-tip" style="margin-bottom:10px">
-            平台原始原因（只读）：{{ reasonDlg.raw || '—' }}
+            平台退款原因（只读）：{{ remarkDlg.reason || '—' }}
+            <span v-if="remarkDlg.by"> ｜ 上次编辑：{{ remarkDlg.by }} · {{ remarkDlg.at }}</span>
           </div>
-          <el-input type="textarea" :rows="3" v-model="reasonDlg.value" maxlength="512" show-word-limit
-                    placeholder="如：顾客嫌日期不新鲜，已退款"></el-input>
+          <el-input type="textarea" :rows="3" v-model="remarkDlg.value" maxlength="512" show-word-limit
+                    placeholder="如：已联系顾客，商品退回仓库待质检"></el-input>
           <span slot="footer">
-            <el-button size="small" @click="reasonDlg.visible = false">取消</el-button>
-            <el-button size="small" type="primary" :loading="reasonDlg.saving" @click="saveReason">保存</el-button>
+            <el-button size="small" @click="remarkDlg.visible = false">取消</el-button>
+            <el-button size="small" type="primary" :loading="remarkDlg.saving" @click="saveRemark">保存</el-button>
           </span>
         </el-dialog>
 
@@ -5679,15 +5675,15 @@ const vm = new Vue({
         goodsName: '', sku: '', qty: 1, afterReason: '', afterDate: '', note: '',
         saving: false, error: '', up: afUpBox(),
       },
-      // 退款原因编辑（退单列表用；商品售后 v0.3.25 起不再读退单）
-      reasonDlg: { visible: false, refundNo: '', value: '', raw: '', from: 'refund', saving: false },
+      // 备注编辑（退单列表用；退款原因 2026-11-06 起改为只读，人工记录写 remark）
+      remarkDlg: { visible: false, refundNo: '', value: '', reason: '', by: '', at: '', saving: false },
       // 操作日志（仅超级管理员）
       opLog: { draftUsername: '', username: '', page: 1, size: 20, total: 0, rows: [], loading: false, summary: {} },
       // 退单列表（牵牛花）
       rq: {
         loading: false, rows: [], total: 0, page: 1, size: 20,
         range: null,
-        filter: { keyword: '', delivery: '', sort: 'apply_desc' },
+        filter: { keyword: '', delivery: '' },
         trend: [], days: 30, summary: null,
         cookie: { logined: false, loading: false, configured: false, tenantId: '', tenantName: '', message: '' },
         lastRun: null, syncing: false, syncPoll: null,
@@ -6561,7 +6557,8 @@ const vm = new Vue({
       if (p === 'users' && !this.isAdmin) p = 'board';
       if (p === 'audit' && !this.isAdmin) p = 'board';
       if (p === 'refund' && !this.canRefund) p = 'board';
-      if (p === 'refundalert' && !this.canRefund) p = 'board';
+      // 退单提醒配置只给非员工（员工只有退单列表权限，页面上的「提醒配置」入口也隐藏了）
+      if (p === 'refundalert' && (!this.canRefund || this.isStaff)) p = 'board';
       if (p === 'qnhcfg' && !(this.canProfit || this.canRefund)) p = 'board';
       if (p === 'profit' && !this.canProfit) p = 'board';
       if (p === 'after' && !this.canAfter) p = 'board';
@@ -6574,12 +6571,11 @@ const vm = new Vue({
       if (p === 'waybill' && !this.canWaybill) p = 'board';
       if (p === 'replenishOrder' && !this.canReplenishOrder) p = 'board';
       // 员工账号兜底：上面各条回落到 'board'（1688发票）的规则对员工不适用，
-      // 员工只允许导航里出现的页面（外加从毛利/退单页进来的「告警配置」「退单提醒」）
+      // 员工只允许导航里出现的页面（外加毛利页的「牵牛花配置」；退单提醒配置已对员工关闭）
       if (this.isStaff) {
         const allowed = new Set();
         for (const g of this.navGroups) for (const it of g.items) allowed.add(it.key);
         allowed.add('qnhcfg');
-        allowed.add('refundalert');
         if (!allowed.has(p)) p = this.staffHome || '__none';
       }
       this.page = p;
@@ -7291,7 +7287,7 @@ const vm = new Vue({
         }
         if (f.keyword) q.set('keyword', f.keyword);
         if (f.delivery) q.set('delivery', f.delivery);
-        if (f.sort) q.set('sort', f.sort);
+        // 不传 sort：服务端默认按支付时间倒序（2026-11-06 起页面排序下拉已下线）
         q.set('page', this.rq.page);
         q.set('size', this.rq.size);
         const d = await this.qnhApi('/api/qnh/refunds?' + q.toString());
@@ -7309,46 +7305,42 @@ const vm = new Vue({
       this.loadRefunds();
       this.reportOp('btn.click', { btn: '退单列表查询' });
     },
-    resetRefundFilter() {
-      this.rq.range = null;
-      this.rq.filter = { keyword: '', delivery: '', sort: 'apply_desc' };
-      this.rq.page = 1;
-      this.loadRefunds();
-    },
     onRefundPage(p) { this.rq.page = p; this.loadRefunds(); },
     onRefundSize(s) { this.rq.size = s; this.rq.page = 1; this.loadRefunds(); },
     refundRowClass({ row }) { return row && row.picked ? 'row-picked' : ''; },
 
-    // ── 售后原因（退单列表写 refund_reason；商品售后 v0.3.25 起不再读退单）──
-    /** 打开编辑框：value 取现有原因，raw 展示平台原值（手工记录没有平台原值） */
-    /** 退单列表的「编辑退款原因」（人工列 refund_reason，同步不覆盖） */
-    openReason(row) {
+    // ── 备注（2026-11-06：退款原因改为只读，人工记录写 remark，同步不覆盖）──
+    /** 打开备注编辑框：带出已有备注与上次编辑人/时间 */
+    openRemark(row) {
       if (this.readonly) { this.$message.warning('只读模式下不能修改'); return; }
-      this.reasonDlg = {
+      this.remarkDlg = {
         visible: true,
         refundNo: row.refundNo || '',
-        value: row.refundReason || '',
-        raw: row.applyReason || '',
+        value: row.remark || '',
+        reason: row.reasonText || '',
+        by: row.remarkBy || '',
+        at: row.remarkAt || '',
         saving: false,
       };
     },
-    async saveReason() {
-      const d0 = this.reasonDlg;
+    async saveRemark() {
+      const d0 = this.remarkDlg;
       if (d0.saving) return;
       if (!d0.refundNo) return;
       d0.saving = true;
       try {
-        const d = await this.qnhApi('/api/qnh/refunds/reason', {
+        const d = await this.qnhApi('/api/qnh/refunds/remark', {
           method: 'POST', headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ refundNo: d0.refundNo, reason: d0.value }),
+          body: JSON.stringify({ refundNo: d0.refundNo, remark: d0.value }),
         });
         if (!d || d.error) { this.$message.error((d && d.error) || '保存失败'); return; }
         const row = (this.rq.rows || []).find((r) => r.refundNo === d0.refundNo);
         if (row) {
-          row.refundReason = d.refundReason || '';
-          row.reasonText = row.refundReason || row.applyReason || '';
+          row.remark = d.remark || '';
+          row.remarkBy = d.remarkBy || '';
+          row.remarkAt = d.remarkAt || '';
         }
-        this.$message.success('退款原因已保存');
+        this.$message.success(d.remark ? '备注已保存' : '备注已清空');
         d0.visible = false;
       } catch (e) {
         this.$message.error('保存失败：' + e.message);

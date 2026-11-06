@@ -141,6 +141,9 @@ async function ensureQnhSchema(q) {
       "  `audit_operator` VARCHAR(64) DEFAULT NULL," +
       "  `audit_reason` VARCHAR(512) DEFAULT NULL," +
       "  `refund_reason` VARCHAR(512) DEFAULT NULL COMMENT '人工填写的退款原因（同步不覆盖，页面优先展示）'," +
+      "  `remark` VARCHAR(512) DEFAULT NULL COMMENT '人工备注（退单列表可编辑，同步不覆盖）'," +
+      "  `remark_by` VARCHAR(64) DEFAULT NULL COMMENT '备注最后编辑人（登录账号）'," +
+      "  `remark_at` DATETIME DEFAULT NULL COMMENT '备注最后编辑时间'," +
       "  `after_sale_status` TINYINT NOT NULL DEFAULT 0 COMMENT '售后处理状态：0待处理 1已申请 2已退货 3已退款'," +
       "  `after_sale_note` VARCHAR(255) DEFAULT NULL COMMENT '售后备注'," +
       "  `after_sale_by` VARCHAR(64) DEFAULT NULL COMMENT '最后处理人'," +
@@ -1149,6 +1152,10 @@ async function migrate(conn, dbName) {
       ['after_sale_note', "VARCHAR(255) DEFAULT NULL COMMENT '售后备注'"],
       ['after_sale_by', "VARCHAR(64) DEFAULT NULL COMMENT '最后处理人'"],
       ['after_sale_at', "DATETIME DEFAULT NULL COMMENT '最后处理时间'"],
+      // 退单备注（2026-11-06）：退款原因改只读后，人工记录改到这三列
+      ['remark', "VARCHAR(512) DEFAULT NULL COMMENT '人工备注（退单列表可编辑，同步不覆盖）'"],
+      ['remark_by', "VARCHAR(64) DEFAULT NULL COMMENT '备注最后编辑人（登录账号）'"],
+      ['remark_at', "DATETIME DEFAULT NULL COMMENT '备注最后编辑时间'"],
     ]) {
       if (!(await colExists('qnh_refund_order', col))) {
         await q(`ALTER TABLE \`qnh_refund_order\` ADD COLUMN \`${col}\` ${decl}`);
