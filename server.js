@@ -4667,13 +4667,17 @@ const server = http.createServer(async (req, res) => {
       writeGuard();
       const up = new URL(req.url, 'http://localhost');
       const kp = up.searchParams.get('kind');
-      const kind = kp === 'invoices' ? 'invoices' : kp === 'products' ? 'products' : 'orders';
+      const kind = kp === 'invoices' ? 'invoices'
+        : kp === 'products' ? 'products'
+        : kp === 'price_ref' ? 'price_ref' : 'orders';
       // 商品列表导入（前置仓补货参考）：随「商品列表」菜单权限放行；另为「1688比价」页的
       // 导入按钮（v0.3.45）放行 —— 比价要拿补货参考当目标价，得让只有比价权限的用户也能导入。
-      if (kind === 'products' && !canProduct && !canPriceCheck) return denyProduct();
+      // price_ref 是 1688 比价页专用「补货单明细导出」导入，权限口径与 products 一致。
+      if ((kind === 'products' || kind === 'price_ref') && !canProduct && !canPriceCheck) return denyProduct();
       const rawName = String(up.searchParams.get('name') || '').trim();
       const safeName = path.basename(rawName).replace(/[\\/:*?"<>|]+/g, '_').slice(-120)
-        || (kind === 'invoices' ? 'invoices.xlsx' : kind === 'products' ? 'products.xlsx' : 'orders.xlsx');
+        || (kind === 'invoices' ? 'invoices.xlsx' : kind === 'products' ? 'products.xlsx'
+          : kind === 'price_ref' ? '补货单明细.xlsx' : 'orders.xlsx');
       if (!/\.(xlsx|xls)$/i.test(safeName)) throw new Error('只支持 .xlsx / .xls 文件（请上传从 1688 / 税务局导出的 Excel）');
       const buf = await readRawBody(req, 80e6);
       if (!buf) throw new Error('上传失败：内容过大（上限 80MB）或读取中断');
@@ -4688,11 +4692,16 @@ const server = http.createServer(async (req, res) => {
       fs.writeFileSync(dest, buf);
 
       const t = taskFor(tenantId);
-      taskLog(t, `▶ 上传导入（${kind === 'invoices' ? '税务局发票' : kind === 'orders' ? '1688订单' : '前置仓补货参考'}）：${safeName} · ${(buf.length / 1024).toFixed(0)}KB`);
+      const kindLabel = kind === 'invoices' ? '税务局发票'
+        : kind === 'orders' ? '1688订单'
+        : kind === 'price_ref' ? '比价补货单明细' : '前置仓补货参考';
+      taskLog(t, `▶ 上传导入（${kindLabel}）：${safeName} · ${(buf.length / 1024).toFixed(0)}KB`);
       const r = kind === 'invoices'
         ? await importInvoiceUpload(tenantId, dest, safeName)
         : kind === 'orders'
         ? await importOrderUpload(tenantId, dest, safeName)
+        : kind === 'price_ref'
+        ? await products.importPriceRefFile(tenantId, dest, safeName, await brandIdOfUser(tenantId))
         : await products.importReplenishFile(tenantId, dest, safeName, await brandIdOfUser(tenantId));
       if (!r.ok) {
         taskLog(t, `✗ 导入失败：${r.error}`);
@@ -4702,6 +4711,9 @@ const server = http.createServer(async (req, res) => {
         taskLog(t, `✓ 发票导入完成：新增 ${r.inserted} 行 · 更新 ${r.updated} 行` +
           (r.autoMapped ? ` · 自动匹配 ${r.autoMapped} 个销方` : '') +
           (r.unmatchedNames && r.unmatchedNames.length ? ` · 待人工匹配 ${r.unmatchedNames.length} 个销方` : ''));
+      } else if (kind === 'price_ref') {
+        taskLog(t, `✓ 比价补货单明细导入完成：${r.total} 行 · 新增 ${r.inserted} · 更新 ${r.updated}`
+          + ` · 跳过其它来源 ${r.skipped} · 回填链接 ${r.linkFilled}（1688 ${r.link1688}） · 批次 ${r.batchId}`);
       } else {
         // 订单导入后服务端会补跑一次销方自动匹配（v0.3.32）：先导发票后导订单的账号靠它补齐税名
         taskLog(t, `✓ 订单导入完成：新增 ${r.inserted} 单 · 更新 ${r.updated} 单`
@@ -4709,7 +4721,7 @@ const server = http.createServer(async (req, res) => {
             ? ` · 补匹配税名 ${r.rematch.autoMapped} 个` : ''));
       }
       // 操作日志：记录导入（旁路）
-      logOp(user, kind === 'invoices' ? 'import.invoice' : 'import.order', {
+      logOp(user, kind === 'invoices' ? 'import.invoice' : kind === 'price_ref' ? 'import.price_ref' : 'import.order', {
         file: safeName, inserted: r.inserted || 0, updated: r.updated || 0, ip: clientIp(req),
       });
       return sendJson(res, 200, { ok: true, kind, ...r });
@@ -5444,7 +5456,20 @@ const server = http.createServer(async (req, res) => {
       } catch (e) { bp = 0; bpPriced = 0; }
       const productRef = Number(pi[0] && pi[0].c) || 0;
       const count = productRef + bpPriced;
-      return sendJson(res, 200, { ok: true, count, hasRef: count > 0, productRef, brandRef: bpPriced < bp ? bpPriced : bp });
+      // 1688 比价页最近一次「补货单明细」导入批次：核对时带上它，只用这批窄目标集，
+      // 避免把 brand_product 全量行混进来造成同 offer 多 SKU 歧义。
+      let refBatchId = null;
+      try {
+        const last = await db.query(
+          'SELECT id FROM product_import_batch WHERE user_id = ? AND source_file LIKE ? ORDER BY id DESC LIMIT 1',
+          [tenantId, products.PRICE_REF_PREFIX + '%']
+        );
+        if (last.length) refBatchId = Number(last[0].id);
+      } catch (e) { refBatchId = null; }
+      return sendJson(res, 200, {
+        ok: true, count, hasRef: count > 0, productRef,
+        brandRef: bpPriced < bp ? bpPriced : bp, refBatchId,
+      });
     }
 
     // ── 1688比价· 到1688打备注上色（把最近一批还没上色的判定行下发给助手逐单打备注染色）──

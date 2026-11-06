@@ -2239,20 +2239,20 @@
       <div v-show="page === 'price1688'" id="page-price1688">
         <div class="page-bar">
           <span class="pb-info">
-            核对 1688「待付款订单」的采购价：按补货参考里的<b>供应商商品</b>匹配目标采购单价，
+            核对 1688「待付款订单」的采购价：以本页导入的<b>补货单明细</b>「补货单价」为目标价，按 1688 商品链接匹配，
             差额/采购量异常标黄、新品标绿、合理标蓝；核完可一键到 1688 打备注上色。
           </span>
           <span style="flex:1"></span>
           <el-tag v-if="price1688.range && price1688.range.length === 2" size="small" type="info" style="margin-right:8px">
             下单时间 {{ price1688.range[0] }} ~ {{ price1688.range[1] }}
           </el-tag>
-          <el-button size="small" :disabled="price1688.running" @click="openUpload('products')"
-                     title="上传「前置仓补货参考批量导出」Excel 作为核对的目标价来源：目标价取文件里「采购单价(基础单位)」，匹配靠供应商链接/名称/规格。导入后「开始核对」才可点。">导入补货参考文件</el-button>
+          <el-button size="small" :disabled="price1688.running" @click="openUpload('price_ref')"
+                     title="上传「补货单明细导出」Excel：目标价取「补货单价」，按 SKU 从商品同步补回 1688 链接匹配待付款订单；导入后本页核对只用这一批，不影响其它页面的导入。">导入补货单明细</el-button>
           <el-button size="small" :loading="price1688.running" type="primary"
                      icon="el-icon-video-play" :disabled="!price1688.hasRef" @click="runPrice1688()"
                      :title="price1688.hasRef
-                       ? '先选择下单时间范围，再由本机助手抓取该范围内 1688 待付款订单 → 按已导入的补货参考（优先）与商品同步（品牌商品按品名兜底）匹配目标价 → 助手去 1688 打备注上色。'
-                       : '尚无可用目标价：先点左上「导入补货参考文件」，或由管理员在本页「商品列表 → 商品同步」同步品牌商品后即可核对。'">开始核对</el-button>
+                       ? '先选择下单时间范围，再由本机助手抓取该范围内 1688 待付款订单 → 按本页导入的补货单明细（补货单价）匹配目标价 → 助手去 1688 打备注上色。'
+                       : '尚无可用目标价：先点左上「导入补货单明细」，或由管理员在本页「商品列表 → 商品同步」同步品牌商品后即可核对。'">开始核对</el-button>
           <el-button size="small" :loading="price1688.loading" @click="loadPrice1688()">刷新</el-button>
         </div>
 
@@ -5116,6 +5116,20 @@ const UP_GUIDES = {
     accept: '.xlsx,.xls',
     html: '',
   },
+  // 仅 1688 比价页的导入按钮使用：目标价取「补货单价」，按 SKU 从商品同步补 1688 链接
+  price_ref: {
+    title: '导入补货单明细（1688 比价用）',
+    accept: '.xlsx,.xls',
+    html: `<div style="font-weight:600;margin-bottom:4px">上传「补货单明细导出」Excel</div>
+      <ul style="margin:4px 0 8px 18px;padding:0;line-height:1.7">
+        <li>表头需包含 <b>SKU</b>、<b>商品名称</b>、<b>规格</b>、<b>补货单价</b> 等列</li>
+        <li><b>目标价取本文件的「补货单价」</b>；系统按 SKU 从「商品同步」结果补回 1688 商品链接，
+            再用链接与待付款订单匹配；没有链接的商品无法匹配</li>
+        <li>导入后本页「开始核对」<b>只用这一批文件</b>作目标价，不混入商品同步的全量品牌商品</li>
+        <li>同一 SKU 若已由其它页面导入，本次会跳过、不覆盖，也不参与这一批核对</li>
+      </ul>
+      <div style="color:#5a7291">此导入只作用于 1688 比价页，不影响「商品列表」「补货」「导入订单」「导入发票」等其它页面的导入。</div>`,
+  },
 };
 
 // 操作日志：这些按钮文案不含有效信息（弹框的确定/取消等），不记入操作日志
@@ -5805,6 +5819,9 @@ const vm = new Vue({
         task: null,
         // 是否已导入补货参考文件（v0.3.45）：没有就不给点「开始核对」
         hasRef: false, refCount: 0,
+        // 最近一次「补货单明细」导入批次：核对时带上，只用这批窄目标集，
+        // 避免把商品同步的全量品牌行混进来造成同 offer 多 SKU 歧义
+        refBatchId: null,
       },
       // ── 商品售后（v0.3.25：商品名称/SKU + 数量 + 原因 + 状态 + 凭证）──
       af: {
@@ -6691,6 +6708,8 @@ const vm = new Vue({
         const d = await this.api('/api/price-check/ref');
         this.$set(this.price1688, 'refCount', (d && d.count) || 0);
         this.$set(this.price1688, 'hasRef', (d && d.count) > 0);
+        // 服务端返回最近一次比价专用导入批次：刷新页面后也能继续用窄目标集
+        if (d && d.refBatchId) this.$set(this.price1688, 'refBatchId', d.refBatchId);
       } catch (e) { /* 忽略：保持当前开关 */ }
     },
     runPrice1688() {
@@ -6785,7 +6804,11 @@ const vm = new Vue({
     async dispatchPriceCheck(range) {
       return await this.api('/api/price-check/run', {
         method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ checkSales: true, dateStart: range[0], dateEnd: range[1] }),
+        body: JSON.stringify({
+          checkSales: true, dateStart: range[0], dateEnd: range[1],
+          // 只带本页导入的补货单明细批次：服务端据此只用这批窄目标集，不混入全量品牌商品
+          batchId: this.price1688.refBatchId || undefined,
+        }),
       });
     },
     async applyPrice1688() {
@@ -10423,6 +10446,14 @@ const vm = new Vue({
           if (kind === 'products') {
             html = `✓ 导入完成：<b>${d.total || 0}</b> 个商品（重复商品已按本次文件内容更新） · 本次总货值 <b>${this.yuan(d.totalValue)}</b>`
               + (this.page === 'price1688' ? ' · <b>已可开始核对</b>' : '');
+          } else if (kind === 'price_ref') {
+            const otherLink = (d.linkFilled || 0) - (d.link1688 || 0);
+            html = `✓ 导入完成：<b>${d.total || 0}</b> 行 · 新增 <b>${d.inserted || 0}</b> · 更新 <b>${d.updated || 0}</b>`
+              + ` · 跳过其它来源 <b>${d.skipped || 0}</b>`
+              + `<div style="margin-top:6px">按 SKU 回填 1688 链接 <b>${d.link1688 || 0}</b> 个`
+              + (otherLink > 0 ? `（另有 ${otherLink} 个其它渠道链接，不参与 1688 比价）` : '')
+              + `；目标价取本文件「补货单价」，本次核对只用这一批。</div>`
+              + (d.skipped ? `<div style="margin-top:4px;color:#b26a00">⚠ ${d.skipped} 个 SKU 已由其它页面导入，本次未覆盖，不参与这一批核对。</div>` : '');
           } else if (kind === 'invoices') {
             const un = d.unmatched || [];
             html = `✓ 导入完成：新增 <b>${d.inserted || 0}</b> 行 · 更新 <b>${d.updated || 0}</b> 行`
@@ -10447,6 +10478,12 @@ const vm = new Vue({
               }).then(() => { this.up.visible = false; this.openReplenish(d.batchId, d.total); })
                 .catch(() => { this.up.visible = false; });
             });
+          }
+          // 比价专用导入：记下批次并刷新可用目标数，直接收尾（不弹「是否去补货」，不跳补货页）
+          if (kind === 'price_ref') {
+            this.$set(this.price1688, 'refBatchId', d.batchId || null);
+            this.loadPriceRef();
+            this.$nextTick(() => { this.up.visible = false; });
           }
         } else {
           this.up.result = { ok: false, html: '✗ ' + this.esc((payload && payload.error) || '导入失败') };
