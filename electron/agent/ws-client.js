@@ -19,6 +19,10 @@ const WebSocket = require('ws');
 const RECONNECT_MIN_MS = 3000;
 const RECONNECT_MAX_MS = 30000;
 const HELLO_TIMEOUT_MS = 15000;
+// 「牵牛花页内请求」硬超时（v0.3.50）：必须早于服务端 qagent.request 的 120 秒。
+// 超时即强制回执并释放 _qnhBusy，否则一次卡死的页面请求会把助手永久占住 ——
+// 之后「登录牵牛花」「退出账号」都会被判成「助手正在执行任务」而弹不出窗口。
+const QNH_FETCH_HARD_TIMEOUT_MS = 105 * 1000;
 
 function toWsBase(httpUrl) {
   return String(httpUrl || '').trim().replace(/\/+$/, '')
@@ -308,9 +312,12 @@ class AgentClient extends EventEmitter {
    * 只与登录互斥（共用同一个窗口）；发送催收消息期间照常执行，不影响发送节奏。
    */
   async _runQnhFetch(m) {
-    const done = (payload) => this.send(Object.assign({
-      type: 'qnh_fetch_done', taskId: m.taskId,
-    }, payload || {}));
+    let reported = false;
+    const done = (payload) => {
+      if (reported) return;   // 硬超时后迟到的回执一律忽略
+      reported = true;
+      this.send(Object.assign({ type: 'qnh_fetch_done', taskId: m.taskId }, payload || {}));
+    };
 
     if (this._qnhBusy) { done({ ok: false, error: '登录窗口正在使用中，请稍后再试' }); return; }
     if (typeof this._qnhFetchHandler !== 'function') {
@@ -322,11 +329,20 @@ class AgentClient extends EventEmitter {
       log: (text) => this.send({ type: 'log', text: String(text == null ? '' : text).slice(0, 200) }),
       report: done,
     };
+    let timer = null;
     try {
-      await this._qnhFetchHandler(m, api);
+      // 即便处理器自己卡死，也必须在服务端放弃等待之前给一次回执并解锁。
+      await new Promise((resolve, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`牵牛花页内请求硬超时（${Math.round(QNH_FETCH_HARD_TIMEOUT_MS / 1000)} 秒）`)),
+          QNH_FETCH_HARD_TIMEOUT_MS
+        );
+        Promise.resolve(this._qnhFetchHandler(m, api)).then(resolve, reject);
+      });
     } catch (e) {
       done({ ok: false, error: String((e && e.message) || e).slice(0, 200) });
     } finally {
+      if (timer) clearTimeout(timer);
       this._qnhBusy = false;
     }
   }

@@ -349,6 +349,40 @@ function appendPriceLog(ctx, text) {
   savePriceProgress(ctx.userId, ctx);
 }
 
+// ── 商品同步· 异步任务与进度快照（v0.3.50）──────────────────────────────────
+//   一次同步会跑几分钟（每品牌约 170 页 × 1 秒 × 2 轮）。原来是 HTTP 阻塞等待，
+//   既看不到进度，也容易被代理/浏览器掐断。改成「下发即返回 taskId + 后台跑 + 前端轮询」。
+//   进度只存内存，服务重启即失效（与 1688 比价进度同一口径），不写库、不加表。
+const PRODUCT_SYNC = new Map();          // taskId -> ctx（运行中的任务）
+const PRODUCT_SYNC_PROGRESS = new Map(); // userId -> 最近一次快照（结束后仍可查终态）
+const PRODUCT_SYNC_TTL_MS = 60 * 60 * 1000;
+
+function productSyncSnapshot(ctx) {
+  return {
+    taskId: ctx.taskId,
+    running: !ctx.finished,
+    phase: ctx.finished ? (ctx.ok ? 'done' : 'failed') : 'running',
+    percent: ctx.percent || 0,
+    brandIndex: ctx.brandIndex || 0, brandCount: ctx.brandCount || 0,
+    brandId: ctx.brandId || 0, statusLabel: ctx.statusLabel || '',
+    page: ctx.page || 0, pages: ctx.pages || 0,
+    total: ctx.total || 0, inserted: ctx.inserted || 0,
+    updated: ctx.updated || 0, failed: ctx.failed || 0,
+    current: ctx.current || '', message: ctx.message || '', error: ctx.error || null,
+    startedAt: ctx.startedAt || null, finishedAt: ctx.finishedAt || null,
+  };
+}
+
+/** 按「品牌数 × 2 轮（正常采购 / 已停采）」分块估算百分比，封顶 99，完成时才给 100 */
+function productSyncPercent(pr, brandCount) {
+  const blocks = Math.max(1, Number(brandCount) * 2);
+  const finished = (Math.max(1, Number(pr.brandIndex) || 1) - 1) * 2
+    + (pr.statusKey === 'stopped' ? 1 : 0);
+  const pages = Number(pr.pages) || 0;
+  const part = pages > 0 ? Math.min(1, (Number(pr.page) || 0) / pages) : 0;
+  return Math.max(0, Math.min(99, Math.round(((finished + part) / blocks) * 100)));
+}
+
 const configStore = require('./lib/config');
 const { loadConfig } = configStore;
 const collectShare = require('./lib/collect-share');
@@ -5730,12 +5764,81 @@ const server = http.createServer(async (req, res) => {
       if (body && body.dryRun) {
         return sendJson(res, 200, await qnh.syncProducts({ userId: user.id, brandIds, dryRun: true }));
       }
-      const out = await qnh.syncProducts({ userId: user.id, brandIds, onProgress: null });
-      await logOp(user, 'product.sync', {
-        ok: !!out.ok, total: out.total, inserted: out.inserted,
-        updated: out.updated, failed: out.failed, brandIds,
-      });
-      return sendJson(res, 200, out);
+      // 同一超管已有任务在跑：直接复用同一个 taskId，让前端继续轮询，
+      // 不重复下发（否则助手会被并发的 qnh_fetch 打爆，正是「助手超时 + 登录唤不起」的诱因）。
+      for (const c of PRODUCT_SYNC.values()) {
+        if (c.userId === Number(user.id) && !c.finished) {
+          return sendJson(res, 200, {
+            ok: true, pending: true, taskId: c.taskId,
+            message: '已有商品同步任务在进行中，继续显示当前进度',
+          });
+        }
+      }
+      const taskId = 'ps-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+      const ctx = {
+        taskId, userId: Number(user.id), brandIds, brandCount: brandIds.length,
+        finished: false, ok: false, percent: 0, current: '正在准备同步…',
+        startedAt: new Date().toISOString(),
+      };
+      PRODUCT_SYNC.set(taskId, ctx);
+      PRODUCT_SYNC_PROGRESS.set(ctx.userId, productSyncSnapshot(ctx));
+
+      // 后台执行，不阻塞 HTTP；每页回调刷新一次进度快照
+      (async () => {
+        try {
+          const out = await qnh.syncProducts({
+            userId: user.id, brandIds,
+            onProgress: (pr) => {
+              if (ctx.finished) return;
+              ctx.brandId = Number(pr.brandId) || 0;
+              ctx.brandIndex = Number(pr.brandIndex) || 0;
+              ctx.statusLabel = pr.statusLabel || '';
+              ctx.page = Number(pr.page) || 0;
+              ctx.pages = Number(pr.pages) || 0;
+              ctx.total = Number(pr.total) || 0;
+              ctx.inserted = Number(pr.inserted) || 0;
+              ctx.updated = Number(pr.updated) || 0;
+              ctx.failed = Number(pr.failed) || 0;
+              ctx.percent = productSyncPercent(pr, ctx.brandCount);
+              ctx.current = `品牌 ${ctx.brandIndex}/${ctx.brandCount} · ${ctx.statusLabel}`
+                + ` · 第 ${ctx.page}${ctx.pages ? '/' + ctx.pages : ''} 页 · 已处理 ${ctx.total} 个商品`;
+              PRODUCT_SYNC_PROGRESS.set(ctx.userId, productSyncSnapshot(ctx));
+            },
+          });
+          ctx.ok = !!out.ok;
+          ctx.message = out.message || '';
+          ctx.error = out.ok ? null : (out.message || '商品同步失败');
+          ctx.percent = out.ok ? 100 : ctx.percent;
+          ctx.current = out.ok ? '同步完成' : '同步失败';
+          await logOp(user, 'product.sync', {
+            ok: !!out.ok, total: out.total, inserted: out.inserted,
+            updated: out.updated, failed: out.failed, brandIds,
+          }).catch(() => {});
+        } catch (e) {
+          ctx.ok = false;
+          ctx.error = String((e && e.message) || e);
+          ctx.message = '商品同步异常：' + ctx.error;
+          ctx.current = '同步失败';
+        } finally {
+          ctx.finished = true;
+          ctx.finishedAt = new Date().toISOString();
+          PRODUCT_SYNC_PROGRESS.set(ctx.userId, productSyncSnapshot(ctx));
+          const t = setTimeout(() => PRODUCT_SYNC.delete(taskId), PRODUCT_SYNC_TTL_MS);
+          if (t.unref) t.unref();
+        }
+      })();
+
+      return sendJson(res, 200, { ok: true, pending: true, taskId, message: '商品同步已开始' });
+    }
+
+    // 商品同步进度（仅超管）：带 taskId 查本次任务，不带则查该用户最近一次快照
+    if (method === 'GET' && p === '/api/admin/products/sync/progress') {
+      if (!isAdmin) return sendJson(res, 403, { error: '仅超级管理员可查看商品同步进度' });
+      const tid = String(url.searchParams.get('taskId') || '').trim();
+      const ctx = tid ? PRODUCT_SYNC.get(tid) : null;
+      if (ctx && ctx.userId !== Number(user.id)) return sendJson(res, 404, { error: '任务不存在' });
+      const snap = ctx ? productSyncSnapshot(ctx) : (PRODUCT_SYNC_PROGRESS.get(Number(user.id)) || null);
+      return sendJson(res, 200, { ok: true, progress: snap });
     }
 
     // ── 品牌方（超管可增改；商品数据按品牌方共享）──

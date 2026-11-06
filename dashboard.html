@@ -1926,10 +1926,27 @@
           <div class="form-tip" style="margin-top:6px">
             每个品牌方必须先用<b>它自己的牵牛花账号</b>登录一次，才能同步该品牌的商品（登录窗口在本机助手里弹出）。
           </div>
+          <!-- 同步进度（v0.3.50）：后端改异步任务，这里按页实时刷新；任务结束后保留终态供查看 -->
+          <div v-if="product.syncProgress && (product.syncing || !product.syncProgress.running)"
+               style="margin-top:12px;padding:10px 12px;background:#f7f8fa;border-radius:4px">
+            <el-progress :percentage="Number(product.syncProgress.percent) || 0" :stroke-width="10"
+                         :status="product.syncProgress.phase === 'failed' ? 'exception' : (product.syncProgress.percent >= 100 ? 'success' : '')"></el-progress>
+            <div style="font-size:12px;color:#606266;margin-top:8px;line-height:1.7">
+              <div>{{ product.syncProgress.current || '正在准备同步…' }}</div>
+              <div v-if="product.syncProgress.total">
+                共 {{ product.syncProgress.total }} 个商品 · 新增 {{ product.syncProgress.inserted }}
+                / 更新 {{ product.syncProgress.updated }} / 失败 {{ product.syncProgress.failed }}
+              </div>
+              <div v-if="!product.syncing && product.syncProgress.message"
+                   :style="{ color: product.syncProgress.phase === 'failed' ? '#f56c6c' : '#67c23a' }">
+                {{ product.syncProgress.message }}
+              </div>
+            </div>
+          </div>
           <div slot="footer">
-            <el-button size="small" @click="product.syncDlg.visible = false">取消</el-button>
+            <el-button size="small" @click="product.syncDlg.visible = false">{{ product.syncing ? '后台继续' : '关闭' }}</el-button>
             <el-button size="small" type="primary" :loading="product.syncing"
-                       :disabled="!product.syncDlg.brandIds.length" @click="doSyncProducts">
+                       :disabled="!product.syncDlg.brandIds.length || product.syncing" @click="doSyncProducts">
               {{ product.syncing ? '同步中…请稍候' : '开始同步' }}
             </el-button>
           </div>
@@ -5612,7 +5629,7 @@ const vm = new Vue({
         loading: false, rows: [], total: 0, page: 1, size: 20,
         draftQ: '', status: '', priceSort: '', selected: [],
         filteredValue: 0, latestBatch: null,
-        syncing: false, syncMsg: '',
+        syncing: false, syncMsg: '', syncTaskId: '', syncProgress: null,
         // 品牌方：普通用户固定看自己品牌；超管默认看全部，可用下拉收窄（''=全部品牌）
         brand: '', brandStats: [], brandAll: true,
         // 停采商品（同步第二轮拉的 purchase_status_code=2）货值与条数，统计卡用
@@ -6638,6 +6655,7 @@ const vm = new Vue({
     document.removeEventListener('click', this.onLayoutClick, true);
     window.removeEventListener('scroll', this.onAnyScroll);
     if (this.agentTimer) { clearInterval(this.agentTimer); this.agentTimer = null; }
+    this.stopProductSyncPoll();
   },
   methods: {
     esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); },
@@ -10534,31 +10552,71 @@ const vm = new Vue({
         }, 2500);
       } catch (e) { this.$message.error('发起登录失败: ' + e.message); }
     },
+    /**
+     * 商品同步（v0.3.50）：后端改成异步任务，这里只负责下发 + 轮询进度。
+     * 弹框关掉后任务仍在后台跑，轮询不中断，完成照样弹消息并刷新列表。
+     */
     async doSyncProducts() {
       if (this.product.syncing) return;
       const ids = (this.product.syncDlg.brandIds || []).filter((x) => Number(x) > 0);
       if (!ids.length) { this.$message.warning('请勾选要同步的品牌方'); return; }
       this.product.syncing = true;
-      this.product.syncMsg = '';
+      this.product.syncMsg = '正在准备同步…';
+      this.$set(this.product, 'syncProgress', {
+        taskId: '', running: true, phase: 'running', percent: 0,
+        current: '正在准备同步…', total: 0, inserted: 0, updated: 0, failed: 0,
+      });
       try {
         const d = await this.api('/api/admin/products/sync', {
           method: 'POST', headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ brandIds: ids }),
         });
-        if (d && d.ok) {
-          this.$message.success(d.message || '商品同步完成');
-          this.product.syncDlg.visible = false;
-          await this.loadProducts();
-          if (this.page === 'replenish') this.loadReplenish();
-        } else {
-          this.$message.error((d && d.message) || '商品同步失败');
+        if (!d || !d.ok) {
+          this.product.syncing = false;
+          this.product.syncMsg = (d && d.message) || '商品同步失败';
+          this.$message.error(this.product.syncMsg);
+          return;
         }
-        this.product.syncMsg = (d && d.message) || '';
+        this.$set(this.product, 'syncTaskId', d.taskId);
+        this.startProductSyncPoll();
       } catch (e) {
-        this.$message.error('商品同步请求失败: ' + e.message);
-      } finally {
         this.product.syncing = false;
+        this.product.syncMsg = '商品同步请求失败: ' + e.message;
+        this.$message.error(this.product.syncMsg);
       }
+    },
+    /** 商品同步进度轮询：下发后立刻拉一次，之后每 2 秒一次 */
+    startProductSyncPoll() {
+      this.stopProductSyncPoll();
+      this.pollProductSync();
+      this._productSyncPoll = setInterval(() => this.pollProductSync(), 2000);
+    },
+    stopProductSyncPoll() {
+      if (this._productSyncPoll) { clearInterval(this._productSyncPoll); this._productSyncPoll = null; }
+    },
+    async pollProductSync() {
+      const tid = this.product.syncTaskId;
+      if (!tid) return;
+      try {
+        const d = await this.api('/api/admin/products/sync/progress?taskId=' + encodeURIComponent(tid));
+        const pr = d && d.progress;
+        if (!pr) return;                              // 还没生成快照，保持乐观态
+        if (pr.taskId && pr.taskId !== tid) return;   // 忽略上一次任务的终态
+        this.$set(this.product, 'syncProgress', pr);
+        this.product.syncMsg = pr.current || pr.message || '';
+        if (!pr.running) {
+          this.stopProductSyncPoll();
+          this.product.syncing = false;
+          if (pr.phase === 'done') {
+            this.$message.success(pr.message || '商品同步完成');
+            await this.loadProducts();
+            if (this.page === 'replenish') this.loadReplenish();
+            await this.loadBrandsQnh();
+          } else {
+            this.$message.error(pr.message || pr.error || '商品同步失败');
+          }
+        }
+      } catch (e) { /* 忽略网络波动，下个节拍重试 */ }
     },
     togglePriceSort() {
       this.product.priceSort = this.product.priceSort === '' ? 'desc' : (this.product.priceSort === 'desc' ? 'asc' : '');

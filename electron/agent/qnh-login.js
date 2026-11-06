@@ -34,6 +34,31 @@ function partitionFor(brandId) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// ── 页内请求硬超时（v0.3.50）───────────────────────────────────────────────
+// Electron 的 loadURL / executeJavaScript 在页面白屏、渲染进程卡住时可能永不 settle。
+// 服务端 qagent.request 只等 120 秒就放弃等待，但助手这边 runFetch 不返回 →
+// _qnhBusy 永远不释放 → 之后「登录牵牛花」「退出账号」全被判成「助手正在执行任务」。
+// 所以每个可能挂住的点单独限时，整体再兜一层（必须早于服务端的 120 秒）。
+const LOAD_URL_TIMEOUT_MS = 15 * 1000;
+const INPAGE_TIMEOUT_MS = 15 * 1000;
+const FETCH_HARD_TIMEOUT_MS = 100 * 1000;
+
+/** 给 Promise 套硬超时；原 Promise 卡住时不等它，直接 reject */
+function withTimeout(promise, ms, label) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      reject(new Error(`${label}超时（${Math.round(ms / 1000)} 秒）`));
+    }, ms);
+    Promise.resolve(promise).then(
+      (v) => { if (!settled) { settled = true; clearTimeout(timer); resolve(v); } },
+      (e) => { if (!settled) { settled = true; clearTimeout(timer); reject(e); } }
+    );
+  });
+}
+
 /** Electron 的 cookie → 可序列化的普通对象（服务端会再转成 storageState） */
 function packCookie(c) {
   return {
@@ -241,7 +266,7 @@ async function runFetch(task, api) {
   const onRoute = /qnh\.meituan\.com/i.test(cur) && (!pageRoute || cur.includes('#' + pageRoute));
   if (!onRoute) {
     api.log('正在准备牵牛花页面环境…');
-    await w.loadURL(pageUrl).catch(() => {});
+    await withTimeout(w.loadURL(pageUrl), LOAD_URL_TIMEOUT_MS, '加载牵牛花页面').catch(() => {});
     // 等 SPA 初始化（签名脚本注入完成），最多 ~15 秒
     for (let i = 0; i < 10; i += 1) {
       await sleep(1500);
@@ -283,7 +308,7 @@ async function runFetch(task, api) {
   for (const kind of ['xhr', 'lib', 'fetch']) {
     const js = buildRequestJs(kind, { target, method, headers, bodyStr });
     if (!js) { attempts.push(`${kind}: 页面无可用请求方法`); continue; }
-    const r = await w.webContents.executeJavaScript(js, true)
+    const r = await withTimeout(w.webContents.executeJavaScript(js, true), INPAGE_TIMEOUT_MS, '页内请求')
       .catch((e) => ({ error: String((e && e.message) || e) }));
     if (!r || r.skip) { attempts.push(`${kind}: 页面无该请求方法`); continue; }
     if (r.error) { attempts.push(`${kind}: ${r.error}`); continue; }
@@ -475,11 +500,22 @@ async function waitGuardReady(wc, timeoutMs = 12000) {
 /** 供 main.js 注入：返回一个 fetch 处理器 */
 function createFetchHandler({ log = () => {} } = {}) {
   return async function handleQnhFetch(task, api) {
+    // 只回执一次：整体硬超时后 runFetch 可能还在跑，迟到的回执必须忽略，
+    // 否则服务端会收到两次 qnh_fetch_done（第二次 pending 已删，虽无害但会污染日志判断）。
+    let reported = false;
+    const reportOnce = (payload) => {
+      if (reported) return;
+      reported = true;
+      api.report(payload);
+    };
+    const guarded = Object.assign({}, api, { report: reportOnce });
     try {
-      await runFetch(task, api);
+      await withTimeout(runFetch(task, guarded), FETCH_HARD_TIMEOUT_MS, '牵牛花页内请求整体');
+      // 正常返回却没回执（理论上不会）：补一次失败回执，绝不让服务端干等到超时
+      reportOnce({ ok: false, error: '页内请求未返回结果' });
     } catch (e) {
       log('牵牛花页内请求异常: ' + ((e && e.message) || e));
-      api.report({ ok: false, error: String((e && e.message) || e).slice(0, 200) });
+      reportOnce({ ok: false, error: String((e && e.message) || e).slice(0, 200) });
     }
   };
 }
