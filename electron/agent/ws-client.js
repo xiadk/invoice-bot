@@ -55,6 +55,7 @@ class AgentClient extends EventEmitter {
     this._helloTimer = null;
     this._qnhBusy = false;
     this._sdcBusy = false;
+    this._priceBusy = false;
     this._jdFetchBusy = false;
     this._jdLoginBusy = false;
     this._aliBusy = false;
@@ -112,9 +113,10 @@ class AgentClient extends EventEmitter {
       pdd: !!this._pddBusy,
       qnh: !!this._qnhBusy,
       sdc: !!this._sdcBusy,
+      price: !!this._priceBusy,
       ali: !!this._aliBusy,
       jd: !!(this._jdFetchBusy || this._jdLoginBusy),
-      any: !!(this.sending || this._pddBusy || this._qnhBusy || this._sdcBusy || this._aliBusy
+      any: !!(this.sending || this._pddBusy || this._qnhBusy || this._sdcBusy || this._priceBusy || this._aliBusy
         || this._jdFetchBusy || this._jdLoginBusy),
     };
   }
@@ -201,6 +203,8 @@ class AgentClient extends EventEmitter {
     if (m.type === 'sdc_login') { this._runSdcLogin(m).catch((e) => this.log('闪电帮帮登录异常: ' + e.message)); return; }
     if (m.type === 'sdc_fetch') { this._runSdcFetch(m).catch((e) => this.log('闪电帮帮取数异常: ' + e.message)); return; }
     if (m.type === 'sdc_send') { this._runSdcSend(m).catch((e) => this.log('闪电帮帮催收异常: ' + e.message)); return; }
+    if (m.type === 'price_fetch') { this._runPriceFetch(m).catch((e) => this.log('1688比价· 抓取异常: ' + e.message)); return; }
+    if (m.type === 'price_apply') { this._runPriceApply(m).catch((e) => this.log('1688比价· 上色异常: ' + e.message)); return; }
     if (m.type === 'logout') { this._runLogout(m).catch((e) => this.log('清除登录态异常: ' + e.message)); return; }
     if (m.type === 'stop') {
       this.stopFlag = true;
@@ -286,6 +290,11 @@ class AgentClient extends EventEmitter {
   setPddSendHandler(fn) { this._pddSendHandler = fn; }
   /** 注册「拼多多解析店铺 mall_sn→mall_id」处理器（main.js 注入 pdd-mall.createResolveHandler） */
   setPddMallHandler(fn) { this._pddMallHandler = fn; }
+
+  /** 注册「1688 比价· 抓取待付款订单」处理器（main.js 注入 price-1688.createFetchHandler） */
+  setPriceFetchHandler(fn) { this._priceFetchHandler = fn; }
+  /** 注册「1688 比价· 打备注上色」处理器（main.js 注入 price-1688.createApplyHandler） */
+  setPriceApplyHandler(fn) { this._priceApplyHandler = fn; }
 
   /** 注册「登录闪电帮帮」处理器（main.js 注入 sdc.createLoginHandler） */
   setSdcLoginHandler(fn) { this._sdcLoginHandler = fn; }
@@ -547,6 +556,101 @@ class AgentClient extends EventEmitter {
       done({ ok: false, error: String((e && e.message) || e).slice(0, 200) });
     } finally {
       this._sdcBusy = false;
+      this.stopFlag = false;
+      this.currentTaskId = null;
+      this._emitState();
+    }
+  }
+
+  /**
+   * 执行一次「1688 比价· 抓取待付款订单」：复用 1688 发送窗口进待付款列表，
+   * 逐单以 price_order 回传服务器（服务器端跑判定后落库），最后 price_fetch_done 收尾。
+   */
+  async _runPriceFetch(m) {
+    const done = (payload) => this.send(Object.assign({
+      type: 'price_fetch_done', taskId: m.taskId,
+    }, payload || {}));
+
+    if (this._priceBusy) { done({ ok: false, error: '已有 1688 比价任务在进行中' }); return; }
+    if (this.sending) { done({ ok: false, error: '正在发送催收消息，请等发送完成后再比价' }); return; }
+    if (typeof this._priceFetchHandler !== 'function') {
+      done({ ok: false, error: '助手版本过旧，不支持 1688 比价，请重新下载安装助手' });
+      return;
+    }
+    this._priceBusy = true;
+    this.stopFlag = false;
+    this.currentTaskId = m.taskId;
+    this._emitState();
+    const api = {
+      log: (text) => this.send({ type: 'log', text: String(text == null ? '' : text).slice(0, 200) }),
+      isStopped: () => this.stopFlag,
+      sleep: async (ms) => {
+        for (let waited = 0; waited < ms && !this.stopFlag; waited += 300) {
+          await new Promise((r) => setTimeout(r, Math.min(300, ms - waited)));
+        }
+      },
+      /** 回传一单待付款订单：服务器把它加进本次核对的待算队列 */
+      stream: (order) => this.send({ type: 'price_order', taskId: m.taskId, order }),
+      report: done,
+    };
+    try {
+      const count = await this._priceFetchHandler(m, api);
+      done(typeof count === 'number'
+        ? { ok: true, count }
+        : { ok: false, error: '抓取结果缺失' });
+    } catch (e) {
+      done({ ok: false, error: String((e && e.message) || e).slice(0, 200) });
+    } finally {
+      this._priceBusy = false;
+      this.stopFlag = false;
+      this.currentTaskId = null;
+      this._emitState();
+    }
+  }
+
+  /**
+   * 执行一次「1688 比价· 打备注上色」：逐单打开备忘对话框选色填文本保存，
+   * 每单 price_apply_done 回传，全部结束后 price_apply_all 收尾（服务器回填 applied_at）。
+   */
+  async _runPriceApply(m) {
+    const done = (payload) => this.send(Object.assign({
+      type: 'price_apply_all', taskId: m.taskId,
+    }, payload || {}));
+
+    if (this._priceBusy) { done({ ok: false, error: '已有 1688 比价任务在进行中' }); return; }
+    if (this.sending) { done({ ok: false, error: '正在发送催收消息，请等发送完成后再上色' }); return; }
+    if (typeof this._priceApplyHandler !== 'function') {
+      done({ ok: false, error: '助手版本过旧，不支持 1688 比价上色，请重新下载安装助手' });
+      return;
+    }
+    this._priceBusy = true;
+    this.stopFlag = false;
+    this.currentTaskId = m.taskId;
+    this._emitState();
+    const api = {
+      log: (text) => this.send({ type: 'log', text: String(text == null ? '' : text).slice(0, 200) }),
+      isStopped: () => this.stopFlag,
+      sleep: async (ms) => {
+        for (let waited = 0; waited < ms && !this.stopFlag; waited += 300) {
+          await new Promise((r) => setTimeout(r, Math.min(300, ms - waited)));
+        }
+      },
+      /** 回传「某一单上色成功/失败」，服务器据此回填 applied_at / 记录错误 */
+      applied: (orderId, ok, error) => this.send({
+        type: 'price_apply_done', taskId: m.taskId, orderId, ok: !!ok,
+        error: ok ? undefined : String(error == null ? '' : error).slice(0, 120),
+      }),
+      report: done,
+    };
+    try {
+      const r = await this._priceApplyHandler(m, api);
+      done(r && typeof r === 'object'
+        ? { ok: true, handled: r.handled || 0, okCount: r.ok || 0, failCount: r.fail || 0 }
+        : { ok: true });
+    } catch (e) {
+      done({ ok: false, error: String((e && e.message) || e).slice(0, 200) });
+    } finally {
+      this._priceBusy = false;
       this.stopFlag = false;
       this.currentTaskId = null;
       this._emitState();

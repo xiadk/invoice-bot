@@ -141,6 +141,9 @@ async function ensureQnhSchema(q) {
       "  `audit_operator` VARCHAR(64) DEFAULT NULL," +
       "  `audit_reason` VARCHAR(512) DEFAULT NULL," +
       "  `refund_reason` VARCHAR(512) DEFAULT NULL COMMENT '人工填写的退款原因（同步不覆盖，页面优先展示）'," +
+      "  `remark` VARCHAR(512) DEFAULT NULL COMMENT '人工备注（退单列表可编辑，同步不覆盖）'," +
+      "  `remark_by` VARCHAR(64) DEFAULT NULL COMMENT '备注最后编辑人（登录账号）'," +
+      "  `remark_at` DATETIME DEFAULT NULL COMMENT '备注最后编辑时间'," +
       "  `after_sale_status` TINYINT NOT NULL DEFAULT 0 COMMENT '售后处理状态：0待处理 1已申请 2已退货 3已退款'," +
       "  `after_sale_note` VARCHAR(255) DEFAULT NULL COMMENT '售后备注'," +
       "  `after_sale_by` VARCHAR(64) DEFAULT NULL COMMENT '最后处理人'," +
@@ -766,6 +769,14 @@ async function migrate(conn, dbName) {
       "COMMENT '是否允许平台取价操作（齐货通登录/重新取价、阿发Token/自动匹配/取价、选购加购；1=开启，超级管理员始终可见）'"
     );
   }
+  // ── 1688比价菜单权限（v0.3.43）：独立菜单，需超级管理员在「用户管理/员工管理」授权。
+  //    默认 0 = 非超管一律不可见（成品审核，与商品/补货解耦）。
+  if (!(await colExists('app_user', 'price1688_enabled'))) {
+    await q(
+      'ALTER TABLE `app_user` ADD COLUMN `price1688_enabled` TINYINT(1) NOT NULL DEFAULT 0 ' +
+      "COMMENT '是否允许查看「1688比价」页（1688待付款订单采购价核对；1=开启，超级管理员始终可见）'"
+    );
+  }
   // ── 使用期限（v0.2.97）：新建用户默认 1 个月，到期后禁止登录、任何接口都不放行
   //    NULL = 永久有效。存量账号升级时一律为 NULL（永久），避免上线瞬间把现有客户踢下线。
   if (!(await colExists('app_user', 'expires_at'))) {
@@ -852,6 +863,64 @@ async function migrate(conn, dbName) {
     if (!(await idxExists('product_item', 'idx_pi_brand'))) {
       await q('ALTER TABLE `product_item` ADD KEY `idx_pi_brand` (`brand_id`)');
     }
+    // ── 1688 采购价核对补列（v0.3.43）：待付款订单端只有 1688 供应商维度，
+    //    要拿补货参考当目标价，必须按「供应商商品链接/名称/规格 + 下单比例」对得上号。
+    //    supplier_link 是稳定键；name/spec/order_ratio 在 1688 页面核对/折算单价都要用。
+    for (const [col, decl] of [
+      ['supplier_name', "VARCHAR(512) NOT NULL DEFAULT '' COMMENT '供应商商品名称（来自补货参考文件，「供应商商品名称」列）'"],
+      ['supplier_spec', "VARCHAR(512) NOT NULL DEFAULT '' COMMENT '供应商商品规格（来自补货参考文件，「供应商商品规格」列）'"],
+      ['supplier_link', "VARCHAR(512) NOT NULL DEFAULT '' COMMENT '供应商商品链接（detail.1688.com/offer，待付款订单匹配键）'"],
+      ['order_ratio',   "DECIMAL(12,2) NOT NULL DEFAULT 1 COMMENT '供应商下单比例（一个销售单位含基础单位数，如一箱12桶=12）'"],
+    ]) {
+      if (!(await colExists('product_item', col))) {
+        await q(`ALTER TABLE \`product_item\` ADD COLUMN \`${col}\` ${decl}`);
+      }
+    }
+    if (!(await idxExists('product_item', 'idx_pi_supplier_link'))) {
+      await q('ALTER TABLE `product_item` ADD KEY `idx_pi_supplier_link` (`supplier_link`)');
+    }
+  }
+  // ── 1688 待付款订单价格检查审计表（v0.3.43）──
+  //   每次「1688 采购价核对」的结果逐条落入此表；run_batch 区分不同运行批次，
+  //   verdict = blue/yellow/green/unmatched；applied_at 标记是否已在 1688 打备注上色（本机助手做）。
+  if (!(await tableExists('price_check'))) {
+    await q(
+      'CREATE TABLE `price_check` (' +
+      '  `id`             BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,' +
+      "  `user_id`        INT           NOT NULL COMMENT '归属用户（app_user.id）'," +
+      "  `brand_id`       INT           NOT NULL DEFAULT 1 COMMENT '用户归属品牌方'," +
+      "  `run_batch`      VARCHAR(64)   NOT NULL COMMENT '本次检查批次（YYYYMMDDHHmmss）'," +
+      "  `batch_id`       BIGINT UNSIGNED NULL COMMENT '目标价来源批次（product_import_batch.id；NULL=品牌方全部）'," +
+      "  `order_id`       VARCHAR(64)   NOT NULL COMMENT '1688订单号'," +
+      "  `order_time`     VARCHAR(64)   NOT NULL DEFAULT '' COMMENT '下单时间（1688页面原文）'," +
+      "  `sku`            VARCHAR(64)   NOT NULL DEFAULT '' COMMENT '匹配到的商品SKU'," +
+      "  `goods_name`     VARCHAR(512)  NOT NULL DEFAULT '' COMMENT '商品名称（品牌方）'," +
+      "  `supplier_name`  VARCHAR(512)  NOT NULL DEFAULT '' COMMENT '供应商商品名称（1688）'," +
+      "  `supplier_spec`  VARCHAR(512)  NOT NULL DEFAULT '' COMMENT '供应商商品规格'," +
+      "  `supplier_link`  VARCHAR(512)  NOT NULL DEFAULT '' COMMENT '供应商商品链接'," +
+      "  `order_ratio`    DECIMAL(12,2) NOT NULL DEFAULT 1 COMMENT '下单比例（一件含基础单位数）'," +
+      "  `quantity`       DECIMAL(12,2) NOT NULL DEFAULT 0 COMMENT '采购数量（规格单位）'," +
+      "  `base_quantity`  DECIMAL(12,2) NOT NULL DEFAULT 0 COMMENT '基础单位数量 = 数量 × order_ratio'," +
+      "  `spec_price`     DECIMAL(12,2) NOT NULL DEFAULT 0 COMMENT '页面规格单价'," +
+      "  `target_price`   DECIMAL(12,2) NOT NULL DEFAULT 0 COMMENT '目标采购单价（基础单位）'," +
+      "  `actual_price`   DECIMAL(12,2) NOT NULL DEFAULT 0 COMMENT '实际到手单价（基础单位，含分摊运费）'," +
+      "  `freight_share`  DECIMAL(12,2) NOT NULL DEFAULT 0 COMMENT '分摊运费（按商品金额占比）'," +
+      "  `paid_amount`    DECIMAL(12,2) NOT NULL DEFAULT 0 COMMENT '实付金额'," +
+      "  `price_diff`     DECIMAL(12,2) NOT NULL DEFAULT 0 COMMENT '差价 = 实际 - 目标'," +
+      "  `price_ratio`    DECIMAL(8,4)  NOT NULL DEFAULT 0 COMMENT '涨幅 = (实际 - 目标) / 目标'," +
+      "  `sales_30d`      INT           NOT NULL DEFAULT 0 COMMENT '目标侧30天销量'," +
+      "  `matched`        TINYINT       NOT NULL DEFAULT 0 COMMENT '是否匹配到目标价'," +
+      "  `verdict`        VARCHAR(16)   NOT NULL DEFAULT '' COMMENT 'blue/yellow/green/unmatched'," +
+      "  `reason`         VARCHAR(32)   NOT NULL DEFAULT '' COMMENT '判定原因(price_issue/qty_too_high/new_product/all_reasonable)'," +
+      "  `is_qty_too_high` TINYINT      NOT NULL DEFAULT 0 COMMENT '采购量过高'," +
+      "  `memo_text`      VARCHAR(2000) NOT NULL DEFAULT '' COMMENT '要写到1688的备忘文本'," +
+      "  `checked_at`     DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '检查时间'," +
+      "  `applied_at`     DATETIME      DEFAULT NULL COMMENT '已在1688打备注上色的时间（NULL=未上色）'," +
+      '  PRIMARY KEY (`id`),' +
+      '  KEY `idx_pc_user_run` (`user_id`, `run_batch`),' +
+      '  KEY `idx_pc_order` (`order_id`)' +
+      ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='1688待付款订单价格检查记录'"
+    );
   }
 
   // ── 品牌方（v0.2.83）──────────────────────────────────────────────────────
@@ -1149,6 +1218,10 @@ async function migrate(conn, dbName) {
       ['after_sale_note', "VARCHAR(255) DEFAULT NULL COMMENT '售后备注'"],
       ['after_sale_by', "VARCHAR(64) DEFAULT NULL COMMENT '最后处理人'"],
       ['after_sale_at', "DATETIME DEFAULT NULL COMMENT '最后处理时间'"],
+      // 退单备注（2026-11-06）：退款原因改只读后，人工记录改到这三列
+      ['remark', "VARCHAR(512) DEFAULT NULL COMMENT '人工备注（退单列表可编辑，同步不覆盖）'"],
+      ['remark_by', "VARCHAR(64) DEFAULT NULL COMMENT '备注最后编辑人（登录账号）'"],
+      ['remark_at', "DATETIME DEFAULT NULL COMMENT '备注最后编辑时间'"],
     ]) {
       if (!(await colExists('qnh_refund_order', col))) {
         await q(`ALTER TABLE \`qnh_refund_order\` ADD COLUMN \`${col}\` ${decl}`);
@@ -1674,6 +1747,7 @@ async function migrate(conn, dbName) {
       "  `user_id`       INT           NOT NULL DEFAULT 1   COMMENT '数据归属用户（员工录入时是所属主体账号）'," +
       "  `goods_name`    VARCHAR(255)  NOT NULL DEFAULT ''  COMMENT '商品名称（选中商品自动回填，可手改）'," +
       "  `sku`           VARCHAR(64)   NOT NULL DEFAULT ''  COMMENT '商品 SKU'," +
+      "  `image_url`     VARCHAR(512)  DEFAULT NULL         COMMENT '商品主图（选中商品时快照，列表展示用）'," +
       "  `qty`           INT           NOT NULL DEFAULT 1   COMMENT '售后数量（件）'," +
       "  `after_reason`  VARCHAR(255)  DEFAULT NULL         COMMENT '售后原因'," +
       "  `after_date`    DATE          NOT NULL             COMMENT '售后日期（按此列查询与排序）'," +
@@ -1692,6 +1766,25 @@ async function migrate(conn, dbName) {
       ') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci' +
       "  COMMENT='商品售后台账（商品名称/SKU + 数量 + 原因 + 状态 + 运单号 + 凭证）'"
     );
+  }
+
+  // ── 商品售后补「商品主图」（2026-11-06）──
+  //   售后列表新增「商品图片」列，新增售后选中商品时也会显示该图。
+  //   新记录由 createAfter 落库（选中商品的 brand_product.image_url 快照）；
+  //   老记录在加列时按 sku 从 brand_product 回填一次 —— 只在列缺失的那一次启动执行，
+  //   之后 image_url 有值了就不再扫表。brand_product 不存在时跳过（全新库由 schema 建）。
+  if (await tableExists('product_after') && !(await colExists('product_after', 'image_url'))) {
+    await q('ALTER TABLE `product_after` ADD COLUMN `image_url` VARCHAR(512) DEFAULT NULL ' +
+      "COMMENT '商品主图（选中商品时快照，列表展示用）' AFTER `sku`");
+    if (await tableExists('brand_product')) {
+      await q(
+        'UPDATE `product_after` a ' +
+        '  JOIN (SELECT `sku`, MIN(`image_url`) AS `image_url` FROM `brand_product` ' +
+        "         WHERE `image_url` IS NOT NULL AND `image_url` <> '' GROUP BY `sku`) t " +
+        '    ON t.`sku` = a.`sku` ' +
+        '   SET a.`image_url` = t.`image_url` ' +
+        " WHERE a.`image_url` IS NULL OR a.`image_url` = ''");
+    }
   }
 
   // ── qht_order 齐货通订单（v0.3.3）──

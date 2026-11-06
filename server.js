@@ -65,7 +65,106 @@ const jd = require('./lib/jd-bmall');
 const priceCache = require('./lib/price-cache');
 const products = require('./lib/products');
 const productPrice = require('./lib/product-price');
+const priceCheck = require('./lib/price-check');
 const billing = require('./lib/billing');
+
+// ── 1688比价：本机助手任务登记（v0.3.43）───────────────────────────────────
+//   price_fetch / price_apply 两类下行任务都登记进 PRICECHECK，
+//   助手的 price_order / price_fetch_done / price_apply_done / price_apply_all 上行按 taskId 落进来。
+//   ctx.orders    抓取阶段累计的待付款订单（助手逐单 price_order 回传）
+//   ctx.appliedIds 上色阶段已成功的 1688 订单号（price_apply_done.ok 累计；按 order_id 对 price_check.id）
+//   finishPriceFetch 在抓取收尾时跑判定 + 落 price_check，并把等待中的 HTTP 请求 resolve。
+const PRICECHECK = new Map();
+
+/** 对一批待付款订单跑判定并落 price_check（纯计算，不碰浏览器）。返回 { runBatch, summary, outOrders } */
+async function computeAndStorePrice({ user, tenantId, orders, opts, batchId }) {
+  let sql = 'SELECT id, sku, goods_name, purchase_price, sales_30d, supplier_name, supplier_spec, supplier_link, order_ratio FROM product_item WHERE user_id = ?';
+  const tArgs = [tenantId];
+  if (batchId) { sql += ' AND batch_id = ?'; tArgs.push(batchId); }
+  const targets = await db.query(sql, tArgs);
+
+  const runBatch = new Date().toISOString().replace(/\D/g, '').slice(0, 14);
+  const brandId = Number(user.brand_id) || 1;
+  const outOrders = [];
+  const allRows = [];
+  const summary = { blue: 0, yellow: 0, green: 0, unmatched: 0 };
+
+  for (const order of orders) {
+    const od = priceCheck.checkOrder(order, targets, opts);
+    outOrders.push({
+      order_id: od.order_id, order_time: od.order_time,
+      order_total: od.order_total, target_total: od.target_total,
+      summary: od.summary, rows: od.rows,
+    });
+    for (const r of od.rows) {
+      allRows.push([
+        tenantId, brandId, runBatch, batchId, r.order_id, r.order_time,
+        r.sku, r.goods_name, r.supplier_name, r.supplier_spec, r.supplier_link,
+        r.order_ratio, r.quantity, r.base_quantity, r.spec_price, r.target_price,
+        r.actual_price, r.freight_share, r.paid_amount, r.price_diff, r.price_ratio,
+        r.sales_30d, r.matched, r.verdict, r.reason, r.is_qty_too_high, r.memo_text,
+      ]);
+      summary[r.verdict] = (summary[r.verdict] || 0) + 1;
+    }
+  }
+  if (allRows.length) {
+    const CHUNK = 200;
+    for (let i = 0; i < allRows.length; i += CHUNK) {
+      const part = allRows.slice(i, i + CHUNK);
+      const ph = part.map(() => '(' + new Array(27).fill('?').join(',') + ')').join(',');
+      const args = part.flat();
+      await db.exec(
+        'INSERT INTO price_check (user_id, brand_id, run_batch, batch_id, order_id, order_time, sku, goods_name, supplier_name, supplier_spec, supplier_link, order_ratio, quantity, base_quantity, spec_price, target_price, actual_price, freight_share, paid_amount, price_diff, price_ratio, sales_30d, matched, verdict, reason, is_qty_too_high, memo_text) VALUES ' + ph,
+        args
+      );
+    }
+  }
+  return { runBatch, summary, outOrders };
+}
+
+/** 抓取收尾：助手 price_fetch_done → 缓存订单跑判定落库 → 结束等待中的 HTTP 请求 */
+async function onPriceFetchDone(ctx, msg) {
+  ctx.done = true;
+  try {
+    if (!msg.ok || !ctx.orders || !ctx.orders.length) {
+      return finalize(ctx, { ok: false, error: msg.error || '未抓取到待付款订单' });
+    }
+    const opts = ctx.opts || {};
+    const r = await computeAndStorePrice({
+      user: ctx.user, tenantId: ctx.userId, orders: ctx.orders, opts, batchId: ctx.batchId,
+    });
+    await logOp(ctx.user, 'price_check.run', { tenantId: ctx.userId, batchId: ctx.batchId, orders: ctx.orders.length, summary: r.summary });
+    return finalize(ctx, { ok: true, run_batch: r.runBatch, summary: r.summary, orders: r.outOrders });
+  } catch (e) {
+    return finalize(ctx, { ok: false, error: '计算失败：' + String((e && e.message) || e) });
+  }
+}
+
+/** 上色收尾：助手 price_apply_all → 回填 applied_at → 结束等待中的 HTTP 请求 */
+async function onPriceApplyDone(ctx, msg) {
+  ctx.done = true;
+  let applied = 0;
+  if (msg.ok) {
+    // 助手回传 appliedIds 仅是订单号；我们用「本批要上色的 price_check.id」按 order_id 回填
+    const ids = [];
+    for (const row of ctx.targetRows) if (ctx.appliedIds.has(String(row.order_id))) ids.push(row.id);
+    if (ids.length) {
+      await db.exec('UPDATE price_check SET applied_at = NOW() WHERE id IN (' + ids.map(() => '?').join(',') + ') AND user_id = ?', [...ids, ctx.userId]).catch(() => {});
+      applied = ids.length;
+    }
+    ctx.okCount = msg.okCount || applied;
+    ctx.failCount = msg.failCount || 0;
+  }
+  return finalize(ctx, { ok: !!msg.ok, handled: msg.handled, okCount: ctx.okCount || applied, failCount: msg.failCount || 0, applied, error: msg.error || null });
+}
+
+/** 结束任务并 resolve 等待中的 HTTP 响应；超时/收尾都走这里 */
+function finalize(ctx, payload) {
+  ctx.finished = true;
+  if (ctx.timer) clearTimeout(ctx.timer);
+  return ctx.resolve(payload);
+}
+
 const configStore = require('./lib/config');
 const { loadConfig } = configStore;
 const collectShare = require('./lib/collect-share');
@@ -437,6 +536,8 @@ function publicUser(u) {
     replenishOrderEnabled: u.role === 'admin' ? true : !!Number(u.replenish_order_enabled),
     // 平台取价权限（v0.2.95）：齐货通登录/重新取价、阿发Token/自动匹配/取价、选购加购
     priceEnabled: u.role === 'admin' ? true : !!Number(u.price_enabled),
+    // 1688比价（v0.3.43，独立菜单权限）：超管恒为 true，普通账号由超管在「用户管理/员工管理」授权
+    price1688Enabled: u.role === 'admin' ? true : !!Number(u.price1688_enabled),
     // 所属品牌方（商品数据按品牌方共享：同品牌下所有用户看到同一套商品）
     brandId: Number(u.brand_id) || 1,
     brandName: u.brand_name || '',
@@ -687,6 +788,8 @@ const MENU_PERMS = {
   supplier: { col: 'supplier_enabled', label: '供应商管理', field: 'supplierEnabled' },
   waybill: { col: 'waybill_enabled', label: '货单管理', field: 'waybillEnabled' },
   replenishOrder: { col: 'replenish_order_enabled', label: '补货单管理', field: 'replenishOrderEnabled' },
+  // 1688比价（v0.3.43）：独立菜单权限，超管在「用户管理/员工管理」授权（与商品/补货解耦）
+  price1688: { col: 'price1688_enabled', label: '1688比价', field: 'price1688Enabled' },
   // 员工管理（v0.3.13）：只有主体账号能开，超管走「用户管理」；员工账号永远没有这一项。
   // ⚠ 员工配菜单时这张表要排除本项（见 staffMenuKeys()），否则会出现「员工管理里再管员工」。
   staff: { col: 'staff_enabled', label: '员工管理', field: 'staffEnabled' },
@@ -2464,6 +2567,27 @@ function handleAgentMessage(uid, msg) {
     }
     return;
   }
+  // ── 「1688比价」流程：助手逐单回传待付款订单 / 回报抓取与上色结果 ──
+  if (msg.type === 'price_order') {
+    const c = PRICECHECK.get(String(msg.taskId || ''));
+    if (c && c.userId === Number(uid) && msg.order) c.orders.push(msg.order);
+    return;
+  }
+  if (msg.type === 'price_fetch_done') {
+    const c = PRICECHECK.get(String(msg.taskId || ''));
+    if (c && c.userId === Number(uid) && !c.done) onPriceFetchDone(c, msg).catch(() => {});
+    return;
+  }
+  if (msg.type === 'price_apply_done') {
+    const c = PRICECHECK.get(String(msg.taskId || ''));
+    if (c && c.userId === Number(uid) && msg.orderId && msg.ok && c.appliedIds) c.appliedIds.add(String(msg.orderId));
+    return;
+  }
+  if (msg.type === 'price_apply_all') {
+    const c = PRICECHECK.get(String(msg.taskId || ''));
+    if (c && c.userId === Number(uid) && !c.done) onPriceApplyDone(c, msg).catch(() => {});
+    return;
+  }
   // 本机弹窗点了「停止」：与看板停止等价——扩展侧停发剩余，服务端记录停止意图
   if (msg.type === 'client_stop') {
     const ctx = CLIENT_TASKS.get(Number(msg.taskId));
@@ -3166,6 +3290,7 @@ async function listUsers() {
     supplierEnabled: u.role === 'admin' ? true : !!Number(u.supplier_enabled),
     waybillEnabled: u.role === 'admin' ? true : !!Number(u.waybill_enabled),
     replenishOrderEnabled: u.role === 'admin' ? true : !!Number(u.replenish_order_enabled),
+    price1688Enabled: u.role === 'admin' ? true : !!Number(u.price1688_enabled),
     // 员工管理（v0.3.13）：超管恒为 true（走用户管理），主体账号按列开关
     staffEnabled: u.role === 'admin' ? true : !!Number(u.staff_enabled),
     // 员工号标记（v0.2.104）：ownerId 非空表示数据归属主体账号，自己名下没有业务数据
@@ -3417,6 +3542,18 @@ const server = http.createServer(async (req, res) => {
           statusText: o.statusText, goodsName: o.goodsName,
         })),
       });
+    }
+    // 补货单分享手机页（v0.3.44）：**不需要登录**，凭据是 URL 里 30 天有效的签名令牌。
+    // 商家 / 业务员手机扫码打开，只读展示这一张补货单的明细（图 / 名称 / 规格 / 补货数量）。
+    // 短链走 /r/<令牌>；令牌在已登录的「补货单详情」里点「补货链接」生成。
+    if (method === 'GET' && /^\/r\/[\w.-]{1,220}$/.test(p)) return sendHtml(res, 'r-replenish.html');
+    if (method === 'GET' && p === '/api/pub/replenish') {
+      const tk = replenishOrder.verifyShareToken(url.searchParams.get('t') || '');
+      if (!tk) {
+        return sendJson(res, 200, { ok: false, error: '链接已失效（有效期 30 天），请回到电脑上在「补货单详情」里重新生成' });
+      }
+      const d = await replenishOrder.shareOrderData(tk.orderId, tk.u);
+      return sendJson(res, 200, d);
     }
     if (p === '/api/pub/waybill-upload') {
       if (method === 'GET') {
@@ -3684,6 +3821,9 @@ const server = http.createServer(async (req, res) => {
     const canMarket = isAdmin || !!Number(user.market_enabled);
     const canBilling = isAdmin || !!Number(user.billing_enabled);
     const denyProduct = () => sendJson(res, 403, { error: '未开启商品列表权限，请联系超级管理员' });
+    // 1688比价（v0.3.43）：独立菜单权限，超管授权后方可使用（与商品/补货解耦）
+    const canPriceCheck = isAdmin || !!Number(user.price1688_enabled);
+    const denyPriceCheck = () => sendJson(res, 403, { error: '未开通「1688比价」权限，请联系超级管理员在「用户管理/员工管理」授权' });
     // 平台取价权限（v0.2.95）：齐货通登录/取价、阿发Token/匹配/取价、选购加购都要动平台真实账号，
     // 默认只给超级管理员；普通账号须由超管在「菜单权限 → 平台取价」里单独授权
     const canPrice = isAdmin || !!Number(user.price_enabled);
@@ -4982,6 +5122,133 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, out.ok ? 200 : 400, out);
     }
 
+    // ── 1688 待付款订单价格检查（v0.3.43）───────────────────────────────
+    //   单账号口径：目标价 = 当前用户自己导入的「前置仓补货参考」（product_item，
+    //   可收窄到某次 batchId）；待付款订单由本机助手抓取后在 POST 里上传，
+    //   server 只做纯计算 + 落 price_check 审计表，不碰浏览器。
+    //   判定三色：blue(合理) / yellow(价格异常或采购量过高) / green(新品)；未匹配→unmatched。
+    //   旺旺谈价整块不做（去橙色）。
+    if (method === 'POST' && p === '/api/price-check') {
+      if (!canPriceCheck) return denyPriceCheck();
+      writeGuard();
+      const b = await readBody(req);
+      const orders = Array.isArray(b.orders) ? b.orders : [];
+      if (!orders.length || !orders.every((o) => Array.isArray(o.items) && o.items.length)) {
+        return sendJson(res, 200, { error: '缺少待检查订单（orders，每单需含 items）' });
+      }
+      const opts = {
+        priceRatio: b.priceRatio, priceAmount: b.priceAmount,
+        totalRatio: b.totalRatio, totalAmount: b.totalAmount,
+        checkSales: !!b.checkSales, salePercentage: b.salePercentage,
+      };
+      const batchId = b.batchId ? Number(b.batchId) : null;
+      try {
+        const r = await computeAndStorePrice({ user, tenantId, orders, opts, batchId });
+        await logOp(user, 'price_check.run', { tenantId, batchId, orders: orders.length, summary: r.summary });
+        return sendJson(res, 200, { ok: true, run_batch: r.runBatch, summary: r.summary, orders: r.outOrders });
+      } catch (e) {
+        return sendJson(res, 500, { error: '计算或入库失败：' + String((e && e.message) || e) });
+      }
+    }
+
+    // ── 1688比价· 开始核对（下发本机助手抓取待付款订单 → 等收尾算判定落库）──
+    //   与上面 POST 的关系：这个是「一键」入口，助手抓完订单后走同一套 computeAndStorePrice。
+    if (method === 'POST' && p === '/api/price-check/run') {
+      if (!canPriceCheck) return denyPriceCheck();
+      writeGuard();
+      const b = await readBody(req);
+      if (!agentHub.isOnline(tenantId)) {
+        return sendJson(res, 200, { error: '本机助手未连接：请先在本机启动「催收小助手」并绑定后才可开始核对' });
+      }
+      // 阈值缺省用模块默认，避免把 DEFAULTS 刷成 undefined 导致全部误判
+      const opts = {};
+      for (const k of ['priceRatio', 'priceAmount', 'totalRatio', 'totalAmount', 'salePercentage']) {
+        if (b[k] != null) opts[k] = Number(b[k]);
+      }
+      opts.checkSales = !!b.checkSales;
+      const batchId = b.batchId ? Number(b.batchId) : null;
+      const taskId = 'P' + Date.now().toString(36) + Math.floor(Math.random() * 1e4).toString(36);
+      const result = await new Promise((resolve) => {
+        const ctx = {
+          taskId, userId: Number(tenantId), user, orders: [], opts, batchId,
+          done: false, finished: false, resolve, timer: setTimeout(() => {
+            finalize(ctx, { ok: false, error: '等待本机助手抓取订单超时（15 分钟未收尾）' });
+          }, 15 * 60 * 1000),
+        };
+        PRICECHECK.set(taskId, ctx);
+        const sent = agentHub.send(tenantId, { type: 'price_fetch', taskId });
+        if (!sent) finalize(ctx, { ok: false, error: '下发失败：本机助手通道已断开' });
+      });
+      PRICECHECK.delete(taskId);
+      if (result.ok) return sendJson(res, 200, result);
+      return sendJson(res, 200, { ok: false, error: result.error });
+    }
+
+    // ── 1688比价· 到1688打备注上色（把最近一批还没上色的判定行下发给助手逐单打备注染色）──
+    if (method === 'POST' && p === '/api/price-check/apply') {
+      if (!canPriceCheck) return denyPriceCheck();
+      writeGuard();
+      if (!agentHub.isOnline(tenantId)) {
+        return sendJson(res, 200, { error: '本机助手未连接：请先在本机启动「催收小助手」并绑定后才可上色' });
+      }
+      const rows = await db.query(
+        'SELECT id, order_id, verdict, memo_text FROM price_check WHERE user_id = ? AND applied_at IS NULL AND memo_text <> \'\' ORDER BY id ASC LIMIT 500',
+        [tenantId]
+      );
+      if (!rows.length) return sendJson(res, 200, { ok: false, error: '没有待上色的核对结果（先点「开始核对」生成判定，且已上色的会自动跳过）' });
+      const targetRows = rows;
+      const orders = rows.map((r) => ({ orderId: String(r.order_id), verdict: r.verdict || 'blue', memoText: r.memo_text || '' }));
+      const taskId = 'A' + Date.now().toString(36) + Math.floor(Math.random() * 1e4).toString(36);
+      const result = await new Promise((resolve) => {
+        const ctx = {
+          taskId, userId: Number(tenantId), user, targetRows, appliedIds: new Set(),
+          okCount: 0, failCount: 0, done: false, finished: false, resolve,
+          timer: setTimeout(() => finalize(ctx, { ok: false, error: '等待本机助手上色超时（30 分钟未收尾）' }), 30 * 60 * 1000),
+        };
+        PRICECHECK.set(taskId, ctx);
+        const sent = agentHub.send(tenantId, { type: 'price_apply', taskId, orders });
+        if (!sent) finalize(ctx, { ok: false, error: '下发失败：本机助手通道已断开' });
+      });
+      PRICECHECK.delete(taskId);
+      if (result.ok) return sendJson(res, 200, result);
+      return sendJson(res, 200, { ok: false, error: result.error });
+    }
+
+    // 查询最新一次价格检查结果（按 run_batch 取；默认最近一次），供补货页弹窗展示
+    if (method === 'GET' && p === '/api/price-check') {
+      if (!canPriceCheck) return denyPriceCheck();
+      const batch = (url.searchParams.get('run_batch') || '').trim();
+      let runBatch = batch;
+      if (!runBatch) {
+        const latest = await db.query('SELECT MAX(run_batch) AS m FROM price_check WHERE user_id = ?', [tenantId]);
+        runBatch = (latest[0] && latest[0].m) || '';
+      }
+      if (!runBatch) return sendJson(res, 200, { ok: true, run_batch: '', summary: { blue: 0, yellow: 0, green: 0, unmatched: 0 }, orders: [] });
+      const rows = await db.query(
+        'SELECT * FROM price_check WHERE user_id = ? AND run_batch = ? ORDER BY id ASC', [tenantId, runBatch]);
+      const summary = { blue: 0, yellow: 0, green: 0, unmatched: 0 };
+      const orders = [];
+      const byOrder = {};
+      for (const r of rows) {
+        summary[r.verdict] = (summary[r.verdict] || 0) + 1;
+        if (!byOrder[r.order_id]) byOrder[r.order_id] = { order_id: r.order_id, order_time: r.order_time, rows: [] };
+        byOrder[r.order_id].rows.push(r);
+      }
+      for (const k of Object.keys(byOrder)) orders.push(byOrder[k]);
+      return sendJson(res, 200, { ok: true, run_batch: runBatch, summary, orders });
+    }
+
+    // 标记：本机助手在 1688 页面打完备注上色后回报，回填 applied_at（审计用）
+    if (method === 'POST' && p === '/api/price-check/applied') {
+      if (!canPriceCheck) return denyPriceCheck();
+      writeGuard();
+      const b = await readBody(req);
+      const ids = Array.isArray(b.ids) ? b.ids.map(Number).filter(Boolean) : [];
+      if (!ids.length) return sendJson(res, 200, { error: '缺少 ids' });
+      await db.exec('UPDATE price_check SET applied_at = NOW() WHERE id IN (' + ids.map(() => '?').join(',') + ') AND user_id = ?', [...ids, tenantId]);
+      return sendJson(res, 200, { ok: true, applied: ids.length });
+    }
+
     // ── 供应商下拉（v0.3.12）────────────────────────────────────────────
     // 本地价要选供应商，但补货页用户不一定有「供应商管理 / 货单管理」权限，
     // 所以单开一个只读接口：有商品或补货权限就能拿到自己的供应商名单（只读，不能增删改）。
@@ -5941,6 +6208,25 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, out.ok ? 200 : 400, out);
       }
 
+      // 生成补货单分享链接（v0.3.44）：签一张 30 天有效的手机只读令牌，返回短链 /r/<令牌>。
+      // 只签授权用户自己的补货单；手机端打开页与数据接口都在鉴权之前（见上方 /r/ 与 /api/pub/replenish）。
+      if (method === 'POST' && p === '/api/replenish-order/share') {
+        writeGuard();
+        const body = await readBody(req);
+        const oid = Number(body.id) || 0;
+        if (!oid) return sendJson(res, 400, { ok: false, error: '缺少补货单 id' });
+        const own = await db.query(
+          'SELECT id FROM replenish_order WHERE id = ? AND user_id = ? AND deleted_at IS NULL', [oid, roUid]);
+        if (!own.length) return sendJson(res, 404, { ok: false, error: '补货单不存在或已删除' });
+        const token = replenishOrder.createShareToken(oid, roUid);
+        if (!token) return sendJson(res, 400, { ok: false, error: '补货单 id 无效' });
+        return sendJson(res, 200, {
+          ok: true, token,
+          url: serverUrlOf(req) + '/r/' + token,
+          ttlDays: Math.round(replenishOrder.SHARE_TTL_MS / 86400000),
+        });
+      }
+
       return sendJson(res, 404, { error: '未知的补货单接口' });
     }
 
@@ -5997,6 +6283,7 @@ const server = http.createServer(async (req, res) => {
         const out = await afterSales.createAfter({
           userId: afUid,
           goodsName: body.goodsName, sku: body.sku, qty: body.qty,
+          imageUrl: body.imageUrl,   // 选中商品的品牌商品主图（快照，列表「商品图片」列用）
           afterReason: body.afterReason, afterDate: body.afterDate, note: body.note,
           operator: user.username, images,
         });
@@ -6115,6 +6402,17 @@ const server = http.createServer(async (req, res) => {
       const profitApi = p === '/api/qnh/profit' || p === '/api/qnh/profit/pull' || p === '/api/qnh/profit/trend';
       // 退款原因在退单列表改（商品售后 v0.3.25 起不再读退单，旧售后页的「改原因」已下线）
       const reasonApi = p === '/api/qnh/refunds/reason';
+      // 员工账号只读退单：页面上的登录/刷新/提醒配置按钮已隐藏，这里做接口层兜底，
+      // 免得拿浏览器控制台直接打接口（同步、改定时配置、退出登录都会影响主体的牵牛花账号）。
+      // 判定只看 owner_id（员工身份），主体账号与超级管理员不受影响。
+      const staffQnh = !isAdmin && Number(user.owner_id) > 0;
+      const STAFF_QNH_ALLOW = new Set([
+        '/api/qnh/status', '/api/qnh/refunds', '/api/qnh/refunds/remark',
+        '/api/qnh/summary', '/api/qnh/trend', '/api/qnh/logs',
+      ]);
+      if (staffQnh && !STAFF_QNH_ALLOW.has(p)) {
+        return sendJson(res, 403, { error: '员工账号只能查看退单列表，其它操作请联系超级管理员' });
+      }
       if (reasonApi) {
         if (!canRefund) return sendJson(res, 403, { error: '未开启退单列表权限，请联系超级管理员' });
       } else if (profitApi) {
@@ -6141,6 +6439,23 @@ const server = http.createServer(async (req, res) => {
           canProfit,
           tenantId: qnhUid,
         };
+        // 员工：页面上只留退单表格，登录条整条不显示，所以不下发账号名、企业微信 webhook、
+        // 提醒模板、毛利配置这些「其它数据」——只给退单数据进度（最近同步批次）。
+        if (staffQnh) {
+          return sendJson(res, 200, {
+            cookie: {
+              logined: !!(cookie && cookie.logined),
+              loading: false,
+              configured: !!(cookie && cookie.configured),
+              tenantId: '', tenantName: '', message: '',
+              lastRun: (cookie && cookie.lastRun) || null,
+            },
+            config: null,
+            sync: qnh.getSyncState(),
+            summary: canRefund ? sum : null,
+            isAdmin, canRefund, canProfit, tenantId: qnhUid, staffLimited: true,
+          });
+        }
         // 管理员需要「以某账号身份进入」：给它账号列表 + 哪些账号已登录牵牛花
         if (isAdmin) {
           try {
@@ -6185,6 +6500,18 @@ const server = http.createServer(async (req, res) => {
         writeGuard();
         const out = await qnh.setRefundReason({ refundNo: body.refundNo, reason: body.reason, userId: qnhUid });
         if (out.ok) await logOp(user, 'qnh.refund_reason', { tenantId: qnhUid, refundNo: out.refundNo });
+        return sendJson(res, out.ok ? 200 : 400, out);
+      }
+
+      // 退单列表的「备注」：写 remark + 最后编辑人 + 时间；传空 = 清空备注（操作人/时间一并清）。
+      // 编辑人取当前登录会话的 username，不接受前端传，避免冒名。
+      if (method === 'POST' && p === '/api/qnh/refunds/remark') {
+        const body = await readBody(req);
+        writeGuard();
+        const out = await qnh.setRefundRemark({
+          refundNo: body.refundNo, remark: body.remark, operator: user.username, userId: qnhUid,
+        });
+        if (out.ok) await logOp(user, 'qnh.refund_remark', { tenantId: qnhUid, refundNo: out.refundNo });
         return sendJson(res, out.ok ? 200 : 400, out);
       }
 
