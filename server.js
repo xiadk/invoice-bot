@@ -85,25 +85,51 @@ const PRICECHECK = new Map();
  */
 function normalizePriceOrder(raw) {
   const o = (raw && typeof raw === 'object') ? raw : {};
+  // 第一个非空值胜出：助手 0.3.47 用 products，旧入口用 items，页面改版后可能换别的键名
+  const pick = (obj, keys) => {
+    for (const k of keys) {
+      const v = obj[k];
+      if (v != null && String(v).trim() !== '') return v;
+    }
+    return '';
+  };
   const src = (Array.isArray(o.items) && o.items.length) ? o.items
-    : (Array.isArray(o.products) ? o.products : []);
+    : (Array.isArray(o.products) && o.products.length) ? o.products
+      : (Array.isArray(o.entries) && o.entries.length) ? o.entries
+        : (Array.isArray(o.goods) && o.goods.length) ? o.goods
+          : (Array.isArray(o.orderEntries) ? o.orderEntries : []);
   const items = src.filter((it) => it && typeof it === 'object').map((it) => ({
-    link: String(it.link == null ? '' : it.link).slice(0, 512),
-    name: String(it.name == null ? '' : it.name).slice(0, 512),
-    spec: String(it.spec == null ? '' : it.spec).slice(0, 512),
-    unit_price: Number(it.unit_price) || 0,
-    quantity: Number(it.quantity) || 0,
-    entry_id: String(it.entry_id == null ? '' : it.entry_id),
+    link: String(pick(it, ['link', 'url', 'href', 'supplier_link', 'offerUrl'])).slice(0, 512),
+    name: String(pick(it, ['name', 'title', 'productName', 'goods_name', 'item_name'])).slice(0, 512),
+    spec: String(pick(it, ['spec', 'skuInfo', 'specInfo', 'supplier_spec', 'sku_text'])).slice(0, 512),
+    unit_price: Number(pick(it, ['unit_price', 'price', 'actualUnitPrice', 'spec_price'])) || 0,
+    quantity: Number(pick(it, ['quantity', 'count', 'qty', 'amount'])) || 0,
+    entry_id: String(pick(it, ['entry_id', 'entryId', 'id', 'offerId'])),
   }));
   return {
-    order_id: String(o.order_id == null ? '' : o.order_id).trim().slice(0, 64),
-    order_time: String(o.order_time == null ? '' : o.order_time).trim().slice(0, 64),
+    order_id: String(pick(o, ['order_id', 'orderId', 'tradeId', 'id'])).trim().slice(0, 64),
+    order_time: String(pick(o, ['order_time', 'orderTime', 'gmtCreate', 'createTime'])).trim().slice(0, 64),
     total_price: Number(o.total_price) || 0,
     freight: Number(o.freight) || 0,
     is_free_shipping: !!o.is_free_shipping,
-    status_text: String(o.status_text == null ? '' : o.status_text).trim(),
+    status_text: String(pick(o, ['status_text', 'status', 'statusLabel', 'orderStatus'])).trim(),
     items,
   };
+}
+
+/** 抓取结果字段诊断：订单到了但明细为空时，日志要说清「几单有明细、首单有哪些字段」 */
+function summarizePriceOrders(rawOrders) {
+  const list = Array.isArray(rawOrders) ? rawOrders : [];
+  let withItems = 0, itemTotal = 0;
+  const firstKeys = [];
+  for (const o of list) {
+    if (!o || typeof o !== 'object') continue;
+    if (!firstKeys.length) firstKeys.push(...Object.keys(o).slice(0, 12));
+    // 与 computeAndStorePrice 的 usable 同口径：按归一化后真正可用的明细数统计
+    const n = normalizePriceOrder(o).items.length;
+    if (n) { withItems += 1; itemTotal += n; }
+  }
+  return { orders: list.length, withItems, itemTotal, firstKeys };
 }
 
 /** 阈值清洗：undefined 不能覆盖 DEFAULTS（Object.assign 会把默认阈值刷成 NaN） */
@@ -191,7 +217,8 @@ async function onPriceFetchDone(ctx, msg) {
     }
     ctx.phase = 'calc';
     ctx.calcTotal = ctx.orders.length;
-    appendPriceLog(ctx, `✓ 抓取完成，共 ${ctx.orders.length} 单待付款订单，正在计算判定…`);
+    const diag = summarizePriceOrders(ctx.orders);
+    appendPriceLog(ctx, `✓ 抓取完成，共 ${ctx.orders.length} 单（${diag.withItems} 单含商品明细 / 共 ${diag.itemTotal} 条），正在计算判定…`);
     const opts = ctx.opts || {};
     const r = await computeAndStorePrice({
       user: ctx.user, tenantId: ctx.userId, orders: ctx.orders, opts, batchId: ctx.batchId,
@@ -202,7 +229,7 @@ async function onPriceFetchDone(ctx, msg) {
     });
     // 抓到订单却一条判定行都没算出来：必须明确报错，不能再静默「核对完成」让前端空态
     if (!r.rowsWritten) {
-      ctx._error = `抓取到 ${ctx.orders.length} 单，但没有解析出任何商品明细（页面改版或抓取字段不匹配），未生成核对结果`;
+      ctx._error = `抓取到 ${ctx.orders.length} 单，其中仅 ${diag.withItems} 单含商品明细（共 ${diag.itemTotal} 条），未生成判定行；首单字段：${diag.firstKeys.join(',') || '无'}（多为页面改版或抓取字段不匹配）`;
       appendPriceLog(ctx, '✗ ' + ctx._error);
       return finalize(ctx, { ok: false, error: ctx._error });
     }

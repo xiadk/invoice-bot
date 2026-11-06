@@ -89,7 +89,7 @@ function filterOrders(orders, opts, api) {
   let dropStatus = 0, dropDate = 0;
   for (const o of orders) {
     const st = String(o.status_text || '').trim();
-    if (st && !/待付款|待支付|等待买家付款/.test(st)) { dropStatus++; continue; }
+    if (st && !/待付款|待支付|等待买家付款|等待付款/.test(st)) { dropStatus++; continue; }
     const dm = /(\d{4}-\d{2}-\d{2})/.exec(String(o.order_time || ''));
     if (dm && opts.dateStart && opts.dateEnd && (dm[1] < opts.dateStart || dm[1] > opts.dateEnd)) { dropDate++; continue; }
     kept.push(o);
@@ -165,7 +165,7 @@ const SCRAPE_ORDERS = `
         for (var k = 0; k < all.length; k++) { var c = String(all[k].className || ''); if (c.indexOf(cls) >= 0) return all[k]; }
         return null;
       }
-      var order = { order_id: '', order_time: '', status_text: '', total_price: 0, freight: 0, is_free_shipping: true, has_memo: false, memo_color: '', products: [] };
+      var order = { order_id: '', order_time: '', status_text: '', total_price: 0, freight: 0, is_free_shipping: true, has_memo: false, memo_color: '', products: [], parse_mode: '' };
       // 订单号取自 copy-to-clipboard 内的一串 15 位以上数字
       var cc = window.__pf.findAllInShadow(it, 'copy-to-clipboard')[0];
       if (cc) { var m = /(\\d{15,})/.exec(window.__pf.text(cc)); if (m) order.order_id = m[1]; }
@@ -186,7 +186,7 @@ const SCRAPE_ORDERS = `
         var s = window.__pf.text(all[z]).trim();
         if (s && s.length < 60) itText.push(s);
       }
-      var sm = /(待付款|待支付|等待买家付款|交易关闭|交易成功|已付款|已发货|待收货|已取消)/.exec(itText.join(' '));
+      var sm = /(待付款|待支付|等待买家付款|等待付款|交易关闭|交易成功|已付款|已发货|待收货|已取消|已关闭)/.exec(itText.join(' '));
       if (sm) order.status_text = sm[1];
       // 商品明细
       var entries = all.filter(function (e) { var c = String(e.className || ''); return c.indexOf('order-item-entry') >= 0; });
@@ -224,9 +224,121 @@ const SCRAPE_ORDERS = `
         prod.entry_id = en.getAttribute('data-entry-id') || '';
         order.products.push(prod);
       }
+      // ── 商品明细兜底（v0.3.48）──
+      //  0.3.47 只认 .order-item-entry，页面改版后 90 单 products 全空 → 服务端 0 行判定。
+      //  旧 class 命中就沿用原结果；否则以 1688 商品详情链接为锚点，向上找最小商品容器。
+      if (order.products.length) {
+        order.parse_mode = 'class';
+      } else {
+        var ptext = function (e) { try { var t = (e.innerText === undefined ? e.textContent : e.innerText) || ''; return String(t).trim(); } catch (er) { return ''; } };
+        var pcls = function (e) { try { return String(e.className || ''); } catch (er) { return ''; } };
+        var pnum = function (s) { var m = /[0-9]+(?:[.][0-9]+)?/.exec(String(s)); return m ? parseFloat(m[0]) : 0; };
+        var offerOf = function (href) {
+          var h = String(href || ''), i = h.indexOf('/offer/');
+          if (i < 0) return '';
+          var rest = h.slice(i + 7), id = '';
+          for (var q = 0; q < rest.length && /[0-9]/.test(rest[q]); q++) id += rest[q];
+          return id ? 'https://detail.1688.com/offer/' + id + '.html' : '';
+        };
+        var upOf = function (e) {
+          var p = e.parentElement;
+          if (p) return p;
+          var r = e.parentNode;
+          return (r && r.host) ? r.host : null;
+        };
+        var anchors = all.filter(function (e) { return e.tagName === 'A' && e.getAttribute && offerOf(e.getAttribute('href')); });
+        var seen = [];
+        for (var a = 0; a < anchors.length; a++) {
+          var link = offerOf(anchors[a].getAttribute('href'));
+          var box = anchors[a], chosen = null;
+          for (var lv = 0; lv < 5; lv++) {
+            box = upOf(box);
+            if (!box) break;
+            var sub = window.__pf.deepAll(box), hp = false, hq = false, linksIn = 0;
+            for (var z2 = 0; z2 < sub.length; z2++) {
+              var cz = pcls(sub[z2]), tz = ptext(sub[z2]);
+              if (/price|amount|unit/i.test(cz) && /[0-9]/.test(tz)) hp = true;
+              if (/quantity|count|qty|num/i.test(cz) && /[0-9]/.test(tz)) hq = true;
+              if (sub[z2].tagName === 'A' && sub[z2].getAttribute && offerOf(sub[z2].getAttribute('href'))) linksIn++;
+            }
+            if ((hp || hq) && linksIn <= 1) { chosen = box; if (hp && hq) break; }
+          }
+          if (!chosen) chosen = upOf(anchors[a]) || anchors[a];
+          var dup = false;
+          for (var s3 = 0; s3 < seen.length; s3++) if (seen[s3] === chosen) { dup = true; break; }
+          if (dup) continue;
+          seen.push(chosen);
+          var eall2 = window.__pf.deepAll(chosen);
+          var p2 = { link: link, name: ptext(anchors[a]), spec: '', unit_price: 0, quantity: 0, entry_id: '' };
+          if (!p2.name) {
+            for (var n2 = 0; n2 < eall2.length; n2++) { if (/product-name|goods-title|item-title/i.test(pcls(eall2[n2])) && ptext(eall2[n2])) { p2.name = ptext(eall2[n2]); break; } }
+          }
+          var sp2 = [];
+          for (var n2 = 0; n2 < eall2.length; n2++) {
+            if (!/sku|spec/i.test(pcls(eall2[n2]))) continue;
+            var v2 = ptext(eall2[n2]);
+            if (v2 && v2.length < 60) { var sa = v2.split(/[:：]/); sp2.push(sa.length > 1 ? sa.slice(1).join(':').trim() : v2); }
+          }
+          p2.spec = sp2.slice(0, 6).join(' ').slice(0, 512);
+          var prices = [];
+          for (var n2 = 0; n2 < eall2.length; n2++) {
+            var c4 = pcls(eall2[n2]), t4 = ptext(eall2[n2]);
+            if (!/[¥￥]/.test(t4) && !/price/i.test(c4)) continue;
+            var v4 = pnum(t4);
+            if (v4 > 0) prices.push({ v: v4, prefer: /unit-price|actual-unit|单价/i.test(c4) ? 1 : 0 });
+          }
+          prices.sort(function (x, y) { return y.prefer - x.prefer || x.v - y.v; });
+          p2.unit_price = prices.length ? prices[0].v : 0;
+          var qty2 = 0, boxText = ptext(chosen);
+          var qm = /[x×][ ]*([0-9]+)/.exec(boxText) || /数量[:：]?[ ]*([0-9]+)/.exec(boxText);
+          if (qm) qty2 = parseInt(qm[1], 10);
+          if (!qty2) {
+            for (var n2 = 0; n2 < eall2.length; n2++) {
+              if (!/quantity|count|qty|num/i.test(pcls(eall2[n2]))) continue;
+              var vq = parseInt(pnum(ptext(eall2[n2])), 10);
+              if (vq > 0) { qty2 = vq; break; }
+            }
+          }
+          p2.quantity = qty2;
+          var em = link.split('/offer/')[1] || '';
+          p2.entry_id = (chosen.getAttribute && chosen.getAttribute('data-entry-id')) || em.split('.')[0] || '';
+          order.products.push(p2);
+        }
+        order.parse_mode = anchors.length ? 'offer-anchor' : 'none';
+      }
       orders.push(order);
     }
     return orders;
+  })()
+`;
+
+/** 首单 DOM 摘要（v0.3.48）：页面改版抓不到明细时，把真实 class 名/offer 链接数回传进度日志 */
+const PROBE_DOM = `
+  (function () {
+    var items = window.__pf.deepAll(document).filter(function (e) { return e.tagName === 'ORDER-ITEM'; });
+    if (!items.length) return { n: 0, classes: '', classTotal: 0, links: 0, text: '' };
+    var it = items[0], all = window.__pf.deepAll(it), seen = {}, names = [], links = 0;
+    for (var i = 0; i < all.length; i++) {
+      var e = all[i], c = '';
+      try { c = String(e.className || ''); } catch (er) {}
+      var parts = c.split(/[ ]+/);
+      for (var j = 0; j < parts.length; j++) {
+        var k = parts[j];
+        if (!k || seen[k]) continue;
+        seen[k] = 1;
+        if (/order|entry|product|sku|spec|price|quantity|count|item|goods|trade/i.test(k)) names.push(k);
+      }
+      if (e.tagName === 'A') {
+        var href = e.getAttribute ? (e.getAttribute('href') || '') : '';
+        if (href.indexOf('/offer/') >= 0) links++;
+      }
+    }
+    var t = '';
+    try { t = (it.innerText === undefined ? it.textContent : it.innerText) || ''; } catch (er) {}
+    return {
+      n: all.length, classes: names.slice(0, 24).join(','), classTotal: Object.keys(seen).length,
+      links: links, text: String(t).replace(/[ ]+/g, ' ').trim().slice(0, 160)
+    };
   })()
 `;
 
@@ -385,9 +497,50 @@ async function openFilteredList(api, opts = {}) {
   } else {
     api.log('⚠ 本次没有有效的下单时间范围，跳过日历筛选（按页面当前条件抓取）');
   }
-  // 3) 订单状态 → 待付款；个别版本下拉结构不同，失败不致命（抓完再按状态文本过滤）
+  // 3) 订单状态 → 待付款；0.3.47 日志「trade-status → 」回读为空，补独立回读 + 重试
+  const readTradeStatus = () => execFrame(wc, `(function(){
+    var hs = [], stack = [document];
+    while (stack.length) {
+      var r = stack.pop();
+      var els; try { els = r.querySelectorAll('*'); } catch (e) { continue; }
+      for (var i = 0; i < els.length; i++) {
+        var e = els[i];
+        if (e.shadowRoot) stack.push(e.shadowRoot);
+        if (e.tagName === 'ORDER-SEARCH-TRADE-STATUS') hs.push(e);
+      }
+    }
+    if (!hs.length) return '';
+    var h = hs[0], all = [], st = [h];
+    if (h.shadowRoot) st.push(h.shadowRoot);
+    while (st.length) {
+      var q = st.pop();
+      var sub; try { sub = q.querySelectorAll('*'); } catch (e) { continue; }
+      for (var j = 0; j < sub.length; j++) { all.push(sub[j]); if (sub[j].shadowRoot) st.push(sub[j].shadowRoot); }
+    }
+    var texts = [];
+    for (var k = 0; k < all.length; k++) {
+      var el = all[k];
+      if (el.getAttribute && el.getAttribute('slot') === 'content') {
+        var t = (el.innerText === undefined ? el.textContent : el.innerText) || '';
+        if (String(t).trim()) texts.push(String(t).trim());
+      }
+    }
+    var own = (h.innerText === undefined ? h.textContent : h.innerText) || '';
+    return (texts[0] || String(own).trim()).slice(0, 40);
+  })()`, 8000, '状态回读').catch(() => '');
+  let statusPicked = true;
   try { await orderExport.pickSelect(wc, 'trade-status', '待付款', api); }
-  catch (e) { api.log(`⚠ 订单状态下拉未选到「待付款」（${e.message}），改由抓取结果按状态文本过滤`); }
+  catch (e) { statusPicked = false; api.log(`⚠ 订单状态下拉未选到「待付款」（${e.message}），改由抓取结果按状态文本过滤`); }
+  if (statusPicked) {
+    let cur = String(await readTradeStatus() || '').trim();
+    if (!/待付款|待支付|等待买家付款/.test(cur)) {
+      try { await orderExport.pickSelect(wc, 'trade-status', '待付款', api); } catch (e) {}
+      await sleep(600);
+      cur = String(await readTradeStatus() || '').trim();
+    }
+    if (/待付款|待支付|等待买家付款/.test(cur)) api.log(`状态筛选已确认：${cur}`);
+    else api.log('⚠ 状态筛选回读为空，改由订单状态文本二次过滤（请核对日志中的订单状态）');
+  }
   // 4) 搜索（按钮文字是「搜索」不是「查询」）
   api.log('应用筛选（搜索）…');
   const clicked = await execFrame(wc, `window.__qexp.clickText('搜索')`, 10000, '搜索').catch(() => false);
@@ -404,11 +557,38 @@ async function scrapeAllPages(api, frame, opts = {}) {
   let total = 0;
   for (let page = 1; page <= MAX_PAGES; page++) {
     try { await execFrame(frame, INJECT, 10000, '注入 helper'); } catch (e) { /* 注入失败继续，页面可能整体无 shadow */ }
-    try { const x = await execFrame(frame, EXPAND_FOLDED, 15000, '展开折叠'); if (x) api.log(`展开折叠商品 ×${x}`); } catch (e) {}
-    let orders = [];
-    try { orders = await execFrame(frame, SCRAPE_ORDERS, 15000, '抓取订单'); } catch (e) { api.log('抓取本页订单失败: ' + e.message); }
+    try {
+      const x = await execFrame(frame, EXPAND_FOLDED, 15000, '展开折叠');
+      if (x) { api.log(`展开折叠商品 ×${x}`); await sleep(700); }
+    } catch (e) {}
+    const scrapeOnce = async () => {
+      try { return await execFrame(frame, SCRAPE_ORDERS, 15000, '抓取订单'); }
+      catch (e) { api.log('抓取本页订单失败: ' + e.message); return []; }
+    };
+    const detailOf = (arr) => (Array.isArray(arr) ? arr : []).reduce((s, o) => s + ((o && o.products && o.products.length) || 0), 0);
+    let orders = await scrapeOnce();
+    let detailCount = detailOf(orders);
+    // 商品行常在「展开」后异步渲染：首抓 0 明细时等一拍重抓，别把加载中的页面当空数据
+    if (!detailCount && Array.isArray(orders) && orders.length) {
+      await sleep(1500);
+      orders = await scrapeOnce();
+      detailCount = detailOf(orders);
+      if (detailCount) api.log('商品明细异步渲染完成，重抓生效');
+    }
     orders = filterOrders(Array.isArray(orders) ? orders : [], opts, api);
     if (!orders.length) { api.log(`第 ${page} 页没有「待付款且在下单时间范围内」的订单，结束`); break; }
+    detailCount = detailOf(orders);
+    api.log(`第 ${page} 页：${orders.length} 单 / ${detailCount} 条商品明细（解析 ${String((orders[0] && orders[0].parse_mode) || 'unknown')}）`);
+    if (page === 1) {
+      const probe = await execFrame(frame, PROBE_DOM, 8000, 'DOM 诊断').catch(() => null);
+      if (probe) {
+        api.log(`DOM诊断① 首单元素 ${probe.n} 个 / 类名 ${probe.classTotal} 种 / offer链接 ${probe.links} 个`);
+        if (!detailCount) {
+          api.log(`DOM诊断② 候选类名: ${String(probe.classes || '').slice(0, 140)}`);
+          api.log(`DOM诊断③ 首单文本: ${String(probe.text || '').slice(0, 140)}`);
+        }
+      }
+    }
     const firstId = String((orders[0] && orders[0].order_id) || '');
     for (const o of orders) {
       if (api.isStopped && api.isStopped()) throw new Error('已取消');
