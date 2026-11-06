@@ -76,7 +76,50 @@ const billing = require('./lib/billing');
 //   finishPriceFetch 在抓取收尾时跑判定 + 落 price_check，并把等待中的 HTTP 请求 resolve。
 const PRICECHECK = new Map();
 
-/** 对一批待付款订单跑判定并落 price_check（纯计算，不碰浏览器）。返回 { runBatch, summary, outOrders } */
+/**
+ * 归一化一条「1688 待付款订单」——修 0.3.43 起就存在的字段契约错位：
+ *   助手 electron/agent/price-1688.js 把商品明细放在 products，
+ *   而 lib/price-check.js 的 checkOrder() 只认 items（旧 POST /api/price-check 入口也是 items）。
+ *   不一致时 items 恒为 [] → 判定行 0 条 → price_check 一条不写 → 前端「核对完成」却没数据。
+ * 这里在服务端收口两侧：优先 items、兼容 products，明细字段与阈值都做类型清洗。
+ */
+function normalizePriceOrder(raw) {
+  const o = (raw && typeof raw === 'object') ? raw : {};
+  const src = (Array.isArray(o.items) && o.items.length) ? o.items
+    : (Array.isArray(o.products) ? o.products : []);
+  const items = src.filter((it) => it && typeof it === 'object').map((it) => ({
+    link: String(it.link == null ? '' : it.link).slice(0, 512),
+    name: String(it.name == null ? '' : it.name).slice(0, 512),
+    spec: String(it.spec == null ? '' : it.spec).slice(0, 512),
+    unit_price: Number(it.unit_price) || 0,
+    quantity: Number(it.quantity) || 0,
+    entry_id: String(it.entry_id == null ? '' : it.entry_id),
+  }));
+  return {
+    order_id: String(o.order_id == null ? '' : o.order_id).trim().slice(0, 64),
+    order_time: String(o.order_time == null ? '' : o.order_time).trim().slice(0, 64),
+    total_price: Number(o.total_price) || 0,
+    freight: Number(o.freight) || 0,
+    is_free_shipping: !!o.is_free_shipping,
+    status_text: String(o.status_text == null ? '' : o.status_text).trim(),
+    items,
+  };
+}
+
+/** 阈值清洗：undefined 不能覆盖 DEFAULTS（Object.assign 会把默认阈值刷成 NaN） */
+function normalizePriceOpts(raw) {
+  const out = {};
+  const src = (raw && typeof raw === 'object') ? raw : {};
+  for (const k of Object.keys(priceCheck.DEFAULTS)) {
+    const v = src[k];
+    if (v === undefined || v === null || v === '') continue;
+    out[k] = (k === 'checkSales') ? !!v : (Number(v) || 0);
+  }
+  return out;
+}
+
+/** 对一批待付款订单跑判定并落 price_check（纯计算，不碰浏览器）。
+ *  返回 { runBatch, summary, outOrders, rowsWritten, skippedEmpty, ordersUsed } */
 async function computeAndStorePrice({ user, tenantId, orders, opts, batchId, onProgress }) {
   let sql = 'SELECT id, sku, goods_name, purchase_price, sales_30d, supplier_name, supplier_spec, supplier_link, order_ratio FROM product_item WHERE user_id = ?';
   const tArgs = [tenantId];
@@ -88,26 +131,38 @@ async function computeAndStorePrice({ user, tenantId, orders, opts, batchId, onP
   const outOrders = [];
   const allRows = [];
   const summary = { blue: 0, yellow: 0, green: 0, unmatched: 0 };
+  const cleanOpts = normalizePriceOpts(opts);
+  const usable = (orders || []).map(normalizePriceOrder).filter((o) => o.items.length);
+  const skippedEmpty = (orders || []).length - usable.length;
 
-  for (let i = 0; i < orders.length; i += 1) {
-    const order = orders[i];
-    const od = priceCheck.checkOrder(order, targets, opts);
+  for (let i = 0; i < usable.length; i += 1) {
+    const order = usable[i];
+    const od = priceCheck.checkOrder(order, targets, cleanOpts);
     outOrders.push({
       order_id: od.order_id, order_time: od.order_time,
       order_total: od.order_total, target_total: od.target_total,
       summary: od.summary, rows: od.rows,
     });
     for (const r of od.rows) {
+      // 判定层「未匹配」分支不带 paid_amount/price_diff/price_ratio 等列，目标价为 0 时
+      // price_ratio 还可能是 Infinity；mysql2 会把 undefined 当 NULL、Infinity 也写不进 DECIMAL，
+      // 结果整批 INSERT 报 "Column 'paid_amount' cannot be null" → 前端「计算失败、没数据」。
+      // 这里按表列定义统一兜底：数值列非有限数一律 0，字符串列按列宽截断。
+      const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
+      const str = (v, len) => String(v == null ? '' : v).slice(0, len);
       allRows.push([
-        tenantId, brandId, runBatch, batchId, r.order_id, r.order_time,
-        r.sku, r.goods_name, r.supplier_name, r.supplier_spec, r.supplier_link,
-        r.order_ratio, r.quantity, r.base_quantity, r.spec_price, r.target_price,
-        r.actual_price, r.freight_share, r.paid_amount, r.price_diff, r.price_ratio,
-        r.sales_30d, r.matched, r.verdict, r.reason, r.is_qty_too_high, r.memo_text,
+        tenantId, brandId, runBatch, batchId,
+        str(r.order_id, 64), str(r.order_time, 64),
+        str(r.sku, 64), str(r.goods_name, 512), str(r.supplier_name, 512),
+        str(r.supplier_spec, 512), str(r.supplier_link, 512),
+        num(r.order_ratio), num(r.quantity), num(r.base_quantity), num(r.spec_price),
+        num(r.target_price), num(r.actual_price), num(r.freight_share), num(r.paid_amount),
+        num(r.price_diff), num(r.price_ratio), num(r.sales_30d), num(r.matched),
+        str(r.verdict, 16), str(r.reason, 32), num(r.is_qty_too_high), str(r.memo_text, 2000),
       ]);
       summary[r.verdict] = (summary[r.verdict] || 0) + 1;
     }
-    if (typeof onProgress === 'function') onProgress(i + 1, orders.length, od.order_id);
+    if (typeof onProgress === 'function') onProgress(i + 1, usable.length, od.order_id);
   }
   if (allRows.length) {
     const CHUNK = 200;
@@ -121,7 +176,7 @@ async function computeAndStorePrice({ user, tenantId, orders, opts, batchId, onP
       );
     }
   }
-  return { runBatch, summary, outOrders };
+  return { runBatch, summary, outOrders, rowsWritten: allRows.length, skippedEmpty, ordersUsed: usable.length };
 }
 
 /** 抓取收尾：助手 price_fetch_done → 缓存订单跑判定落库 → 结束等待中的 HTTP 请求 */
@@ -145,10 +200,17 @@ async function onPriceFetchDone(ctx, msg) {
         if (i === n || i % 5 === 0) appendPriceLog(ctx, `计算判定 ${i}/${n}${orderId ? ' · 订单 ' + orderId : ''}`);
       },
     });
+    // 抓到订单却一条判定行都没算出来：必须明确报错，不能再静默「核对完成」让前端空态
+    if (!r.rowsWritten) {
+      ctx._error = `抓取到 ${ctx.orders.length} 单，但没有解析出任何商品明细（页面改版或抓取字段不匹配），未生成核对结果`;
+      appendPriceLog(ctx, '✗ ' + ctx._error);
+      return finalize(ctx, { ok: false, error: ctx._error });
+    }
     ctx._runBatch = r.runBatch;
-    await logOp(ctx.user, 'price_check.run', { tenantId: ctx.userId, batchId: ctx.batchId, orders: ctx.orders.length, summary: r.summary });
+    await logOp(ctx.user, 'price_check.run', { tenantId: ctx.userId, batchId: ctx.batchId, orders: r.ordersUsed, summary: r.summary });
     appendPriceLog(ctx,
-      `✓ 核对完成：合理 ${r.summary.blue} · 价格/采购量异常 ${r.summary.yellow} · 新品 ${r.summary.green} · 未匹配 ${r.summary.unmatched}`);
+      `✓ 核对完成：合理 ${r.summary.blue} · 价格/采购量异常 ${r.summary.yellow} · 新品 ${r.summary.green} · 未匹配 ${r.summary.unmatched}` +
+      `（写入 ${r.rowsWritten} 行判定${r.skippedEmpty ? `，跳过 ${r.skippedEmpty} 单无商品明细` : ''}）`);
     return finalize(ctx, { ok: true, run_batch: r.runBatch, summary: r.summary, orders: r.outOrders });
   } catch (e) {
     ctx._error = '计算失败：' + String((e && e.message) || e);
@@ -5208,8 +5270,10 @@ const server = http.createServer(async (req, res) => {
       writeGuard();
       const b = await readBody(req);
       const orders = Array.isArray(b.orders) ? b.orders : [];
-      if (!orders.length || !orders.every((o) => Array.isArray(o.items) && o.items.length)) {
-        return sendJson(res, 200, { error: '缺少待检查订单（orders，每单需含 items）' });
+      // 与助手抓取链路同一套归一化：明细既可以是 items（本入口原口径），也可以是 products（助手回传口径）
+      const usableOrders = orders.map(normalizePriceOrder).filter((o) => o.items.length);
+      if (!orders.length || !usableOrders.length) {
+        return sendJson(res, 200, { error: '缺少待检查订单（orders，每单需含 items 或 products 商品明细）' });
       }
       const opts = {
         priceRatio: b.priceRatio, priceAmount: b.priceAmount,
@@ -5218,9 +5282,9 @@ const server = http.createServer(async (req, res) => {
       };
       const batchId = b.batchId ? Number(b.batchId) : null;
       try {
-        const r = await computeAndStorePrice({ user, tenantId, orders, opts, batchId });
-        await logOp(user, 'price_check.run', { tenantId, batchId, orders: orders.length, summary: r.summary });
-        return sendJson(res, 200, { ok: true, run_batch: r.runBatch, summary: r.summary, orders: r.outOrders });
+        const r = await computeAndStorePrice({ user, tenantId, orders: usableOrders, opts, batchId });
+        await logOp(user, 'price_check.run', { tenantId, batchId, orders: r.ordersUsed, summary: r.summary });
+        return sendJson(res, 200, { ok: true, run_batch: r.runBatch, summary: r.summary, orders: r.outOrders, rows_written: r.rowsWritten });
       } catch (e) {
         return sendJson(res, 500, { error: '计算或入库失败：' + String((e && e.message) || e) });
       }

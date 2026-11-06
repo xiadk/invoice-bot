@@ -6683,6 +6683,8 @@ const vm = new Vue({
       this.$set(this.price1688, 'task', {
         visible: true, running: true, phase: 'fetch', fetched: 0, logs: [], error: null,
         startedAt: Date.now(), range: [r[0], r[1]],
+        // taskId/dispatched 用来区分「本次任务终态」与「服务端残留的上一次任务快照」
+        taskId: '', dispatched: false,
       });
       this.price1688.running = true;
       this.startPricePoll();
@@ -6692,8 +6694,11 @@ const vm = new Vue({
           const d = await this.dispatchPriceCheck(r);
           // v0.3.45：该接口改为立即返回 taskId，真正的「核对完成」由轮询进度判定
           if (d && d.error) { this.$message.error(d.error); fail(); return; }
-          if (d && d.ok) this.$message.success('已下发核对任务');
-          else { this.$message.error('未收到核对结果'); fail(); }
+          if (d && d.ok) {
+            const x = this.price1688.task;
+            if (x) { this.$set(x, 'taskId', d.taskId || ''); this.$set(x, 'dispatched', true); }
+            this.$message.success('已下发核对任务');
+          } else { this.$message.error('未收到核对结果'); fail(); }
         } catch (e) { this.$message.error('开始核对失败: ' + e.message); fail(); }
         // 成功分支：running 留给轮询在真正结束时置回 false；继续轮询直到完成
       })();
@@ -6715,6 +6720,8 @@ const vm = new Vue({
         const pr = d && d.progress;
         if (!pr) return; // 还没有快照（极小概率），保持乐观态
         const wasRunning = this._priceWasRunning;
+        // 进度快照按 userId 只存一份：忽略上一次任务的终态，避免刚下发就被误判为「已完成」
+        if (t.taskId && pr.taskId && pr.taskId !== t.taskId) return;
         this.$set(t, 'running', !!pr.running);
         this.$set(t, 'phase', pr.phase || 'fetch');
         this.$set(t, 'fetched', pr.fetched || 0);
@@ -6725,7 +6732,9 @@ const vm = new Vue({
           this.$set(t, 'running', false);
           this.stopPricePoll();
           this.price1688.running = false;
-          if (wasRunning) {
+          // 完成即拉结果：即使任务在首次轮询前就结束（wasRunning=false），
+          // 只要本次已成功下发并确认是本次 taskId，也照样刷新列表，避免「核对完成却没数据」
+          if (wasRunning || t.dispatched) {
             if (pr.error) this.$message.error('核对未完成：' + pr.error);
             else { this.$message.success('核对完成'); await this.loadPrice1688(); }
           }
