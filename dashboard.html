@@ -214,6 +214,12 @@
   .af-att-meta { font-size: 12px; margin-bottom: 8px; }
   .af-att-img { width: 132px; height: 132px; object-fit: cover; border-radius: 6px;
                 border: 1px solid #ebeef5; cursor: zoom-in; }
+  /* 新增售后：选中商品后显示商品主图（2026-11-06），未选中给虚线占位 */
+  .af-pick-img { width: 64px; height: 64px; object-fit: cover; border-radius: 4px;
+                 border: 1px solid #ebeef5; display: block; cursor: zoom-in; background: #f5f7fa; }
+  .af-pick-img.is-empty { display: flex; align-items: center; justify-content: center;
+                          border-style: dashed; border-color: #dcdfe6; color: #c0c4cc;
+                          font-size: 12px; cursor: default; background: #fafbfc; }
   /* 货单图片（v0.3.0）：新建弹窗里的缩略图网格 + 手机上传二维码 */
   .wb-sec-title { font-size: 13px; font-weight: 600; margin: 4px 0 8px; }
   .wb-img-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(84px, 1fr)); gap: 8px; }
@@ -2925,6 +2931,16 @@
             <el-table-column label="售后日期" width="108">
               <template slot-scope="p"><span class="loginid">{{ p.row.afterDate || '—' }}</span></template>
             </el-table-column>
+            <el-table-column label="商品图片" width="72">
+              <template slot-scope="p">
+                <img v-if="p.row.imageUrl" :src="imgThumb(p.row.imageUrl, 96)" :alt="p.row.goodsName"
+                     width="48" height="48" loading="lazy" decoding="async"
+                     style="width:48px;height:48px;object-fit:cover;border-radius:4px;display:block;cursor:zoom-in"
+                     @click="openAfImage(p.row.imageUrl)"
+                     @error="imgError($event, p.row.imageUrl)" />
+                <span v-else class="loginid">—</span>
+              </template>
+            </el-table-column>
             <el-table-column label="商品名称" min-width="250">
               <template slot-scope="p"><span :title="p.row.goodsName">{{ p.row.goodsName || '—' }}</span></template>
             </el-table-column>
@@ -3071,7 +3087,16 @@
             </el-form-item>
 
             <el-row :gutter="12">
-              <el-col :span="16">
+              <el-col :span="4">
+                <el-form-item label="商品图片">
+                  <img v-if="afNew.imageUrl" :src="imgThumb(afNew.imageUrl, 128)" :alt="afNew.goodsName"
+                       class="af-pick-img" title="点击看大图"
+                       @click="openAfImage(afNew.imageUrl)"
+                       @error="imgError($event, afNew.imageUrl)" />
+                  <div v-else class="af-pick-img is-empty">未选</div>
+                </el-form-item>
+              </el-col>
+              <el-col :span="12">
                 <el-form-item label="商品名称">
                   <el-input v-model="afNew.goodsName" maxlength="255" disabled
                             placeholder="从上面搜索选中商品后自动填入"></el-input>
@@ -7608,7 +7633,7 @@ const vm = new Vue({
       if (this.readonly) { this.$message.warning('只读模式下不能修改'); return; }
       this.afNew = {
         visible: true, pick: '', options: [], searching: false,
-        goodsName: '', sku: '', qty: 1, afterReason: '', afterDate: this.todayStr(), note: '',
+        goodsName: '', sku: '', imageUrl: '', qty: 1, afterReason: '', afterDate: this.todayStr(), note: '',
         saving: false, error: '', up: afUpBox(),
       };
       this.bindAfPaste();
@@ -7635,9 +7660,11 @@ const vm = new Vue({
     },
     onAfPickProduct(v) {
       const hit = (this.afNew.options || []).find((p) => (p.brandId + '|' + p.sku) === v);
+      // 清空搜索框（v='')时保持原回填内容不变（名称/SKU/图片一起留），避免误清已选商品
       if (!hit) return;
       this.afNew.goodsName = hit.goodsName || '';
       this.afNew.sku = hit.sku || '';
+      this.afNew.imageUrl = hit.imageUrl || '';
     },
     async saveAfCreate() {
       const d0 = this.afNew;
@@ -7653,7 +7680,7 @@ const vm = new Vue({
         const d = await this.api('/api/after/create', {
           method: 'POST', headers: { 'content-type': 'application/json' },
           body: JSON.stringify({
-            goodsName: d0.goodsName, sku: d0.sku, qty: d0.qty,
+            goodsName: d0.goodsName, sku: d0.sku, qty: d0.qty, imageUrl: d0.imageUrl,
             afterReason: d0.afterReason, afterDate: d0.afterDate, note: d0.note,
             token: d0.up.token,
           }),

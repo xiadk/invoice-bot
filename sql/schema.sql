@@ -747,6 +747,7 @@ CREATE TABLE IF NOT EXISTS `product_after` (
   `user_id`       INT           NOT NULL DEFAULT 1   COMMENT '数据归属用户（员工录入时是所属主体账号）',
   `goods_name`    VARCHAR(255)  NOT NULL DEFAULT ''  COMMENT '商品名称（选中商品自动回填，可手改）',
   `sku`           VARCHAR(64)   NOT NULL DEFAULT ''  COMMENT '商品 SKU',
+  `image_url`     VARCHAR(512)  DEFAULT NULL         COMMENT '商品主图（选中商品时快照，列表展示用）',
   `qty`           INT           NOT NULL DEFAULT 1   COMMENT '售后数量（件）',
   `after_reason`  VARCHAR(255)  DEFAULT NULL         COMMENT '售后原因',
   `after_date`    DATE          NOT NULL             COMMENT '售后日期（按此列查询与排序）',

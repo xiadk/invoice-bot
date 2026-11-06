@@ -5997,6 +5997,7 @@ const server = http.createServer(async (req, res) => {
         const out = await afterSales.createAfter({
           userId: afUid,
           goodsName: body.goodsName, sku: body.sku, qty: body.qty,
+          imageUrl: body.imageUrl,   // 选中商品的品牌商品主图（快照，列表「商品图片」列用）
           afterReason: body.afterReason, afterDate: body.afterDate, note: body.note,
           operator: user.username, images,
         });

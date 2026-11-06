@@ -1674,6 +1674,7 @@ async function migrate(conn, dbName) {
       "  `user_id`       INT           NOT NULL DEFAULT 1   COMMENT '数据归属用户（员工录入时是所属主体账号）'," +
       "  `goods_name`    VARCHAR(255)  NOT NULL DEFAULT ''  COMMENT '商品名称（选中商品自动回填，可手改）'," +
       "  `sku`           VARCHAR(64)   NOT NULL DEFAULT ''  COMMENT '商品 SKU'," +
+      "  `image_url`     VARCHAR(512)  DEFAULT NULL         COMMENT '商品主图（选中商品时快照，列表展示用）'," +
       "  `qty`           INT           NOT NULL DEFAULT 1   COMMENT '售后数量（件）'," +
       "  `after_reason`  VARCHAR(255)  DEFAULT NULL         COMMENT '售后原因'," +
       "  `after_date`    DATE          NOT NULL             COMMENT '售后日期（按此列查询与排序）'," +
@@ -1692,6 +1693,25 @@ async function migrate(conn, dbName) {
       ') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci' +
       "  COMMENT='商品售后台账（商品名称/SKU + 数量 + 原因 + 状态 + 运单号 + 凭证）'"
     );
+  }
+
+  // ── 商品售后补「商品主图」（2026-11-06）──
+  //   售后列表新增「商品图片」列，新增售后选中商品时也会显示该图。
+  //   新记录由 createAfter 落库（选中商品的 brand_product.image_url 快照）；
+  //   老记录在加列时按 sku 从 brand_product 回填一次 —— 只在列缺失的那一次启动执行，
+  //   之后 image_url 有值了就不再扫表。brand_product 不存在时跳过（全新库由 schema 建）。
+  if (await tableExists('product_after') && !(await colExists('product_after', 'image_url'))) {
+    await q('ALTER TABLE `product_after` ADD COLUMN `image_url` VARCHAR(512) DEFAULT NULL ' +
+      "COMMENT '商品主图（选中商品时快照，列表展示用）' AFTER `sku`");
+    if (await tableExists('brand_product')) {
+      await q(
+        'UPDATE `product_after` a ' +
+        '  JOIN (SELECT `sku`, MIN(`image_url`) AS `image_url` FROM `brand_product` ' +
+        "         WHERE `image_url` IS NOT NULL AND `image_url` <> '' GROUP BY `sku`) t " +
+        '    ON t.`sku` = a.`sku` ' +
+        '   SET a.`image_url` = t.`image_url` ' +
+        " WHERE a.`image_url` IS NULL OR a.`image_url` = ''");
+    }
   }
 
   // ── qht_order 齐货通订单（v0.3.3）──
