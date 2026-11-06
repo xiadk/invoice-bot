@@ -3,28 +3,30 @@
  *
  * 职责（两条任务，分别由 ws-client 的 price_fetch / price_apply 下行触发）：
  *   1) 抓取待付款订单   → 复用 1688 发送窗口（persist:1688 分区，与发消息共用登录态），
- *                        导航到「待付款」订单列表，逐页把订单（order_id/时间/运费/商品明细）
+ *                        在「已买到的货品」订单列表页**用页面自己的筛选控件**设置
+ *                        下单时间起止 + 订单状态「待付款」→ 搜索 → 逐页抓 ORDER-ITEM，
  *                        通过 api.stream() 一条条回给服务器；服务器端算判定并落库。
  *   2) 打备注上色       → 服务器把最近一次判定的行（orderId + memo_text + 三色 verdict）下发，
  *                        助手按订单号在列表里逐单找到，点备忘图标 → 选色 radio → 填备注文本 →
  *                        点确定保存，逐单 api.applied() 回报，服务器据此回填 price_check.applied_at。
  *
- * 帧模型：待付款订单渲染在子 iframe（buyer-order-list 内嵌 order-item 容器）+ 深 shadow DOM，
- *   与聊天发送同一套路 —— 递归遍历 webContents.mainFrame.frames 找到含 order-item 的帧，
- *   用 webContents/frame.executeJavaScript 注入 shadow DOM helper 后执行。所有点击一律用
- *   dispatchEvent（纯 JS），不做坐标鼠标点 —— 规避 iframe 坐标偏移，与 Python 版降压手段一致。
+ * ⚠ v0.3.47：不再靠 URL 参数 tradeStatus=waitbuyerpay 过滤（新版页面由 ORDER-SEARCH-*
+ *   组件驱动，URL 参数不生效），也不再遍历子 iframe 找 ORDER-ITEM —— 曾误命中
+ *   g.alicdn.com/platform/xdomain-storage 的无关 iframe，页面刚加载 1 秒就把 0 单当正常收尾，
+ *   线上表现为「助手已打开订单列表，却报未抓取到待付款订单」。
+ *   改为与「导入/同步 1688 订单」（electron/agent/order-export.js）同口径：直接在主 frame
+ *   用 wc.executeJavaScript + deepAll 穿透 shadow DOM，靠日历点选与状态下拉筛选，
+ *   并等 ORDER-ITEM 真正渲染出来后才开始抓；只有页面明确空态才按 0 单正常收尾。
  *
  * 隐私边界：不接触、不保存 1688 账号密码/Cookie；登录态沿用发送窗口的分区。回传服务器的
  *   只有订单公开数据与「哪一单已上色」，不涉及敏感信息。
  *
- * v0.3.43 首版。
+ * v0.3.43 首版；v0.3.47 改为页面筛选 + 主 frame 抓取。
  */
 const sender = require('./sender');
+const orderExport = require('./order-export');
 
-// 待付款订单列表页（与 Python 版同一 URL；tradeStatus=waitbuyerpay 即待买家付款）
-const ORDER_LIST_URL = 'https://air.1688.com/app/ctf-page/trade-order-list/buyer-order-list.html'
-  + '?tradeStatus=waitbuyerpay&page=1&pageSize=10';
-// 翻页安全上限（待付款一般一页 10 单，20 页足够覆盖日常量）
+// 翻页安全上限（一页一般 10~20 单，20 页足够覆盖单月范围）
 const MAX_PAGES = 20;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -40,75 +42,60 @@ async function execFrame(frame, code, timeoutMs, tag) {
   }
 }
 
-// 帧探测脚本：自包含，不往页面里写 window.__pf（避免在无关帧留下副作用）。
-// ⚠ v0.3.46 修：旧版用 !!document.querySelector("order-item") 做判定，但 order-item
-//   挂在 shadowRoot 里（参见文件头注释与 scripts/price1688-scrape-harness.js 的
-//   orderWrap.setShadow([...])），querySelector 按 DOM 规范不穿透 shadowRoot，
-//   于是帧永远找不到 → 页面明明已打开却卡 3×60 秒后报「订单列表未渲染」。
-//   这里改用与抓取阶段 INJECT.deepAll 同口径的下钻查找。
-const PROBE_FRAME = `(function(){
-  var found = false, stack = [document];
-  while (stack.length && !found) {
-    var root = stack.pop();
-    var els; try { els = root.querySelectorAll('*'); } catch (e) { continue; }
-    for (var i = 0; i < els.length; i++) {
-      var el = els[i];
-      if (el.tagName === 'ORDER-ITEM') { found = true; break; }
-      if (el.shadowRoot) stack.push(el.shadowRoot);
-    }
+// ── 页面就绪判定 / 二次过滤（v0.3.47）────────────────────────────────────
+
+/** 页面明确空态：组件把「暂无订单」渲染在 shadow DOM 里，必须 deepAll 收集文本 */
+const PROBE_EMPTY = `(function(){
+  var els = window.__qexp.deepAll(), out = [];
+  for (var i = 0; i < els.length; i++) {
+    var s = '';
+    try { s = ((els[i].innerText === undefined ? els[i].textContent : els[i].innerText) || '').trim(); } catch (e) {}
+    if (s && s.length < 60) out.push(s);
   }
-  // 页面特征：列表页本身（含 0 单空态）。主 frame 的 URL 也带 buyer-order-list，
-  // 所以弱命中要排除 depth=0，避免抢在真正承载订单的子 iframe 前面。
-  var page = /buyer-order-list|trade-order-list|waitbuyerpay/.test(location.href)
-    || !!document.querySelector('q-pagination, .order-list, [class*="order-empty"], [class*="empty-order"]');
-  return { items: found ? 1 : 0, page: !!page };
+  return /暂无订单|没有找到|无符合条件|暂无数据|没有相关订单|未查询到|无匹配/.test(out.join(' ')) ? 1 : 0;
 })()`;
 
-/** 单帧探测超时：旧版 3s × 遍历预算 4s，一个卡住的无关帧就能截断整轮 */
-const PROBE_TIMEOUT = 1500;
+/** 当前主 frame 里的订单卡片数（穿透 shadow DOM） */
+const COUNT_ITEMS = `window.__qexp.deepAll().filter(function(e){return e.tagName==='ORDER-ITEM';}).length`;
 
 /**
- * 递归遍历 mainFrame 的所有帧，找订单列表所在的子 iframe。
- * 返回 { frame, probes }：probes 是每帧的探测结果，供线上日志定位「页面在哪、为什么没命中」。
- *
- * 命中优先级：① 帧里真有 ORDER-ITEM（强命中）→ ② 页面是列表页但 0 单（弱命中，排除主 frame）。
- * 同优先级取 depth 更深的（订单渲染在子 iframe）。
- * 不再按 1688.com 域名过滤 —— about:blank / srcdoc 的 iframe 也要探。
+ * 等主 frame 真的渲染出 ORDER-ITEM。
+ * 只有页面明确空态才返回 false（= 范围内确实 0 单）；未渲染就一直等，超时直接抛错，
+ * 不再像 v0.3.46 那样「加载 1 秒看到 0 单就当正常收尾」。
  */
-async function findOrderFrame(wc, timeoutMs) {
+async function waitForOrderItems(wc, api, timeoutMs) {
   const t0 = Date.now();
-  const probes = [];
-  const walk = async (f, depth) => {
-    if (Date.now() - t0 > timeoutMs) return;
-    let url = '', kids = [];
-    try { url = String(f.url || ''); kids = f.frames || []; } catch (e) { return; }
-    // 只排除登录页，其余帧一律探测（含 about:blank / 空 URL）
-    if (!/login\.1688\.com|signin|login\.taobao\.com/i.test(url)) {
-      let r = null, timer = null;
-      try {
-        r = await Promise.race([
-          Promise.resolve().then(() => f.executeJavaScript(PROBE_FRAME, false)),
-          new Promise((res) => { timer = setTimeout(() => res(null), PROBE_TIMEOUT); }),
-        ]);
-      } catch (e) { /* 帧已销毁或不可执行 */ }
-      finally { if (timer) clearTimeout(timer); }
-      probes.push({
-        f, url, depth,
-        items: r ? Number(r.items) || 0 : 0,
-        page: !!(r && r.page),
-        err: !r,
-      });
+  for (;;) {
+    let n = -1;
+    try { n = await execFrame(wc, COUNT_ITEMS, 8000, '查订单数'); } catch (e) { /* 页面切换中，下一轮再试 */ }
+    if (Number(n) > 0) { api.log(`订单列表已渲染（本页 ${n} 单）`); return true; }
+    let empty = 0;
+    try { empty = await execFrame(wc, PROBE_EMPTY, 8000, '查空态'); } catch (e) { /* 忽略，继续等 */ }
+    if (Number(empty) === 1) { api.log('页面明确显示「暂无订单」，该时间范围内没有待付款订单'); return false; }
+    if (Date.now() - t0 > (timeoutMs || 60000)) {
+      throw new Error('订单列表 60 秒内未渲染出订单卡片（请检查 1688 登录态、筛选条件或页面是否改版）');
     }
-    for (const c of kids) {
-      if (Date.now() - t0 > timeoutMs) return;
-      await walk(c, depth + 1);
-    }
-  };
-  try { await walk(wc.mainFrame, 0); } catch (e) { /* 帧树遍历异常，用已收集的结果判定 */ }
-  const byDepth = (a, b) => b.depth - a.depth;
-  const strong = probes.filter((p) => p.items > 0).sort(byDepth)[0];
-  const weak = probes.filter((p) => p.page && p.depth > 0).sort(byDepth)[0];
-  return { frame: (strong || weak || {}).f || null, probes };
+    if (api.isStopped && api.isStopped()) throw new Error('已取消');
+    await sleep(1500);
+  }
+}
+
+/**
+ * 二次过滤：页面筛选是主，这里按抓到的状态文本 / 下单时间再兜一层。
+ * 状态文本识别不出来时不丢弃（避免误杀整页订单），此时只依赖页面状态下拉。
+ */
+function filterOrders(orders, opts, api) {
+  const kept = [];
+  let dropStatus = 0, dropDate = 0;
+  for (const o of orders) {
+    const st = String(o.status_text || '').trim();
+    if (st && !/待付款|待支付|等待买家付款/.test(st)) { dropStatus++; continue; }
+    const dm = /(\d{4}-\d{2}-\d{2})/.exec(String(o.order_time || ''));
+    if (dm && opts.dateStart && opts.dateEnd && (dm[1] < opts.dateStart || dm[1] > opts.dateEnd)) { dropDate++; continue; }
+    kept.push(o);
+  }
+  if (dropStatus || dropDate) api.log(`二次过滤：非待付款 ${dropStatus} 单、超出下单时间范围 ${dropDate} 单`);
+  return kept;
 }
 
 // ── 注入 helper（移植 Python browser_operator.py 的 __findInShadow 等）──
@@ -178,7 +165,7 @@ const SCRAPE_ORDERS = `
         for (var k = 0; k < all.length; k++) { var c = String(all[k].className || ''); if (c.indexOf(cls) >= 0) return all[k]; }
         return null;
       }
-      var order = { order_id: '', order_time: '', total_price: 0, freight: 0, is_free_shipping: true, has_memo: false, memo_color: '', products: [] };
+      var order = { order_id: '', order_time: '', status_text: '', total_price: 0, freight: 0, is_free_shipping: true, has_memo: false, memo_color: '', products: [] };
       // 订单号取自 copy-to-clipboard 内的一串 15 位以上数字
       var cc = window.__pf.findAllInShadow(it, 'copy-to-clipboard')[0];
       if (cc) { var m = /(\\d{15,})/.exec(window.__pf.text(cc)); if (m) order.order_id = m[1]; }
@@ -193,6 +180,14 @@ const SCRAPE_ORDERS = `
       // 备忘标记
       var memo = window.__pf.findAllInShadow(it, 'icon-memo')[0];
       if (memo) { order.has_memo = true; order.memo_color = memo.getAttribute('color') || ''; }
+      // 订单状态文本（页面筛选是主，这里用于二次过滤；状态文字可能藏在 shadow DOM 里）
+      var itText = [];
+      for (var z = 0; z < all.length; z++) {
+        var s = window.__pf.text(all[z]).trim();
+        if (s && s.length < 60) itText.push(s);
+      }
+      var sm = /(待付款|待支付|等待买家付款|交易关闭|交易成功|已付款|已发货|待收货|已取消)/.exec(itText.join(' '));
+      if (sm) order.status_text = sm[1];
       // 商品明细
       var entries = all.filter(function (e) { var c = String(e.className || ''); return c.indexOf('order-item-entry') >= 0; });
       for (var j = 0; j < entries.length; j++) {
@@ -235,34 +230,54 @@ const SCRAPE_ORDERS = `
   })()
 `;
 
-/** 是否还有下一页（底部分页器 next 未禁用） */
-const HAS_NEXT = `
-  (function () {
+/** 找「下一页」控件：优先 q-pagination，兜底页面里可见的「下一页」文本元素 */
+const FIND_NEXT_HELPER = `
+  function __pfNext() {
     var pages = window.__pf.findAllInShadow(document, 'q-pagination');
-    if (!pages || !pages.length) return false;
-    var p = pages[pages.length - 1];
-    var next = window.__pf.findInShadow(p, 'button.ui-page-next');
-    if (!next) return false;
-    return next.getAttribute('disabled') !== 'true';
-  })()
+    if (pages && pages.length) {
+      var next = window.__pf.findInShadow(pages[pages.length - 1], 'button.ui-page-next');
+      if (next) return next;
+    }
+    var els = window.__pf.deepAll(document);
+    for (var i = 0; i < els.length; i++) {
+      var e = els[i], t = window.__pf.text(e).trim();
+      if (t !== '下一页' && t !== '下页') continue;
+      var r = e.getBoundingClientRect ? e.getBoundingClientRect() : null;
+      if (r && r.width === 0 && r.height === 0) continue;
+      return e;
+    }
+    return null;
+  }
+  function __pfNextDisabled(n) {
+    if (!n) return true;
+    var d = n.getAttribute ? String(n.getAttribute('disabled') || '') : '';
+    return d === 'true' || d === 'disabled' || n.disabled === true;
+  }
 `;
 
+/** 是否还有下一页 */
+const HAS_NEXT = `(function(){ ${FIND_NEXT_HELPER}
+  var n = __pfNext(); return !!n && !__pfNextDisabled(n);
+})()`;
+
 /** 点下一页 */
-const GO_NEXT = `
-  (function () {
-    var pages = window.__pf.findAllInShadow(document, 'q-pagination');
-    if (!pages || !pages.length) return { ok: false, msg: 'no-pagination' };
-    var p = pages[pages.length - 1];
-    var next = window.__pf.findInShadow(p, 'button.ui-page-next');
-    if (!next) return { ok: false, msg: 'no-button' };
-    if (next.getAttribute('disabled') === 'true') return { ok: false, msg: 'disabled' };
-    window.__pf.click(next);
-    pages = window.__pf.findAllInShadow(document, 'q-pagination');
-    var cur = 1;
-    if (pages.length) { var pp = pages[pages.length - 1]; cur = parseInt(pp.getAttribute('current') || '1', 10); }
-    return { ok: true, page: cur };
-  })()
-`;
+const GO_NEXT = `(function(){ ${FIND_NEXT_HELPER}
+  var n = __pfNext();
+  if (!n) return { ok: false, msg: 'no-next' };
+  if (__pfNextDisabled(n)) return { ok: false, msg: 'disabled' };
+  window.__pf.click(n);
+  return { ok: true };
+})()`;
+
+/** 本页第一单的订单号：翻页后等它变化，避免在旧数据上重复抓一遍 */
+const FIRST_ORDER_ID = `(function(){
+  var items = window.__pf.deepAll(document).filter(function(e){return e.tagName==='ORDER-ITEM';});
+  if (!items.length) return '';
+  var cc = window.__pf.findAllInShadow(items[0], 'copy-to-clipboard')[0];
+  if (!cc) return '';
+  var m = /(\\d{15,})/.exec(window.__pf.text(cc));
+  return m ? m[1] : '';
+})()`;
 
 /** 展开所有折叠商品（点「展开更多」按钮），直到点无可点 */
 const EXPAND_FOLDED = `
@@ -336,68 +351,65 @@ const SET_MARK = `
   })
 `;
 
-// ── 打开/复用 1688 待付款列表，返回 { win, frame } ──
-async function openPendingList(api, win) {
-  win.show();
-  const wc = win.webContents;
-  api.log('打开 1688「待付款订单」列表…');
-  let lastErr = null;
-  for (let retry = 0; retry < 3; retry++) {
-    try {
-      await Promise.race([wc.loadURL(ORDER_LIST_URL), sleep(45000)]);
-    } catch (e) {
-      api.log('页面 loadURL 未确认完成（SPA 常见），按帧探测继续');
-    }
-    // 等订单列表所在子 iframe 出现（未登录会长时间停在登录态，判超时）
-    let frame = null;
-    let lastBrief = '';
-    const t0 = Date.now();
-    while (Date.now() - t0 < 60000) {
-      const r = await findOrderFrame(wc, 15000);
-      // 帧树摘要只在变化时打，避免 60 秒里刷几十条重复日志；线上据此判断「页面在哪、为何没命中」
-      const brief = r.probes.map((p) => `${p.depth}:${p.items > 0 ? 'H' : p.page ? 'P' : p.err ? 'E' : '-'}`).join(',');
-      if (brief !== lastBrief) {
-        api.log(`帧探测 ${r.probes.length} 个 [${brief.slice(0, 90)}] H=有订单 P=列表页 E=超时`);
-        if (r.probes.length) {
-          api.log('帧URL ' + r.probes.slice(0, 3).map((p) =>
-            `${p.depth} ${String(p.url).replace(/^https?:\/\//, '').slice(0, 42)}`).join(' | '));
-        }
-        lastBrief = brief;
-      }
-      frame = r.frame;
-      if (frame) {
-        // 注入 helper 复核：n >= 0 即列表页就绪（n=0 是「今天没有待付款订单」，正常收尾）
-        try {
-          const n = await Promise.race([
-            frame.executeJavaScript(INJECT + '; window.__pf.deepAll(document).filter(function(e){return e.tagName==="ORDER-ITEM";}).length', true),
-            new Promise((res) => setTimeout(() => res(-1), 8000)),
-          ]);
-          if (Number(n) >= 0) {
-            api.log(`订单列表已加载（本页 ${n} 单）`);
-            return { win, frame, wc };
-          }
-        } catch (e) { frame = null; }
-      }
-      if (api.isStopped && api.isStopped()) throw new Error('已取消');
-      await sleep(1500);
-    }
-    lastErr = '订单列表未渲染（可能未登录 1688 或页面改版）';
-    api.log(`订单列表未出现，刷新重试…（第 ${retry + 1}/3 次）`);
-    try { await wc.reload(); } catch (e) { /* 忽略 */ }
-    await sleep(3000);
+// ── 打开/复用 1688 订单列表，用页面控件按下单时间 + 待付款筛选（v0.3.47）──
+/**
+ * 复用 electron/agent/order-export.js 的同一套页面操作（主 frame + shadow DOM 穿透）：
+ * 打开「已买到的货品」→ 关引导弹窗 → 清除选项 → 日历设下单时间起止 →
+ * 订单状态选「待付款」→ 搜索 → 等 ORDER-ITEM 真正渲染。
+ * @returns {{win, wc, empty}} empty=true 表示页面明确显示「暂无订单」
+ */
+async function openFilteredList(api, opts = {}) {
+  const dateStart = String(opts.dateStart || '').trim();
+  const dateEnd = String(opts.dateEnd || '').trim();
+  const hasRange = /^\d{4}-\d{2}-\d{2}$/.test(dateStart) && /^\d{4}-\d{2}-\d{2}$/.test(dateEnd);
+  api.log('打开 1688 订单列表（主 frame · 页面筛选）…');
+  // 与「导入/同步 1688 订单」共用入口：同一个窗口、同一份登录态、同一套主 frame 助手
+  const { win, wc } = await orderExport.openOrderPage(api);
+  // 导航会清掉 window.__qexp，兜底再注入一次
+  await execFrame(wc, orderExport.PAGE_HELPERS, 10000, '注入助手').catch(() => {});
+  // 0) 关掉「AI订单巡检」引导弹窗（首次进入会有，可能挡住后续点击）
+  await execFrame(wc, `(function(){
+    var h = window.__qexp.byText('跳过', 2, true);
+    if (h.length) { try { h[0].click(); return 'skipped'; } catch (e) {} }
+    return 'none';
+  })()`, 10000, '关引导弹窗').catch(() => {});
+  await sleep(800);
+  // 1) 清除既有筛选，避免残留条件混入本次抓取
+  api.log('清除既有筛选条件…');
+  await execFrame(wc, `window.__qexp.clickText('清除选项')`, 10000, '清除选项').catch(() => false);
+  await sleep(1500);
+  // 2) 下单时间范围（日历点选 + 回读校验，直接写 value 会被组件重渲染清掉）
+  if (hasRange) {
+    api.log(`设置下单时间：${dateStart} ~ ${dateEnd}`);
+    await orderExport.setDateRange(wc, dateStart, dateEnd, api);
+  } else {
+    api.log('⚠ 本次没有有效的下单时间范围，跳过日历筛选（按页面当前条件抓取）');
   }
-  throw new Error(lastErr || '订单列表加载失败');
+  // 3) 订单状态 → 待付款；个别版本下拉结构不同，失败不致命（抓完再按状态文本过滤）
+  try { await orderExport.pickSelect(wc, 'trade-status', '待付款', api); }
+  catch (e) { api.log(`⚠ 订单状态下拉未选到「待付款」（${e.message}），改由抓取结果按状态文本过滤`); }
+  // 4) 搜索（按钮文字是「搜索」不是「查询」）
+  api.log('应用筛选（搜索）…');
+  const clicked = await execFrame(wc, `window.__qexp.clickText('搜索')`, 10000, '搜索').catch(() => false);
+  if (!clicked) api.log('⚠ 未找到「搜索」按钮，按页面当前结果继续');
+  await sleep(2500);
+  if (api.isStopped && api.isStopped()) throw new Error('已取消');
+  // 5) 等订单卡片真正出现（只有明确空态才按 0 单收尾）
+  const empty = !await waitForOrderItems(wc, api, 60000);
+  return { win, wc, empty };
 }
 
 /** 抓取整个列表（多页），逐单 api.stream 回传；返回抓到订单数 */
-async function scrapeAllPages(api, frame) {
+async function scrapeAllPages(api, frame, opts = {}) {
   let total = 0;
   for (let page = 1; page <= MAX_PAGES; page++) {
     try { await execFrame(frame, INJECT, 10000, '注入 helper'); } catch (e) { /* 注入失败继续，页面可能整体无 shadow */ }
     try { const x = await execFrame(frame, EXPAND_FOLDED, 15000, '展开折叠'); if (x) api.log(`展开折叠商品 ×${x}`); } catch (e) {}
     let orders = [];
     try { orders = await execFrame(frame, SCRAPE_ORDERS, 15000, '抓取订单'); } catch (e) { api.log('抓取本页订单失败: ' + e.message); }
-    if (!orders.length) { api.log(`第 ${page} 页无订单，结束`); break; }
+    orders = filterOrders(Array.isArray(orders) ? orders : [], opts, api);
+    if (!orders.length) { api.log(`第 ${page} 页没有「待付款且在下单时间范围内」的订单，结束`); break; }
+    const firstId = String((orders[0] && orders[0].order_id) || '');
     for (const o of orders) {
       if (api.isStopped && api.isStopped()) throw new Error('已取消');
       await api.stream(o); // 逐单回传服务器（服务器端累加并计入批次）
@@ -410,15 +422,19 @@ async function scrapeAllPages(api, frame) {
     if (!hasNext) break;
     const gp = await execFrame(frame, GO_NEXT, 8000, '翻页').catch(() => ({ ok: false }));
     if (!gp || !gp.ok) { api.log('翻页失败或无下一页，结束'); break; }
-    // 等页内 order-item 刷新
-    for (let w = 0; w < 40; w++) {
-      let n = -1;
-      try {
-        n = await execFrame(frame, `window.__pf.deepAll(document).filter(function(e){return e.tagName==="ORDER-ITEM";}).length`, 8000, '等渲染')
-          .catch(() => -1);
-      } catch (e) {}
-      if (Number(n) > 0) break;
-      await sleep(500);
+    // 等页内数据真正换页（旧逻辑只等「数量>0」，会在旧数据上重复抓一遍）
+    if (firstId) {
+      let changed = false;
+      for (let w = 0; w < 40; w++) {
+        let id = '';
+        try { id = String(await execFrame(frame, FIRST_ORDER_ID, 8000, '等翻页') || ''); } catch (e) {}
+        if (id && id !== firstId) { changed = true; break; }
+        await sleep(500);
+      }
+      if (!changed) { api.log('翻页后订单列表未刷新，结束翻页'); break; }
+    } else {
+      // 没抓到订单号（页面改版）时退回固定等待，宁可少翻一页也不要重复抓
+      await sleep(2000);
     }
   }
   return total;
@@ -480,21 +496,22 @@ async function findAndOpenMemo(api, frame, orderId) {
 
 const COLOR_VALUE = { blue: '2', green: '3', yellow: '4' };
 
-/** 抓取 handler：ws-client 下行 price_fetch 触发 */
+/** 抓取 handler：ws-client 下行 price_fetch 触发（m 带 dateStart / dateEnd） */
 function createFetchHandler({ log = (m) => {} } = {}) {
   return async (m, api) => {
-    log('开始抓取 1688 待付款订单…');
+    const dateStart = String(m.dateStart || '').trim();
+    const dateEnd = String(m.dateEnd || '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStart) || !/^\d{4}-\d{2}-\d{2}$/.test(dateEnd)) {
+      throw new Error('缺少下单时间范围：请在看板「开始核对」里选择日期（助手需 0.3.47 及以上）');
+    }
+    log(`开始抓取 1688 待付款订单（下单时间 ${dateStart} ~ ${dateEnd}）…`);
     const st = sender.state ? sender.state() : {};
     if (st.sending) throw new Error('正在发送催收消息，请等发送完成后再比价');
-    const win = sender.getSendWindow();
-    const { frame } = await openPendingList(api, win);
-    try {
-      const count = await scrapeAllPages(api, frame);
-      log(`待付款订单抓取完成，共 ${count} 单`);
-      return count; // ws-client 据此回 price_fetch_done
-    } finally {
-      // 不关窗口：用户可能想核对页面。返回空包即代表任务结束。
-    }
+    const { wc, empty } = await openFilteredList(api, { dateStart, dateEnd });
+    if (empty) { log('该下单时间范围内没有待付款订单'); return 0; }
+    const count = await scrapeAllPages(api, wc, { dateStart, dateEnd });
+    log(`待付款订单抓取完成，共 ${count} 单`);
+    return count; // ws-client 据此回 price_fetch_done
   };
 }
 
@@ -509,8 +526,14 @@ function createApplyHandler({ log = (m) => {} } = {}) {
     if (!orders.length) return 0;
     const st = sender.state ? sender.state() : {};
     if (st.sending) throw new Error('正在发送催收消息，请等发送完成后再上色');
-    const win = sender.getSendWindow();
-    const { frame } = await openPendingList(api, win);
+    // 与抓取共用同一套页面筛选：服务端把这批订单的下单时间范围一并下发
+    const { wc, empty } = await openFilteredList(api, { dateStart: m.dateStart, dateEnd: m.dateEnd });
+    if (empty) {
+      log('筛选后列表没有订单，无法上色');
+      for (const t of orders) api.applied(t.orderId, false, '筛选后列表无订单');
+      return { handled: 0, ok: 0, fail: orders.length };
+    }
+    const frame = wc;
 
     let handled = 0, ok = 0, fail = 0, skipped = 0;
     for (const t of orders) {
@@ -546,4 +569,4 @@ function createApplyHandler({ log = (m) => {} } = {}) {
   };
 }
 
-module.exports = { createFetchHandler, createApplyHandler, ORDER_LIST_URL };
+module.exports = { createFetchHandler, createApplyHandler };

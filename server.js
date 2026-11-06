@@ -77,7 +77,7 @@ const billing = require('./lib/billing');
 const PRICECHECK = new Map();
 
 /** 对一批待付款订单跑判定并落 price_check（纯计算，不碰浏览器）。返回 { runBatch, summary, outOrders } */
-async function computeAndStorePrice({ user, tenantId, orders, opts, batchId }) {
+async function computeAndStorePrice({ user, tenantId, orders, opts, batchId, onProgress }) {
   let sql = 'SELECT id, sku, goods_name, purchase_price, sales_30d, supplier_name, supplier_spec, supplier_link, order_ratio FROM product_item WHERE user_id = ?';
   const tArgs = [tenantId];
   if (batchId) { sql += ' AND batch_id = ?'; tArgs.push(batchId); }
@@ -89,7 +89,8 @@ async function computeAndStorePrice({ user, tenantId, orders, opts, batchId }) {
   const allRows = [];
   const summary = { blue: 0, yellow: 0, green: 0, unmatched: 0 };
 
-  for (const order of orders) {
+  for (let i = 0; i < orders.length; i += 1) {
+    const order = orders[i];
     const od = priceCheck.checkOrder(order, targets, opts);
     outOrders.push({
       order_id: od.order_id, order_time: od.order_time,
@@ -106,6 +107,7 @@ async function computeAndStorePrice({ user, tenantId, orders, opts, batchId }) {
       ]);
       summary[r.verdict] = (summary[r.verdict] || 0) + 1;
     }
+    if (typeof onProgress === 'function') onProgress(i + 1, orders.length, od.order_id);
   }
   if (allRows.length) {
     const CHUNK = 200;
@@ -127,16 +129,31 @@ async function onPriceFetchDone(ctx, msg) {
   ctx.done = true;
   try {
     if (!msg.ok || !ctx.orders || !ctx.orders.length) {
-      return finalize(ctx, { ok: false, error: msg.error || '未抓取到待付款订单' });
+      const range = (ctx.dateStart && ctx.dateEnd) ? `（${ctx.dateStart} ~ ${ctx.dateEnd} 内无待付款订单）` : '';
+      ctx._error = msg.error || ('未抓取到待付款订单' + range);
+      appendPriceLog(ctx, '✗ ' + ctx._error);
+      return finalize(ctx, { ok: false, error: ctx._error });
     }
+    ctx.phase = 'calc';
+    ctx.calcTotal = ctx.orders.length;
+    appendPriceLog(ctx, `✓ 抓取完成，共 ${ctx.orders.length} 单待付款订单，正在计算判定…`);
     const opts = ctx.opts || {};
     const r = await computeAndStorePrice({
       user: ctx.user, tenantId: ctx.userId, orders: ctx.orders, opts, batchId: ctx.batchId,
+      onProgress: (i, n, orderId) => {
+        ctx.calcDone = i;
+        if (i === n || i % 5 === 0) appendPriceLog(ctx, `计算判定 ${i}/${n}${orderId ? ' · 订单 ' + orderId : ''}`);
+      },
     });
+    ctx._runBatch = r.runBatch;
     await logOp(ctx.user, 'price_check.run', { tenantId: ctx.userId, batchId: ctx.batchId, orders: ctx.orders.length, summary: r.summary });
+    appendPriceLog(ctx,
+      `✓ 核对完成：合理 ${r.summary.blue} · 价格/采购量异常 ${r.summary.yellow} · 新品 ${r.summary.green} · 未匹配 ${r.summary.unmatched}`);
     return finalize(ctx, { ok: true, run_batch: r.runBatch, summary: r.summary, orders: r.outOrders });
   } catch (e) {
-    return finalize(ctx, { ok: false, error: '计算失败：' + String((e && e.message) || e) });
+    ctx._error = '计算失败：' + String((e && e.message) || e);
+    appendPriceLog(ctx, '✗ ' + ctx._error);
+    return finalize(ctx, { ok: false, error: ctx._error });
   }
 }
 
@@ -160,9 +177,60 @@ async function onPriceApplyDone(ctx, msg) {
 
 /** 结束任务并 resolve 等待中的 HTTP 响应；超时/收尾都走这里 */
 function finalize(ctx, payload) {
+  if (ctx.finished) return payload;
   ctx.finished = true;
+  ctx.finishedAt = new Date().toISOString();
+  ctx.phase = 'done';
+  ctx._error = payload.error || null;
+  ctx._runBatch = payload.run_batch || ctx._runBatch || '';
   if (ctx.timer) clearTimeout(ctx.timer);
-  return ctx.resolve(payload);
+  if (typeof ctx.resolve === 'function') ctx.resolve(payload);
+  // 终态快照：任务结束后前端仍能读到「核对结束」，直到它自己停止轮询
+  PRICECHECK.delete(ctx.taskId);
+  savePriceProgress(ctx.userId, ctx);
+  return payload;
+}
+
+// ── 1688比价· 进度快照（v0.3.45）：供前端「开始核对」进度条 + 控制台轮询，易失内存态 ──
+//   PRICECHECK 里跑完的 ctx 会被删除，前台轮询又要看得到，所以再存一份按 userId 的快照。
+const PRICE_PROGRESS = new Map();
+
+/** 当前未结束的 1688 比价任务（多任务取最新一个） */
+function priceCtxForUser(uid) {
+  let best = null;
+  for (const c of PRICECHECK.values()) {
+    if (c.userId === Number(uid) && !c.finished) {
+      if (!best || c.createdAt > best.createdAt) best = c;
+    }
+  }
+  return best;
+}
+
+function priceSnapshot(ctx) {
+  return {
+    taskId: ctx.taskId,
+    running: !ctx.finished,
+    phase: ctx.finished ? 'done' : (ctx.phase || 'fetch'),
+    fetched: ctx.orders ? ctx.orders.length : 0,
+    calcDone: ctx.calcDone || 0,
+    calcTotal: ctx.calcTotal || 0,
+    current: ctx.current || '',
+    logs: (ctx.progressLog || []).slice(-120),
+    error: ctx._error || null,
+    run_batch: ctx._runBatch || '',
+    finishedAt: ctx.finishedAt || null,
+  };
+}
+
+function savePriceProgress(uid, ctx) {
+  PRICE_PROGRESS.set(Number(uid), priceSnapshot(ctx));
+}
+
+function appendPriceLog(ctx, text) {
+  ctx.progressLog = ctx.progressLog || [];
+  ctx.progressLog.push({ t: new Date().toISOString().slice(11, 19), text: String(text).slice(0, 200) });
+  if (ctx.progressLog.length > 300) ctx.progressLog.splice(0, ctx.progressLog.length - 300);
+  savePriceProgress(ctx.userId, ctx);
 }
 
 const configStore = require('./lib/config');
@@ -2549,6 +2617,9 @@ function handleAgentMessage(uid, msg) {
         // 否则进度数字会一直停在 0，直到最后一次回执才跳到 100%（等于没有进度）。
         if (sctx.kind === 'send') guessSdcProgress(sctx, text);
       }
+      // 1688比价·「开始核对」：助手日志并入该任务的进度面板（控制台输出）
+      const prctx = priceCtxForUser(uid);
+      if (prctx) appendPriceLog(prctx, String(msg.text || '').slice(0, 200));
       console.log(`[agent] uid=${uid} · ${String(msg.text || '').slice(0, 200)}`);
     }
     return;
@@ -2570,7 +2641,11 @@ function handleAgentMessage(uid, msg) {
   // ── 「1688比价」流程：助手逐单回传待付款订单 / 回报抓取与上色结果 ──
   if (msg.type === 'price_order') {
     const c = PRICECHECK.get(String(msg.taskId || ''));
-    if (c && c.userId === Number(uid) && msg.order) c.orders.push(msg.order);
+    if (c && c.userId === Number(uid) && msg.order) {
+      c.orders.push(msg.order);
+      const label = String(msg.order.order_id || '');
+      appendPriceLog(c, `抓取到待付款订单${label ? ' ' + label : ''}（第 ${c.orders.length} 单）`);
+    }
     return;
   }
   if (msg.type === 'price_fetch_done') {
@@ -5151,12 +5226,24 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
-    // ── 1688比价· 开始核对（下发本机助手抓取待付款订单 → 等收尾算判定落库）──
+    // ── 1688比价· 开始核对（下发本机助手抓取待付款订单 → 后台收尾算判定落库）──
     //   与上面 POST 的关系：这个是「一键」入口，助手抓完订单后走同一套 computeAndStorePrice。
+    //   v0.3.45：改为不阻塞（立即返回 taskId），助手推进的每单进度 / 日志由 /api/price-check/progress 轮询取。
     if (method === 'POST' && p === '/api/price-check/run') {
       if (!canPriceCheck) return denyPriceCheck();
       writeGuard();
       const b = await readBody(req);
+      // 下单时间范围必填（与前端弹窗同口径）：助手据此在 1688 订单列表页用日历筛选
+      const dateStart = String(b.dateStart || '').trim();
+      const dateEnd = String(b.dateEnd || '').trim();
+      const dateRe = /^\d{4}-\d{2}-\d{2}$/;
+      if (!dateRe.test(dateStart) || !dateRe.test(dateEnd)) {
+        return sendJson(res, 200, { error: '请选择下单时间范围（开始日期 ~ 结束日期）' });
+      }
+      const daySpan = (Date.parse(dateEnd + 'T00:00:00') - Date.parse(dateStart + 'T00:00:00')) / 86400000 + 1;
+      if (!(daySpan >= 1 && daySpan <= 31)) {
+        return sendJson(res, 200, { error: '下单时间范围需在 1~31 天内，且开始日期不能晚于结束日期' });
+      }
       if (!agentHub.isOnline(tenantId)) {
         return sendJson(res, 200, { error: '本机助手未连接：请先在本机启动「催收小助手」并绑定后才可开始核对' });
       }
@@ -5168,20 +5255,27 @@ const server = http.createServer(async (req, res) => {
       opts.checkSales = !!b.checkSales;
       const batchId = b.batchId ? Number(b.batchId) : null;
       const taskId = 'P' + Date.now().toString(36) + Math.floor(Math.random() * 1e4).toString(36);
-      const result = await new Promise((resolve) => {
-        const ctx = {
-          taskId, userId: Number(tenantId), user, orders: [], opts, batchId,
-          done: false, finished: false, resolve, timer: setTimeout(() => {
-            finalize(ctx, { ok: false, error: '等待本机助手抓取订单超时（15 分钟未收尾）' });
-          }, 15 * 60 * 1000),
-        };
-        PRICECHECK.set(taskId, ctx);
-        const sent = agentHub.send(tenantId, { type: 'price_fetch', taskId });
+      const ctx = {
+        taskId, userId: Number(tenantId), user, orders: [], opts, batchId, dateStart, dateEnd,
+        createdAt: Date.now(), progressLog: [],
+        done: false, finished: false, phase: 'fetch',
+        timer: setTimeout(() => finalize(ctx, { ok: false, error: '等待本机助手抓取订单超时（15 分钟未收尾）' }), 15 * 60 * 1000),
+      };
+      PRICECHECK.set(taskId, ctx);
+      savePriceProgress(Number(tenantId), ctx);
+      appendPriceLog(ctx, `已下发核对任务：下单时间 ${dateStart} ~ ${dateEnd}，只抓取「待付款」订单…`);
+      // 后台执行不阻塞 HTTP：先给前端返回 taskId，让进度条能立刻铺开
+      Promise.resolve().then(async () => {
+        const sent = agentHub.send(tenantId, { type: 'price_fetch', taskId, dateStart, dateEnd });
         if (!sent) finalize(ctx, { ok: false, error: '下发失败：本机助手通道已断开' });
-      });
-      PRICECHECK.delete(taskId);
-      if (result.ok) return sendJson(res, 200, result);
-      return sendJson(res, 200, { ok: false, error: result.error });
+      }).catch((e) => { /* 与超时/收尾一致地落终态 */ finalize(ctx, { ok: false, error: '下发失败：' + String((e && e.message) || e) }); });
+      return sendJson(res, 200, { ok: true, taskId });
+    }
+
+    // 1688比价· 进度轮询：前端「开始核对」进度条 + 控制台面板实时读
+    if (method === 'GET' && p === '/api/price-check/progress') {
+      if (!canPriceCheck) return denyPriceCheck();
+      return sendJson(res, 200, { ok: true, progress: PRICE_PROGRESS.get(Number(tenantId)) || null });
     }
 
     // ── 1688比价· 到1688打备注上色（把最近一批还没上色的判定行下发给助手逐单打备注染色）──
@@ -5192,12 +5286,17 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 200, { error: '本机助手未连接：请先在本机启动「催收小助手」并绑定后才可上色' });
       }
       const rows = await db.query(
-        'SELECT id, order_id, verdict, memo_text FROM price_check WHERE user_id = ? AND applied_at IS NULL AND memo_text <> \'\' ORDER BY id ASC LIMIT 500',
+        'SELECT id, order_id, order_time, verdict, memo_text FROM price_check WHERE user_id = ? AND applied_at IS NULL AND memo_text <> \'\' ORDER BY id ASC LIMIT 500',
         [tenantId]
       );
       if (!rows.length) return sendJson(res, 200, { ok: false, error: '没有待上色的核对结果（先点「开始核对」生成判定，且已上色的会自动跳过）' });
       const targetRows = rows;
       const orders = rows.map((r) => ({ orderId: String(r.order_id), verdict: r.verdict || 'blue', memoText: r.memo_text || '' }));
+      // 上色也要用同一套页面筛选定位订单：把这批订单的下单时间范围下发给助手
+      const days = rows.map((r) => String(r.order_time || '').slice(0, 10))
+        .filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d)).sort();
+      const dateStart = days[0] || '';
+      const dateEnd = days[days.length - 1] || '';
       const taskId = 'A' + Date.now().toString(36) + Math.floor(Math.random() * 1e4).toString(36);
       const result = await new Promise((resolve) => {
         const ctx = {
@@ -5206,7 +5305,7 @@ const server = http.createServer(async (req, res) => {
           timer: setTimeout(() => finalize(ctx, { ok: false, error: '等待本机助手上色超时（30 分钟未收尾）' }), 30 * 60 * 1000),
         };
         PRICECHECK.set(taskId, ctx);
-        const sent = agentHub.send(tenantId, { type: 'price_apply', taskId, orders });
+        const sent = agentHub.send(tenantId, { type: 'price_apply', taskId, orders, dateStart, dateEnd });
         if (!sent) finalize(ctx, { ok: false, error: '下发失败：本机助手通道已断开' });
       });
       PRICECHECK.delete(taskId);
