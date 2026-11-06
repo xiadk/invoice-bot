@@ -40,27 +40,75 @@ async function execFrame(frame, code, timeoutMs, tag) {
   }
 }
 
-/** 递归遍历 mainFrame 的帧，找第一个能在其中看到 order-item 的（即订单列表所在的子 iframe） */
+// 帧探测脚本：自包含，不往页面里写 window.__pf（避免在无关帧留下副作用）。
+// ⚠ v0.3.46 修：旧版用 !!document.querySelector("order-item") 做判定，但 order-item
+//   挂在 shadowRoot 里（参见文件头注释与 scripts/price1688-scrape-harness.js 的
+//   orderWrap.setShadow([...])），querySelector 按 DOM 规范不穿透 shadowRoot，
+//   于是帧永远找不到 → 页面明明已打开却卡 3×60 秒后报「订单列表未渲染」。
+//   这里改用与抓取阶段 INJECT.deepAll 同口径的下钻查找。
+const PROBE_FRAME = `(function(){
+  var found = false, stack = [document];
+  while (stack.length && !found) {
+    var root = stack.pop();
+    var els; try { els = root.querySelectorAll('*'); } catch (e) { continue; }
+    for (var i = 0; i < els.length; i++) {
+      var el = els[i];
+      if (el.tagName === 'ORDER-ITEM') { found = true; break; }
+      if (el.shadowRoot) stack.push(el.shadowRoot);
+    }
+  }
+  // 页面特征：列表页本身（含 0 单空态）。主 frame 的 URL 也带 buyer-order-list，
+  // 所以弱命中要排除 depth=0，避免抢在真正承载订单的子 iframe 前面。
+  var page = /buyer-order-list|trade-order-list|waitbuyerpay/.test(location.href)
+    || !!document.querySelector('q-pagination, .order-list, [class*="order-empty"], [class*="empty-order"]');
+  return { items: found ? 1 : 0, page: !!page };
+})()`;
+
+/** 单帧探测超时：旧版 3s × 遍历预算 4s，一个卡住的无关帧就能截断整轮 */
+const PROBE_TIMEOUT = 1500;
+
+/**
+ * 递归遍历 mainFrame 的所有帧，找订单列表所在的子 iframe。
+ * 返回 { frame, probes }：probes 是每帧的探测结果，供线上日志定位「页面在哪、为什么没命中」。
+ *
+ * 命中优先级：① 帧里真有 ORDER-ITEM（强命中）→ ② 页面是列表页但 0 单（弱命中，排除主 frame）。
+ * 同优先级取 depth 更深的（订单渲染在子 iframe）。
+ * 不再按 1688.com 域名过滤 —— about:blank / srcdoc 的 iframe 也要探。
+ */
 async function findOrderFrame(wc, timeoutMs) {
   const t0 = Date.now();
-  const walk = async (f) => {
-    if (Date.now() - t0 > timeoutMs) return null;
+  const probes = [];
+  const walk = async (f, depth) => {
+    if (Date.now() - t0 > timeoutMs) return;
     let url = '', kids = [];
-    try { url = String(f.url || ''); kids = f.frames || []; } catch (e) { /* frame 可能已销毁 */ }
-    // 只探测 1688 域内的帧，别去戳登录页等无关 frame
-    if (/1688\.com/i.test(url)) {
+    try { url = String(f.url || ''); kids = f.frames || []; } catch (e) { return; }
+    // 只排除登录页，其余帧一律探测（含 about:blank / 空 URL）
+    if (!/login\.1688\.com|signin|login\.taobao\.com/i.test(url)) {
+      let r = null, timer = null;
       try {
-        const has = await Promise.race([
-          f.executeJavaScript('!!document.querySelector("order-item")', false),
-          new Promise((r) => setTimeout(() => r(false), 3000)),
+        r = await Promise.race([
+          Promise.resolve().then(() => f.executeJavaScript(PROBE_FRAME, false)),
+          new Promise((res) => { timer = setTimeout(() => res(null), PROBE_TIMEOUT); }),
         ]);
-        if (has) return f;
-      } catch (e) { /* 该帧不可用，继续 */ }
+      } catch (e) { /* 帧已销毁或不可执行 */ }
+      finally { if (timer) clearTimeout(timer); }
+      probes.push({
+        f, url, depth,
+        items: r ? Number(r.items) || 0 : 0,
+        page: !!(r && r.page),
+        err: !r,
+      });
     }
-    for (const c of kids) { const r = await walk(c); if (r) return r; }
-    return null;
+    for (const c of kids) {
+      if (Date.now() - t0 > timeoutMs) return;
+      await walk(c, depth + 1);
+    }
   };
-  try { return await walk(wc.mainFrame); } catch (e) { return null; }
+  try { await walk(wc.mainFrame, 0); } catch (e) { /* 帧树遍历异常，用已收集的结果判定 */ }
+  const byDepth = (a, b) => b.depth - a.depth;
+  const strong = probes.filter((p) => p.items > 0).sort(byDepth)[0];
+  const weak = probes.filter((p) => p.page && p.depth > 0).sort(byDepth)[0];
+  return { frame: (strong || weak || {}).f || null, probes };
 }
 
 // ── 注入 helper（移植 Python browser_operator.py 的 __findInShadow 等）──
@@ -297,18 +345,32 @@ async function openPendingList(api, win) {
   for (let retry = 0; retry < 3; retry++) {
     try {
       await Promise.race([wc.loadURL(ORDER_LIST_URL), sleep(45000)]);
-    } catch (e) { /* SPA 常见：did-finish-load 迟迟不触发，继续按 frame 探测 */ }
+    } catch (e) {
+      api.log('页面 loadURL 未确认完成（SPA 常见），按帧探测继续');
+    }
     // 等订单列表所在子 iframe 出现（未登录会长时间停在登录态，判超时）
     let frame = null;
+    let lastBrief = '';
     const t0 = Date.now();
     while (Date.now() - t0 < 60000) {
-      frame = await findOrderFrame(wc, 4000);
+      const r = await findOrderFrame(wc, 15000);
+      // 帧树摘要只在变化时打，避免 60 秒里刷几十条重复日志；线上据此判断「页面在哪、为何没命中」
+      const brief = r.probes.map((p) => `${p.depth}:${p.items > 0 ? 'H' : p.page ? 'P' : p.err ? 'E' : '-'}`).join(',');
+      if (brief !== lastBrief) {
+        api.log(`帧探测 ${r.probes.length} 个 [${brief.slice(0, 90)}] H=有订单 P=列表页 E=超时`);
+        if (r.probes.length) {
+          api.log('帧URL ' + r.probes.slice(0, 3).map((p) =>
+            `${p.depth} ${String(p.url).replace(/^https?:\/\//, '').slice(0, 42)}`).join(' | '));
+        }
+        lastBrief = brief;
+      }
+      frame = r.frame;
       if (frame) {
-        // 注入 helper 后探一探 order-item 是否真的渲染出来了
+        // 注入 helper 复核：n >= 0 即列表页就绪（n=0 是「今天没有待付款订单」，正常收尾）
         try {
           const n = await Promise.race([
             frame.executeJavaScript(INJECT + '; window.__pf.deepAll(document).filter(function(e){return e.tagName==="ORDER-ITEM";}).length', true),
-            new Promise((r) => setTimeout(() => r(-1), 8000)),
+            new Promise((res) => setTimeout(() => res(-1), 8000)),
           ]);
           if (Number(n) >= 0) {
             api.log(`订单列表已加载（本页 ${n} 单）`);
@@ -320,7 +382,7 @@ async function openPendingList(api, win) {
       await sleep(1500);
     }
     lastErr = '订单列表未渲染（可能未登录 1688 或页面改版）';
-    api.log('订单列表未出现，刷新重试…');
+    api.log(`订单列表未出现，刷新重试…（第 ${retry + 1}/3 次）`);
     try { await wc.reload(); } catch (e) { /* 忽略 */ }
     await sleep(3000);
   }
