@@ -1001,6 +1001,7 @@ async function migrate(conn, dbName) {
       "  `sku` VARCHAR(64) NOT NULL COMMENT '商品SKU（= 牵牛花 goodsId，19 位长数字用文本存储）'," +
       "  `goods_name` VARCHAR(512) NOT NULL DEFAULT '' COMMENT '商品名称（goodsName）'," +
       "  `image_url` VARCHAR(512) DEFAULT NULL COMMENT '商品主图（picUrl）'," +
+      "  `supplier_link` VARCHAR(512) DEFAULT NULL COMMENT '渠道商品链接（channelGoods.detailUrl，detail.1688.com/offer，1688比价匹配键）'," +
       "  `purchase_price` DECIMAL(12,2) NOT NULL DEFAULT 0 COMMENT '采购价（purchasePrice）'," +
       "  `available_stock` INT NOT NULL DEFAULT 0 COMMENT '可用库存（inStoreValidStockQty）'," +
       "  `transit_stock` INT NOT NULL DEFAULT 0 COMMENT '在途库存（inTransitQty）'," +
@@ -1020,6 +1021,22 @@ async function migrate(conn, dbName) {
   // 采购状态码（v0.2.84）：同步会分别拉「正常采购(1)」与「已停采(2)」两轮，
   // 光靠 purchaseStatusDesc 中文文案判断停采不稳，单独存状态码供统计/筛选使用。
   if (await tableExists('brand_product')) {
+    // 渠道商品链接（v0.3.50）：牵牛花接口返回 channelGoods.detailUrl，之前没解析持久化，
+    // 1688 比价按它做 supplier_link 精确匹配。已有库补列 + 建索引 + 从个人补货行回填一份。
+    if (!(await colExists('brand_product', 'supplier_link'))) {
+      await q("ALTER TABLE `brand_product` ADD COLUMN `supplier_link` VARCHAR(512) DEFAULT NULL COMMENT '渠道商品链接（detail.1688.com/offer，1688比价匹配键）' AFTER `image_url`");
+    }
+    if (await colExists('product_item', 'supplier_link') && await colExists('brand_product', 'supplier_link')) {
+      await q(
+        'UPDATE brand_product bp JOIN (' +
+        '  SELECT brand_id, sku, MAX(NULLIF(supplier_link, \'\')) AS v FROM product_item WHERE supplier_link IS NOT NULL AND supplier_link <> \'\' GROUP BY brand_id, sku' +
+        ') m ON m.brand_id = bp.brand_id AND m.sku = bp.sku ' +
+        'SET bp.supplier_link = m.v WHERE (bp.supplier_link IS NULL OR bp.supplier_link = \'\') AND m.v IS NOT NULL'
+      ).catch(() => {});
+    }
+    if (!(await idxExists('brand_product', 'idx_bp_supplier_link'))) {
+      await q('ALTER TABLE `brand_product` ADD INDEX `idx_bp_supplier_link` (`supplier_link`)');
+    }
     if (!(await colExists('brand_product', 'purchase_status_code'))) {
       await q(
         "ALTER TABLE `brand_product` ADD COLUMN `purchase_status_code` TINYINT NOT NULL DEFAULT 0 " +

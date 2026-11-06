@@ -2229,9 +2229,13 @@
           <el-tag v-if="price1688.range && price1688.range.length === 2" size="small" type="info" style="margin-right:8px">
             下单时间 {{ price1688.range[0] }} ~ {{ price1688.range[1] }}
           </el-tag>
+          <el-button size="small" :disabled="price1688.running" @click="openUpload('products')"
+                     title="上传「前置仓补货参考批量导出」Excel 作为核对的目标价来源：目标价取文件里「采购单价(基础单位)」，匹配靠供应商链接/名称/规格。导入后「开始核对」才可点。">导入补货参考文件</el-button>
           <el-button size="small" :loading="price1688.running" type="primary"
-                     icon="el-icon-video-play" @click="runPrice1688()"
-                     title="先选择下单时间范围，再由本机助手抓取该范围内 1688 待付款订单 → 本页算出判定 → 助手去 1688 打备注上色。">开始核对</el-button>
+                     icon="el-icon-video-play" :disabled="!price1688.hasRef" @click="runPrice1688()"
+                     :title="price1688.hasRef
+                       ? '先选择下单时间范围，再由本机助手抓取该范围内 1688 待付款订单 → 按已导入的补货参考（优先）与商品同步（品牌商品按品名兜底）匹配目标价 → 助手去 1688 打备注上色。'
+                       : '尚无可用目标价：先点左上「导入补货参考文件」，或由管理员在本页「商品列表 → 商品同步」同步品牌商品后即可核对。'">开始核对</el-button>
           <el-button size="small" :loading="price1688.loading" @click="loadPrice1688()">刷新</el-button>
         </div>
 
@@ -5782,6 +5786,8 @@ const vm = new Vue({
         filterDlg: false, range: null,
         // 「开始核对」进度条 + 控制台（v0.3.45，参考 1688发票「发送催收消息」的任务进度卡）
         task: null,
+        // 是否已导入补货参考文件（v0.3.45）：没有就不给点「开始核对」
+        hasRef: false, refCount: 0,
       },
       // ── 商品售后（v0.3.25：商品名称/SKU + 数量 + 原因 + 状态 + 凭证）──
       af: {
@@ -6661,6 +6667,14 @@ const vm = new Vue({
       } catch (e) { this.$message.error('加载核对结果失败: ' + e.message); }
       finally { this.price1688.loading = false; }
     },
+    /** 是否已导入补货参考文件（决定「开始核对」可否点） */
+    async loadPriceRef() {
+      try {
+        const d = await this.api('/api/price-check/ref');
+        this.$set(this.price1688, 'refCount', (d && d.count) || 0);
+        this.$set(this.price1688, 'hasRef', (d && d.count) > 0);
+      } catch (e) { /* 忽略：保持当前开关 */ }
+    },
     runPrice1688() {
       if (this.price1688.running) return;
       // 先弹窗要求输入下单时间范围，确认后才下发（服务端只抓该范围内待付款订单）
@@ -6921,7 +6935,7 @@ const vm = new Vue({
       if (p === 'supplier') this.loadSuppliers();
       if (p === 'waybill') this.loadWaybills();
       if (p === 'replenishOrder') this.loadReplenishOrders();
-      if (p === 'price1688') this.loadPrice1688();
+      if (p === 'price1688') { this.loadPrice1688(); this.loadPriceRef(); }
       if (p === 'audit') this.loadOpLog();
       if (p === 'profit' || p === 'refund' || p === 'after' || p === 'pdd' || p === 'pddCollect'
           || p === 'qnhcfg' || p === 'refundalert') {
@@ -10389,7 +10403,8 @@ const vm = new Vue({
           const d = payload || {};
           let html = '';
           if (kind === 'products') {
-            html = `✓ 导入完成：<b>${d.total || 0}</b> 个商品（重复商品已按本次文件内容更新） · 本次总货值 <b>${this.yuan(d.totalValue)}</b>`;
+            html = `✓ 导入完成：<b>${d.total || 0}</b> 个商品（重复商品已按本次文件内容更新） · 本次总货值 <b>${this.yuan(d.totalValue)}</b>`
+              + (this.page === 'price1688' ? ' · <b>已可开始核对</b>' : '');
           } else if (kind === 'invoices') {
             const un = d.unmatched || [];
             html = `✓ 导入完成：新增 <b>${d.inserted || 0}</b> 行 · 更新 <b>${d.updated || 0}</b> 行`
@@ -10402,9 +10417,12 @@ const vm = new Vue({
           this.loadData();
           if (this.page === 'mapping') this.loadMapping();
           if (this.page === 'product') { this.loadProducts(); }
-          // 商品导入完成：询问是否进入补货（否=关闭弹框，是=打开补货界面）
+          // 商品导入完成：刷新「是否有补货参考」让 1688比价「开始核对」立即解锁。
+          // 有补货权限的才问「是否需要补货」；只有比价权限的用户直接收尾，别把人塞进没权限的补货页。
           if (kind === 'products') {
+            this.loadPriceRef();
             this.$nextTick(() => {
+              if (!this.canReplenish) { this.up.visible = false; return; }
               this.$confirm(`共导入 <b>${d.total || 0}</b> 个商品。是否需要补货？`, '导入完成', {
                 dangerouslyUseHTMLString: true,
                 confirmButtonText: '是，去补货', cancelButtonText: '否，稍后再说', type: 'success',

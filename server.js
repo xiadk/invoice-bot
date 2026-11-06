@@ -154,6 +154,33 @@ async function computeAndStorePrice({ user, tenantId, orders, opts, batchId, onP
 
   const runBatch = new Date().toISOString().replace(/\D/g, '').slice(0, 14);
   const brandId = Number(user.brand_id) || 1;
+  // 商品同步兜底（v0.3.50）：同品牌 brand_product 可当第二层目标价来源。
+  //   · 已持久化 supplier_link（channelGoods.detailUrl）的行 → 与补货参考同等参与链接精确匹配，按品牌主数据给目标价；
+  //   · 没有链接的行 → 只按品名子串兜底（matchTarget 的 _fallback 分支，见 lib/price-check.js）。
+  // 补货参考（product_item）按用户隔离、是用户自己谈的单，优先；品牌共享行按 sku 去重，避免与用户自己 SKU 重复。
+  // 指定了补货批次时不混入品牌行（用户明确只对比某批补货参考）；价格≤0 的给不出目标价，排除。
+  if (!batchId) {
+    let fbRows = [];
+    try {
+      fbRows = await db.query(
+        'SELECT sku, goods_name, purchase_price, sales_30d, supplier_link FROM brand_product WHERE brand_id = ? AND purchase_price > 0',
+        [brandId]
+      );
+    } catch (e) { fbRows = []; }
+    const ownedSku = new Set(); // 用户自己的补货参考 sku（product_item），品牌行不覆盖
+    for (const t of targets) if (t.sku) ownedSku.add(String(t.sku));
+    for (const b of fbRows) {
+      const link = String(b.supplier_link || '').trim();
+      const sku = String(b.sku || '');
+      if (ownedSku.has(sku)) continue; // 用户自已导过这个 SKU，以补货参考为准
+      targets.push({
+        sku, goods_name: String(b.goods_name || ''),
+        purchase_price: Number(b.purchase_price) || 0, sales_30d: Number(b.sales_30d) || 0,
+        supplier_name: String(b.goods_name || ''), supplier_spec: '', supplier_link: link, order_ratio: 1,
+        _fallback: !link, // 有链接→走主匹配；无链接→仅品名兜底
+      });
+    }
+  }
   const outOrders = [];
   const allRows = [];
   const summary = { blue: 0, yellow: 0, green: 0, unmatched: 0 };
@@ -4607,8 +4634,9 @@ const server = http.createServer(async (req, res) => {
       const up = new URL(req.url, 'http://localhost');
       const kp = up.searchParams.get('kind');
       const kind = kp === 'invoices' ? 'invoices' : kp === 'products' ? 'products' : 'orders';
-      // 商品列表导入（前置仓补货参考）随「商品列表」菜单权限放行
-      if (kind === 'products' && !canProduct) return denyProduct();
+      // 商品列表导入（前置仓补货参考）：随「商品列表」菜单权限放行；另为「1688比价」页的
+      // 导入按钮（v0.3.45）放行 —— 比价要拿补货参考当目标价，得让只有比价权限的用户也能导入。
+      if (kind === 'products' && !canProduct && !canPriceCheck) return denyProduct();
       const rawName = String(up.searchParams.get('name') || '').trim();
       const safeName = path.basename(rawName).replace(/[\\/:*?"<>|]+/g, '_').slice(-120)
         || (kind === 'invoices' ? 'invoices.xlsx' : kind === 'products' ? 'products.xlsx' : 'orders.xlsx');
@@ -5367,6 +5395,22 @@ const server = http.createServer(async (req, res) => {
     if (method === 'GET' && p === '/api/price-check/progress') {
       if (!canPriceCheck) return denyPriceCheck();
       return sendJson(res, 200, { ok: true, progress: PRICE_PROGRESS.get(Number(tenantId)) || null });
+    }
+
+    if (method === 'GET' && p === '/api/price-check/ref') {
+      if (!canPriceCheck) return denyPriceCheck();
+      // count = 可用目标数。补货参考（product_item，按用户）为主；商品同步的
+      // brand_product（品牌共享，仅按品名兜底匹配）也计入，让纯同步用户也能「开始核对」。
+      const pi = await db.query('SELECT COUNT(*) AS c FROM product_item WHERE user_id = ?', [tenantId]);
+      let bp = 0, bpPriced = 0;
+      try {
+        const bpCnt = await db.query('SELECT COUNT(*) AS c, SUM(purchase_price > 0) AS priced FROM brand_product WHERE brand_id = ?', [Number(user.brand_id) || 1]);
+        bp = Number(bpCnt[0] && bpCnt[0].c) || 0;
+        bpPriced = Number(bpCnt[0] && bpCnt[0].priced) || 0;
+      } catch (e) { bp = 0; bpPriced = 0; }
+      const productRef = Number(pi[0] && pi[0].c) || 0;
+      const count = productRef + bpPriced;
+      return sendJson(res, 200, { ok: true, count, hasRef: count > 0, productRef, brandRef: bpPriced < bp ? bpPriced : bp });
     }
 
     // ── 1688比价· 到1688打备注上色（把最近一批还没上色的判定行下发给助手逐单打备注染色）──

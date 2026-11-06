@@ -411,6 +411,7 @@ CREATE TABLE IF NOT EXISTS `brand_product` (
   `sku`             VARCHAR(64)   NOT NULL              COMMENT '商品SKU（= 牵牛花 goodsId）',
   `goods_name`      VARCHAR(512)  NOT NULL DEFAULT ''   COMMENT '商品名称（goodsName）',
   `image_url`       VARCHAR(512)  DEFAULT NULL          COMMENT '商品主图（picUrl）',
+  `supplier_link`   VARCHAR(512)  DEFAULT NULL          COMMENT '渠道商品链接（channelGoods.detailUrl，1688比价匹配键）',
   `purchase_price`  DECIMAL(12,2) NOT NULL DEFAULT 0    COMMENT '采购价（purchasePrice）',
   `available_stock` INT           NOT NULL DEFAULT 0    COMMENT '可用库存（inStoreValidStockQty）',
   `transit_stock`   INT           NOT NULL DEFAULT 0    COMMENT '在途库存（inTransitQty）',
@@ -435,7 +436,8 @@ CREATE TABLE IF NOT EXISTS `brand_product` (
   KEY `idx_bp_brand_scode` (`brand_id`, `purchase_status_code`),
   KEY `idx_bp_afa` (`brand_id`, `afa_goods_id`),
   KEY `idx_bp_jd` (`brand_id`, `jd_sku_id`),
-  KEY `idx_bp_sku` (`sku`)
+  KEY `idx_bp_sku` (`sku`),
+  KEY `idx_bp_supplier_link` (`supplier_link`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   COMMENT='品牌商品（商品同步写入；同品牌全员共享）';
 
