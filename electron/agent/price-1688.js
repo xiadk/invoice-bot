@@ -21,7 +21,8 @@
  * 隐私边界：不接触、不保存 1688 账号密码/Cookie；登录态沿用发送窗口的分区。回传服务器的
  *   只有订单公开数据与「哪一单已上色」，不涉及敏感信息。
  *
- * v0.3.43 首版；v0.3.47 改为页面筛选 + 主 frame 抓取。
+ * v0.3.43 首版；v0.3.47 改为页面筛选 + 主 frame 抓取；v0.3.48 加商品行兜底解析与 DOM 诊断；
+ * v0.3.49 修 deepAll 漏遍历 root 自身 shadowRoot（ORDER-ITEM 内容全在其中，导致 90 单 0 明细）。
  */
 const sender = require('./sender');
 const orderExport = require('./order-export');
@@ -132,11 +133,22 @@ const INJECT = `
   };
   window.__pf.deepAll = function (root) {
     root = root || document;
-    var out = [], stack = [root];
+    var out = [], stack = [], seen = [];
+    function add(r) {
+      if (!r) return;
+      for (var i = 0; i < seen.length; i++) { if (seen[i] === r) return; }
+      seen.push(r); stack.push(r);
+    }
+    add(root);
     while (stack.length) {
       var r = stack.pop();
+      // ⚠ v0.3.49：root 自身也是 shadow host 时（ORDER-ITEM 正是），必须把它自己的
+      //   shadowRoot 压栈。旧版只压「子元素」的，deepAll(ORDER-ITEM) 恒为空数组：
+      //   订单号靠 findAllInShadow 还能拿到（那个函数会查 root.shadowRoot），但商品明细、
+      //   下单时间、状态、价格全解析不到 → 90 单 products 全空、DOM 诊断也全 0。
+      add(r.shadowRoot);
       var els; try { els = r.querySelectorAll('*'); } catch (e) { continue; }
-      for (var i = 0; i < els.length; i++) { out.push(els[i]); if (els[i].shadowRoot) stack.push(els[i].shadowRoot); }
+      for (var i = 0; i < els.length; i++) { out.push(els[i]); add(els[i].shadowRoot); }
     }
     return out;
   };
@@ -188,6 +200,22 @@ const SCRAPE_ORDERS = `
       }
       var sm = /(待付款|待支付|等待买家付款|等待付款|交易关闭|交易成功|已付款|已发货|待收货|已取消|已关闭)/.exec(itText.join(' '));
       if (sm) order.status_text = sm[1];
+      // ⚠ v0.3.49：class 名也可能改版，用整单文本兜底下单时间与状态
+      //   （filterOrders 依赖 order_time 做日期过滤、依赖 status_text 排除非待付款）
+      var fullText = [];
+      for (var z2 = 0; z2 < all.length; z2++) {
+        var s3 = window.__pf.text(all[z2]).replace(/[ ]+/g, ' ').trim();
+        if (s3 && s3.length < 200) fullText.push(s3);
+      }
+      var joined = fullText.join(' ');
+      if (!order.order_time) {
+        var dm = /([0-9]{4}-[0-9]{2}-[0-9]{2}(?:[ ][0-9]{2}:[0-9]{2}(?::[0-9]{2})?)?)/.exec(joined);
+        if (dm) order.order_time = dm[1];
+      }
+      if (!order.status_text) {
+        var sm2 = /(待付款|待支付|等待买家付款|等待付款|交易关闭|交易成功|已付款|已发货|待收货|已取消|已关闭)/.exec(joined);
+        if (sm2) order.status_text = sm2[1];
+      }
       // 商品明细
       var entries = all.filter(function (e) { var c = String(e.className || ''); return c.indexOf('order-item-entry') >= 0; });
       for (var j = 0; j < entries.length; j++) {
@@ -335,6 +363,15 @@ const PROBE_DOM = `
     }
     var t = '';
     try { t = (it.innerText === undefined ? it.textContent : it.innerText) || ''; } catch (er) {}
+    // ⚠ v0.3.49：ORDER-ITEM 是 shadow host，host.innerText 天然为空；改从 all 收集短文本
+    if (!String(t).trim()) {
+      var frag = [];
+      for (var q = 0; q < all.length && frag.length < 14; q++) {
+        var s4 = window.__pf.text(all[q]).replace(/[ ]+/g, ' ').trim();
+        if (s4 && s4.length < 80 && frag.indexOf(s4) < 0) frag.push(s4);
+      }
+      t = frag.join(' | ');
+    }
     return {
       n: all.length, classes: names.slice(0, 24).join(','), classTotal: Object.keys(seen).length,
       links: links, text: String(t).replace(/[ ]+/g, ' ').trim().slice(0, 160)
