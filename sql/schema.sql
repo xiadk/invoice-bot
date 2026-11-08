@@ -401,9 +401,12 @@ CREATE TABLE IF NOT EXISTS `app_config` (
 
 -- ----------------------------------------------------------------------------
 -- brand_product —— 品牌商品主数据（「商品同步」写入；同品牌方全员共享）
---   一个品牌方一套商品，品牌内所有用户看到的是同一份数据（采购价/库存/在途/销量/状态/主图）。
---   数据源：牵牛花 前置仓补货参考（store-warehouse/page-query），字段映射见 lib/qnh.js。
---   唯一键 (brand_id, sku)：重复同步按品牌+SKU 覆盖更新。
+--   一个品牌方一套商品，品牌内所有用户看到的是同一份数据（采购价/库存/在途/建议量/销量/状态/主图）。
+--   ⚠ v0.3.50 后：采购价 / 可用库存 / 在途库存 / 建议量 这四类字段的**唯一权威表就是本表**，
+--      「商品同步」与「补货菜单导入前置仓补货参考文件」都写这里，页面/比价/补货单一律只读这里，
+--      不再从 product_item 取（个人补货行只保留批次、来源文件、采购状态、销量、供应商维度）。
+--   数据源：牵牛花 前置仓补货参考（store-warehouse/page-query）或本地导入文件，字段映射见 lib/qnh.js / lib/products.js。
+--   唯一键 (brand_id, sku)：重复同步 / 重复导入按品牌+SKU 覆盖更新；同步不碰 suggest_qty，导入会带建议量。
 -- ----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS `brand_product` (
   `id`              BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -411,9 +414,11 @@ CREATE TABLE IF NOT EXISTS `brand_product` (
   `sku`             VARCHAR(64)   NOT NULL              COMMENT '商品SKU（= 牵牛花 goodsId）',
   `goods_name`      VARCHAR(512)  NOT NULL DEFAULT ''   COMMENT '商品名称（goodsName）',
   `image_url`       VARCHAR(512)  DEFAULT NULL          COMMENT '商品主图（picUrl）',
-  `purchase_price`  DECIMAL(12,2) NOT NULL DEFAULT 0    COMMENT '采购价（purchasePrice）',
-  `available_stock` INT           NOT NULL DEFAULT 0    COMMENT '可用库存（inStoreValidStockQty）',
-  `transit_stock`   INT           NOT NULL DEFAULT 0    COMMENT '在途库存（inTransitQty）',
+  `supplier_link`   VARCHAR(512)  DEFAULT NULL          COMMENT '渠道商品链接（channelGoods.detailUrl，1688比价匹配键）',
+  `purchase_price`  DECIMAL(12,2) NOT NULL DEFAULT 0    COMMENT '采购价（purchasePrice / 补货参考文件「采购单价(基础单位)」）',
+  `available_stock` INT           NOT NULL DEFAULT 0    COMMENT '可用库存（inStoreValidStockQty / 补货参考文件「可用库存」）',
+  `transit_stock`   INT           NOT NULL DEFAULT 0    COMMENT '在途库存（inTransitQty / 补货参考文件「在途库存」）',
+  `suggest_qty`     INT           NOT NULL DEFAULT 0    COMMENT '建议量（基础单位，补货参考文件「建议量(基础单位)」；商品同步不写此列）',
   `purchase_status` VARCHAR(32)   NOT NULL DEFAULT ''   COMMENT '采购状态（purchaseStatusDesc）',
   `purchase_status_code` TINYINT  NOT NULL DEFAULT 0    COMMENT '采购状态码（接口 purchaseStatuses：1=正常采购 2=已停采）',
   `sales_30d`       INT           NOT NULL DEFAULT 0    COMMENT '30天销量（sale30Num）',
@@ -435,7 +440,8 @@ CREATE TABLE IF NOT EXISTS `brand_product` (
   KEY `idx_bp_brand_scode` (`brand_id`, `purchase_status_code`),
   KEY `idx_bp_afa` (`brand_id`, `afa_goods_id`),
   KEY `idx_bp_jd` (`brand_id`, `jd_sku_id`),
-  KEY `idx_bp_sku` (`sku`)
+  KEY `idx_bp_sku` (`sku`),
+  KEY `idx_bp_supplier_link` (`supplier_link`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   COMMENT='品牌商品（商品同步写入；同品牌全员共享）';
 
@@ -443,6 +449,10 @@ CREATE TABLE IF NOT EXISTS `brand_product` (
 -- product_item —— 商品列表（前置仓补货参考批量导出导入；按用户隔离）
 --   商品SKU 为 19 位长数字，按 VARCHAR 文本存储（禁止数值类型，防精度丢失）
 --   重复导入按 (user_id, sku) 覆盖更新（与发票/订单导入同一惯例）
+--   ⚠ 2026-11-08 统一数据源：采购价 / 可用库存 / 在途库存 / 建议量 的唯一权威表是
+--     brand_product。本表这几列只为兼容老数据与「1688 比价目标价」按批次保留：
+--     补货菜单导入不再写它们（只写批次/来源/状态/销量/供应商维度），
+--     页面 / 比价分析 / 补货单实时库存 / 交易市场发布都从 brand_product 读。
 -- ----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS `product_item` (
   `id`              BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -451,12 +461,12 @@ CREATE TABLE IF NOT EXISTS `product_item` (
   `sku`             VARCHAR(64)   NOT NULL              COMMENT '商品SKU（文本存储）',
   `goods_name`      VARCHAR(512)  NOT NULL DEFAULT ''   COMMENT '商品名称',
   `image_url`       VARCHAR(512)  DEFAULT NULL          COMMENT '商品主图（按品牌商品补）',
-  `purchase_price`  DECIMAL(12,2) NOT NULL DEFAULT 0    COMMENT '商品采购价（元，取「采购单价(基础单位)」）',
-  `available_stock` INT           NOT NULL DEFAULT 0    COMMENT '可用库存（门店仓口径）',
-  `transit_stock`   INT           NOT NULL DEFAULT 0    COMMENT '在途库存（门店仓口径）',
+  `purchase_price`  DECIMAL(12,2) NOT NULL DEFAULT 0    COMMENT '采购价（历史列；补货菜单导入不再写，仅1688比价页专用导入写目标价）',
+  `available_stock` INT           NOT NULL DEFAULT 0    COMMENT '可用库存（历史列，权威值在 brand_product）',
+  `transit_stock`   INT           NOT NULL DEFAULT 0    COMMENT '在途库存（历史列，权威值在 brand_product）',
   `purchase_status` VARCHAR(16)   NOT NULL DEFAULT ''   COMMENT '采购状态（正常采购/停止采购，原样存导出文件的值）',
   `sales_30d`       INT           NOT NULL DEFAULT 0    COMMENT '30天总销量',
-  `suggest_qty`     INT           NOT NULL DEFAULT 0    COMMENT '建议量（基础单位，来自补货参考文件的「建议量(基础单位)」列）',
+  `suggest_qty`     INT           NOT NULL DEFAULT 0    COMMENT '建议量（历史列，权威值在 brand_product.suggest_qty）',
   `qht_goods_id`    VARCHAR(64)   DEFAULT NULL          COMMENT '关联的齐货通商品ID（goodsId，用于实时取价与加购）',
   `afa_goods_id`    VARCHAR(64)   DEFAULT NULL          COMMENT '关联的城配速达商品ID（goodsId，用于实时取价与加购）',
   `jd_sku_id`       VARCHAR(64)   DEFAULT NULL          COMMENT '关联的京东万商 skuId（b.jd.com 商品ID，用于取万商价）',

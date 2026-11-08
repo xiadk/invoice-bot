@@ -1001,9 +1001,11 @@ async function migrate(conn, dbName) {
       "  `sku` VARCHAR(64) NOT NULL COMMENT '商品SKU（= 牵牛花 goodsId，19 位长数字用文本存储）'," +
       "  `goods_name` VARCHAR(512) NOT NULL DEFAULT '' COMMENT '商品名称（goodsName）'," +
       "  `image_url` VARCHAR(512) DEFAULT NULL COMMENT '商品主图（picUrl）'," +
-      "  `purchase_price` DECIMAL(12,2) NOT NULL DEFAULT 0 COMMENT '采购价（purchasePrice）'," +
-      "  `available_stock` INT NOT NULL DEFAULT 0 COMMENT '可用库存（inStoreValidStockQty）'," +
-      "  `transit_stock` INT NOT NULL DEFAULT 0 COMMENT '在途库存（inTransitQty）'," +
+      "  `supplier_link` VARCHAR(512) DEFAULT NULL COMMENT '渠道商品链接（channelGoods.detailUrl，detail.1688.com/offer，1688比价匹配键）'," +
+      "  `purchase_price` DECIMAL(12,2) NOT NULL DEFAULT 0 COMMENT '采购价（purchasePrice / 补货参考文件采购单价）'," +
+      "  `available_stock` INT NOT NULL DEFAULT 0 COMMENT '可用库存（inStoreValidStockQty / 补货参考文件）'," +
+      "  `transit_stock` INT NOT NULL DEFAULT 0 COMMENT '在途库存（inTransitQty / 补货参考文件）'," +
+      "  `suggest_qty` INT NOT NULL DEFAULT 0 COMMENT '建议量（基础单位，补货参考文件；商品同步不写此列）'," +
       "  `purchase_status` VARCHAR(32) NOT NULL DEFAULT '' COMMENT '采购状态（purchaseStatusDesc）'," +
       "  `purchase_status_code` TINYINT NOT NULL DEFAULT 0 COMMENT '采购状态码（接口 purchaseStatuses：1=正常采购 2=已停采）'," +
       "  `sales_30d` INT NOT NULL DEFAULT 0 COMMENT '30天销量（sale30Num）'," +
@@ -1020,6 +1022,22 @@ async function migrate(conn, dbName) {
   // 采购状态码（v0.2.84）：同步会分别拉「正常采购(1)」与「已停采(2)」两轮，
   // 光靠 purchaseStatusDesc 中文文案判断停采不稳，单独存状态码供统计/筛选使用。
   if (await tableExists('brand_product')) {
+    // 渠道商品链接（v0.3.50）：牵牛花接口返回 channelGoods.detailUrl，之前没解析持久化，
+    // 1688 比价按它做 supplier_link 精确匹配。已有库补列 + 建索引 + 从个人补货行回填一份。
+    if (!(await colExists('brand_product', 'supplier_link'))) {
+      await q("ALTER TABLE `brand_product` ADD COLUMN `supplier_link` VARCHAR(512) DEFAULT NULL COMMENT '渠道商品链接（detail.1688.com/offer，1688比价匹配键）' AFTER `image_url`");
+    }
+    if (await colExists('product_item', 'supplier_link') && await colExists('brand_product', 'supplier_link')) {
+      await q(
+        'UPDATE brand_product bp JOIN (' +
+        '  SELECT brand_id, sku, MAX(NULLIF(supplier_link, \'\')) AS v FROM product_item WHERE supplier_link IS NOT NULL AND supplier_link <> \'\' GROUP BY brand_id, sku' +
+        ') m ON m.brand_id = bp.brand_id AND m.sku = bp.sku ' +
+        'SET bp.supplier_link = m.v WHERE (bp.supplier_link IS NULL OR bp.supplier_link = \'\') AND m.v IS NOT NULL'
+      ).catch(() => {});
+    }
+    if (!(await idxExists('brand_product', 'idx_bp_supplier_link'))) {
+      await q('ALTER TABLE `brand_product` ADD INDEX `idx_bp_supplier_link` (`supplier_link`)');
+    }
     if (!(await colExists('brand_product', 'purchase_status_code'))) {
       await q(
         "ALTER TABLE `brand_product` ADD COLUMN `purchase_status_code` TINYINT NOT NULL DEFAULT 0 " +
@@ -1028,6 +1046,26 @@ async function migrate(conn, dbName) {
     }
     if (!(await idxExists('brand_product', 'idx_bp_brand_scode'))) {
       await q('ALTER TABLE `brand_product` ADD KEY `idx_bp_brand_scode` (`brand_id`, `purchase_status_code`)');
+    }
+    // 统一数据源（2026-11-08）：采购价 / 可用库存 / 在途库存 / 建议量的唯一权威表改为
+    // brand_product，补货菜单导入会按 (brand_id, sku) upsert 回这里；商品同步不写 suggest_qty，
+    // 所以导入的建议量不会被后续同步清零。老库补列 + 只在首次加列时回填一次历史建议量
+    // （不能在每次启动都回填：导入文件里合法的 0 会被旧值重新顶掉）。
+    if (!(await colExists('brand_product', 'suggest_qty'))) {
+      await q(
+        "ALTER TABLE `brand_product` ADD COLUMN `suggest_qty` INT NOT NULL DEFAULT 0 " +
+        "COMMENT '建议量（基础单位，补货参考文件；商品同步不写此列）' AFTER `transit_stock`"
+      );
+      if (await colExists('product_item', 'suggest_qty')) {
+        await q(
+          'UPDATE `brand_product` bp JOIN (' +
+          '  SELECT brand_id, sku, MAX(suggest_qty) AS v FROM `product_item` ' +
+          "  WHERE (source_file IS NULL OR source_file NOT LIKE '比价参考|%') AND suggest_qty > 0 " +
+          '  GROUP BY brand_id, sku' +
+          ') m ON m.brand_id = bp.brand_id AND m.sku = bp.sku ' +
+          'SET bp.suggest_qty = m.v WHERE bp.suggest_qty = 0 AND m.v > 0'
+        ).catch(() => {});
+      }
     }
   }
   // ── 商品关联补列（v0.2.87）────────────────────────────────────────────────

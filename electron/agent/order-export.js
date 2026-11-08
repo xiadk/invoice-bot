@@ -493,4 +493,8 @@ async function finishUpload(dlResult, m, api, ctx) {
   api.log(`✓ 服务器入库完成：新写入 ${imp.inserted != null ? imp.inserted : '?'} 单，跳过已有 ${imp.skipped != null ? imp.skipped : '?'} 单`);
 }
 
-module.exports = { runExport };
+module.exports = {
+  runExport,
+  // 「1688比价」复用同一套订单列表页筛选：主 frame + shadow DOM 穿透 + 日历起止 + 状态下拉 + 搜索
+  PAGE_HELPERS, exec, openOrderPage, setDateRange, pickSelect, sleep,
+};

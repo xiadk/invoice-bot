@@ -1926,10 +1926,27 @@
           <div class="form-tip" style="margin-top:6px">
             每个品牌方必须先用<b>它自己的牵牛花账号</b>登录一次，才能同步该品牌的商品（登录窗口在本机助手里弹出）。
           </div>
+          <!-- 同步进度（v0.3.50）：后端改异步任务，这里按页实时刷新；任务结束后保留终态供查看 -->
+          <div v-if="product.syncProgress && (product.syncing || !product.syncProgress.running)"
+               style="margin-top:12px;padding:10px 12px;background:#f7f8fa;border-radius:4px">
+            <el-progress :percentage="Number(product.syncProgress.percent) || 0" :stroke-width="10"
+                         :status="product.syncProgress.phase === 'failed' ? 'exception' : (product.syncProgress.percent >= 100 ? 'success' : '')"></el-progress>
+            <div style="font-size:12px;color:#606266;margin-top:8px;line-height:1.7">
+              <div>{{ product.syncProgress.current || '正在准备同步…' }}</div>
+              <div v-if="product.syncProgress.total">
+                共 {{ product.syncProgress.total }} 个商品 · 新增 {{ product.syncProgress.inserted }}
+                / 更新 {{ product.syncProgress.updated }} / 失败 {{ product.syncProgress.failed }}
+              </div>
+              <div v-if="!product.syncing && product.syncProgress.message"
+                   :style="{ color: product.syncProgress.phase === 'failed' ? '#f56c6c' : '#67c23a' }">
+                {{ product.syncProgress.message }}
+              </div>
+            </div>
+          </div>
           <div slot="footer">
-            <el-button size="small" @click="product.syncDlg.visible = false">取消</el-button>
+            <el-button size="small" @click="product.syncDlg.visible = false">{{ product.syncing ? '后台继续' : '关闭' }}</el-button>
             <el-button size="small" type="primary" :loading="product.syncing"
-                       :disabled="!product.syncDlg.brandIds.length" @click="doSyncProducts">
+                       :disabled="!product.syncDlg.brandIds.length || product.syncing" @click="doSyncProducts">
               {{ product.syncing ? '同步中…请稍候' : '开始同步' }}
             </el-button>
           </div>
@@ -2222,15 +2239,50 @@
       <div v-show="page === 'price1688'" id="page-price1688">
         <div class="page-bar">
           <span class="pb-info">
-            核对 1688「待付款订单」的采购价：按补货参考里的<b>供应商商品</b>匹配目标采购单价，
+            核对 1688「待付款订单」的采购价：以本页导入的<b>补货单明细</b>「补货单价」为目标价，按 1688 商品链接匹配，
             差额/采购量异常标黄、新品标绿、合理标蓝；核完可一键到 1688 打备注上色。
           </span>
           <span style="flex:1"></span>
+          <el-tag v-if="price1688.range && price1688.range.length === 2" size="small" type="info" style="margin-right:8px">
+            下单时间 {{ price1688.range[0] }} ~ {{ price1688.range[1] }}
+          </el-tag>
+          <el-button size="small" :disabled="price1688.running" @click="openUpload('price_ref')"
+                     title="上传「补货单明细导出」Excel：目标价取「补货单价」，按 SKU 从商品同步补回 1688 链接匹配待付款订单；导入后本页核对只用这一批，不影响其它页面的导入。">导入补货单明细</el-button>
           <el-button size="small" :loading="price1688.running" type="primary"
-                     icon="el-icon-video-play" @click="runPrice1688()"
-                     title="需要本机助手已登录 1688。助手抓取待付款订单 → 本页算出判定 → 助手去 1688 打备注上色。">开始核对</el-button>
+                     icon="el-icon-video-play" :disabled="!price1688.hasRef" @click="runPrice1688()"
+                     :title="price1688.hasRef
+                       ? '先选择下单时间范围，再由本机助手抓取该范围内 1688 待付款订单 → 按本页导入的补货单明细（补货单价）匹配目标价 → 助手去 1688 打备注上色。'
+                       : '尚无可用目标价：先点左上「导入补货单明细」，或由管理员在本页「商品列表 → 商品同步」同步品牌商品后即可核对。'">开始核对</el-button>
           <el-button size="small" :loading="price1688.loading" @click="loadPrice1688()">刷新</el-button>
         </div>
+
+        <!-- 开始核对 · 下单时间筛选（必填：只抓该范围内、状态为待付款的订单） -->
+        <el-dialog title="开始核对 · 选择下单时间" :visible.sync="price1688.filterDlg" width="440px" top="12vh"
+                   :close-on-click-modal="false">
+          <div style="font-size:13px;line-height:1.9;color:#606266">
+            本机助手将在 1688 订单列表里按下单时间筛选，<b>只抓取「待付款」状态</b>的订单进行比价。
+            范围最长 31 天，起止日期均含当天。
+          </div>
+          <el-date-picker v-model="price1688.range" type="daterange" value-format="yyyy-MM-dd"
+                          range-separator="至" start-placeholder="开始日期" end-placeholder="结束日期"
+                          unlink-panels style="width:100%;margin-top:14px"></el-date-picker>
+          <div style="margin-top:10px;color:#909399;font-size:12px">提示：时间范围越大，抓取与翻页耗时越长。</div>
+          <span slot="footer">
+            <el-button size="small" @click="price1688.filterDlg = false">取消</el-button>
+            <el-button size="small" type="primary" :loading="price1688.running" @click="confirmPriceRun()">开始核对</el-button>
+          </span>
+        </el-dialog>
+
+        <!-- 开始核对 · 进度条 + 控制台输出（参考 1688发票「发送催收消息」任务进度卡） -->
+        <el-card v-if="price1688.task && price1688.task.visible" shadow="never" class="section-card" style="margin-bottom:12px" :body-style="{ padding: '14px 16px' }">
+          <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px">
+            <span style="font-size:13px">{{ priceTaskText }}</span>
+            <span class="spacer" style="flex:1"></span>
+            <el-button v-if="price1688.task.running" size="mini" type="text" @click="stopPriceNow">收起</el-button>
+          </div>
+          <el-progress :percentage="priceTaskPercent" :stroke-width="10" :show-text="false"></el-progress>
+          <div class="log-panel" ref="priceLogPanel" v-html="priceLogHtml"></div>
+        </el-card>
 
         <!-- 汇总卡 -->
         <div class="stat-row" v-if="price1688.orders.length">
@@ -2300,7 +2352,7 @@
         </el-card>
 
         <el-empty v-if="!price1688.loading && !price1688.orders.length"
-                  :description="'暂无核对结果。请先点「开始核对」由本机助手抓取 1688 待付款订单。'"></el-empty>
+                  :description="'暂无核对结果。请先点「开始核对」选择下单时间范围，由本机助手抓取该范围内的 1688 待付款订单。'"></el-empty>
       </div>
 
       <!-- ══════════ 系统管理 ══════════ -->
@@ -5064,6 +5116,20 @@ const UP_GUIDES = {
     accept: '.xlsx,.xls',
     html: '',
   },
+  // 仅 1688 比价页的导入按钮使用：目标价取「补货单价」，按 SKU 从商品同步补 1688 链接
+  price_ref: {
+    title: '导入补货单明细（1688 比价用）',
+    accept: '.xlsx,.xls',
+    html: `<div style="font-weight:600;margin-bottom:4px">上传「补货单明细导出」Excel</div>
+      <ul style="margin:4px 0 8px 18px;padding:0;line-height:1.7">
+        <li>表头需包含 <b>SKU</b>、<b>商品名称</b>、<b>规格</b>、<b>补货单价</b> 等列</li>
+        <li><b>目标价取本文件的「补货单价」</b>；系统按 SKU 从「商品同步」结果补回 1688 商品链接，
+            再用链接与待付款订单匹配；没有链接的商品无法匹配</li>
+        <li>导入后本页「开始核对」<b>只用这一批文件</b>作目标价，不混入商品同步的全量品牌商品</li>
+        <li>同一 SKU 若已由其它页面导入，本次会跳过、不覆盖，也不参与这一批核对</li>
+      </ul>
+      <div style="color:#5a7291">此导入只作用于 1688 比价页，不影响「商品列表」「补货」「导入订单」「导入发票」等其它页面的导入。</div>`,
+  },
 };
 
 // 操作日志：这些按钮文案不含有效信息（弹框的确定/取消等），不记入操作日志
@@ -5577,7 +5643,7 @@ const vm = new Vue({
         loading: false, rows: [], total: 0, page: 1, size: 20,
         draftQ: '', status: '', priceSort: '', selected: [],
         filteredValue: 0, latestBatch: null,
-        syncing: false, syncMsg: '',
+        syncing: false, syncMsg: '', syncTaskId: '', syncProgress: null,
         // 品牌方：普通用户固定看自己品牌；超管默认看全部，可用下拉收窄（''=全部品牌）
         brand: '', brandStats: [], brandAll: true,
         // 停采商品（同步第二轮拉的 purchase_status_code=2）货值与条数，统计卡用
@@ -5747,6 +5813,15 @@ const vm = new Vue({
         loading: false, running: false, runBatch: '', checkedAt: '',
         summary: { blue: 0, yellow: 0, green: 0, unmatched: 0 },
         orders: [], memoText: '',
+        // 「开始核对」先选下单时间范围（必填，最长 31 天）
+        filterDlg: false, range: null,
+        // 「开始核对」进度条 + 控制台（v0.3.45，参考 1688发票「发送催收消息」的任务进度卡）
+        task: null,
+        // 是否已导入补货参考文件（v0.3.45）：没有就不给点「开始核对」
+        hasRef: false, refCount: 0,
+        // 最近一次「补货单明细」导入批次：核对时带上，只用这批窄目标集，
+        // 避免把商品同步的全量品牌行混进来造成同 offer 多 SKU 歧义
+        refBatchId: null,
       },
       // ── 商品售后（v0.3.25：商品名称/SKU + 数量 + 原因 + 状态 + 凭证）──
       af: {
@@ -5934,6 +6009,38 @@ const vm = new Vue({
       const rows = [];
       for (const o of (this.price1688.orders || [])) for (const r of (o.rows || [])) rows.push(r);
       return rows;
+    },
+    // ── 1688比价「开始核对」进度条 + 控制台（与 1688发票「发送催收消息」同视觉）──
+    priceTaskPercent() {
+      const t = this.price1688.task; if (!t) return 0;
+      if (!t.running) return 100;
+      // 抓取阶段拿不到总订单数，按时长/数量爬升封顶 90；进入判定阶段固定 95，等价 applyPercent 的空总数口径
+      if (t.phase === 'calc') return 95;
+      if (t.startedAt) return Math.min(90, Math.round(15 + (Date.now() - t.startedAt) / 1000 * 2));
+      return 30;
+    },
+    priceTaskText() {
+      const t = this.price1688.task; if (!t) return '';
+      let s = t.running ? '正在核对' : '核对结束';
+      if (t.running && t.phase === 'calc') s = '正在核对（判定中）';
+      else if (t.running) s = '正在核对';
+      s += `：已抓取 ${t.fetched || 0} 单待付款订单`;
+      if (t.range && t.range.length === 2) s += `（下单时间 ${t.range[0]} ~ ${t.range[1]}）`;
+      if (t.running && t.phase === 'calc') s += '，正在计算 蓝/黄/绿 判定…';
+      if (!t.running && t.error) s += ' · ✗ ' + t.error;
+      if (!t.running && !t.error) s += ' · ✓ 已完成';
+      if (t.startedAt) s += ` · 已用${fmtDur(Date.now() - t.startedAt)}`;
+      return s;
+    },
+    priceLogHtml() {
+      const t = this.price1688.task; if (!t || !t.logs) return '';
+      if (!t.logs.length) return '<div style="color:#8a8f98">等待本机助手开始抓取…</div>';
+      return t.logs.slice(-80).map((l) => {
+        const bad = l.text.indexOf('✗') > -1 || l.text.indexOf('失败') > -1;
+        const good = l.text.indexOf('✓') > -1;
+        const color = bad ? '#ff8a80' : (good ? '#69f0ae' : '#b9f6ca');
+        return '<div style="color:' + color + '">' + this.esc(l.t) + ' ' + this.esc(l.text) + '</div>';
+      }).join('');
     },
     // 平台取价权限（v0.2.95）：登录齐货通 / 重新取价 / 配置阿发Token / 自动匹配阿发 / 阿发重新取价 / 选购加购
     //   这些操作要动平台真实账号，默认只给超级管理员，普通账号由超管在「菜单权限 → 平台取价」里授权
@@ -6565,6 +6672,7 @@ const vm = new Vue({
     document.removeEventListener('click', this.onLayoutClick, true);
     window.removeEventListener('scroll', this.onAnyScroll);
     if (this.agentTimer) { clearInterval(this.agentTimer); this.agentTimer = null; }
+    this.stopProductSyncPoll();
   },
   methods: {
     esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); },
@@ -6594,25 +6702,113 @@ const vm = new Vue({
       } catch (e) { this.$message.error('加载核对结果失败: ' + e.message); }
       finally { this.price1688.loading = false; }
     },
-    async runPrice1688() {
-      if (this.price1688.running) return;
-      this.$confirm('将由本机助手登录你的 1688 账号，抓取「待付款订单」进行比价核对。确定开始？', '开始 1688 比价', {
-        confirmButtonText: '开始', cancelButtonText: '取消', type: 'warning',
-      }).then(async () => {
-        this.price1688.running = true;
-        try {
-          const d = await this.dispatchPriceCheck();
-          if (d && d.ok) { this.$message.success('核对完成'); await this.loadPrice1688(); }
-          else if (d && d.error) this.$message.error(d.error);
-          else this.$message.error('未收到核对结果');
-        } catch (e) { this.$message.error('开始核对失败: ' + e.message); }
-        finally { this.price1688.running = false; }
-      }).catch(() => {});
+    /** 是否已导入补货参考文件（决定「开始核对」可否点） */
+    async loadPriceRef() {
+      try {
+        const d = await this.api('/api/price-check/ref');
+        this.$set(this.price1688, 'refCount', (d && d.count) || 0);
+        this.$set(this.price1688, 'hasRef', (d && d.count) > 0);
+        // 服务端返回最近一次比价专用导入批次：刷新页面后也能继续用窄目标集
+        if (d && d.refBatchId) this.$set(this.price1688, 'refBatchId', d.refBatchId);
+      } catch (e) { /* 忽略：保持当前开关 */ }
     },
-    async dispatchPriceCheck() {
+    runPrice1688() {
+      if (this.price1688.running) return;
+      // 先弹窗要求输入下单时间范围，确认后才下发（服务端只抓该范围内待付款订单）
+      this.$set(this.price1688, 'filterDlg', true);
+    },
+    /** 校验下单时间范围后下发核对任务（与服务端 /api/price-check/run 口径一致） */
+    confirmPriceRun() {
+      if (this.price1688.running) return;
+      const r = this.price1688.range;
+      const re = /^\d{4}-\d{2}-\d{2}$/;
+      if (!Array.isArray(r) || r.length !== 2 || !re.test(r[0]) || !re.test(r[1])) {
+        this.$message.warning('请先选择下单时间范围（开始日期 ~ 结束日期）'); return;
+      }
+      const days = (Date.parse(r[1] + 'T00:00:00') - Date.parse(r[0] + 'T00:00:00')) / 86400000 + 1;
+      if (!(days >= 1 && days <= 31)) {
+        this.$message.warning('下单时间范围需在 1~31 天内，且开始日期不能晚于结束日期'); return;
+      }
+      this.$set(this.price1688, 'filterDlg', false);
+      // 铺开进度条 + 控制台面板，开始后台轮询进度
+      this.$set(this.price1688, 'task', {
+        visible: true, running: true, phase: 'fetch', fetched: 0, logs: [], error: null,
+        startedAt: Date.now(), range: [r[0], r[1]],
+        // taskId/dispatched 用来区分「本次任务终态」与「服务端残留的上一次任务快照」
+        taskId: '', dispatched: false,
+      });
+      this.price1688.running = true;
+      this.startPricePoll();
+      const fail = () => { this.stopPricePoll(); this.price1688.running = false; const x = this.price1688.task; if (x) this.$set(x, 'visible', false); };
+      (async () => {
+        try {
+          const d = await this.dispatchPriceCheck(r);
+          // v0.3.45：该接口改为立即返回 taskId，真正的「核对完成」由轮询进度判定
+          if (d && d.error) { this.$message.error(d.error); fail(); return; }
+          if (d && d.ok) {
+            const x = this.price1688.task;
+            if (x) { this.$set(x, 'taskId', d.taskId || ''); this.$set(x, 'dispatched', true); }
+            this.$message.success('已下发核对任务');
+          } else { this.$message.error('未收到核对结果'); fail(); }
+        } catch (e) { this.$message.error('开始核对失败: ' + e.message); fail(); }
+        // 成功分支：running 留给轮询在真正结束时置回 false；继续轮询直到完成
+      })();
+    },
+    // ── 1688比价· 进度轮询（v0.3.45，参考 1688发票「发送催收消息」看板轮询）──
+    startPricePoll() {
+      this.stopPricePoll();
+      this._priceWasRunning = false;
+      this._pricePoll = setInterval(() => this.pollPrice1688(), 2000);
+    },
+    stopPricePoll() {
+      if (this._pricePoll) { clearInterval(this._pricePoll); this._pricePoll = null; }
+    },
+    async pollPrice1688() {
+      const t = this.price1688.task;
+      if (!t) return;
+      try {
+        const d = await this.api('/api/price-check/progress');
+        const pr = d && d.progress;
+        if (!pr) return; // 还没有快照（极小概率），保持乐观态
+        const wasRunning = this._priceWasRunning;
+        // 进度快照按 userId 只存一份：忽略上一次任务的终态，避免刚下发就被误判为「已完成」
+        if (t.taskId && pr.taskId && pr.taskId !== t.taskId) return;
+        this.$set(t, 'running', !!pr.running);
+        this.$set(t, 'phase', pr.phase || 'fetch');
+        this.$set(t, 'fetched', pr.fetched || 0);
+        this.$set(t, 'logs', pr.logs || []);
+        this.$set(t, 'error', pr.error || null);
+        this.$nextTick(() => { const el = this.$refs.priceLogPanel; if (el) el.scrollTop = 99999; });
+        if (!pr.running) {
+          this.$set(t, 'running', false);
+          this.stopPricePoll();
+          this.price1688.running = false;
+          // 完成即拉结果：即使任务在首次轮询前就结束（wasRunning=false），
+          // 只要本次已成功下发并确认是本次 taskId，也照样刷新列表，避免「核对完成却没数据」
+          if (wasRunning || t.dispatched) {
+            if (pr.error) this.$message.error('核对未完成：' + pr.error);
+            else { this.$message.success('核对完成'); await this.loadPrice1688(); }
+          }
+          // 结束后保留面板几秒展示日志，再自动收起
+          setTimeout(() => { const x = this.price1688.task; if (x) this.$set(x, 'visible', false); }, 8000);
+        }
+        this._priceWasRunning = pr.running;
+      } catch (e) { /* 忽略网络波动，下个节拍重试 */ }
+    },
+    stopPriceNow() {
+      // 用户手动收起进度面板（若想中断任务，本机助手弹窗里可「停止」）
+      this.stopPricePoll();
+      this.price1688.running = false;
+      if (this.price1688.task) this.$set(this.price1688.task, 'visible', false);
+    },
+    async dispatchPriceCheck(range) {
       return await this.api('/api/price-check/run', {
         method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ checkSales: true }),
+        body: JSON.stringify({
+          checkSales: true, dateStart: range[0], dateEnd: range[1],
+          // 只带本页导入的补货单明细批次：服务端据此只用这批窄目标集，不混入全量品牌商品
+          batchId: this.price1688.refBatchId || undefined,
+        }),
       });
     },
     async applyPrice1688() {
@@ -6780,7 +6976,7 @@ const vm = new Vue({
       if (p === 'supplier') this.loadSuppliers();
       if (p === 'waybill') this.loadWaybills();
       if (p === 'replenishOrder') this.loadReplenishOrders();
-      if (p === 'price1688') this.loadPrice1688();
+      if (p === 'price1688') { this.loadPrice1688(); this.loadPriceRef(); }
       if (p === 'audit') this.loadOpLog();
       if (p === 'profit' || p === 'refund' || p === 'after' || p === 'pdd' || p === 'pddCollect'
           || p === 'qnhcfg' || p === 'refundalert') {
@@ -10248,7 +10444,16 @@ const vm = new Vue({
           const d = payload || {};
           let html = '';
           if (kind === 'products') {
-            html = `✓ 导入完成：<b>${d.total || 0}</b> 个商品（重复商品已按本次文件内容更新） · 本次总货值 <b>${this.yuan(d.totalValue)}</b>`;
+            html = `✓ 导入完成：<b>${d.total || 0}</b> 个商品（重复商品已按本次文件内容更新） · 本次总货值 <b>${this.yuan(d.totalValue)}</b>`
+              + (this.page === 'price1688' ? ' · <b>已可开始核对</b>' : '');
+          } else if (kind === 'price_ref') {
+            const otherLink = (d.linkFilled || 0) - (d.link1688 || 0);
+            html = `✓ 导入完成：<b>${d.total || 0}</b> 行 · 新增 <b>${d.inserted || 0}</b> · 更新 <b>${d.updated || 0}</b>`
+              + ` · 跳过其它来源 <b>${d.skipped || 0}</b>`
+              + `<div style="margin-top:6px">按 SKU 回填 1688 链接 <b>${d.link1688 || 0}</b> 个`
+              + (otherLink > 0 ? `（另有 ${otherLink} 个其它渠道链接，不参与 1688 比价）` : '')
+              + `；目标价取本文件「补货单价」，本次核对只用这一批。</div>`
+              + (d.skipped ? `<div style="margin-top:4px;color:#b26a00">⚠ ${d.skipped} 个 SKU 已由其它页面导入，本次未覆盖，不参与这一批核对。</div>` : '');
           } else if (kind === 'invoices') {
             const un = d.unmatched || [];
             html = `✓ 导入完成：新增 <b>${d.inserted || 0}</b> 行 · 更新 <b>${d.updated || 0}</b> 行`
@@ -10261,15 +10466,24 @@ const vm = new Vue({
           this.loadData();
           if (this.page === 'mapping') this.loadMapping();
           if (this.page === 'product') { this.loadProducts(); }
-          // 商品导入完成：询问是否进入补货（否=关闭弹框，是=打开补货界面）
+          // 商品导入完成：刷新「是否有补货参考」让 1688比价「开始核对」立即解锁。
+          // 有补货权限的才问「是否需要补货」；只有比价权限的用户直接收尾，别把人塞进没权限的补货页。
           if (kind === 'products') {
+            this.loadPriceRef();
             this.$nextTick(() => {
+              if (!this.canReplenish) { this.up.visible = false; return; }
               this.$confirm(`共导入 <b>${d.total || 0}</b> 个商品。是否需要补货？`, '导入完成', {
                 dangerouslyUseHTMLString: true,
                 confirmButtonText: '是，去补货', cancelButtonText: '否，稍后再说', type: 'success',
               }).then(() => { this.up.visible = false; this.openReplenish(d.batchId, d.total); })
                 .catch(() => { this.up.visible = false; });
             });
+          }
+          // 比价专用导入：记下批次并刷新可用目标数，直接收尾（不弹「是否去补货」，不跳补货页）
+          if (kind === 'price_ref') {
+            this.$set(this.price1688, 'refBatchId', d.batchId || null);
+            this.loadPriceRef();
+            this.$nextTick(() => { this.up.visible = false; });
           }
         } else {
           this.up.result = { ok: false, html: '✗ ' + this.esc((payload && payload.error) || '导入失败') };
@@ -10375,31 +10589,71 @@ const vm = new Vue({
         }, 2500);
       } catch (e) { this.$message.error('发起登录失败: ' + e.message); }
     },
+    /**
+     * 商品同步（v0.3.50）：后端改成异步任务，这里只负责下发 + 轮询进度。
+     * 弹框关掉后任务仍在后台跑，轮询不中断，完成照样弹消息并刷新列表。
+     */
     async doSyncProducts() {
       if (this.product.syncing) return;
       const ids = (this.product.syncDlg.brandIds || []).filter((x) => Number(x) > 0);
       if (!ids.length) { this.$message.warning('请勾选要同步的品牌方'); return; }
       this.product.syncing = true;
-      this.product.syncMsg = '';
+      this.product.syncMsg = '正在准备同步…';
+      this.$set(this.product, 'syncProgress', {
+        taskId: '', running: true, phase: 'running', percent: 0,
+        current: '正在准备同步…', total: 0, inserted: 0, updated: 0, failed: 0,
+      });
       try {
         const d = await this.api('/api/admin/products/sync', {
           method: 'POST', headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ brandIds: ids }),
         });
-        if (d && d.ok) {
-          this.$message.success(d.message || '商品同步完成');
-          this.product.syncDlg.visible = false;
-          await this.loadProducts();
-          if (this.page === 'replenish') this.loadReplenish();
-        } else {
-          this.$message.error((d && d.message) || '商品同步失败');
+        if (!d || !d.ok) {
+          this.product.syncing = false;
+          this.product.syncMsg = (d && d.message) || '商品同步失败';
+          this.$message.error(this.product.syncMsg);
+          return;
         }
-        this.product.syncMsg = (d && d.message) || '';
+        this.$set(this.product, 'syncTaskId', d.taskId);
+        this.startProductSyncPoll();
       } catch (e) {
-        this.$message.error('商品同步请求失败: ' + e.message);
-      } finally {
         this.product.syncing = false;
+        this.product.syncMsg = '商品同步请求失败: ' + e.message;
+        this.$message.error(this.product.syncMsg);
       }
+    },
+    /** 商品同步进度轮询：下发后立刻拉一次，之后每 2 秒一次 */
+    startProductSyncPoll() {
+      this.stopProductSyncPoll();
+      this.pollProductSync();
+      this._productSyncPoll = setInterval(() => this.pollProductSync(), 2000);
+    },
+    stopProductSyncPoll() {
+      if (this._productSyncPoll) { clearInterval(this._productSyncPoll); this._productSyncPoll = null; }
+    },
+    async pollProductSync() {
+      const tid = this.product.syncTaskId;
+      if (!tid) return;
+      try {
+        const d = await this.api('/api/admin/products/sync/progress?taskId=' + encodeURIComponent(tid));
+        const pr = d && d.progress;
+        if (!pr) return;                              // 还没生成快照，保持乐观态
+        if (pr.taskId && pr.taskId !== tid) return;   // 忽略上一次任务的终态
+        this.$set(this.product, 'syncProgress', pr);
+        this.product.syncMsg = pr.current || pr.message || '';
+        if (!pr.running) {
+          this.stopProductSyncPoll();
+          this.product.syncing = false;
+          if (pr.phase === 'done') {
+            this.$message.success(pr.message || '商品同步完成');
+            await this.loadProducts();
+            if (this.page === 'replenish') this.loadReplenish();
+            await this.loadBrandsQnh();
+          } else {
+            this.$message.error(pr.message || pr.error || '商品同步失败');
+          }
+        }
+      } catch (e) { /* 忽略网络波动，下个节拍重试 */ }
     },
     togglePriceSort() {
       this.product.priceSort = this.product.priceSort === '' ? 'desc' : (this.product.priceSort === 'desc' ? 'asc' : '');

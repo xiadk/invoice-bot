@@ -76,8 +76,79 @@ const billing = require('./lib/billing');
 //   finishPriceFetch 在抓取收尾时跑判定 + 落 price_check，并把等待中的 HTTP 请求 resolve。
 const PRICECHECK = new Map();
 
-/** 对一批待付款订单跑判定并落 price_check（纯计算，不碰浏览器）。返回 { runBatch, summary, outOrders } */
-async function computeAndStorePrice({ user, tenantId, orders, opts, batchId }) {
+/**
+ * 归一化一条「1688 待付款订单」——修 0.3.43 起就存在的字段契约错位：
+ *   助手 electron/agent/price-1688.js 把商品明细放在 products，
+ *   而 lib/price-check.js 的 checkOrder() 只认 items（旧 POST /api/price-check 入口也是 items）。
+ *   不一致时 items 恒为 [] → 判定行 0 条 → price_check 一条不写 → 前端「核对完成」却没数据。
+ * 这里在服务端收口两侧：优先 items、兼容 products，明细字段与阈值都做类型清洗。
+ */
+function normalizePriceOrder(raw) {
+  const o = (raw && typeof raw === 'object') ? raw : {};
+  // 第一个非空值胜出：助手 0.3.47 用 products，旧入口用 items，页面改版后可能换别的键名
+  const pick = (obj, keys) => {
+    for (const k of keys) {
+      const v = obj[k];
+      if (v != null && String(v).trim() !== '') return v;
+    }
+    return '';
+  };
+  const src = (Array.isArray(o.items) && o.items.length) ? o.items
+    : (Array.isArray(o.products) && o.products.length) ? o.products
+      : (Array.isArray(o.entries) && o.entries.length) ? o.entries
+        : (Array.isArray(o.goods) && o.goods.length) ? o.goods
+          : (Array.isArray(o.orderEntries) ? o.orderEntries : []);
+  const items = src.filter((it) => it && typeof it === 'object').map((it) => ({
+    link: String(pick(it, ['link', 'url', 'href', 'supplier_link', 'offerUrl'])).slice(0, 512),
+    name: String(pick(it, ['name', 'title', 'productName', 'goods_name', 'item_name'])).slice(0, 512),
+    spec: String(pick(it, ['spec', 'skuInfo', 'specInfo', 'supplier_spec', 'sku_text'])).slice(0, 512),
+    unit_price: Number(pick(it, ['unit_price', 'price', 'actualUnitPrice', 'spec_price'])) || 0,
+    quantity: Number(pick(it, ['quantity', 'count', 'qty', 'amount'])) || 0,
+    entry_id: String(pick(it, ['entry_id', 'entryId', 'id', 'offerId'])),
+  }));
+  return {
+    order_id: String(pick(o, ['order_id', 'orderId', 'tradeId', 'id'])).trim().slice(0, 64),
+    order_time: String(pick(o, ['order_time', 'orderTime', 'gmtCreate', 'createTime'])).trim().slice(0, 64),
+    total_price: Number(o.total_price) || 0,
+    freight: Number(o.freight) || 0,
+    is_free_shipping: !!o.is_free_shipping,
+    status_text: String(pick(o, ['status_text', 'status', 'statusLabel', 'orderStatus'])).trim(),
+    items,
+  };
+}
+
+/** 抓取结果字段诊断：订单到了但明细为空时，日志要说清「几单有明细、首单有哪些字段」 */
+function summarizePriceOrders(rawOrders) {
+  const list = Array.isArray(rawOrders) ? rawOrders : [];
+  let withItems = 0, itemTotal = 0;
+  const firstKeys = [];
+  for (const o of list) {
+    if (!o || typeof o !== 'object') continue;
+    if (!firstKeys.length) firstKeys.push(...Object.keys(o).slice(0, 12));
+    // 与 computeAndStorePrice 的 usable 同口径：按归一化后真正可用的明细数统计
+    const n = normalizePriceOrder(o).items.length;
+    if (n) { withItems += 1; itemTotal += n; }
+  }
+  return { orders: list.length, withItems, itemTotal, firstKeys };
+}
+
+/** 阈值清洗：undefined 不能覆盖 DEFAULTS（Object.assign 会把默认阈值刷成 NaN） */
+function normalizePriceOpts(raw) {
+  const out = {};
+  const src = (raw && typeof raw === 'object') ? raw : {};
+  for (const k of Object.keys(priceCheck.DEFAULTS)) {
+    const v = src[k];
+    if (v === undefined || v === null || v === '') continue;
+    out[k] = (k === 'checkSales') ? !!v : (Number(v) || 0);
+  }
+  return out;
+}
+
+/** 对一批待付款订单跑判定并落 price_check（纯计算，不碰浏览器）。
+ *  返回 { runBatch, summary, outOrders, rowsWritten, skippedEmpty, ordersUsed }
+ *  ⚠ 这里的 product_item.purchase_price 是「1688 比价目标价」（用户按批次导入的补货单价，
+ *    个人隔离），与 brand_product 的商品主数据采购价是两套业务口径，不参与「统一数据源」改造。 */
+async function computeAndStorePrice({ user, tenantId, orders, opts, batchId, onProgress }) {
   let sql = 'SELECT id, sku, goods_name, purchase_price, sales_30d, supplier_name, supplier_spec, supplier_link, order_ratio FROM product_item WHERE user_id = ?';
   const tArgs = [tenantId];
   if (batchId) { sql += ' AND batch_id = ?'; tArgs.push(batchId); }
@@ -85,27 +156,68 @@ async function computeAndStorePrice({ user, tenantId, orders, opts, batchId }) {
 
   const runBatch = new Date().toISOString().replace(/\D/g, '').slice(0, 14);
   const brandId = Number(user.brand_id) || 1;
+  // 商品同步兜底（v0.3.50）：同品牌 brand_product 可当第二层目标价来源。
+  //   · 已持久化 supplier_link（channelGoods.detailUrl）的行 → 与补货参考同等参与链接精确匹配，按品牌主数据给目标价；
+  //   · 没有链接的行 → 只按品名子串兜底（matchTarget 的 _fallback 分支，见 lib/price-check.js）。
+  // 补货参考（product_item）按用户隔离、是用户自己谈的单，优先；品牌共享行按 sku 去重，避免与用户自己 SKU 重复。
+  // 指定了补货批次时不混入品牌行（用户明确只对比某批补货参考）；价格≤0 的给不出目标价，排除。
+  if (!batchId) {
+    let fbRows = [];
+    try {
+      fbRows = await db.query(
+        'SELECT sku, goods_name, purchase_price, sales_30d, supplier_link FROM brand_product WHERE brand_id = ? AND purchase_price > 0',
+        [brandId]
+      );
+    } catch (e) { fbRows = []; }
+    const ownedSku = new Set(); // 用户自己的补货参考 sku（product_item），品牌行不覆盖
+    for (const t of targets) if (t.sku) ownedSku.add(String(t.sku));
+    for (const b of fbRows) {
+      const link = String(b.supplier_link || '').trim();
+      const sku = String(b.sku || '');
+      if (ownedSku.has(sku)) continue; // 用户自已导过这个 SKU，以补货参考为准
+      targets.push({
+        sku, goods_name: String(b.goods_name || ''),
+        purchase_price: Number(b.purchase_price) || 0, sales_30d: Number(b.sales_30d) || 0,
+        supplier_name: String(b.goods_name || ''), supplier_spec: '', supplier_link: link, order_ratio: 1,
+        _fallback: !link, // 有链接→走主匹配；无链接→仅品名兜底
+      });
+    }
+  }
   const outOrders = [];
   const allRows = [];
   const summary = { blue: 0, yellow: 0, green: 0, unmatched: 0 };
+  const cleanOpts = normalizePriceOpts(opts);
+  const usable = (orders || []).map(normalizePriceOrder).filter((o) => o.items.length);
+  const skippedEmpty = (orders || []).length - usable.length;
 
-  for (const order of orders) {
-    const od = priceCheck.checkOrder(order, targets, opts);
+  for (let i = 0; i < usable.length; i += 1) {
+    const order = usable[i];
+    const od = priceCheck.checkOrder(order, targets, cleanOpts);
     outOrders.push({
       order_id: od.order_id, order_time: od.order_time,
       order_total: od.order_total, target_total: od.target_total,
       summary: od.summary, rows: od.rows,
     });
     for (const r of od.rows) {
+      // 判定层「未匹配」分支不带 paid_amount/price_diff/price_ratio 等列，目标价为 0 时
+      // price_ratio 还可能是 Infinity；mysql2 会把 undefined 当 NULL、Infinity 也写不进 DECIMAL，
+      // 结果整批 INSERT 报 "Column 'paid_amount' cannot be null" → 前端「计算失败、没数据」。
+      // 这里按表列定义统一兜底：数值列非有限数一律 0，字符串列按列宽截断。
+      const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
+      const str = (v, len) => String(v == null ? '' : v).slice(0, len);
       allRows.push([
-        tenantId, brandId, runBatch, batchId, r.order_id, r.order_time,
-        r.sku, r.goods_name, r.supplier_name, r.supplier_spec, r.supplier_link,
-        r.order_ratio, r.quantity, r.base_quantity, r.spec_price, r.target_price,
-        r.actual_price, r.freight_share, r.paid_amount, r.price_diff, r.price_ratio,
-        r.sales_30d, r.matched, r.verdict, r.reason, r.is_qty_too_high, r.memo_text,
+        tenantId, brandId, runBatch, batchId,
+        str(r.order_id, 64), str(r.order_time, 64),
+        str(r.sku, 64), str(r.goods_name, 512), str(r.supplier_name, 512),
+        str(r.supplier_spec, 512), str(r.supplier_link, 512),
+        num(r.order_ratio), num(r.quantity), num(r.base_quantity), num(r.spec_price),
+        num(r.target_price), num(r.actual_price), num(r.freight_share), num(r.paid_amount),
+        num(r.price_diff), num(r.price_ratio), num(r.sales_30d), num(r.matched),
+        str(r.verdict, 16), str(r.reason, 32), num(r.is_qty_too_high), str(r.memo_text, 2000),
       ]);
       summary[r.verdict] = (summary[r.verdict] || 0) + 1;
     }
+    if (typeof onProgress === 'function') onProgress(i + 1, usable.length, od.order_id);
   }
   if (allRows.length) {
     const CHUNK = 200;
@@ -119,7 +231,7 @@ async function computeAndStorePrice({ user, tenantId, orders, opts, batchId }) {
       );
     }
   }
-  return { runBatch, summary, outOrders };
+  return { runBatch, summary, outOrders, rowsWritten: allRows.length, skippedEmpty, ordersUsed: usable.length };
 }
 
 /** 抓取收尾：助手 price_fetch_done → 缓存订单跑判定落库 → 结束等待中的 HTTP 请求 */
@@ -127,16 +239,39 @@ async function onPriceFetchDone(ctx, msg) {
   ctx.done = true;
   try {
     if (!msg.ok || !ctx.orders || !ctx.orders.length) {
-      return finalize(ctx, { ok: false, error: msg.error || '未抓取到待付款订单' });
+      const range = (ctx.dateStart && ctx.dateEnd) ? `（${ctx.dateStart} ~ ${ctx.dateEnd} 内无待付款订单）` : '';
+      ctx._error = msg.error || ('未抓取到待付款订单' + range);
+      appendPriceLog(ctx, '✗ ' + ctx._error);
+      return finalize(ctx, { ok: false, error: ctx._error });
     }
+    ctx.phase = 'calc';
+    ctx.calcTotal = ctx.orders.length;
+    const diag = summarizePriceOrders(ctx.orders);
+    appendPriceLog(ctx, `✓ 抓取完成，共 ${ctx.orders.length} 单（${diag.withItems} 单含商品明细 / 共 ${diag.itemTotal} 条），正在计算判定…`);
     const opts = ctx.opts || {};
     const r = await computeAndStorePrice({
       user: ctx.user, tenantId: ctx.userId, orders: ctx.orders, opts, batchId: ctx.batchId,
+      onProgress: (i, n, orderId) => {
+        ctx.calcDone = i;
+        if (i === n || i % 5 === 0) appendPriceLog(ctx, `计算判定 ${i}/${n}${orderId ? ' · 订单 ' + orderId : ''}`);
+      },
     });
-    await logOp(ctx.user, 'price_check.run', { tenantId: ctx.userId, batchId: ctx.batchId, orders: ctx.orders.length, summary: r.summary });
+    // 抓到订单却一条判定行都没算出来：必须明确报错，不能再静默「核对完成」让前端空态
+    if (!r.rowsWritten) {
+      ctx._error = `抓取到 ${ctx.orders.length} 单，其中仅 ${diag.withItems} 单含商品明细（共 ${diag.itemTotal} 条），未生成判定行；首单字段：${diag.firstKeys.join(',') || '无'}（多为页面改版或抓取字段不匹配）`;
+      appendPriceLog(ctx, '✗ ' + ctx._error);
+      return finalize(ctx, { ok: false, error: ctx._error });
+    }
+    ctx._runBatch = r.runBatch;
+    await logOp(ctx.user, 'price_check.run', { tenantId: ctx.userId, batchId: ctx.batchId, orders: r.ordersUsed, summary: r.summary });
+    appendPriceLog(ctx,
+      `✓ 核对完成：合理 ${r.summary.blue} · 价格/采购量异常 ${r.summary.yellow} · 新品 ${r.summary.green} · 未匹配 ${r.summary.unmatched}` +
+      `（写入 ${r.rowsWritten} 行判定${r.skippedEmpty ? `，跳过 ${r.skippedEmpty} 单无商品明细` : ''}）`);
     return finalize(ctx, { ok: true, run_batch: r.runBatch, summary: r.summary, orders: r.outOrders });
   } catch (e) {
-    return finalize(ctx, { ok: false, error: '计算失败：' + String((e && e.message) || e) });
+    ctx._error = '计算失败：' + String((e && e.message) || e);
+    appendPriceLog(ctx, '✗ ' + ctx._error);
+    return finalize(ctx, { ok: false, error: ctx._error });
   }
 }
 
@@ -160,9 +295,94 @@ async function onPriceApplyDone(ctx, msg) {
 
 /** 结束任务并 resolve 等待中的 HTTP 响应；超时/收尾都走这里 */
 function finalize(ctx, payload) {
+  if (ctx.finished) return payload;
   ctx.finished = true;
+  ctx.finishedAt = new Date().toISOString();
+  ctx.phase = 'done';
+  ctx._error = payload.error || null;
+  ctx._runBatch = payload.run_batch || ctx._runBatch || '';
   if (ctx.timer) clearTimeout(ctx.timer);
-  return ctx.resolve(payload);
+  if (typeof ctx.resolve === 'function') ctx.resolve(payload);
+  // 终态快照：任务结束后前端仍能读到「核对结束」，直到它自己停止轮询
+  PRICECHECK.delete(ctx.taskId);
+  savePriceProgress(ctx.userId, ctx);
+  return payload;
+}
+
+// ── 1688比价· 进度快照（v0.3.45）：供前端「开始核对」进度条 + 控制台轮询，易失内存态 ──
+//   PRICECHECK 里跑完的 ctx 会被删除，前台轮询又要看得到，所以再存一份按 userId 的快照。
+const PRICE_PROGRESS = new Map();
+
+/** 当前未结束的 1688 比价任务（多任务取最新一个） */
+function priceCtxForUser(uid) {
+  let best = null;
+  for (const c of PRICECHECK.values()) {
+    if (c.userId === Number(uid) && !c.finished) {
+      if (!best || c.createdAt > best.createdAt) best = c;
+    }
+  }
+  return best;
+}
+
+function priceSnapshot(ctx) {
+  return {
+    taskId: ctx.taskId,
+    running: !ctx.finished,
+    phase: ctx.finished ? 'done' : (ctx.phase || 'fetch'),
+    fetched: ctx.orders ? ctx.orders.length : 0,
+    calcDone: ctx.calcDone || 0,
+    calcTotal: ctx.calcTotal || 0,
+    current: ctx.current || '',
+    logs: (ctx.progressLog || []).slice(-120),
+    error: ctx._error || null,
+    run_batch: ctx._runBatch || '',
+    finishedAt: ctx.finishedAt || null,
+  };
+}
+
+function savePriceProgress(uid, ctx) {
+  PRICE_PROGRESS.set(Number(uid), priceSnapshot(ctx));
+}
+
+function appendPriceLog(ctx, text) {
+  ctx.progressLog = ctx.progressLog || [];
+  ctx.progressLog.push({ t: new Date().toISOString().slice(11, 19), text: String(text).slice(0, 200) });
+  if (ctx.progressLog.length > 300) ctx.progressLog.splice(0, ctx.progressLog.length - 300);
+  savePriceProgress(ctx.userId, ctx);
+}
+
+// ── 商品同步· 异步任务与进度快照（v0.3.50）──────────────────────────────────
+//   一次同步会跑几分钟（每品牌约 170 页 × 1 秒 × 2 轮）。原来是 HTTP 阻塞等待，
+//   既看不到进度，也容易被代理/浏览器掐断。改成「下发即返回 taskId + 后台跑 + 前端轮询」。
+//   进度只存内存，服务重启即失效（与 1688 比价进度同一口径），不写库、不加表。
+const PRODUCT_SYNC = new Map();          // taskId -> ctx（运行中的任务）
+const PRODUCT_SYNC_PROGRESS = new Map(); // userId -> 最近一次快照（结束后仍可查终态）
+const PRODUCT_SYNC_TTL_MS = 60 * 60 * 1000;
+
+function productSyncSnapshot(ctx) {
+  return {
+    taskId: ctx.taskId,
+    running: !ctx.finished,
+    phase: ctx.finished ? (ctx.ok ? 'done' : 'failed') : 'running',
+    percent: ctx.percent || 0,
+    brandIndex: ctx.brandIndex || 0, brandCount: ctx.brandCount || 0,
+    brandId: ctx.brandId || 0, statusLabel: ctx.statusLabel || '',
+    page: ctx.page || 0, pages: ctx.pages || 0,
+    total: ctx.total || 0, inserted: ctx.inserted || 0,
+    updated: ctx.updated || 0, failed: ctx.failed || 0,
+    current: ctx.current || '', message: ctx.message || '', error: ctx.error || null,
+    startedAt: ctx.startedAt || null, finishedAt: ctx.finishedAt || null,
+  };
+}
+
+/** 按「品牌数 × 2 轮（正常采购 / 已停采）」分块估算百分比，封顶 99，完成时才给 100 */
+function productSyncPercent(pr, brandCount) {
+  const blocks = Math.max(1, Number(brandCount) * 2);
+  const finished = (Math.max(1, Number(pr.brandIndex) || 1) - 1) * 2
+    + (pr.statusKey === 'stopped' ? 1 : 0);
+  const pages = Number(pr.pages) || 0;
+  const part = pages > 0 ? Math.min(1, (Number(pr.page) || 0) / pages) : 0;
+  return Math.max(0, Math.min(99, Math.round(((finished + part) / blocks) * 100)));
 }
 
 const configStore = require('./lib/config');
@@ -614,10 +834,12 @@ function brandFromBody(user, body) {
  * 起因：v0.2.91 的自动匹配只按 user_id/batch 取数，页面筛选了却照样动全量，
  * 和账单那次「统计与明细口径不一致」是同一类坑，所以把范围表达式收在一处。
  *
- * 两种数据集：
+ * 两种数据集（行主表不同，但四类业务数值的读源完全相同）：
  *   · 带 batch（补货页——只看某次导入文件里的商品）：行主表 product_item（文件行，个人隔离），
- *     LEFT JOIN 品牌商品补齐价格/库存/状态/图/关联；文件里有、品牌库还没同步到的 SKU 也会显示。
+ *     LEFT JOIN 品牌商品补齐采购价/库存/在途/建议量/状态/图/关联。
  *   · 不带 batch（补货页默认 / 商品列表）：行主表 brand_product（同品牌共享）。
+ * ⚠ 统一数据源（2026-11-08）：采购价 / 可用库存 / 在途库存 / 建议量 一律读 brand_product，
+ *   两个视图都不再 COALESCE 到 product_item；导入补货参考文件时会按 (brand_id, sku) 写回 bp。
  * @param {{tenantId:number, brandId:number, all:boolean, q?:string, status?:string, batch?:string}} o
  */
 function productScope(o) {
@@ -636,9 +858,12 @@ function productScope(o) {
       from: 'product_item pi LEFT JOIN brand_product bp ON bp.brand_id = pi.brand_id AND bp.sku = pi.sku',
       order: 'pi.id DESC',
       idExpr: 'pi.id', skuExpr: 'pi.sku', nameExpr: 'pi.goods_name', brandExpr: 'pi.brand_id',
-      priceExpr: 'COALESCE(bp.purchase_price, pi.purchase_price)',
-      availExpr: 'COALESCE(bp.available_stock, pi.available_stock)',
-      transitExpr: 'COALESCE(bp.transit_stock, pi.transit_stock)',
+      // ⚠ 统一数据源（2026-11-08）：四类字段只读 brand_product，不再 COALESCE 到 product_item。
+      //   导入补货参考文件时已按 (brand_id, sku) 写回 bp，bp 必有行；COALESCE(...,0) 只防
+      //   「比价页专用批次」里 bp 恰好没行的极端情况，0 是常量、不构成第二数据源。
+      priceExpr: 'COALESCE(bp.purchase_price, 0)',
+      availExpr: 'COALESCE(bp.available_stock, 0)',
+      transitExpr: 'COALESCE(bp.transit_stock, 0)',
       salesExpr: 'COALESCE(bp.sales_30d, pi.sales_30d)',
       statusExpr, statusCodeExpr: 'bp.purchase_status_code',
       imageExpr: "COALESCE(NULLIF(pi.image_url, ''), bp.image_url)",
@@ -655,7 +880,7 @@ function productScope(o) {
       localQtyExpr: 'COALESCE(bp.local_spec_qty, pi.local_spec_qty)',
       // 供应商 0 表示「没填」，不能直接 COALESCE（否则品牌行没填时会把个人行的值顶掉）
       localSupExpr: 'COALESCE(NULLIF(bp.local_supplier_id, 0), pi.local_supplier_id, 0)',
-      bpIdExpr: 'bp.id', suggestExpr: 'pi.suggest_qty', fileExpr: 'pi.source_file', batchExpr: 'pi.batch_id',
+      bpIdExpr: 'bp.id', suggestExpr: 'COALESCE(bp.suggest_qty, 0)', fileExpr: 'pi.source_file', batchExpr: 'pi.batch_id',
     };
   }
   let where = 'WHERE 1=1 ';
@@ -680,7 +905,7 @@ function productScope(o) {
     localPackExpr: 'bp.local_pack_price',
     localQtyExpr: 'bp.local_spec_qty',
     localSupExpr: 'bp.local_supplier_id',
-    bpIdExpr: 'bp.id', suggestExpr: 'NULL', fileExpr: 'NULL', batchExpr: 'NULL',
+    bpIdExpr: 'bp.id', suggestExpr: 'bp.suggest_qty', fileExpr: 'NULL', batchExpr: 'NULL',
   };
 }
 
@@ -2549,6 +2774,9 @@ function handleAgentMessage(uid, msg) {
         // 否则进度数字会一直停在 0，直到最后一次回执才跳到 100%（等于没有进度）。
         if (sctx.kind === 'send') guessSdcProgress(sctx, text);
       }
+      // 1688比价·「开始核对」：助手日志并入该任务的进度面板（控制台输出）
+      const prctx = priceCtxForUser(uid);
+      if (prctx) appendPriceLog(prctx, String(msg.text || '').slice(0, 200));
       console.log(`[agent] uid=${uid} · ${String(msg.text || '').slice(0, 200)}`);
     }
     return;
@@ -2570,7 +2798,11 @@ function handleAgentMessage(uid, msg) {
   // ── 「1688比价」流程：助手逐单回传待付款订单 / 回报抓取与上色结果 ──
   if (msg.type === 'price_order') {
     const c = PRICECHECK.get(String(msg.taskId || ''));
-    if (c && c.userId === Number(uid) && msg.order) c.orders.push(msg.order);
+    if (c && c.userId === Number(uid) && msg.order) {
+      c.orders.push(msg.order);
+      const label = String(msg.order.order_id || '');
+      appendPriceLog(c, `抓取到待付款订单${label ? ' ' + label : ''}（第 ${c.orders.length} 单）`);
+    }
     return;
   }
   if (msg.type === 'price_fetch_done') {
@@ -4442,12 +4674,17 @@ const server = http.createServer(async (req, res) => {
       writeGuard();
       const up = new URL(req.url, 'http://localhost');
       const kp = up.searchParams.get('kind');
-      const kind = kp === 'invoices' ? 'invoices' : kp === 'products' ? 'products' : 'orders';
-      // 商品列表导入（前置仓补货参考）随「商品列表」菜单权限放行
-      if (kind === 'products' && !canProduct) return denyProduct();
+      const kind = kp === 'invoices' ? 'invoices'
+        : kp === 'products' ? 'products'
+        : kp === 'price_ref' ? 'price_ref' : 'orders';
+      // 商品列表导入（前置仓补货参考）：随「商品列表」菜单权限放行；另为「1688比价」页的
+      // 导入按钮（v0.3.45）放行 —— 比价要拿补货参考当目标价，得让只有比价权限的用户也能导入。
+      // price_ref 是 1688 比价页专用「补货单明细导出」导入，权限口径与 products 一致。
+      if ((kind === 'products' || kind === 'price_ref') && !canProduct && !canPriceCheck) return denyProduct();
       const rawName = String(up.searchParams.get('name') || '').trim();
       const safeName = path.basename(rawName).replace(/[\\/:*?"<>|]+/g, '_').slice(-120)
-        || (kind === 'invoices' ? 'invoices.xlsx' : kind === 'products' ? 'products.xlsx' : 'orders.xlsx');
+        || (kind === 'invoices' ? 'invoices.xlsx' : kind === 'products' ? 'products.xlsx'
+          : kind === 'price_ref' ? '补货单明细.xlsx' : 'orders.xlsx');
       if (!/\.(xlsx|xls)$/i.test(safeName)) throw new Error('只支持 .xlsx / .xls 文件（请上传从 1688 / 税务局导出的 Excel）');
       const buf = await readRawBody(req, 80e6);
       if (!buf) throw new Error('上传失败：内容过大（上限 80MB）或读取中断');
@@ -4462,11 +4699,16 @@ const server = http.createServer(async (req, res) => {
       fs.writeFileSync(dest, buf);
 
       const t = taskFor(tenantId);
-      taskLog(t, `▶ 上传导入（${kind === 'invoices' ? '税务局发票' : kind === 'orders' ? '1688订单' : '前置仓补货参考'}）：${safeName} · ${(buf.length / 1024).toFixed(0)}KB`);
+      const kindLabel = kind === 'invoices' ? '税务局发票'
+        : kind === 'orders' ? '1688订单'
+        : kind === 'price_ref' ? '比价补货单明细' : '前置仓补货参考';
+      taskLog(t, `▶ 上传导入（${kindLabel}）：${safeName} · ${(buf.length / 1024).toFixed(0)}KB`);
       const r = kind === 'invoices'
         ? await importInvoiceUpload(tenantId, dest, safeName)
         : kind === 'orders'
         ? await importOrderUpload(tenantId, dest, safeName)
+        : kind === 'price_ref'
+        ? await products.importPriceRefFile(tenantId, dest, safeName, await brandIdOfUser(tenantId))
         : await products.importReplenishFile(tenantId, dest, safeName, await brandIdOfUser(tenantId));
       if (!r.ok) {
         taskLog(t, `✗ 导入失败：${r.error}`);
@@ -4476,6 +4718,9 @@ const server = http.createServer(async (req, res) => {
         taskLog(t, `✓ 发票导入完成：新增 ${r.inserted} 行 · 更新 ${r.updated} 行` +
           (r.autoMapped ? ` · 自动匹配 ${r.autoMapped} 个销方` : '') +
           (r.unmatchedNames && r.unmatchedNames.length ? ` · 待人工匹配 ${r.unmatchedNames.length} 个销方` : ''));
+      } else if (kind === 'price_ref') {
+        taskLog(t, `✓ 比价补货单明细导入完成：${r.total} 行 · 新增 ${r.inserted} · 更新 ${r.updated}`
+          + ` · 跳过其它来源 ${r.skipped} · 回填链接 ${r.linkFilled}（1688 ${r.link1688}） · 批次 ${r.batchId}`);
       } else {
         // 订单导入后服务端会补跑一次销方自动匹配（v0.3.32）：先导发票后导订单的账号靠它补齐税名
         taskLog(t, `✓ 订单导入完成：新增 ${r.inserted} 单 · 更新 ${r.updated} 单`
@@ -4483,7 +4728,7 @@ const server = http.createServer(async (req, res) => {
             ? ` · 补匹配税名 ${r.rematch.autoMapped} 个` : ''));
       }
       // 操作日志：记录导入（旁路）
-      logOp(user, kind === 'invoices' ? 'import.invoice' : 'import.order', {
+      logOp(user, kind === 'invoices' ? 'import.invoice' : kind === 'price_ref' ? 'import.price_ref' : 'import.order', {
         file: safeName, inserted: r.inserted || 0, updated: r.updated || 0, ip: clientIp(req),
       });
       return sendJson(res, 200, { ok: true, kind, ...r });
@@ -5133,8 +5378,10 @@ const server = http.createServer(async (req, res) => {
       writeGuard();
       const b = await readBody(req);
       const orders = Array.isArray(b.orders) ? b.orders : [];
-      if (!orders.length || !orders.every((o) => Array.isArray(o.items) && o.items.length)) {
-        return sendJson(res, 200, { error: '缺少待检查订单（orders，每单需含 items）' });
+      // 与助手抓取链路同一套归一化：明细既可以是 items（本入口原口径），也可以是 products（助手回传口径）
+      const usableOrders = orders.map(normalizePriceOrder).filter((o) => o.items.length);
+      if (!orders.length || !usableOrders.length) {
+        return sendJson(res, 200, { error: '缺少待检查订单（orders，每单需含 items 或 products 商品明细）' });
       }
       const opts = {
         priceRatio: b.priceRatio, priceAmount: b.priceAmount,
@@ -5143,20 +5390,32 @@ const server = http.createServer(async (req, res) => {
       };
       const batchId = b.batchId ? Number(b.batchId) : null;
       try {
-        const r = await computeAndStorePrice({ user, tenantId, orders, opts, batchId });
-        await logOp(user, 'price_check.run', { tenantId, batchId, orders: orders.length, summary: r.summary });
-        return sendJson(res, 200, { ok: true, run_batch: r.runBatch, summary: r.summary, orders: r.outOrders });
+        const r = await computeAndStorePrice({ user, tenantId, orders: usableOrders, opts, batchId });
+        await logOp(user, 'price_check.run', { tenantId, batchId, orders: r.ordersUsed, summary: r.summary });
+        return sendJson(res, 200, { ok: true, run_batch: r.runBatch, summary: r.summary, orders: r.outOrders, rows_written: r.rowsWritten });
       } catch (e) {
         return sendJson(res, 500, { error: '计算或入库失败：' + String((e && e.message) || e) });
       }
     }
 
-    // ── 1688比价· 开始核对（下发本机助手抓取待付款订单 → 等收尾算判定落库）──
+    // ── 1688比价· 开始核对（下发本机助手抓取待付款订单 → 后台收尾算判定落库）──
     //   与上面 POST 的关系：这个是「一键」入口，助手抓完订单后走同一套 computeAndStorePrice。
+    //   v0.3.45：改为不阻塞（立即返回 taskId），助手推进的每单进度 / 日志由 /api/price-check/progress 轮询取。
     if (method === 'POST' && p === '/api/price-check/run') {
       if (!canPriceCheck) return denyPriceCheck();
       writeGuard();
       const b = await readBody(req);
+      // 下单时间范围必填（与前端弹窗同口径）：助手据此在 1688 订单列表页用日历筛选
+      const dateStart = String(b.dateStart || '').trim();
+      const dateEnd = String(b.dateEnd || '').trim();
+      const dateRe = /^\d{4}-\d{2}-\d{2}$/;
+      if (!dateRe.test(dateStart) || !dateRe.test(dateEnd)) {
+        return sendJson(res, 200, { error: '请选择下单时间范围（开始日期 ~ 结束日期）' });
+      }
+      const daySpan = (Date.parse(dateEnd + 'T00:00:00') - Date.parse(dateStart + 'T00:00:00')) / 86400000 + 1;
+      if (!(daySpan >= 1 && daySpan <= 31)) {
+        return sendJson(res, 200, { error: '下单时间范围需在 1~31 天内，且开始日期不能晚于结束日期' });
+      }
       if (!agentHub.isOnline(tenantId)) {
         return sendJson(res, 200, { error: '本机助手未连接：请先在本机启动「催收小助手」并绑定后才可开始核对' });
       }
@@ -5168,20 +5427,56 @@ const server = http.createServer(async (req, res) => {
       opts.checkSales = !!b.checkSales;
       const batchId = b.batchId ? Number(b.batchId) : null;
       const taskId = 'P' + Date.now().toString(36) + Math.floor(Math.random() * 1e4).toString(36);
-      const result = await new Promise((resolve) => {
-        const ctx = {
-          taskId, userId: Number(tenantId), user, orders: [], opts, batchId,
-          done: false, finished: false, resolve, timer: setTimeout(() => {
-            finalize(ctx, { ok: false, error: '等待本机助手抓取订单超时（15 分钟未收尾）' });
-          }, 15 * 60 * 1000),
-        };
-        PRICECHECK.set(taskId, ctx);
-        const sent = agentHub.send(tenantId, { type: 'price_fetch', taskId });
+      const ctx = {
+        taskId, userId: Number(tenantId), user, orders: [], opts, batchId, dateStart, dateEnd,
+        createdAt: Date.now(), progressLog: [],
+        done: false, finished: false, phase: 'fetch',
+        timer: setTimeout(() => finalize(ctx, { ok: false, error: '等待本机助手抓取订单超时（15 分钟未收尾）' }), 15 * 60 * 1000),
+      };
+      PRICECHECK.set(taskId, ctx);
+      savePriceProgress(Number(tenantId), ctx);
+      appendPriceLog(ctx, `已下发核对任务：下单时间 ${dateStart} ~ ${dateEnd}，只抓取「待付款」订单…`);
+      // 后台执行不阻塞 HTTP：先给前端返回 taskId，让进度条能立刻铺开
+      Promise.resolve().then(async () => {
+        const sent = agentHub.send(tenantId, { type: 'price_fetch', taskId, dateStart, dateEnd });
         if (!sent) finalize(ctx, { ok: false, error: '下发失败：本机助手通道已断开' });
+      }).catch((e) => { /* 与超时/收尾一致地落终态 */ finalize(ctx, { ok: false, error: '下发失败：' + String((e && e.message) || e) }); });
+      return sendJson(res, 200, { ok: true, taskId });
+    }
+
+    // 1688比价· 进度轮询：前端「开始核对」进度条 + 控制台面板实时读
+    if (method === 'GET' && p === '/api/price-check/progress') {
+      if (!canPriceCheck) return denyPriceCheck();
+      return sendJson(res, 200, { ok: true, progress: PRICE_PROGRESS.get(Number(tenantId)) || null });
+    }
+
+    if (method === 'GET' && p === '/api/price-check/ref') {
+      if (!canPriceCheck) return denyPriceCheck();
+      // count = 可用目标数。补货参考（product_item，按用户）为主；商品同步的
+      // brand_product（品牌共享，仅按品名兜底匹配）也计入，让纯同步用户也能「开始核对」。
+      const pi = await db.query('SELECT COUNT(*) AS c FROM product_item WHERE user_id = ?', [tenantId]);
+      let bp = 0, bpPriced = 0;
+      try {
+        const bpCnt = await db.query('SELECT COUNT(*) AS c, SUM(purchase_price > 0) AS priced FROM brand_product WHERE brand_id = ?', [Number(user.brand_id) || 1]);
+        bp = Number(bpCnt[0] && bpCnt[0].c) || 0;
+        bpPriced = Number(bpCnt[0] && bpCnt[0].priced) || 0;
+      } catch (e) { bp = 0; bpPriced = 0; }
+      const productRef = Number(pi[0] && pi[0].c) || 0;
+      const count = productRef + bpPriced;
+      // 1688 比价页最近一次「补货单明细」导入批次：核对时带上它，只用这批窄目标集，
+      // 避免把 brand_product 全量行混进来造成同 offer 多 SKU 歧义。
+      let refBatchId = null;
+      try {
+        const last = await db.query(
+          'SELECT id FROM product_import_batch WHERE user_id = ? AND source_file LIKE ? ORDER BY id DESC LIMIT 1',
+          [tenantId, products.PRICE_REF_PREFIX + '%']
+        );
+        if (last.length) refBatchId = Number(last[0].id);
+      } catch (e) { refBatchId = null; }
+      return sendJson(res, 200, {
+        ok: true, count, hasRef: count > 0, productRef,
+        brandRef: bpPriced < bp ? bpPriced : bp, refBatchId,
       });
-      PRICECHECK.delete(taskId);
-      if (result.ok) return sendJson(res, 200, result);
-      return sendJson(res, 200, { ok: false, error: result.error });
     }
 
     // ── 1688比价· 到1688打备注上色（把最近一批还没上色的判定行下发给助手逐单打备注染色）──
@@ -5192,12 +5487,17 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 200, { error: '本机助手未连接：请先在本机启动「催收小助手」并绑定后才可上色' });
       }
       const rows = await db.query(
-        'SELECT id, order_id, verdict, memo_text FROM price_check WHERE user_id = ? AND applied_at IS NULL AND memo_text <> \'\' ORDER BY id ASC LIMIT 500',
+        'SELECT id, order_id, order_time, verdict, memo_text FROM price_check WHERE user_id = ? AND applied_at IS NULL AND memo_text <> \'\' ORDER BY id ASC LIMIT 500',
         [tenantId]
       );
       if (!rows.length) return sendJson(res, 200, { ok: false, error: '没有待上色的核对结果（先点「开始核对」生成判定，且已上色的会自动跳过）' });
       const targetRows = rows;
       const orders = rows.map((r) => ({ orderId: String(r.order_id), verdict: r.verdict || 'blue', memoText: r.memo_text || '' }));
+      // 上色也要用同一套页面筛选定位订单：把这批订单的下单时间范围下发给助手
+      const days = rows.map((r) => String(r.order_time || '').slice(0, 10))
+        .filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d)).sort();
+      const dateStart = days[0] || '';
+      const dateEnd = days[days.length - 1] || '';
       const taskId = 'A' + Date.now().toString(36) + Math.floor(Math.random() * 1e4).toString(36);
       const result = await new Promise((resolve) => {
         const ctx = {
@@ -5206,7 +5506,7 @@ const server = http.createServer(async (req, res) => {
           timer: setTimeout(() => finalize(ctx, { ok: false, error: '等待本机助手上色超时（30 分钟未收尾）' }), 30 * 60 * 1000),
         };
         PRICECHECK.set(taskId, ctx);
-        const sent = agentHub.send(tenantId, { type: 'price_apply', taskId, orders });
+        const sent = agentHub.send(tenantId, { type: 'price_apply', taskId, orders, dateStart, dateEnd });
         if (!sent) finalize(ctx, { ok: false, error: '下发失败：本机助手通道已断开' });
       });
       PRICECHECK.delete(taskId);
@@ -5496,12 +5796,81 @@ const server = http.createServer(async (req, res) => {
       if (body && body.dryRun) {
         return sendJson(res, 200, await qnh.syncProducts({ userId: user.id, brandIds, dryRun: true }));
       }
-      const out = await qnh.syncProducts({ userId: user.id, brandIds, onProgress: null });
-      await logOp(user, 'product.sync', {
-        ok: !!out.ok, total: out.total, inserted: out.inserted,
-        updated: out.updated, failed: out.failed, brandIds,
-      });
-      return sendJson(res, 200, out);
+      // 同一超管已有任务在跑：直接复用同一个 taskId，让前端继续轮询，
+      // 不重复下发（否则助手会被并发的 qnh_fetch 打爆，正是「助手超时 + 登录唤不起」的诱因）。
+      for (const c of PRODUCT_SYNC.values()) {
+        if (c.userId === Number(user.id) && !c.finished) {
+          return sendJson(res, 200, {
+            ok: true, pending: true, taskId: c.taskId,
+            message: '已有商品同步任务在进行中，继续显示当前进度',
+          });
+        }
+      }
+      const taskId = 'ps-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+      const ctx = {
+        taskId, userId: Number(user.id), brandIds, brandCount: brandIds.length,
+        finished: false, ok: false, percent: 0, current: '正在准备同步…',
+        startedAt: new Date().toISOString(),
+      };
+      PRODUCT_SYNC.set(taskId, ctx);
+      PRODUCT_SYNC_PROGRESS.set(ctx.userId, productSyncSnapshot(ctx));
+
+      // 后台执行，不阻塞 HTTP；每页回调刷新一次进度快照
+      (async () => {
+        try {
+          const out = await qnh.syncProducts({
+            userId: user.id, brandIds,
+            onProgress: (pr) => {
+              if (ctx.finished) return;
+              ctx.brandId = Number(pr.brandId) || 0;
+              ctx.brandIndex = Number(pr.brandIndex) || 0;
+              ctx.statusLabel = pr.statusLabel || '';
+              ctx.page = Number(pr.page) || 0;
+              ctx.pages = Number(pr.pages) || 0;
+              ctx.total = Number(pr.total) || 0;
+              ctx.inserted = Number(pr.inserted) || 0;
+              ctx.updated = Number(pr.updated) || 0;
+              ctx.failed = Number(pr.failed) || 0;
+              ctx.percent = productSyncPercent(pr, ctx.brandCount);
+              ctx.current = `品牌 ${ctx.brandIndex}/${ctx.brandCount} · ${ctx.statusLabel}`
+                + ` · 第 ${ctx.page}${ctx.pages ? '/' + ctx.pages : ''} 页 · 已处理 ${ctx.total} 个商品`;
+              PRODUCT_SYNC_PROGRESS.set(ctx.userId, productSyncSnapshot(ctx));
+            },
+          });
+          ctx.ok = !!out.ok;
+          ctx.message = out.message || '';
+          ctx.error = out.ok ? null : (out.message || '商品同步失败');
+          ctx.percent = out.ok ? 100 : ctx.percent;
+          ctx.current = out.ok ? '同步完成' : '同步失败';
+          await logOp(user, 'product.sync', {
+            ok: !!out.ok, total: out.total, inserted: out.inserted,
+            updated: out.updated, failed: out.failed, brandIds,
+          }).catch(() => {});
+        } catch (e) {
+          ctx.ok = false;
+          ctx.error = String((e && e.message) || e);
+          ctx.message = '商品同步异常：' + ctx.error;
+          ctx.current = '同步失败';
+        } finally {
+          ctx.finished = true;
+          ctx.finishedAt = new Date().toISOString();
+          PRODUCT_SYNC_PROGRESS.set(ctx.userId, productSyncSnapshot(ctx));
+          const t = setTimeout(() => PRODUCT_SYNC.delete(taskId), PRODUCT_SYNC_TTL_MS);
+          if (t.unref) t.unref();
+        }
+      })();
+
+      return sendJson(res, 200, { ok: true, pending: true, taskId, message: '商品同步已开始' });
+    }
+
+    // 商品同步进度（仅超管）：带 taskId 查本次任务，不带则查该用户最近一次快照
+    if (method === 'GET' && p === '/api/admin/products/sync/progress') {
+      if (!isAdmin) return sendJson(res, 403, { error: '仅超级管理员可查看商品同步进度' });
+      const tid = String(url.searchParams.get('taskId') || '').trim();
+      const ctx = tid ? PRODUCT_SYNC.get(tid) : null;
+      if (ctx && ctx.userId !== Number(user.id)) return sendJson(res, 404, { error: '任务不存在' });
+      const snap = ctx ? productSyncSnapshot(ctx) : (PRODUCT_SYNC_PROGRESS.get(Number(user.id)) || null);
+      return sendJson(res, 200, { ok: true, progress: snap });
     }
 
     // ── 品牌方（超管可增改；商品数据按品牌方共享）──
