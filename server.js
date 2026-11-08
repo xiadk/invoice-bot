@@ -145,7 +145,9 @@ function normalizePriceOpts(raw) {
 }
 
 /** 对一批待付款订单跑判定并落 price_check（纯计算，不碰浏览器）。
- *  返回 { runBatch, summary, outOrders, rowsWritten, skippedEmpty, ordersUsed } */
+ *  返回 { runBatch, summary, outOrders, rowsWritten, skippedEmpty, ordersUsed }
+ *  ⚠ 这里的 product_item.purchase_price 是「1688 比价目标价」（用户按批次导入的补货单价，
+ *    个人隔离），与 brand_product 的商品主数据采购价是两套业务口径，不参与「统一数据源」改造。 */
 async function computeAndStorePrice({ user, tenantId, orders, opts, batchId, onProgress }) {
   let sql = 'SELECT id, sku, goods_name, purchase_price, sales_30d, supplier_name, supplier_spec, supplier_link, order_ratio FROM product_item WHERE user_id = ?';
   const tArgs = [tenantId];
@@ -832,10 +834,12 @@ function brandFromBody(user, body) {
  * 起因：v0.2.91 的自动匹配只按 user_id/batch 取数，页面筛选了却照样动全量，
  * 和账单那次「统计与明细口径不一致」是同一类坑，所以把范围表达式收在一处。
  *
- * 两种数据集：
+ * 两种数据集（行主表不同，但四类业务数值的读源完全相同）：
  *   · 带 batch（补货页——只看某次导入文件里的商品）：行主表 product_item（文件行，个人隔离），
- *     LEFT JOIN 品牌商品补齐价格/库存/状态/图/关联；文件里有、品牌库还没同步到的 SKU 也会显示。
+ *     LEFT JOIN 品牌商品补齐采购价/库存/在途/建议量/状态/图/关联。
  *   · 不带 batch（补货页默认 / 商品列表）：行主表 brand_product（同品牌共享）。
+ * ⚠ 统一数据源（2026-11-08）：采购价 / 可用库存 / 在途库存 / 建议量 一律读 brand_product，
+ *   两个视图都不再 COALESCE 到 product_item；导入补货参考文件时会按 (brand_id, sku) 写回 bp。
  * @param {{tenantId:number, brandId:number, all:boolean, q?:string, status?:string, batch?:string}} o
  */
 function productScope(o) {
@@ -854,9 +858,12 @@ function productScope(o) {
       from: 'product_item pi LEFT JOIN brand_product bp ON bp.brand_id = pi.brand_id AND bp.sku = pi.sku',
       order: 'pi.id DESC',
       idExpr: 'pi.id', skuExpr: 'pi.sku', nameExpr: 'pi.goods_name', brandExpr: 'pi.brand_id',
-      priceExpr: 'COALESCE(bp.purchase_price, pi.purchase_price)',
-      availExpr: 'COALESCE(bp.available_stock, pi.available_stock)',
-      transitExpr: 'COALESCE(bp.transit_stock, pi.transit_stock)',
+      // ⚠ 统一数据源（2026-11-08）：四类字段只读 brand_product，不再 COALESCE 到 product_item。
+      //   导入补货参考文件时已按 (brand_id, sku) 写回 bp，bp 必有行；COALESCE(...,0) 只防
+      //   「比价页专用批次」里 bp 恰好没行的极端情况，0 是常量、不构成第二数据源。
+      priceExpr: 'COALESCE(bp.purchase_price, 0)',
+      availExpr: 'COALESCE(bp.available_stock, 0)',
+      transitExpr: 'COALESCE(bp.transit_stock, 0)',
       salesExpr: 'COALESCE(bp.sales_30d, pi.sales_30d)',
       statusExpr, statusCodeExpr: 'bp.purchase_status_code',
       imageExpr: "COALESCE(NULLIF(pi.image_url, ''), bp.image_url)",
@@ -873,7 +880,7 @@ function productScope(o) {
       localQtyExpr: 'COALESCE(bp.local_spec_qty, pi.local_spec_qty)',
       // 供应商 0 表示「没填」，不能直接 COALESCE（否则品牌行没填时会把个人行的值顶掉）
       localSupExpr: 'COALESCE(NULLIF(bp.local_supplier_id, 0), pi.local_supplier_id, 0)',
-      bpIdExpr: 'bp.id', suggestExpr: 'pi.suggest_qty', fileExpr: 'pi.source_file', batchExpr: 'pi.batch_id',
+      bpIdExpr: 'bp.id', suggestExpr: 'COALESCE(bp.suggest_qty, 0)', fileExpr: 'pi.source_file', batchExpr: 'pi.batch_id',
     };
   }
   let where = 'WHERE 1=1 ';
@@ -898,7 +905,7 @@ function productScope(o) {
     localPackExpr: 'bp.local_pack_price',
     localQtyExpr: 'bp.local_spec_qty',
     localSupExpr: 'bp.local_supplier_id',
-    bpIdExpr: 'bp.id', suggestExpr: 'NULL', fileExpr: 'NULL', batchExpr: 'NULL',
+    bpIdExpr: 'bp.id', suggestExpr: 'bp.suggest_qty', fileExpr: 'NULL', batchExpr: 'NULL',
   };
 }
 
