@@ -2,7 +2,8 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="format-detection" content="telephone=no">
 <title>发票催收</title>
 <!-- 品牌图标：/favicon.ico 与 /assets/* 由 server.js 白名单式下发 -->
 <link rel="icon" href="/favicon.ico" sizes="any">
@@ -480,6 +481,112 @@
   /* 补货单 vs 货单的金额对比 */
   .ro-diff-ok { color: #2e9e4f; font-weight: 600; }
   .ro-diff-bad { color: #e5453a; font-weight: 600; }
+
+  /* ══ 手机适配：货单管理 / 商品售后 / 退单列表（纯前端，版本未变）══════════════
+     作用域：只命中这三个页面容器 + 它们弹出的 .m-dlg 弹窗 + .m-date-popper 日期面板。
+     >768px 桌面完全不受影响。表格用「外层横滑 + 保住列宽」：不隐藏列、不删操作按钮，
+     避免 Element UI 表头与表体错位、以及 fixed 列被误判成丢数据。 */
+  .m-table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .m-table-scroll > .el-table { width: 100%; }
+
+  @media (max-width: 768px) {
+    body { -webkit-tap-highlight-color: transparent; }
+
+    /* 筛选条：两列网格；Element 控件上写死的 inline px 宽度用 !important 压过 */
+    #page-refund .filter-bar,
+    #page-after .filter-bar,
+    #page-waybill .filter-bar {
+      display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px;
+    }
+    #page-refund .filter-bar > *,
+    #page-after .filter-bar > *,
+    #page-waybill .filter-bar > * { min-width: 0; }
+    #page-refund .filter-bar > .el-input,
+    #page-after .filter-bar > .el-input,
+    #page-waybill .filter-bar > .el-input,
+    #page-refund .filter-bar > .el-date-editor,
+    #page-after .filter-bar > .el-date-editor,
+    #page-waybill .filter-bar > .el-date-editor { width: 100% !important; grid-column: 1 / -1; }
+    #page-refund .filter-bar > .el-select,
+    #page-after .filter-bar > .el-select,
+    #page-waybill .filter-bar > .el-select { width: 100% !important; }
+    #page-refund .filter-bar > .el-button,
+    #page-after .filter-bar > .el-button,
+    #page-waybill .filter-bar > .el-button { width: 100%; }
+    #page-refund .filter-bar > .fb-label,
+    #page-after .filter-bar > .fb-label,
+    #page-waybill .filter-bar > .fb-label,
+    #page-refund .filter-bar > .loginid,
+    #page-after .filter-bar > .loginid,
+    #page-waybill .filter-bar > .loginid { grid-column: 1 / -1; text-align: right; }
+    #page-refund .filter-bar > .fb-spacer,
+    #page-after .filter-bar > .fb-spacer,
+    #page-waybill .filter-bar > .fb-spacer { display: none; }
+
+    /* 统计卡：四张卡在窄屏改两列，inline 的 min-width 要压掉才不会撑破网格 */
+    #page-refund .stat-row,
+    #page-after .stat-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+    #page-refund .stat-row > .el-card,
+    #page-after .stat-row > .el-card { min-width: 0 !important; }
+    #page-refund .page-bar .pb-actions { margin-left: 0; width: 100%; }
+    #page-refund .el-card__header > div { flex-wrap: wrap; gap: 6px; }
+
+    /* 三张表：保住全部列宽（列数多），由外层容器横向滑动 */
+    #page-refund .m-table-scroll > .el-table { min-width: 1450px; }
+    #page-after .m-table-scroll > .el-table { min-width: 1100px; }
+    #page-waybill .m-table-scroll > .el-table { min-width: 900px; }
+    /* 售后表 fixed="right"：Element 把主表那一列设为隐藏，操作按钮只渲染在
+       .el-table__fixed-right 里（实测隐藏这一层会把「处理/凭证/删除」一起弄丢）。
+       它是相对 1100px 表格绝对定位的，外层横滑容器滚动时整体跟着走，
+       不会再浮在视口右侧挡内容 —— 保留该层，只去掉分隔阴影。 */
+    #page-after .m-table-scroll .el-table__fixed-right { box-shadow: none; }
+    #page-refund .rf-detail { grid-template-columns: minmax(0, 1fr); }
+
+    /* 分页：换行、手机上隐藏「每页条数」选择器，保留总数与翻页 */
+    #page-refund .pager-wrap,
+    #page-after .pager-wrap,
+    #page-waybill .pager-wrap { flex-wrap: wrap; gap: 6px; }
+    #page-refund .pager-wrap .el-pagination,
+    #page-after .pager-wrap .el-pagination,
+    #page-waybill .pager-wrap .el-pagination { display: flex; flex-wrap: wrap; gap: 4px; }
+    #page-refund .pager-wrap .el-pagination__sizes,
+    #page-after .pager-wrap .el-pagination__sizes,
+    #page-waybill .pager-wrap .el-pagination__sizes { display: none; }
+    #page-refund .pager-wrap .total,
+    #page-after .pager-wrap .total,
+    #page-waybill .pager-wrap .total { margin-left: auto; }
+
+    /* 弹窗：width 是 Element 渲染的 inline style，必须 !important 才能压到视口内 */
+    .m-dlg { width: calc(100vw - 24px) !important; max-width: 560px;
+             margin-top: 6vh !important; margin-bottom: 12px; }
+    .m-dlg .el-dialog__header { padding: 14px; }
+    .m-dlg .el-dialog__body { padding: 12px 14px; max-height: calc(100vh - 190px); overflow-y: auto; }
+    .m-dlg .el-dialog__footer { padding: 12px 14px; }
+    /* 售后「新增」弹窗用固定 :span 栅格，手机上每列独占一行 */
+    .m-dlg .el-col[class*="el-col-"] { width: 100% !important; max-width: 100%; flex: 0 0 100%; }
+    .m-dlg .el-form-item__label { line-height: 1.5; }
+    .m-dlg .wb-phone { flex-wrap: wrap; gap: 10px; }
+    .m-dlg .wb-qr { flex: 0 0 120px; width: 120px; height: 120px; }
+    .m-dlg .af-up-thumb, .m-dlg .af-att-img { max-width: 100%; }
+
+    /* 日期范围面板（挂在 body 上）：默认 646px 双月并排，手机改为上下叠放 */
+    .m-date-popper.el-picker-panel { width: calc(100vw - 16px) !important; min-width: 0 !important; }
+    .m-date-popper .el-picker-panel__body { min-width: 0 !important; }
+    .m-date-popper .el-date-range-picker__content { width: 100% !important; float: none; }
+    .m-date-popper .el-date-range-picker__content.is-right { border-left: 0; border-top: 1px solid #e4e4e4; }
+  }
+
+  /* 窄屏骨架：只把 1180 断点折出的 64px 图标条再收窄，给内容区让宽度；
+     不改菜单结构，桌面（>720px）保持原样 */
+  @media (max-width: 720px) {
+    :root { --sb-w: 52px; }
+    .sidebar { padding: 6px; }
+    .app-header { padding: 0 10px; gap: 8px; }
+    .app-header .brand { width: calc(var(--sb-w) - 10px); }
+    .app-header .brand-logo { height: 32px; width: 32px; }
+    .el-main { padding: 10px 8px 32px; }
+    .sb-toggle { display: none; }
+  }
 </style>
 </head>
 <body>
@@ -2904,7 +3011,7 @@
         <el-card class="section-card" shadow="never">
           <div class="filter-bar">
             <el-date-picker v-model="rq.range" type="daterange" size="small" value-format="yyyy-MM-dd"
-                            start-placeholder="申请开始" end-placeholder="申请结束"
+                            start-placeholder="申请开始" end-placeholder="申请结束" popper-class="m-date-popper"
                             style="width:250px" unlink-panels></el-date-picker>
             <el-input v-model="rq.filter.keyword" size="small" clearable style="width:220px"
                       placeholder="退单号 / 订单号 / 门店 / 收货人" @keyup.enter.native="applyRefundFilter"></el-input>
@@ -2918,6 +3025,7 @@
             <span class="loginid">共 {{ rq.total }} 条</span>
           </div>
 
+          <div class="m-table-scroll">
           <el-table :data="rq.rows" size="small" border style="width:100%" v-loading="rq.loading"
                     empty-text="暂无退单数据" :row-class-name="refundRowClass">
             <!-- 行展开：14 列之外的完整信息（数字段全部来自接口已有字段，未新增统计） -->
@@ -2999,6 +3107,7 @@
               <template slot-scope="p"><el-button size="mini" @click="openRefundLog(p.row)">日志</el-button></template>
             </el-table-column>
           </el-table>
+          </div><!-- /.m-table-scroll -->
 
           <div class="pager-wrap">
             <el-pagination background layout="total, sizes, prev, pager, next"
@@ -3015,7 +3124,7 @@
 
         <!-- 备注编辑（2026-11-06）：退款原因改为只读，人工记录写这里；保存后记操作人与时间 -->
         <el-dialog :title="'备注 · ' + (remarkDlg.refundNo || '')"
-                   :visible.sync="remarkDlg.visible" width="560px" append-to-body>
+                   :visible.sync="remarkDlg.visible" width="560px" append-to-body custom-class="m-dlg">
           <div class="form-tip" style="margin-bottom:10px">
             平台退款原因（只读）：{{ remarkDlg.reason || '—' }}
             <span v-if="remarkDlg.by"> ｜ 上次编辑：{{ remarkDlg.by }} · {{ remarkDlg.at }}</span>
@@ -3057,7 +3166,7 @@
               <el-option v-for="s in af.statuses" :key="s.value" :label="s.label" :value="String(s.value)"></el-option>
             </el-select>
             <el-date-picker v-model="af.range" type="daterange" size="small" style="width:250px"
-                            value-format="yyyy-MM-dd" range-separator="至"
+                            value-format="yyyy-MM-dd" range-separator="至" popper-class="m-date-popper"
                             start-placeholder="售后日期起" end-placeholder="止"
                             @change="onAfFilter"></el-date-picker>
             <el-button size="small" type="primary" plain @click="onAfFilter">查询</el-button>
@@ -3066,6 +3175,7 @@
             <span class="loginid">共 {{ af.total }} 条</span>
           </div>
 
+          <div class="m-table-scroll">
           <el-table :data="af.rows" size="small" border style="width:100%" v-loading="af.loading"
                     empty-text="没有符合条件的售后记录">
             <el-table-column label="售后日期" width="108">
@@ -3117,6 +3227,7 @@
               </template>
             </el-table-column>
           </el-table>
+          </div><!-- /.m-table-scroll -->
 
           <div class="pager-wrap">
             <el-pagination background layout="total, sizes, prev, pager, next"
@@ -3129,7 +3240,7 @@
 
         <!-- 处理售后：选目标状态 → 已退货填运单号，已退款传退款截图（扫码拍照 / 粘贴） -->
         <el-dialog title="处理售后" :visible.sync="afDlg.visible" width="600px" top="6vh" append-to-body
-                   custom-class="af-up-dlg" @closed="onAfDlgClosed">
+                   custom-class="af-up-dlg m-dlg" @closed="onAfDlgClosed">
           <div class="af-up-head">
             <b :title="afDlg.goodsName">{{ afDlg.goodsName }}</b>
             <span class="loginid">{{ afDlg.sku }}</span>
@@ -3195,7 +3306,8 @@
         </el-dialog>
 
         <!-- 凭证查看：一次变更一张，最新在前 -->
-        <el-dialog :title="afAttach.title" :visible.sync="afAttach.visible" width="620px" top="6vh" append-to-body>
+        <el-dialog :title="afAttach.title" :visible.sync="afAttach.visible" width="620px" top="6vh" append-to-body
+                   custom-class="m-dlg">
           <div v-if="!afAttach.rows.length" class="loginid">这条记录还没有凭证图片</div>
           <div v-for="(a, i) in afAttach.rows" :key="i" class="af-att-row">
             <div class="af-att-meta">
@@ -3210,7 +3322,7 @@
 
         <!-- 新增售后：搜商品 → 自动回填名称/SKU → 数量 + 原因 + 实物图 -->
         <el-dialog title="新增售后" :visible.sync="afNew.visible" width="660px" top="5vh" append-to-body
-                   custom-class="af-new-dlg" @closed="onAfNewClosed">
+                   custom-class="af-new-dlg m-dlg" @closed="onAfNewClosed">
           <el-form label-position="top" size="small">
             <el-form-item label="搜索商品">
               <el-select v-model="afNew.pick" filterable remote clearable style="width:100%"
@@ -3441,7 +3553,7 @@
                       placeholder="供应商名称"
                       @keyup.enter.native="onWbFilter" @clear="onWbFilter"></el-input>
             <el-date-picker v-model="wb.range" type="daterange" size="small" style="width:250px"
-                            value-format="yyyy-MM-dd" range-separator="至"
+                            value-format="yyyy-MM-dd" range-separator="至" popper-class="m-date-popper"
                             start-placeholder="货单开始日期" end-placeholder="结束日期"
                             @change="onWbFilter"></el-date-picker>
             <!-- 开票状态筛选（v0.3.7）：全部 / 未开票 / 已开票，与列表列同一口径 -->
@@ -3461,6 +3573,7 @@
             <span v-if="!isStaff" class="loginid">共 {{ wb.total }} 张 · 合计 <b style="color:#f56c6c">{{ wbMoney(wb.sumAmount) }}</b></span>
           </div>
 
+          <div class="m-table-scroll">
           <el-table :data="wb.rows" size="small" border style="width:100%" v-loading="wb.loading"
                     empty-text="没有符合条件的货单">
             <el-table-column label="供应商名称" min-width="200">
@@ -3498,6 +3611,7 @@
               </template>
             </el-table-column>
           </el-table>
+          </div><!-- /.m-table-scroll -->
 
           <div class="pager-wrap">
             <el-pagination background layout="total, sizes, prev, pager, next"
@@ -3510,7 +3624,7 @@
 
         <!-- 新建货单：图片可以本机选，也可以生成 5 分钟链接让手机扫码拍 -->
         <el-dialog title="新建货单" :visible.sync="wbNew.visible" width="720px" top="5vh" append-to-body
-                   @closed="onWbNewClosed">
+                   custom-class="m-dlg" @closed="onWbNewClosed">
           <el-form label-position="top" size="small" :inline="false">
             <el-row :gutter="12">
               <el-col :xs="24" :sm="12">
@@ -3597,7 +3711,8 @@
         </el-dialog>
 
         <!-- 货单详情：只看，不改（要改就删了重建，采购单据以图为准） -->
-        <el-dialog title="货单详情" :visible.sync="wbView.visible" width="760px" top="5vh" append-to-body>
+        <el-dialog title="货单详情" :visible.sync="wbView.visible" width="760px" top="5vh" append-to-body
+                   custom-class="m-dlg">
           <div v-loading="wbView.loading">
             <el-descriptions :column="2" size="small" border v-if="wbView.waybill.id">
               <el-descriptions-item label="供应商">{{ wbView.waybill.supplierName || '—' }}</el-descriptions-item>
@@ -4857,7 +4972,7 @@
 
   <!-- ══════════ 退单日志（订单日志 / 配送日志） ══════════ -->
   <el-dialog :title="'订单日志 · ' + (rq.log.row.refundNo || '')" :visible.sync="rq.log.visible"
-             width="820px" top="8vh" append-to-body>
+             width="820px" top="8vh" append-to-body custom-class="m-dlg">
     <div v-if="rq.log.row.refundNo" class="detail-sum" style="margin-bottom:10px">
       退单类型：<b>{{ rq.log.row.refundType || '—' }}</b>
       · 退单金额：<b class="amount">{{ rq.log.row.refundAmount == null ? '—' : yuan(rq.log.row.refundAmount) }}</b>
