@@ -138,13 +138,20 @@
   .user-chip .avatar { width: 28px; height: 28px; border-radius: 50%; background: #fff1e6; color: var(--primary); display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 12px; flex: none; }
   .user-chip .uname { font-size: 13px; color: var(--text-1); white-space: nowrap; }
   .user-chip .urole { font-size: 11px; color: var(--text-3); white-space: nowrap; }
-  /* 绑定本机助手：已连接时是「状态」不是「按钮」→ 保持绿色、hover 无反馈、光标默认 */
+  /* 绑定本机助手：已连接时保持绿色状态；但可点击「取消链接」→ hover 变红提示这是断开操作 */
   .agent-bind-btn.is-bound,
   .agent-bind-btn.is-bound.is-disabled,
   .agent-bind-btn.is-bound.is-disabled:hover,
   .agent-bind-btn.is-bound.is-disabled:focus {
-    color: #2e7d32; background: #f0f9eb; border-color: #c2e7b0; cursor: default;
+    color: #2e7d32; background: #f0f9eb; border-color: #c2e7b0; cursor: pointer;
   }
+  .agent-bind-btn.is-bound:hover,
+  .agent-bind-btn.is-bound:focus {
+    color: #c0392b; background: #fef0f0; border-color: #f5c0bb;
+  }
+  /* 已连接按钮右侧的「×」：明确这里点得动，用来取消链接 */
+  .agent-unbind-x { margin-left: 6px; font-size: 12px; opacity: .6; }
+  .agent-bind-btn.is-bound:hover .agent-unbind-x { opacity: 1; }
   /* 版本更新提示：已停用的用轻微呼吸感提示——它不能像普通弹窗那样被无视 */
   @keyframes updPulse { 0%,100% { opacity: 1; } 50% { opacity: .68; } }
   .agent-upd-btn.is-blocking { animation: updPulse 2.4s ease-in-out infinite; font-weight: 600; }
@@ -492,11 +499,11 @@
       <div class="nav-right">
         <el-button size="small" plain @click="openDownload"
                    title="下载 Windows 版本机助手（已内置服务器地址），下载后双击运行">⬇ 下载本机助手</el-button>
-        <!-- 绑定按钮与连接状态合一：未连接可点、已连接变绿色状态且不可点 -->
+        <!-- 绑定按钮与连接状态合一：未连接=发起绑定；已连接=绿色状态，点击可取消链接后重新绑定 -->
         <el-button size="small" :class="['agent-bind-btn', { 'is-bound': agent.online }]"
                    :type="agent.online ? 'success' : 'primary'" :plain="!agent.online"
-                   :loading="guide.binding" :disabled="agent.online || guide.binding"
-                   :title="agentBindTitle" @click="bindAgent">{{ agentBindText }}</el-button>
+                   :loading="guide.binding" :disabled="guide.binding"
+                   :title="agentBindTitle" @click="onAgentBindClick">{{ agentBindText }}<i v-if="agent.online" class="el-icon-close agent-unbind-x" aria-hidden="true"></i></el-button>
         <!-- 版本体检不通过才出现：宽限期内橙色提醒，已停用则红色 -->
         <el-button v-if="agentUpdate" size="small" class="agent-upd-btn"
                    :class="{ 'is-blocking': agentUpdate.blocking }"
@@ -5986,8 +5993,8 @@ const vm = new Vue({
     agentBindTitle() {
       if (this.guide.binding) return '正在唤起本机助手并等待连接（最多 1 分钟）';
       if (this.agent && this.agent.online) {
-        return '本机助手已连接' + (this.agent.loggedIn ? '（1688 已登录）' : '（1688 未登录，可在 1688发票 页点「登录1688」）')
-          + '，无需重复绑定';
+        return '已连接：点击可取消链接（撤销设备令牌并断开），之后可重新点「绑定本机助手」重新绑定；'
+          + (this.agent.loggedIn ? '1688 已登录' : '1688 未登录，可在 1688发票 页点「登录1688」');
       }
       return '点击唤起并绑定本机助手（浏览器会问是否打开「催收小助手」，点「打开」即可）';
     },
@@ -13142,11 +13149,68 @@ const vm = new Vue({
       }
     },
     /**
-     * 「绑定本机助手」按钮（顶栏）：未连接时可点；连上后按钮变成绿色的「已连接」且不可点。
+     * 顶栏助手按钮统一入口：
+     *   未连接 → bindAgent() 发起绑定；已连接 → unbindAgent() 取消链接（之后可再绑定）。
+     * 已连接状态本身不再是「不可点的标签」，用户需要能主动解绑换机器/换令牌。
+     */
+    onAgentBindClick() {
+      if (this.guide.binding) return;
+      if (this.agent && this.agent.online) this.unbindAgent();
+      else this.bindAgent();
+    },
+    /**
+     * 取消链接：撤销设备令牌 + 断开当前 WS，让按钮回到「绑定本机助手」以便重新绑定。
+     * ⚠ 只调 /api/agent/disconnect 不够：助手 ws-client 在 close 后会自动重连，几秒后
+     *   又变回「已连接」。必须 revoke 令牌，服务端才会在握手阶段用 401 拒绝重连
+     *   （server.js /ws/agent → agentHub.redeem）。
+     */
+    async unbindAgent() {
+      const ver = this.agentVer ? (' v' + this.agentVer) : '';
+      try {
+        await this.$confirm(
+          '<p style="margin:0 0 8px">将取消本机助手的链接：</p>'
+          + '<p style="margin:0;line-height:1.9">'
+          + '① 撤销当前账号下所有已绑定的设备令牌并断开连接；<br>'
+          + '② 其它电脑上用同一账号绑定的助手也会失效；<br>'
+          + '③ 之后点右上角「绑定本机助手」即可重新绑定（会签发新令牌）。</p>',
+          '取消链接并支持重新绑定？' + ver,
+          { confirmButtonText: '取消链接', cancelButtonText: '先不解绑', type: 'warning', dangerouslyUseHTMLString: true }
+        );
+      } catch (e) { return; }
+      const errors = [];
+      let revoked = 0;
+      try {
+        const list = await this.api('/api/agent/devices');
+        const devices = ((list && list.devices) || []).filter((d) => d && d.active !== false);
+        for (const d of devices) {
+          try {
+            const r = await this.api('/api/agent/devices/revoke', {
+              method: 'POST', headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ id: d.id }),
+            });
+            if (r && r.error) errors.push(String(r.error));
+            else revoked += 1;
+          } catch (e) { errors.push(e.message); }
+        }
+      } catch (e) { errors.push('读取设备列表失败：' + e.message); }
+      // 兜底：即使设备列表拿不到，也把当前 WS 立刻断掉（服务端 conns 清空）
+      try { await this.api('/api/agent/disconnect', { method: 'POST' }); }
+      catch (e) { errors.push('断开连接失败：' + e.message); }
+      // 先本地置离线，按钮立刻回到「绑定本机助手」，再用服务端真值校正
+      this.agent = { online: false, connected: false, loggedIn: false };
+      this.agentVer = '';
+      this.agentVersion = null;
+      await this.refreshAgent();
+      this.reportOp('agent.unbind', { revoked });
+      if (errors.length) this.$message.warning('已取消链接（撤销 ' + revoked + ' 个设备），但有问题：' + errors[0]);
+      else this.$message.success('已取消链接，点「绑定本机助手」可重新绑定');
+    },
+    /**
+     * 绑定本机助手：唤起助手并等待握手；成功后按钮变成绿色的「已连接」（点它可取消链接）。
      * 现在没有弹框承载过程提示，所以用一条常驻 toast 说明进度，失败时给「重新绑定 / 去下载」两条出路。
      */
     async bindAgent() {
-      if (this.agent && this.agent.online) { this.$message.success('本机助手已连接，无需重复绑定'); return; }
+      if (this.agent && this.agent.online) { this.$message.info('已连接；如需换绑，请先点击按钮取消链接'); return; }
       if (this.guide.binding) return;
       this.guide.binding = true;
       const tip = this.$message({
