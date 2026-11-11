@@ -4528,8 +4528,8 @@
           </div>
 
           <!-- 跨页全选提示（v0.3.41）：选中数超过当前页行数时才出现，说明勾选已跨越分页 -->
-          <div v-if="pd.selected.length > (pd.rows || []).length" class="bulk-sel-tip">
-            已选中 <b>{{ pd.selected.length }}</b> 条查询结果（含其它页）
+          <div v-if="pd.allPicked || pd.selected.length > (pd.rows || []).length" class="bulk-sel-tip">
+            已选中 <b>{{ pddBatchRows.length }}</b> 条查询结果（含其它页）
             <a @click="keepPddPageSelection">只选本页</a>
             <a @click="clearPddPicked">取消全选</a>
           </div>
@@ -4820,8 +4820,8 @@
           </div>
 
           <!-- 跨页全选提示（v0.3.41）：选中家数超过当前页行数时才出现 -->
-          <div v-if="sd.selected.length > (sd.rows || []).length" class="bulk-sel-tip">
-            已选中 <b>{{ sd.selected.length }}</b> 家店铺（含其它页）
+          <div v-if="sd.allPicked || sd.selected.length > (sd.rows || []).length" class="bulk-sel-tip">
+            已选中 <b>{{ sdcBatchRows.length }}</b> 家店铺（含其它页）
             <a @click="keepSdcPageSelection">只选本页</a>
             <a @click="clearSdcPicked">取消全选</a>
           </div>
@@ -5724,6 +5724,10 @@ const vm = new Vue({
         // 表头 checkbox 在页内有不可勾选行时永远是半选，Element 只按「半选→全选」处理，
         // 所以「再点一次取消」必须自己判：只有这个标志为真时，点表头才当成取消。
         allPicked: false,
+        // allRows = 表头全选时从服务端拉到的「全部查询结果」快照。批量操作优先用它取数：
+        // Element 的 cleanSelection() 会移除不在本页 data 里的选中行并 emit selection-change，
+        // 只靠 selected（由该事件增量维护）有被压回当前页的风险，跨页全选就会白选。
+        allRows: [],
         applyDialog: { visible: false, running: false, kind: '', status: '', message: '', progress: null, log: [], startedAt: 0 },
       },
       // 线下催收（v0.3.38）：把「交易成功 + 暂不可开票/未同步开票」的订单按商家汇总，
@@ -5745,6 +5749,8 @@ const vm = new Vue({
         // 档位不再作为筛选条件（2026-10-29 按要求删除），要看档位分布直接看列表里的「开票档位」列
         filter: { sent: '', invoice: '', keyword: '', sort: 'amount_desc' },
         selected: [], picked: {}, selAllLoading: false, syncing: false, allPicked: false,
+        // 与 pd.allRows 同义：表头全选的全部店铺快照，批量催收以它为准
+        allRows: [],
         login: { logined: false, accountName: '', subUserId: '', lastSyncAt: null, writtenAt: null },
         agent: { online: false, agentVer: '', minVer: '', outdated: false },
         users: [], sessions: [],
@@ -6336,9 +6342,21 @@ const vm = new Vue({
       };
       return tpl.replace(/\{(companyName|taxNo|email|orderSn|amount)\}/g, (m, k) => vars[k] || '');
     },
+    /**
+     * 批量操作的真实取数范围（v0.3.50 修复）：表头全选（跨页）时以服务端返回的
+     * 全量快照为准，否则用跨页累计的 selected。两条路径都不再直接依赖表格内部选中态。
+     */
+    pddBatchRows() {
+      return (this.pd.allPicked && (this.pd.allRows || []).length)
+        ? this.pd.allRows : (this.pd.selected || []);
+    },
+    sdcBatchRows() {
+      return (this.sd.allPicked && (this.sd.allRows || []).length)
+        ? this.sd.allRows : (this.sd.selected || []);
+    },
     // 勾选里可申请 / 可催收的条数（两种操作共用一套勾选，各自只处理自己那一类）
-    applySelCount() { return (this.pd.selected || []).filter((r) => r && r.applyable).length; },
-    chatSelCount() { return (this.pd.selected || []).filter((r) => r && r.chatable).length; },
+    applySelCount() { return this.pddBatchRows.filter((r) => r && r.applyable).length; },
+    chatSelCount() { return this.pddBatchRows.filter((r) => r && r.chatable).length; },
     // 批量申请发票进度百分比（结束且无进度数据时按 100 展示，避免停在 0 误导）
     applyPercent() {
       const ad = this.pd.applyDialog;
@@ -6561,7 +6579,7 @@ const vm = new Vue({
     sdcUsers() { return this.sd.users || []; },
     sdcSessions() { return this.sd.sessions || []; },
     /** 勾选/催收的最小单位是店铺（发送时同一家店合并成一条消息） */
-    sdcSelCount() { return (this.sd.selected || []).length; },
+    sdcSelCount() { return this.sdcBatchRows.length; },
     sdcStageAmount() { return Number(this.sd.amount || 0).toFixed(2); },
     /** 筛选后的全量待开票合计（后端聚合，翻页不跳变；口径与概况卡、催收发送金额一致） */
     sdcPendingTotal() {
@@ -8904,6 +8922,7 @@ const vm = new Vue({
     onPddRowSelect() {
       if (this.pd.syncing) return;
       this.pd.allPicked = false;
+      this.pd.allRows = [];
     },
     /**
      * 表头全选（v0.3.41）：点一次 = 选中**当前筛选条件下的全部查询结果**，不只是当前页。
@@ -8946,6 +8965,7 @@ const vm = new Vue({
         all.forEach((r) => { picked[r.orderSn] = r; });
         this.pd.picked = picked;
         this.pd.selected = all.slice();
+        this.pd.allRows = all.slice();
         this.pd.allPicked = true;
         this.syncPddTableSelection(all);
         this.$message.success('已选择全部 ' + all.length + ' 条查询结果（跨页）');
@@ -8974,6 +8994,7 @@ const vm = new Vue({
       this.pd.picked = picked;
       this.pd.selected = Object.keys(picked).map((k) => picked[k]);
       this.pd.allPicked = false;
+      this.pd.allRows = [];
       const t = this.$refs.pddTable;
       if (t && typeof t.clearSelection === 'function') {
         this.pd.syncing = true;
@@ -8989,11 +9010,12 @@ const vm = new Vue({
     clearPddPicked() {
       this.pd.picked = {};
       this.pd.selected = [];
+      this.pd.allRows = [];
       this.pd.allPicked = false;
       const t = this.$refs.pddTable;
       if (t && typeof t.clearSelection === 'function') t.clearSelection();
     },
-    applyPddBatch() { this.applyPddRows(this.pd.selected); },
+    applyPddBatch() { this.applyPddRows(this.pddBatchRows); },
     async applyPddRows(rows) {
       const list = (rows || []).filter((r) => r && r.applyable);
       if (!list.length) { this.$message.warning('请先勾选「待申请」状态的订单'); return; }
@@ -9048,7 +9070,7 @@ const vm = new Vue({
     },
 
     // ── 拼多多「催商家开票」（只对「商家处理中」开放；行内单个 / 勾选批量，同一入口） ──
-    sendPddBatch() { this.sendPddMsgRows(this.pd.selected); },
+    sendPddBatch() { this.sendPddMsgRows(this.pddBatchRows); },
     async sendPddMsgRows(rows) {
       const list = (rows || []).filter((r) => r && r.chatable);
       if (!list.length) { this.$message.warning('请先勾选「商家处理中」的订单（其余状态不可催收）'); return; }
@@ -9645,6 +9667,7 @@ const vm = new Vue({
     clearSdcPicked() {
       this.sd.picked = {};
       this.sd.selected = [];
+      this.sd.allRows = [];
       this.sd.allPicked = false;
       const t = this.$refs.sdcTable;
       if (t && typeof t.clearSelection === 'function') t.clearSelection();
@@ -9681,6 +9704,7 @@ const vm = new Vue({
     onSdcRowSelect() {
       if (this.sd.syncing) return;
       this.sd.allPicked = false;
+      this.sd.allRows = [];
     },
     /**
      * 表头全选（v0.3.41）：点一次 = 选中**当前筛选条件下的全部店铺**（跨页），
@@ -9720,6 +9744,7 @@ const vm = new Vue({
         all.forEach((r) => { picked[r.key] = r; });
         this.sd.picked = picked;
         this.sd.selected = all.slice();
+        this.sd.allRows = all.slice();
         this.sd.allPicked = true;
         this.syncSdcTableSelection(all);
         this.$message.success('已选择全部 ' + all.length + ' 家店铺（跨页）');
@@ -9748,6 +9773,7 @@ const vm = new Vue({
       this.sd.picked = picked;
       this.sd.selected = Object.keys(picked).map((k) => picked[k]);
       this.sd.allPicked = false;
+      this.sd.allRows = [];
       const t = this.$refs.sdcTable;
       if (t && typeof t.clearSelection === 'function') {
         this.sd.syncing = true;
@@ -9765,8 +9791,11 @@ const vm = new Vue({
      * 没勾店铺 = 对库里所有店铺的「可申请 + 已申请 + 不支持线上开票」订单批量催（已开票不催）。
      */
     async openSdcSend(rows) {
-      const picked = Array.isArray(rows) ? rows : (this.sd.selected || []);
-      const ids = picked.map((r) => r.shop_id).filter(Boolean);
+      // 行内「催收消息」传的是 [row]；表头/复选框批量走 sdcBatchRows（跨页全选用全量快照）
+      const picked = Array.isArray(rows) ? rows : this.sdcBatchRows;
+      // shops() 的行给 shop_id、全选精简行给 shopId/key，三种口径都要能取到店铺 ID
+      const ids = picked.map((r) => r && (r.shop_id || r.shopId || (r.key && r.key !== '__none__' ? r.key : '')))
+        .filter(Boolean).map(String);
       // 发送用本账号默认抬头（app_user 公司全称/税号/邮箱，管理员在「系统管理 → 用户管理」里维护）
       await this.doSendSdc(ids, 0);
     },
