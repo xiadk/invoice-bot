@@ -1912,6 +1912,10 @@ const PDD_TASKS = new Map();                   // taskId -> ctx
 //    与 PDD_TASKS 同构，前端轮询进度即可；不落库，进程重启后作废（订单本身已入库）
 const ALI_TASKS = new Map();                   // taskId -> ctx
 const ALI_TASK_TTL_MS = 60 * 60 * 1000;        // 完成后保留 1 小时供前端读最终状态
+// 支持「本机助手代拉 1688 订单/已开票」的最低版本（0.3.51 起才有 ali_fetch 内核）
+// 为什么必须代拉：1688 对服务器出口 IP 的业务接口下发了人机验证（FAIL_SYS_USER_VALIDATE /
+// RGV587），换账号、换 Cookie、换令牌都一样；只有用户本机的浏览器会话能过。
+const ALI_FETCH_MIN_AGENT = '0.3.51';
 const PDD_APPLY_TIMEOUT_MS = Number(process.env.PDD_APPLY_TIMEOUT_MS) || 10 * 60 * 1000;
 const PDD_APPLY_TTL_MS = PDD_APPLY_TIMEOUT_MS + 5 * 60 * 1000;
 // 支持「申请发票」的最低助手版本
@@ -2586,6 +2590,150 @@ function onSdcLoginDone(uid, msg) {
   logOp(Number(uid), 'sdc.login', { ok: true, tenantId: ctx.userId, accountName: ctx.accountName });
 }
 
+// ── 1688 取数（本机助手代拉）：助手逐页回传原始行，服务端负责字段映射与入库 ──
+//    为什么走助手：1688 对服务器出口 IP 的业务接口下发人机验证（见 ALI_FETCH_MIN_AGENT 注释）。
+//    分工：助手只「取」（发 mtop、翻页、回传原始行），口径全部留在本文件这一侧
+//    （mapOrder / mapInvoiceRecord / upsertOrders / markIssued），字段名只维护一处。
+
+/** 任务日志（与路由里的进度日志同一格式，前端「日志」区直接渲染） */
+function aliPushLog(ctx, text) {
+  if (!ctx) return;
+  if (!Array.isArray(ctx.progressLog)) ctx.progressLog = [];
+  const t = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+  ctx.progressLog.push({ t, text: String(text == null ? '' : text) });
+  if (ctx.progressLog.length > 300) ctx.progressLog.shift();
+}
+
+/** 取本任务：只认「任务号 + 下发时记下的那台助手」，避免串到别人的任务上 */
+function aliAgentTask(uid, msg) {
+  const ctx = ALI_TASKS.get(String((msg && msg.taskId) || ''));
+  if (!ctx || ctx.status !== 'pending') return null;
+  if (ctx.agentUid && Number(ctx.agentUid) !== Number(uid)) return null;
+  return ctx;
+}
+
+/**
+ * 助手回传一页原始数据：订单页按 mapOrder 映射后 upsert；发票页先攒着，
+ * 收尾时一次 markIssued（与服务器直连路径同一口径，少打一遍库）。
+ */
+function onAliFetchPage(uid, msg) {
+  const ctx = aliAgentTask(uid, msg);
+  if (!ctx) return;
+  const phase = msg.phase === 'invoices' ? 'invoices' : 'orders';
+  if (ctx.phase !== phase) ctx.phase = phase;
+  const rows = Array.isArray(msg.rows) ? msg.rows : [];
+  const page = Number(msg.page) || 0;
+
+  // 串行入库：多页并发会同时写同一片订单，计数会互相踩（新增/更新对不上）
+  ctx._chain = (ctx._chain || Promise.resolve()).then(async () => {
+    const p = ctx.progress || {};
+    if (phase === 'orders') {
+      const mapped = rows.map((o) => aliOrders.mapOrder(o, ctx.userId)).filter(Boolean);
+      const r = mapped.length
+        ? await aliOrders.upsertOrders(mapped, ctx.userId)
+        : { saved: 0, inserted: 0 };
+      ctx.progress = Object.assign({}, p, {
+        page,
+        totalPages: Number(msg.totalPages) || p.totalPages || 0,
+        total: Number(msg.total) || p.total || 0,
+        fetched: Number(msg.fetched) || (Number(p.fetched) || 0) + rows.length,
+        rows: mapped.length,
+        saved: (Number(p.saved) || 0) + (r.saved || 0),
+        newCount: (Number(p.newCount) || 0) + (r.inserted || 0),
+        current: mapped[0] ? (mapped[0].seller_company || mapped[0].order_no) : (p.current || ''),
+      });
+      aliPushLog(ctx, `第 ${page}${msg.totalPages ? '/' + msg.totalPages : ''} 页：本页 ${mapped.length} 单，`
+        + `累计 ${ctx.progress.fetched} 单，入库 ${ctx.progress.saved}（新增 ${ctx.progress.newCount}）`);
+      return;
+    }
+    // 已开票：按开票时间过滤（增量锚点由服务端算好下发，助手不掺业务判断）
+    const sinceMs = Number(ctx.invoiceSinceMs) || 0;
+    const mapped = rows.map((r) => aliOrders.mapInvoiceRecord(r)).filter(Boolean);
+    for (const m of mapped) {
+      const ms = m.invoiceTime ? (Date.parse(String(m.invoiceTime).replace(' ', 'T')) || 0) : 0;
+      if (sinceMs && ms && ms < sinceMs) continue;   // 比上次更早 = 已处理过
+      ctx._invPicked.push(m);
+    }
+    ctx.progress = Object.assign({}, p, {
+      invPage: page,
+      invPages: Number(msg.totalPages) || p.invPages || 0,
+      invFetched: Number(msg.invoiceFetched) || (Number(p.invFetched) || 0) + rows.length,
+    });
+    aliPushLog(ctx, `发票同步第 ${page}${msg.totalPages ? '/' + msg.totalPages : ''} 页：`
+      + `接口 ${ctx.progress.invFetched} 条，命中 ${ctx._invPicked.length} 条`);
+  }).catch((e) => {
+    ctx._lastError = String((e && e.message) || e).slice(0, 200);
+    aliPushLog(ctx, '✗ 入库失败：' + ctx._lastError);
+  });
+}
+
+/** 助手跑完取数：收尾（发票回写 + 任务状态 + 操作日志） */
+function onAliFetchDone(uid, msg) {
+  const ctx = aliAgentTask(uid, msg);
+  if (!ctx) return;
+  const finish = async () => {
+    if (ctx._chain) await ctx._chain.catch(() => null);
+    ctx.finishedAt = Date.now();
+    ctx.expiresAt = Date.now() + ALI_TASK_TTL_MS;
+
+    if (!msg.ok) {
+      const why = aliOrders.explainRet(msg.ret);
+      ctx.status = 'failed';
+      ctx.message = String(why || msg.error || '本机助手取数失败').slice(0, 300);
+      // 「要重新登录」只认真正的会话类错误；风控验证码不是登录问题，别引导用户白重登一遍
+      ctx.needLogin = /SESSION_EXPIRED|TOKEN_EMPTY|TOKEN_EXOIRED|TOKEN_EXPIRED/i.test(String(msg.ret || ''))
+        || /未登录|登录态已失效|重新登录/.test(ctx.message);
+      aliPushLog(ctx, '✗ ' + ctx.message);
+      logOp(Number(uid), 'ali.orders.sync', {
+        ok: false, tenantId: ctx.userId, via: 'agent', phase: ctx.phase || 'orders', reason: ctx.message,
+      });
+      return;
+    }
+
+    const p = ctx.progress || {};
+    let inv = null;
+    if (ctx.withInvoices) {
+      const picked = Array.isArray(ctx._invPicked) ? ctx._invPicked : [];
+      const out = picked.length
+        ? await aliOrders.markIssued(ctx.userId, picked).catch(() => ({ updated: 0, missing: 0 }))
+        : { updated: 0, missing: 0 };
+      inv = {
+        fetched: Number(p.invFetched) || 0,
+        matched: out.updated || 0,
+        missing: out.missing || 0,
+        since: ctx.invoiceSince || null,
+      };
+      ctx.invoice = inv;
+      const missTip = inv.missing ? `（${inv.missing} 条订单不在库里，多是还没导入的历史单）` : '';
+      aliPushLog(ctx, inv.matched
+        ? `✓ 已开票同步完成：接口 ${inv.fetched} 条、命中订单 ${inv.matched} 单${missTip}`
+        : `✓ 已开票同步完成：接口 ${inv.fetched} 条，本次没有需要回写的记录${missTip}`);
+    }
+
+    const fetched = Number(p.fetched) || 0;
+    const saved = Number(p.saved) || 0;
+    const newCount = Number(p.newCount) || 0;
+    ctx.status = 'done';
+    ctx.progress = Object.assign({}, p, { page: Number(msg.pages) || p.page || 0, percent: 100 });
+    ctx.message = `同步完成：订单 ${fetched} 单（新增 ${newCount}，更新 ${Math.max(0, saved - newCount)}）`
+      + (inv ? `；已开票命中 ${inv.matched} 单` : '')
+      + (msg.stopped ? '（中途停止）' : '')
+      + (ctx._lastError ? `（部分页入库失败：${ctx._lastError}）` : '');
+    aliPushLog(ctx, (msg.stopped ? '■ ' : '✓ ') + ctx.message);
+    logOp(Number(uid), 'ali.orders.sync', {
+      ok: true, tenantId: ctx.userId, via: 'agent', fetched, newCount,
+      invoiceMatched: inv ? inv.matched : 0, stopped: !!msg.stopped,
+    });
+  };
+  finish().catch((e) => {
+    ctx.status = 'failed';
+    ctx.message = '同步收尾失败：' + String((e && e.message) || e).slice(0, 200);
+    ctx.finishedAt = Date.now();
+    ctx.expiresAt = Date.now() + ALI_TASK_TTL_MS;
+    aliPushLog(ctx, '✗ ' + ctx.message);
+  });
+}
+
 /**
  * 助手分批回传订单行：边收边入库（避免等全部拉完才写，中途失败也留住已拿到的部分）。
  */
@@ -2719,6 +2867,9 @@ function handleAgentMessage(uid, msg) {
   if (msg.type === 'qnh_login_done') { onQnhLoginDone(uid, msg); return; }
   if (msg.type === 'pdd_login_done') { onPddLoginDone(uid, msg); return; }
   if (msg.type === 'ali_login_done') { onAliLoginDone(uid, msg); return; }
+  // ── 1688 取数（本机助手代拉）：分页回传 + 收尾 ──
+  if (msg.type === 'ali_fetch_page') { onAliFetchPage(uid, msg); return; }
+  if (msg.type === 'ali_fetch_done') { onAliFetchDone(uid, msg); return; }
   if (msg.type === 'pdd_apply_done') { onPddApplyDone(uid, msg); return; }
   if (msg.type === 'pdd_apply_progress') { onPddApplyProgress(uid, msg); return; }
   if (msg.type === 'pdd_send_done') { onPddSendDone(uid, msg); return; }
@@ -2907,6 +3058,18 @@ function maybeAbortClientTask(uid) {
       taskLog(ctx.taskState, '⛔ 本机助手连接已断开，订单导出中断');
       finishExport(ctx, false, '本机助手通道断开');
     }
+  }
+  // 1688 取数：任务跑在助手进程里，助手一断就再也回不来了 → 立刻收掉，
+  // 别让看板一直转圈（已回传的订单早已入库，不需要重拉）。只收「这台助手」名下的任务，
+  // 避免老板账号的助手掉线时把员工电脑上的任务也误杀。
+  for (const ctx of ALI_TASKS.values()) {
+    if (ctx.status !== 'pending') continue;
+    if (Number(ctx.agentUid) !== Number(uid)) continue;
+    ctx.status = 'failed';
+    ctx.message = '本机助手连接已断开，1688 取数中断（已拉到的订单已入库，重新打开助手后再同步一次即可续上）';
+    ctx.finishedAt = Date.now();
+    ctx.expiresAt = Date.now() + ALI_TASK_TTL_MS;
+    aliPushLog(ctx, '⛔ ' + ctx.message);
   }
 }
 
@@ -4285,6 +4448,23 @@ const server = http.createServer(async (req, res) => {
       const forcedStart = b.startDateTime && /^\d{4}-\d{2}-\d{2}/.test(String(b.startDateTime))
         ? String(b.startDateTime) : null;
 
+      // 优先下发给本机助手：1688 已对服务器出口 IP 的业务接口下发人机验证
+      // （FAIL_SYS_USER_VALIDATE / RGV587，换账号换 Cookie 换令牌都一样），
+      // 只有用户本机的浏览器会话（同 IP、同设备、真实指纹）能过。
+      // 助手离线或版本过低才回落到服务器直连 —— 大概率仍会失败，但文案会讲清原因。
+      const aUid = agentUidFor(user, tenantId);
+      const agentVer = aUid ? (agentHub.status(aUid).agentVer || '') : '';
+      const viaAgent = !!aUid && verGte(agentVer || '0.0.0', ALI_FETCH_MIN_AGENT);
+      const sess = aliOrders.sessionStatus(tenantId);
+      if (!viaAgent && !sess.configured) {
+        return sendJson(res, 200, {
+          ok: false, pending: false, needLogin: true,
+          message: aUid
+            ? `这台电脑上的催收小助手是 v${agentVer}，还不支持在本机取数 1688 订单（需要 v${ALI_FETCH_MIN_AGENT} 及以上）；服务器侧也没有可用的 1688 登录态，请先升级助手。`
+            : '未配置 1688 登录态：接口需要真实买家登录 Cookie，请到「1688发票」页点「登录1688」，在助手窗口里登录（登录态自动回传服务器）',
+        });
+      }
+
       const taskId = 'aliord-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
       const ctx = {
         taskId, kind: 'ali-orders', userId: Number(tenantId), status: 'pending',
@@ -4294,13 +4474,56 @@ const server = http.createServer(async (req, res) => {
         progress: { page: 0, totalPages: 0, total: 0, fetched: 0, rows: 0, saved: 0, newCount: 0, current: '' },
         progressLog: [], expiresAt: Date.now() + ALI_TASK_TTL_MS,
       };
-      const pushLog = (text) => {
-        const t = new Date().toLocaleTimeString('zh-CN', { hour12: false });
-        ctx.progressLog.push({ t, text });
-        if (ctx.progressLog.length > 300) ctx.progressLog.shift();
-      };
+      const pushLog = (text) => aliPushLog(ctx, text);
       ALI_TASKS.set(taskId, ctx);
-      pushLog('开始同步 1688 订单…');
+
+      // ── 路线 A：本机助手代拉（正常路径）──
+      if (viaAgent) {
+        const startAt = forcedStart || await aliOrders.latestOrderTime(Number(tenantId)).catch(() => null);
+        if (!startAt) {
+          ALI_TASKS.delete(taskId);
+          return sendJson(res, 200, {
+            ok: false, pending: false, needImport: true,
+            message: '首次使用需要先导入历史订单：点「导入订单」上传从 1688 导出的订单 Excel，之后「同步订单」才会按下单时间做增量拉取',
+          });
+        }
+        ctx.startDateTime = startAt;
+        ctx.agentUid = aUid;
+        ctx.via = 'agent';
+        ctx.phase = 'orders';
+        // 已开票的增量锚点由服务端算好（与直连路径同一个 invoiceSinceOf），助手不掺业务判断
+        ctx.invoiceSince = ctx.withInvoices
+          ? await aliOrders.invoiceSinceOf(Number(tenantId)).catch(() => null) : null;
+        ctx.invoiceSinceMs = ctx.invoiceSince ? (Date.parse(String(ctx.invoiceSince).replace(' ', 'T')) || 0) : 0;
+        ctx._invPicked = [];
+        pushLog(`开始同步 1688 订单（由本机助手取数，增量起点 ${startAt}）…`);
+        const sent = agentHub.send(aUid, {
+          type: 'ali_fetch',
+          taskId,
+          startDateTime: startAt,
+          maxPages: aliOrders.getMaxPages(),
+          pageSize: aliOrders.PAGE_SIZE || 100,
+          withInvoices: ctx.withInvoices,
+          invoiceMaxPages: 100,
+          invoicePageSize: 20,
+        });
+        if (!sent) {
+          ALI_TASKS.delete(taskId);
+          return sendJson(res, 200, {
+            ok: false, pending: false, needAgent: true,
+            message: '下发取数任务失败：本机助手连接已断开，请重新打开助手后再试。',
+          });
+        }
+        await logOp(user, 'ali.orders.sync', { tenantId, startDateTime: startAt, via: 'agent' });
+        return sendJson(res, 200, {
+          ok: true, pending: true, taskId, via: 'agent',
+          message: '已下发给本机助手，正在你电脑的浏览器会话里拉取 1688 订单…',
+        });
+      }
+
+      // ── 路线 B：服务器直连（助手离线/版本过低时的兜底）──
+      pushLog('开始同步 1688 订单…（本机助手未连接或版本过低，这次由服务器直连；'
+        + '服务器出口 IP 已被 1688 风控，很可能被要求人机验证）');
 
       aliOrders.syncOrders({
         userId: Number(tenantId),
@@ -4377,17 +4600,10 @@ const server = http.createServer(async (req, res) => {
         pushLog('✗ 同步异常：' + ctx.message);
       });
 
-      const st = aliOrders.sessionStatus(tenantId);
-      if (!st.configured) {
-        return sendJson(res, 200, {
-          ok: false, pending: false, needLogin: true,
-          message: '未配置 1688 登录态：接口需要真实买家登录 Cookie，请到「1688发票」页点「登录1688」，在助手窗口里登录（登录态自动回传服务器）',
-        });
-      }
-      await logOp(user, 'ali.orders.sync', { tenantId, startDateTime: forcedStart });
+      await logOp(user, 'ali.orders.sync', { tenantId, startDateTime: forcedStart, via: 'direct' });
       return sendJson(res, 200, {
-        ok: true, pending: true, taskId,
-        message: '已开始同步 1688 订单，进度见下方…',
+        ok: true, pending: true, taskId, via: 'direct',
+        message: '已开始同步 1688 订单（服务器直连），进度见下方…',
       });
     }
     if (method === 'GET' && p === '/api/ali/orders-sync') {
@@ -4406,7 +4622,26 @@ const server = http.createServer(async (req, res) => {
     if (method === 'POST' && p === '/api/ali/orders-sync-stop') {
       const b = await readBody(req).catch(() => ({}));
       const ctx = ALI_TASKS.get(String(b.taskId || ''));
-      if (ctx) { ctx.stopping = true; return sendJson(res, 200, { ok: true }); }
+      if (ctx) {
+        ctx.stopping = true;
+        // 助手代拉的任务：光置 stopping 没用（循环在助手进程里），还得让它自己收手
+        if (ctx.agentUid) {
+          agentHub.send(ctx.agentUid, { type: 'stop' });
+          // 兜底：助手 15 秒内没回执（断线/卡死）就把任务收掉，别让看板一直转圈
+          const t = setTimeout(() => {
+            const c = ALI_TASKS.get(ctx.taskId);
+            if (c && c.status === 'pending') {
+              c.status = 'failed';
+              c.message = '已停止（助手 15 秒内没有回执，可能已断线）';
+              c.finishedAt = Date.now();
+              c.expiresAt = Date.now() + ALI_TASK_TTL_MS;
+              aliPushLog(c, '■ ' + c.message);
+            }
+          }, 15000);
+          if (t.unref) t.unref();
+        }
+        return sendJson(res, 200, { ok: true });
+      }
       return sendJson(res, 200, { ok: false, error: '任务不存在' });
     }
 
