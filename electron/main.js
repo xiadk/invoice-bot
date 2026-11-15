@@ -26,6 +26,7 @@ const qnhLogin = require('./agent/qnh-login');
 const jdLogin = require('./agent/jd-login');
 const pddLogin = require('./agent/pdd-login');
 const aliLogin = require('./agent/ali-login');
+const aliFetch = require('./agent/ali-fetch');
 const pddApply = require('./agent/pdd-apply');
 const pddSend = require('./agent/pdd-send');
 const pddMall = require('./agent/pdd-mall');
@@ -314,6 +315,11 @@ function startAgent() {
   // 「登录1688」内核：同一套路，桌面窗口 + persist:1688 分区（与发消息内核共用登录态），
   // 回传的 Cookie 串由服务器写进 data/ali-cookie.txt（mtop 直连取数用的就是它）。
   client.setAliLoginHandler(aliLogin.createLoginHandler({
+    log: (m) => { log(m); pushState(); },
+  }));
+  // 「1688 订单/已开票取数」内核（v0.3.51）：服务器出口 IP 被 1688 风控要求人机验证，
+  // 所以 mtop 请求改由本机在 persist:1688 分区（真实浏览器会话）里发出，服务器只收原始行入库。
+  client.setAliFetchHandler(aliFetch.createFetchHandler({
     log: (m) => { log(m); pushState(); },
   }));
   // 「拼多多批量申请发票」内核：加载真实开票页逐单提交，anti-content 由页面自己生成。

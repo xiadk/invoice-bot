@@ -23,6 +23,9 @@ const HELLO_TIMEOUT_MS = 15000;
 // 超时即强制回执并释放 _qnhBusy，否则一次卡死的页面请求会把助手永久占住 ——
 // 之后「登录牵牛花」「退出账号」都会被判成「助手正在执行任务」而弹不出窗口。
 const QNH_FETCH_HARD_TIMEOUT_MS = 105 * 1000;
+// 「1688 取数」占用租约（v0.3.51）：任务卡住/断线时不能把后来者永远挡住。
+// 超过这个时长仍占着的，新任务直接接管（旧任务早已不可达，服务端也会按掉线处理）。
+const ALI_FETCH_LEASE_MS = 30 * 60 * 1000;
 
 function toWsBase(httpUrl) {
   return String(httpUrl || '').trim().replace(/\/+$/, '')
@@ -63,6 +66,8 @@ class AgentClient extends EventEmitter {
     this._jdFetchBusy = false;
     this._jdLoginBusy = false;
     this._aliBusy = false;
+    this._aliFetchBusy = false;
+    this._aliFetchBusyAt = 0;
   }
 
   /** 连接地址（供测试断言） */
@@ -119,9 +124,10 @@ class AgentClient extends EventEmitter {
       sdc: !!this._sdcBusy,
       price: !!this._priceBusy,
       ali: !!this._aliBusy,
+      aliFetch: !!this._aliFetchBusy,
       jd: !!(this._jdFetchBusy || this._jdLoginBusy),
       any: !!(this.sending || this._pddBusy || this._qnhBusy || this._sdcBusy || this._priceBusy || this._aliBusy
-        || this._jdFetchBusy || this._jdLoginBusy),
+        || this._aliFetchBusy || this._jdFetchBusy || this._jdLoginBusy),
     };
   }
 
@@ -175,6 +181,10 @@ class AgentClient extends EventEmitter {
     this.ws.on('close', (code, reason) => {
       clearTimeout(this._helloTimer);
       this._setReady(false);
+      // 断线时把「1688 取数」的占用放掉：这一轮任务的结果已经回不去了，
+      // 服务端会按掉线处理；不放会变成上次 `_pddBusy` 那样的「永久卡住」。
+      this._aliFetchBusy = false;
+      this._aliFetchBusyAt = 0;
       this.emit('disconnected', { code, reason: reason && reason.toString() });
       this._emitState();
       if (!this._stopped) this._scheduleReconnect();
@@ -201,6 +211,7 @@ class AgentClient extends EventEmitter {
     if (m.type === 'jd_fetch') { this._runJdFetch(m).catch((e) => this.log('京东万商取价异常: ' + e.message)); return; }
     if (m.type === 'pdd_login') { this._runPddLogin(m).catch((e) => this.log('拼多多登录异常: ' + e.message)); return; }
     if (m.type === 'ali_login') { this._runAliLogin(m).catch((e) => this.log('1688 登录异常: ' + e.message)); return; }
+    if (m.type === 'ali_fetch') { this._runAliFetch(m).catch((e) => this.log('1688 取数异常: ' + e.message)); return; }
     if (m.type === 'pdd_apply') { this._runPddApply(m).catch((e) => this.log('拼多多申请异常: ' + e.message)); return; }
     if (m.type === 'pdd_send') { this._runPddSend(m).catch((e) => this.log('拼多多催收异常: ' + e.message)); return; }
     if (m.type === 'pdd_mall') { this._runPddMall(m).catch((e) => this.log('拼多多解析店铺异常: ' + e.message)); return; }
@@ -288,6 +299,7 @@ class AgentClient extends EventEmitter {
   setPddLoginHandler(fn) { this._pddLoginHandler = fn; }
   /** 注册「1688 登录」处理器（main.js 注入 ali-login.createLoginHandler） */
   setAliLoginHandler(fn) { this._aliLoginHandler = fn; }
+  setAliFetchHandler(fn) { this._aliFetchHandler = fn; }
   /** 注册「拼多多批量申请发票」处理器（main.js 注入 pdd-apply.createApplyHandler） */
   setPddApplyHandler(fn) { this._pddApplyHandler = fn; }
   /** 注册「拼多多批量催商家开票」处理器（main.js 注入 pdd-send.createSendHandler） */
@@ -755,6 +767,55 @@ class AgentClient extends EventEmitter {
       done({ ok: false, error: String((e && e.message) || e).slice(0, 200) });
     } finally {
       this._aliBusy = false;
+      this.stopFlag = false;
+      this.currentTaskId = null;
+      this._emitState();
+    }
+  }
+
+  /**
+   * 「同步 1688 订单 / 已开票」：由助手在 persist:1688 分区（用户真实浏览器会话）里发 mtop，
+   * 逐页把**原始行**回传服务器（ali_fetch_page），服务端负责字段映射与入库。
+   * 为什么不在这里映射字段：口径只有一处（lib/ali-orders.js），助手只做「取」。
+   */
+  async _runAliFetch(m) {
+    const done = (payload) => this.send(Object.assign({
+      type: 'ali_fetch_done', taskId: m.taskId,
+    }, payload || {}));
+
+    // 占用判定带租约：卡住超过 ALI_FETCH_LEASE_MS 就让新任务接管，避免永久阻挡
+    if (this._aliFetchBusy && Date.now() - (this._aliFetchBusyAt || 0) < ALI_FETCH_LEASE_MS) {
+      done({ ok: false, error: '已有 1688 取数任务在进行中，请稍后重试' });
+      return;
+    }
+    if (this._aliFetchBusy) this.log('上一个 1688 取数任务的占用已超时，本次自动释放');
+    if (typeof this._aliFetchHandler !== 'function') {
+      done({ ok: false, error: '助手版本过旧，不支持在本机取数 1688 订单，请重新下载安装助手' });
+      return;
+    }
+    this._aliFetchBusy = true;
+    this._aliFetchBusyAt = Date.now();
+    this.stopFlag = false;
+    this.currentTaskId = m.taskId;
+    this._emitState();
+
+    const api = {
+      log: (text) => this.send({ type: 'log', text: String(text == null ? '' : text).slice(0, 200) }),
+      isStopped: () => this.stopFlag,
+      // 逐页回传：一页一条消息，服务端边收边入库（中途失败也留住已拿到的部分）
+      emitPage: (p) => {
+        this._aliFetchBusyAt = Date.now();   // 有进展就续租
+        this.send(Object.assign({ type: 'ali_fetch_page', taskId: m.taskId }, p || {}));
+      },
+      report: done,
+    };
+    try {
+      await this._aliFetchHandler(m, api);
+    } catch (e) {
+      done({ ok: false, error: String((e && e.message) || e).slice(0, 200) });
+    } finally {
+      this._aliFetchBusy = false;
+      this._aliFetchBusyAt = 0;
       this.stopFlag = false;
       this.currentTaskId = null;
       this._emitState();
