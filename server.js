@@ -5135,18 +5135,21 @@ const server = http.createServer(async (req, res) => {
     }
 
     // ── 滞销品列表（2026-11-18，独立菜单权限 slowmove）──
-    //   口径：供应商名以「1688-」开头 + 月/周/日销全为 0 + 最近补货距今 ≥ 2 个月，
+    //   口径：供应商名以「1688-」开头 + 7/14/30 天销量全为 0 + 最近补货距今 ≥ 2 个月，
     //         按货值倒序（货值 = (可用库存 + 在途库存) × 采购价，与商品列表同口径）。
-    //   ⚠ 月/周/日销、最近补货、供应商标识来自商品同步接口，字段键名以候选键兜底；
-    //     接口没有对应字段时这些列为 0/NULL/''，此时筛选结果为空，msg 会明确提示。
+    //   字段来源（2026-11-18 线上助手实测校准）：销量 sale7Num/sale14Num/sale30Num、
+    //     最近补货 recentlyReplenish.time、供应商 replenish.senderName；接口无单日销量。
+    //     接口没有对应字段时这些列为 0/NULL/''，此时筛选结果为空，hint 会明确提示。
     if (method === 'GET' && p === '/api/products/slow-moving') {
       if (!canSlowMove) return denySlowMove();
       const bo = brandOf(req, url, user);
       // 超管可看全部品牌；普通用户只锁自己品牌方（防越权看别家商品）
       const brandWhere = bo.all ? '' : ' AND brand_id = ?';
       const brandArgs = bo.all ? [] : [bo.brandId || (Number(user.brand_id) || 1)];
+      // 滞销口径（2026-11-18 用户按真实接口字段确认）：7/14/30 天销量全 0 + 供应商名 1688- 前缀
+      // + 最近补货距今 ≥ 2 个月。牵牛花接口实测只有 sale7Num/sale14Num/sale30Num，无单日销量。
       const wsql = " WHERE supplier_flag REGEXP '^1688[-—]'"
-        + ' AND sales_30d = 0 AND sales_7d = 0 AND sales_1d = 0'
+        + ' AND sales_30d = 0 AND sales_7d = 0 AND sales_14d = 0'
         + ' AND (last_replenish_at IS NULL OR last_replenish_at <= DATE_SUB(NOW(), INTERVAL 2 MONTH))'
         + brandWhere;
       const valueExpr = '((available_stock + transit_stock) * purchase_price)';
@@ -5154,7 +5157,7 @@ const server = http.createServer(async (req, res) => {
       const rows = await db.query(
         `SELECT id, brand_id, sku, goods_name, image_url, supplier_flag,
                 purchase_price, available_stock, transit_stock,
-                sales_30d, sales_7d, sales_1d, last_replenish_at, synced_at,
+                sales_30d, sales_7d, sales_14d, last_replenish_at, synced_at,
                 ${valueExpr} AS goods_value
            FROM brand_product${wsql}
           ORDER BY goods_value DESC, id DESC
@@ -5164,14 +5167,15 @@ const server = http.createServer(async (req, res) => {
       const valueR = await db.query(`SELECT COALESCE(SUM(${valueExpr}), 0) AS v FROM brand_product${wsql}`, brandArgs);
       // 诊断提示：全库商品都没有任何销量，多半是接口字段没 mapped 上（候选键未命中）
       const hasSalesFieldR = await db.query(
-        'SELECT COUNT(*) AS n FROM brand_product WHERE (sales_30d > 0 OR sales_7d > 0 OR sales_1d > 0) LIMIT 1'
+        'SELECT COUNT(*) AS n FROM brand_product WHERE (sales_30d > 0 OR sales_7d > 0 OR sales_14d > 0) LIMIT 1'
       );
       return sendJson(res, 200, {
         total: totalR[0] ? totalR[0].n : 0,
         rows,
         filteredValue: valueR[0] ? Number(valueR[0].v) || 0 : 0,
         hint: (hasSalesFieldR[0] && hasSalesFieldR[0].n === 0)
-          ? '商品同步接口尚未解析到销量/补货/供应商字段，滞销筛选可能为空；请确认助手在线并重新执行商品同步'
+          ? '尚无销量数据：请确认助手在线并完成商品同步（销量取 sale7Num/sale14Num/sale30Num、供应商取 replenish.senderName）；'
+            + '滞销品要求供应商名以「1688-」开头，若接口返回的供应商名无此前缀则不会命中'
           : '',
       });
     }

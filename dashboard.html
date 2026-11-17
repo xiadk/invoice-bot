@@ -1225,7 +1225,7 @@
       <div v-show="page === 'slowmove'" id="page-slowmove">
         <div class="page-bar">
           <span class="pb-info">
-            滞销品 · <b>1688- 开头的供应商 + 月/周/日销全为 0 + 最近补货距今 ≥ 2 个月</b>
+            滞销品 · <b>1688- 开头的供应商 + 7/14/30 天销量全为 0 + 最近补货距今 ≥ 2 个月</b>
             · 按货值倒序（货值 = (可用库存 + 在途库存) × 采购价）
           </span>
         </div>
@@ -1244,7 +1244,7 @@
               <el-option v-for="s in product.brandStats" :key="'sm-'+s.brand_id"
                          :label="(s.brand_name || ('品牌#' + s.brand_id)) + '（' + s.n + '）'" :value="String(s.brand_id)"></el-option>
             </el-select>
-            <span class="loginid">数据由「商品同步」从牵牛花拉取；筛选字段（销量/补货/供应商）需接口返回后才能命中</span>
+            <span class="loginid">数据由「商品同步」从牵牛花拉取；销量取 7/14/30 天、供应商取 replenish.senderName（须以 1688- 开头）</span>
           </div>
           <el-table :data="slow.rows" size="small" border style="width:100%" v-loading="slow.loading"
                     empty-text="暂无滞销品（或商品同步接口未返回销量/补货/供应商字段，见上方提示）"
@@ -1263,8 +1263,8 @@
             <el-table-column label="货值（元）" width="120" align="right" prop="goods_value" sortable>
               <template slot-scope="p"><b class="amount">{{ Number(p.row.goods_value || 0).toFixed(2) }}</b></template>
             </el-table-column>
-            <el-table-column label="月/周/日销" width="110" align="center">
-              <template slot-scope="p"><span class="loginid">{{ p.row.sales_30d || 0 }} / {{ p.row.sales_7d || 0 }} / {{ p.row.sales_1d || 0 }}</span></template>
+            <el-table-column label="30/7/14天销" width="115" align="center">
+              <template slot-scope="p"><span class="loginid">{{ p.row.sales_30d || 0 }} / {{ p.row.sales_7d || 0 }} / {{ p.row.sales_14d || 0 }}</span></template>
             </el-table-column>
             <el-table-column label="最近补货" width="140"><template slot-scope="p"><span class="loginid">{{ p.row.last_replenish_at || '—' }}</span></template></el-table-column>
           </el-table>
@@ -6076,7 +6076,7 @@ const vm = new Vue({
         { key: 'product', label: '商品列表', field: 'productEnabled', tip: '导入补货参考文件、补货、关联齐货通/阿发商品' },
         { key: 'replenish', label: '补货', field: 'replenishEnabled', tip: '导入补货参考文件、查看品牌方商品与价格' },
         { key: 'price1688', label: '1688比价', field: 'price1688Enabled', tip: '核对 1688 待付款订单采购价，匹配补货参考目标价后打备注上色（独立菜单，需超管授权）' },
-        { key: 'slowmove', label: '滞销品列表', field: 'slowmoveEnabled', tip: '1688供应商、月/周/日销为0、超2个月未补货的商品，按货值倒序（独立菜单，需超管授权）' },
+        { key: 'slowmove', label: '滞销品列表', field: 'slowmoveEnabled', tip: '1688供应商、7/14/30天销量为0、超2个月未补货的商品，按货值倒序（独立菜单，需超管授权）' },
         { key: 'productSync', label: '商品同步', field: 'productSyncEnabled', tip: '从牵牛花拉取品牌商品写入商品库（独立菜单，需超管授权；普通用户只能同步自己品牌方）' },
         { key: 'market', label: '交易市场', field: 'marketEnabled', tip: '查看别人的商品报价、发布自己的 SKU' },
         { key: 'billing', label: '账单', field: 'billingEnabled', tip: '按月统计总收入/总支出/净利润' },
@@ -10941,7 +10941,7 @@ const vm = new Vue({
       } catch (e) { this.$message.error('商品加载失败: ' + e.message); }
       finally { this.product.loading = false; }
     },
-    /** 滞销品列表（独立菜单权限 slowmove）：1688- 供应商 + 月/周/日销 0 + 最近补货≥2月，货值倒序 */
+    /** 滞销品列表（独立菜单权限 slowmove）：1688- 供应商 + 7/14/30天销量全 0 + 最近补货≥2月，货值倒序 */
     async loadSlowMovers() {
       if (!this.canSlowMove) return;
       this.slow.loading = true;
