@@ -425,7 +425,7 @@ CREATE TABLE IF NOT EXISTS `brand_product` (
   `purchase_status_code` TINYINT  NOT NULL DEFAULT 0    COMMENT '采购状态码（接口 purchaseStatuses：1=正常采购 2=已停采）',
   `sales_30d`       INT           NOT NULL DEFAULT 0    COMMENT '30天销量（sale30Num）',
   `sales_7d`        INT           NOT NULL DEFAULT 0    COMMENT '7天销量（接口 sale7Num；无则 0）',
-  `sales_1d`        INT           NOT NULL DEFAULT 0    COMMENT '1天销量（接口 sale1Num；无则 0）',
+  `sales_14d`       INT           NOT NULL DEFAULT 0    COMMENT '14天销量（接口 sale14Num；无则 0）',
   `last_replenish_at` DATETIME    DEFAULT NULL          COMMENT '最近一次补货时间（接口最近补货字段；无则 NULL）',
   `supplier_flag`   VARCHAR(64)   NOT NULL DEFAULT ''   COMMENT '供应商标识（1688- 前缀命中；滞销品筛选口径）',
   `qht_goods_id`    VARCHAR(64)   DEFAULT NULL          COMMENT '关联的齐货通商品ID（goodsId）',

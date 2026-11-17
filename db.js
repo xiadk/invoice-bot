@@ -1041,7 +1041,7 @@ async function migrate(conn, dbName) {
       "  `purchase_status_code` TINYINT NOT NULL DEFAULT 0 COMMENT '采购状态码（接口 purchaseStatuses：1=正常采购 2=已停采）'," +
       "  `sales_30d` INT NOT NULL DEFAULT 0 COMMENT '30天销量（sale30Num）'," +
       "  `sales_7d` INT NOT NULL DEFAULT 0 COMMENT '7天销量（接口 sale7Num；无则 0）'," +
-      "  `sales_1d` INT NOT NULL DEFAULT 0 COMMENT '1天销量（接口 sale1Num；无则 0）'," +
+      "  `sales_14d` INT NOT NULL DEFAULT 0 COMMENT '14天销量（接口 sale14Num；无则 0）'," +
       "  `last_replenish_at` DATETIME DEFAULT NULL COMMENT '最近一次补货时间（接口最近补货字段；无则 NULL）'," +
       "  `supplier_flag` VARCHAR(64) NOT NULL DEFAULT '' COMMENT '供应商标识（1688- 前缀命中；滞销品筛选口径）'," +
       "  `synced_at` DATETIME DEFAULT NULL COMMENT '最近一次同步时间'," +
@@ -1082,11 +1082,19 @@ async function migrate(conn, dbName) {
     if (!(await idxExists('brand_product', 'idx_bp_brand_scode'))) {
       await q('ALTER TABLE `brand_product` ADD KEY `idx_bp_brand_scode` (`brand_id`, `purchase_status_code`)');
     }
-    // 滞销品列表（2026-11-18）：月/周/日销、最近补货时间、供应商标识，供滞销筛选按下单/补货口径过滤。
+    // 滞销品列表（2026-11-18）：7/14/30天销量、最近补货时间、供应商标识，供滞销筛选按补货口径过滤。
     // 老库一律补 0 / NULL / ''，避免升级瞬间把历史商品误判成滞销或刷掉已有数据。
+    // 2026-11-18 口径校准：原「日销 sales_1d」接口不存在 → 改名 sales_14d（14天销量，接口 sale14Num）。
+    //   上一轮已加过 sales_1d 的老库走 CHANGE COLUMN 平滑改名（数据保留）；全新库走下方补列。
+    if ((await colExists('brand_product', 'sales_1d')) && !(await colExists('brand_product', 'sales_14d'))) {
+      await q(
+        'ALTER TABLE `brand_product` CHANGE COLUMN `sales_1d` `sales_14d` INT NOT NULL DEFAULT 0 ' +
+        "COMMENT '14天销量（接口 sale14Num；无则 0）'"
+      );
+    }
     const slowCols = [
       ['sales_7d', "INT NOT NULL DEFAULT 0 COMMENT '7天销量（接口 sale7Num；无则 0）'"],
-      ['sales_1d', "INT NOT NULL DEFAULT 0 COMMENT '1天销量（接口 sale1Num；无则 0）'"],
+      ['sales_14d', "INT NOT NULL DEFAULT 0 COMMENT '14天销量（接口 sale14Num；无则 0）'"],
       ['last_replenish_at', "DATETIME DEFAULT NULL COMMENT '最近一次补货时间（接口最近补货字段；无则 NULL）'"],
       ['supplier_flag', "VARCHAR(64) NOT NULL DEFAULT '' COMMENT '供应商标识（1688- 前缀命中；滞销品筛选口径）'"],
     ];
