@@ -2099,6 +2099,10 @@ function findQnhAgent(wantUid) {
 qagent.setTransport({
   findAgent: findQnhAgent,
   send: (uid, msg) => agentHub.send(uid, msg),
+  // 诊断用：列出所有在线助手的 uid + 版本（毛利拉取失败时打印「期望/实际」）
+  list: () => [...agentHub.conns.keys()]
+    .filter((uid) => agentHub.isOnline(uid))
+    .map((uid) => ({ uid: Number(uid), ver: agentHub.status(uid).agentVer || '' })),
 });
 
 // ── 「京东万商页内取价」通道：请求由助手在 b.jd.com 页面里发 ──
@@ -7167,7 +7171,9 @@ const server = http.createServer(async (req, res) => {
             message: `${u.cleared ? '已清除残留运行标志；' : ''}解锁重跑：${out.ok ? '成功' : String(out.message || '失败').slice(0, 160)}`,
           });
         } else {
-          out = await qnh.pullProfitOrders({ userId: qnhUid });
+          // 与「登录牵牛花」同口径：代入/员工场景下助手装在操作者电脑上，优先用它，避免拿归属 uid 找不到助手
+          const agentUid = agentUidFor(user, qnhUid) || qnhUid;
+          out = await qnh.pullProfitOrders({ userId: qnhUid, agentUid });
           await qnh.logTask({
             taskType: 'profit', userId: qnhUid, trigger: 'retry',
             status: out.ok ? 'ok' : 'fail', rows: out.rows || 0,
@@ -7391,7 +7397,9 @@ const server = http.createServer(async (req, res) => {
       }
       // 立即拉取当天毛利明细（经该用户的本机助手页内签名接口）
       if (method === 'POST' && p === '/api/qnh/profit/pull') {
-        const out = await qnh.pullProfitOrders({ userId: qnhUid });
+        // 与登录同口径：优先用实际操作者本机在线的助手（代入/员工场景助手不在归属账号名下），数据仍记在 qnhUid
+        const agentUid = agentUidFor(user, qnhUid) || qnhUid;
+        const out = await qnh.pullProfitOrders({ userId: qnhUid, agentUid });
         await qnh.logTask({
           taskType: 'profit', userId: qnhUid, trigger: 'manual',
           status: out.ok ? 'ok' : 'fail', rows: out.rows || 0,
