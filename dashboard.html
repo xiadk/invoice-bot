@@ -2978,6 +2978,21 @@
                          @login="onQnhLoginBtn" @logout="logoutQnh" @action="doSync"></qnh-login-bar>
         </el-card>
 
+        <!-- 退单同步定时任务监控：日志 + 开关 + 强制解锁重跑（员工隐藏） -->
+        <el-card v-if="!isStaff" class="section-card" shadow="never" :body-style="{ padding: '12px 14px' }"
+                 style="margin-bottom:12px">
+          <div slot="header"><b>定时任务监控</b> <span class="loginid">— 退单同步</span></div>
+          <qnh-task-monitor :logs="rq.taskLogs.refund" :loading="rq.taskLogLoading && rq.taskType === 'refund'"
+                            :resetting="rq.taskResetting && rq.taskType === 'refund'"
+                            :switch-on="!!rq.config.scheduleEnabled" :switch-disabled="!isAdmin"
+                            switch-label="定时同步" :schedule-hint="refundScheduleHint" :stuck="rq.syncing && refundTaskStuck"
+                            @refresh="loadTaskLogs('refund')" @reset="resetTask('refund')" @toggle="v => toggleTaskSwitch('refund', v)"></qnh-task-monitor>
+          <div class="loginid" style="margin-top:8px">
+            开关关闭、无登录账号、时间点未到都会以「跳过」记入日志（相同原因 30 分钟内只记一条）。
+            全局开关仅超级管理员可改；时间点在「牵牛花配置」页设置。
+          </div>
+        </el-card>
+
         <el-alert v-if="qnhNeedPick" type="warning" :closable="false" show-icon style="margin-bottom:12px"
                   title="请先在上方选择要以哪个账号的身份查看"
                   description="超级管理员自己没有独立的牵牛花数据；选定账号后，退单、毛利、登录与告警配置都属于该账号。"></el-alert>
@@ -4129,6 +4144,21 @@
                          :who-label="qnhWhoLabel" action-text="立即拉取毛利数据"
                          :action-loading="rq.profit.loading" :can-logout="true"
                          @login="onQnhLoginBtn" @logout="logoutQnh" @action="pullProfit"></qnh-login-bar>
+        </el-card>
+
+        <!-- 毛利拉取定时任务监控：日志 + 开关 + 强制解锁重拉 -->
+        <el-card class="section-card" shadow="never" :body-style="{ padding: '12px 14px' }"
+                 style="margin-bottom:12px">
+          <div slot="header"><b>定时任务监控</b> <span class="loginid">— 实时毛利监控</span></div>
+          <qnh-task-monitor :logs="rq.taskLogs.profit" :loading="rq.taskLogLoading && rq.taskType === 'profit'"
+                            :resetting="rq.taskResetting && rq.taskType === 'profit'"
+                            :switch-on="!!rq.config.profitEnabled" :switch-disabled="false"
+                            switch-label="毛利监控" schedule-hint="每 10 分钟" :stuck="false"
+                            @refresh="loadTaskLogs('profit')" @reset="resetTask('profit')" @toggle="v => toggleTaskSwitch('profit', v)"></qnh-task-monitor>
+          <div class="loginid" style="margin-top:8px">
+            毛利明细需本机助手页内签名拉取；无在线助手、未登录、开关关闭都会以「跳过」记入日志。
+            开关与告警阈值在「告警配置」页设置。
+          </div>
         </el-card>
 
         <el-alert v-if="qnhNeedPick" type="warning" :closable="false" show-icon style="margin-bottom:12px"
@@ -5637,6 +5667,60 @@ Vue.component('qnh-login-bar', {
 });
 
 // ════════════════════════════════════════════════════════════════════
+// 定时任务监控条（退单列表 / 实时毛利监控 两页共用）
+//   · 显示定时任务日志（触发/结果/条数/原因），回答「到底跑没跑、为什么没跑」
+//   · 任务开关：refund=全局定时（superadmin 可改）/ profit=该用户监控开关
+//   · 立即执行 + 强制解锁重跑：中断/假死后一键恢复
+//   · 只做展示与事件转发，读写都在宿主的 qnhApi 方法里（一套页面、一套接口）
+// ════════════════════════════════════════════════════════════════════
+Vue.component('qnh-task-monitor', {
+  props: {
+    logs: { type: Array, default: () => [] },
+    loading: { type: Boolean, default: false },
+    resetting: { type: Boolean, default: false },
+    switchOn: { type: Boolean, default: false },
+    switchDisabled: { type: Boolean, default: false },
+    switchLabel: { type: String, default: '定时任务' },
+    scheduleHint: { type: String, default: '' },
+    stuck: { type: Boolean, default: false },
+    actionText: { type: String, default: '立即执行' },
+  },
+  methods: {
+    resultType(s) { return s === 'ok' ? 'success' : (s === 'fail' ? 'danger' : 'info'); },
+    resultText(s) { return s === 'ok' ? '成功' : (s === 'fail' ? '失败' : '跳过'); },
+    triggerText(t) { return t === 'manual' ? '手动' : (t === 'retry' ? '解锁重跑' : '定时'); },
+    timeText(v) { return v ? String(v).slice(0, 19).replace('T', ' ') : '—'; },
+  },
+  template: `
+  <div>
+    <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:10px">
+      <span style="display:inline-flex;align-items:center;gap:6px">
+        <b style="font-size:13px">{{ switchLabel }}</b>
+        <el-switch :value="switchOn" :disabled="switchDisabled" size="small"
+                   active-text="开" inactive-text="关" @change="(v) => $emit('toggle', v)"></el-switch>
+      </span>
+      <el-tag v-if="scheduleHint" size="small" type="success">{{ scheduleHint }}</el-tag>
+      <el-tag v-if="stuck" size="small" type="danger">疑似卡住 · 建议强制解锁重跑</el-tag>
+      <span style="flex:1"></span>
+      <el-button size="small" type="primary" :loading="resetting" @click="$emit('reset')">强制解锁并重跑</el-button>
+      <el-button size="small" icon="el-icon-refresh" :loading="loading" @click="$emit('refresh')">刷新日志</el-button>
+    </div>
+    <el-table :data="logs" size="mini" v-loading="loading" max-height="230" empty-text="暂无定时任务日志（开启任务并到点后自动记录）"
+              border style="width:100%">
+      <el-table-column label="时间" width="150"><template slot-scope="s">{{ timeText(s.row.startedAt) }}</template></el-table-column>
+      <el-table-column label="触发" width="82"><template slot-scope="s">{{ triggerText(s.row.trigger) }}</template></el-table-column>
+      <el-table-column label="结果" width="72"><template slot-scope="s">
+        <el-tag size="mini" :type="resultType(s.row.status)">{{ resultText(s.row.status) }}</el-tag>
+      </template></el-table-column>
+      <el-table-column label="条数" width="60" align="right"><template slot-scope="s">{{ s.row.rows || 0 }}</template></el-table-column>
+      <el-table-column label="说明" min-width="220"><template slot-scope="s">
+        <span :title="s.row.message" style="word-break:break-all">{{ s.row.message || '—' }}</span>
+      </template></el-table-column>
+    </el-table>
+  </div>`,
+});
+
+// ════════════════════════════════════════════════════════════════════
 // 身份切换条（仅超级管理员）
 //   管理员自己没有「自己的牵牛花数据」可看，必须选定一个用户，以该用户的身份
 //   查看退单/毛利、发起登录、同步与保存该用户的配置（服务端的写入也落到该用户名下）。
@@ -6010,7 +6094,7 @@ const vm = new Vue({
         filter: { keyword: '', delivery: '' },
         trend: [], days: 30, summary: null,
         cookie: { logined: false, loading: false, configured: false, tenantId: '', tenantName: '', message: '' },
-        lastRun: null, syncing: false, syncPoll: null,
+        lastRun: null, syncing: false, syncPoll: null, syncStartedAt: null,
         config: {
           scheduleEnabled: false, scheduleTime: '03:00', scheduleTimes: ['03:00'],
           webhook: '', wecomEnabled: false, alertDelivery: true,
@@ -6023,6 +6107,9 @@ const vm = new Vue({
         profit: { loading: false, rows: [], total: 0, alerts: 0, summary: {}, error: '' },
         profitDays: 30, profitTrend: [],
         log: { visible: false, row: {}, rows: [], tab: 'all', loading: false },
+        // 定时任务监控（退单 / 毛利共用一套状态，按 taskType 分别加载）
+        taskLogs: { refund: [], profit: [] }, taskLogLoading: false, taskResetting: false,
+        taskType: 'refund',
       },
       // 上传
       up: { visible: false, kind: 'orders', title: '', guide: '', accept: '.xlsx,.xls', file: null, busy: false, percent: 0, msg: '', result: null },
@@ -6759,6 +6846,20 @@ const vm = new Vue({
       const t = this.resumable;
       if (!t) return false;
       return Number(t.id) !== Number(this.resumeDismissed);
+    },
+    // 定时任务监控：时间点提示 + 假死判定（running=true 但超过 15 分钟没结束）
+    refundScheduleHint() {
+      const c = this.rq.config || {};
+      if (!c.scheduleEnabled) return '';
+      const arr = (c.scheduleTimes && c.scheduleTimes.length) ? c.scheduleTimes : [c.scheduleTime];
+      const times = (arr || []).filter(Boolean).join(' / ');
+      return times ? ('每天 ' + times + ' 自动同步') : '';
+    },
+    refundTaskStuck() {
+      const s = this.rq.syncStartedAt;
+      if (!this.rq.syncing || !s) return false;
+      const t = new Date(String(s).replace(' ', 'T')).getTime();
+      return Number.isFinite(t) && (Date.now() - t) > 15 * 60 * 1000;
     },
   },
   watch: {
@@ -7779,9 +7880,10 @@ const vm = new Vue({
       if (this.page === 'pddCollect') { this.loadPddCollect(); return; }
       if (this.page === 'sdc') { this.loadSdcStatus(); this.loadSdcOrders(); return; }
       this.loadRefundStatus();
-      if (this.page === 'refund') { this.loadRefunds(); this.loadRefundTrend(); }
+      if (this.isStaff) return;   // 员工没有定时任务权限，下面两个接口都不放行
+      if (this.page === 'refund') { this.loadRefunds(); this.loadRefundTrend(); this.loadTaskLogs('refund'); }
       if (this.page === 'after') { this.loadAfterSales(); }
-      if (this.page === 'profit') { this.loadProfit(); }
+      if (this.page === 'profit') { this.loadProfit(); this.loadTaskLogs('profit'); }
     },
     async loadRefundStatus() {
       if (this.qnhNeedPick) return;
@@ -7802,6 +7904,7 @@ const vm = new Vue({
         this.rq.lastRun = c.lastRun || null;
         this.rq.summary = d.summary || null;
         this.rq.syncing = !!(d.sync && d.sync.running);
+        this.rq.syncStartedAt = (d.sync && d.sync.startedAt) || null;
         if (Array.isArray(d.sessions)) this.qnhSessions = d.sessions.map(Number);
         if (Array.isArray(d.users)) this.qnhUsers = d.users;
       } catch (e) {
@@ -9221,6 +9324,75 @@ const vm = new Vue({
       return String(v).slice(0, 10);
     },
 
+    // ── 定时任务监控（退单 / 毛利共用）────────────────────────
+    async loadTaskLogs(taskType) {
+      if (this.isStaff) return;
+      this.rq.taskType = taskType;
+      this.rq.taskLogLoading = true;
+      try {
+        const d = await this.qnhApi('/api/qnh/task-logs?taskType=' + encodeURIComponent(taskType) + '&limit=50');
+        if (d.error) { this.$message.error(d.error); return; }
+        this.rq.taskLogs[taskType] = d.logs || [];
+      } catch (e) {
+        // 日志是辅助功能，读不到不打断主流程，只提示
+        this.$message.warning('加载定时任务日志失败：' + e.message);
+      } finally {
+        this.rq.taskLogLoading = false;
+      }
+    },
+    /** 强制解锁并立即重跑；refund 清残留 running 标志，profit 直接重拉 */
+    async resetTask(taskType) {
+      if (this.qnhNeedPick) { this.$message.warning('请先选择要以哪个账号的身份操作'); return; }
+      let tip = taskType === 'refund'
+        ? '将清除可能残留的运行标志并立即重新同步退单，确认继续？'
+        : '将立即重新拉取该账号的当天毛利明细，确认继续？';
+      try {
+        await this.$confirm(tip, '强制解锁并重跑', {
+          confirmButtonText: '确认重跑', cancelButtonText: '取消', type: 'warning',
+        });
+      } catch (e) { return; }
+      this.rq.taskType = taskType;
+      this.rq.taskResetting = true;
+      try {
+        const d = await this.qnhApi('/api/qnh/task-reset', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ taskType }),
+        });
+        if (d.error) { this.$message.error(d.error); return; }
+        if (d.ok) {
+          this.$message.success(taskType === 'refund'
+            ? `重跑完成：新增 ${d.newRefunds || 0} 单`
+            : `重拉完成：${d.rows || 0} 行明细`);
+        } else {
+          this.$message({ message: '重跑未成功：' + (d.message || '未知原因'), type: 'warning', duration: 6000 });
+        }
+      } catch (e) {
+        this.$message.error('重跑失败：' + e.message);
+      } finally {
+        this.rq.taskResetting = false;
+        await this.loadTaskLogs(taskType);
+        await this.loadRefundStatus();
+        if (taskType === 'refund') { await this.loadRefunds(); await this.loadRefundTrend(); }
+        else { await this.loadProfit(); }
+      }
+    },
+    /** 监控卡片上的任务开关：只改这一个字段，不动其它配置 */
+    async toggleTaskSwitch(taskType, value) {
+      if (this.qnhNeedPick) { this.$message.warning('请先选择账号'); return; }
+      const key = taskType === 'refund' ? 'scheduleEnabled' : 'profitEnabled';
+      try {
+        const d = await this.qnhApi('/api/qnh/config', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ [key]: !!value }),
+        });
+        if (d.error) { this.$message.error(d.error); return; }
+        if (d.config) this.rq.config = Object.assign({}, this.rq.config, d.config);
+        this.$message.success((taskType === 'refund' ? '定时同步' : '毛利监控') + (value ? '已开启' : '已关闭'));
+      } catch (e) {
+        this.$message.error('保存开关失败：' + e.message);
+      }
+    },
+
     async doSync() {
       if (this.rq.syncing) return;
       if (this.qnhNeedPick) { this.$message.warning('请先选择要以哪个账号的身份同步'); return; }
@@ -9249,6 +9421,7 @@ const vm = new Vue({
         await this.loadRefundStatus();
         await this.loadRefunds();
         await this.loadRefundTrend();
+        await this.loadTaskLogs('refund');
       } catch (e) {
         this.$message.error('同步失败：' + e.message);
       } finally {
@@ -9383,6 +9556,7 @@ const vm = new Vue({
         }
         await this.loadProfit();
         await this.loadRefundStatus();
+        await this.loadTaskLogs('profit');
       } catch (e) {
         this.$message.error('拉取失败：' + e.message);
       } finally {
