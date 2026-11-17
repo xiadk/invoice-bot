@@ -1130,8 +1130,8 @@
             <span v-if="isAdmin" class="loginid" style="margin-right:8px">
               当前查看：<b>{{ product.brandAll ? '全部品牌方' : (brandNameById(product.brand) || '我的品牌') }}</b>
             </span>
-            <el-button v-if="isAdmin" size="small" type="warning" plain :loading="product.syncing"
-                       title="选择品牌方后，按页拉取牵牛花前置仓商品写入该品牌方（同品牌用户共享）"
+            <el-button v-if="canProductSync" size="small" type="warning" plain :loading="product.syncing"
+                       title="选择品牌方后，按页拉取牵牛花前置仓商品写入该品牌方（同品牌用户共享）；普通用户只能同步自己品牌方"
                        @click="openSyncDlg">商品同步{{ product.syncing ? '中…' : '' }}</el-button>
           </span>
         </div>
@@ -1218,6 +1218,56 @@
                            @size-change="v => { product.size = v; product.page = 1; loadProducts(); }"
                            @current-change="v => { product.page = v; loadProducts(); }"></el-pagination>
           </div>
+        </el-card>
+      </div>
+
+      <!-- ══════════ 滞销品列表（独立菜单权限 slowmove）══════════ -->
+      <div v-show="page === 'slowmove'" id="page-slowmove">
+        <div class="page-bar">
+          <span class="pb-info">
+            滞销品 · <b>1688- 开头的供应商 + 月/周/日销全为 0 + 最近补货距今 ≥ 2 个月</b>
+            · 按货值倒序（货值 = (可用库存 + 在途库存) × 采购价）
+          </span>
+        </div>
+        <el-card class="section-card" shadow="never">
+          <div slot="header" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+            <b>滞销商品</b>
+            <span class="loginid">共 {{ slow.total || 0 }} 个 · 滞销货值 {{ yuan(slow.filteredValue) }}</span>
+            <span style="flex:1"></span>
+            <el-button size="small" type="primary" plain :loading="slow.loading" @click="loadSlowMovers">刷新</el-button>
+          </div>
+          <el-alert v-if="slow.hint" type="warning" :closable="false" show-icon style="margin-bottom:12px"
+                    :title="slow.hint"></el-alert>
+          <div class="filter-bar">
+            <el-select v-if="isAdmin" v-model="slow.brand" size="small" style="width:170px" @change="loadSlowMovers">
+              <el-option label="全部品牌方" value=""></el-option>
+              <el-option v-for="s in product.brandStats" :key="'sm-'+s.brand_id"
+                         :label="(s.brand_name || ('品牌#' + s.brand_id)) + '（' + s.n + '）'" :value="String(s.brand_id)"></el-option>
+            </el-select>
+            <span class="loginid">数据由「商品同步」从牵牛花拉取；筛选字段（销量/补货/供应商）需接口返回后才能命中</span>
+          </div>
+          <el-table :data="slow.rows" size="small" border style="width:100%" v-loading="slow.loading"
+                    empty-text="暂无滞销品（或商品同步接口未返回销量/补货/供应商字段，见上方提示）"
+                    :default-sort="{ prop: 'goods_value', order: 'descending' }">
+            <el-table-column label="商品图片" width="72">
+              <template slot-scope="p"><img v-if="p.row.image_url" :src="p.row.image_url" style="width:44px;height:44px;object-fit:cover" /><span v-else class="loginid">—</span></template>
+            </el-table-column>
+            <el-table-column label="SKU" width="150"><template slot-scope="p"><span class="loginid">{{ p.row.sku }}</span></template></el-table-column>
+            <el-table-column label="商品名称" min-width="200"><template slot-scope="p">{{ p.row.goods_name || '—' }}</template></el-table-column>
+            <el-table-column v-if="isAdmin" label="品牌方" width="100">
+              <template slot-scope="p">{{ brandNameById(p.row.brand_id) || '—' }}</template>
+            </el-table-column>
+            <el-table-column label="供应商" min-width="140"><template slot-scope="p"><span class="loginid">{{ p.row.supplier_flag || '—' }}</span></template></el-table-column>
+            <el-table-column label="采购价" width="100" align="right"><template slot-scope="p">{{ Number(p.row.purchase_price || 0).toFixed(2) }}</template></el-table-column>
+            <el-table-column label="可用/在途" width="110" align="right"><template slot-scope="p">{{ p.row.available_stock || 0 }} / {{ p.row.transit_stock || 0 }}</template></el-table-column>
+            <el-table-column label="货值（元）" width="120" align="right" prop="goods_value" sortable>
+              <template slot-scope="p"><b class="amount">{{ Number(p.row.goods_value || 0).toFixed(2) }}</b></template>
+            </el-table-column>
+            <el-table-column label="月/周/日销" width="110" align="center">
+              <template slot-scope="p"><span class="loginid">{{ p.row.sales_30d || 0 }} / {{ p.row.sales_7d || 0 }} / {{ p.row.sales_1d || 0 }}</span></template>
+            </el-table-column>
+            <el-table-column label="最近补货" width="140"><template slot-scope="p"><span class="loginid">{{ p.row.last_replenish_at || '—' }}</span></template></el-table-column>
+          </el-table>
         </el-card>
       </div>
 
@@ -2038,7 +2088,8 @@
             </div>
           </el-checkbox-group>
           <div class="form-tip" style="margin-top:6px">
-            每个品牌方必须先用<b>它自己的牵牛花账号</b>登录一次，才能同步该品牌的商品（登录窗口在本机助手里弹出）。
+            <template v-if="isAdmin">每个品牌方必须先用<b>它自己的牵牛花账号</b>登录一次，才能同步该品牌的商品（登录窗口在本机助手里弹出）。</template>
+            <template v-else>将同步<b>你所属品牌方</b>的商品（需该品牌牵牛花已登录，登录窗口在本机助手里弹出）。</template>
           </div>
           <!-- 同步进度（v0.3.50）：后端改异步任务，这里按页实时刷新；任务结束后保留终态供查看 -->
           <div v-if="product.syncProgress && (product.syncing || !product.syncProgress.running)"
@@ -4235,9 +4286,12 @@
         </div>
 
         <el-card class="section-card" shadow="never">
-          <div slot="header" style="display:flex;align-items:center;gap:10px">
+          <div slot="header" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
             <b>订单级毛利明细</b>
-            <span class="loginid">亏损/低毛利置顶 · 共 {{ rq.profit.total || 0 }} 单</span>
+            <el-date-picker v-model="rq.profitDate" type="date" value-format="yyyy-MM-dd" size="small"
+                            placeholder="下单日期（默认当天）" clearable style="width:180px"
+                            @change="loadProfit"></el-date-picker>
+            <span class="loginid">按下单时间筛 · {{ rq.profitDate || '当天' }} · 共 {{ rq.profit.total || 0 }} 单</span>
             <span style="flex:1"></span>
             <span class="loginid">线上毛利 = 预计收入 − 成本；告警按阈值推送，每单只推一次</span>
           </div>
@@ -5873,9 +5927,11 @@ const vm = new Vue({
         stoppedValue: 0, stoppedCount: 0,
         // 在途货值（当前筛选口径）：Σ在途 × 采购价
         transitValue: 0, transitQty: 0,
-        // 商品同步弹框（仅超管）：勾选要同步的品牌方（含各品牌牵牛花登录状态）
+        // 商品同步弹框（超管可选品牌；被授权的普通用户固定同步自己品牌方）
         syncDlg: { visible: false, brandIds: [], brandsQnh: [], saving: false },
       },
+      // 滞销品列表（独立菜单权限 slowmove）
+      slow: { loading: false, rows: [], total: 0, filteredValue: 0, hint: '', brand: '' },
       // 补货界面（导入完成后进入）+ 关联的齐货通弹窗
       // 补货默认 20 条/页（页码可翻）；页大小最多 100 条
       // 上限 100 是硬约束：el-table（Element UI 2.x）无虚拟滚动，一次渲染上千行会把主线程卡死十几秒
@@ -6020,6 +6076,8 @@ const vm = new Vue({
         { key: 'product', label: '商品列表', field: 'productEnabled', tip: '导入补货参考文件、补货、关联齐货通/阿发商品' },
         { key: 'replenish', label: '补货', field: 'replenishEnabled', tip: '导入补货参考文件、查看品牌方商品与价格' },
         { key: 'price1688', label: '1688比价', field: 'price1688Enabled', tip: '核对 1688 待付款订单采购价，匹配补货参考目标价后打备注上色（独立菜单，需超管授权）' },
+        { key: 'slowmove', label: '滞销品列表', field: 'slowmoveEnabled', tip: '1688供应商、月/周/日销为0、超2个月未补货的商品，按货值倒序（独立菜单，需超管授权）' },
+        { key: 'productSync', label: '商品同步', field: 'productSyncEnabled', tip: '从牵牛花拉取品牌商品写入商品库（独立菜单，需超管授权；普通用户只能同步自己品牌方）' },
         { key: 'market', label: '交易市场', field: 'marketEnabled', tip: '查看别人的商品报价、发布自己的 SKU' },
         { key: 'billing', label: '账单', field: 'billingEnabled', tip: '按月统计总收入/总支出/净利润' },
         { key: 'price', label: '平台取价', field: 'priceEnabled', tip: '登录齐货通、重新取价、配置阿发Token、选购加购' },
@@ -6117,6 +6175,7 @@ const vm = new Vue({
         },
         savingCfg: false, savedCfg: false,
         profit: { loading: false, rows: [], total: 0, alerts: 0, summary: {}, error: '' },
+        profitDate: '',   // 毛利明细查询日期（下单时间）；空 = 当天（后端默认 CURDATE）
         profitDays: 30, profitTrend: [],
         log: { visible: false, row: {}, rows: [], tab: 'all', loading: false },
         // 定时任务监控（退单 / 毛利共用一套状态，按 taskType 分别加载）
@@ -6155,6 +6214,7 @@ const vm = new Vue({
         ] },
         { title: '核对与商品', items: [
           this.canProduct ? { key: 'product', label: '商品列表', icon: 'el-icon-goods' } : null,
+          this.canSlowMove ? { key: 'slowmove', label: '滞销品列表', icon: 'el-icon-warning-outline' } : null,
           this.canReplenish ? { key: 'replenish', label: '补货', icon: 'el-icon-shopping-cart-full' } : null,
           this.canPriceCheck ? { key: 'price1688', label: '1688比价', icon: 'el-icon-s-opportunity' } : null,
           this.canMarket ? { key: 'market', label: '交易市场', icon: 'el-icon-s-marketing' } : null,
@@ -6231,6 +6291,10 @@ const vm = new Vue({
     // 补货权限（独立菜单，默认所有用户不授权；含导入补货参考文件）
     canReplenish() { return !!(this.me && (this.me.role === 'admin' || this.me.replenishEnabled)); },
     canPriceCheck() { return !!(this.me && (this.me.role === 'admin' || this.me.price1688Enabled)); },
+    // 滞销品列表（独立菜单权限，默认关闭，超管始终可见）
+    canSlowMove() { return !!(this.me && (this.me.role === 'admin' || this.me.slowmoveEnabled)); },
+    // 商品同步（独立菜单权限，默认仅超管；超管授权后普通用户可同步自己品牌方）
+    canProductSync() { return !!(this.me && (this.me.role === 'admin' || this.me.productSyncEnabled)); },
     /** 1688比价：把本次批次所有订单的行拍平成一张表（每行都是 price_check 记录） */
     price1688Rows() {
       const rows = [];
@@ -7206,6 +7270,7 @@ const vm = new Vue({
       if (p === 'after' && !this.canAfter) p = 'board';
       if (p === 'staff' && !this.canStaff) p = 'board';
       if (p === 'product' && !this.canProduct) p = 'board';
+      if (p === 'slowmove' && !this.canSlowMove) p = 'board';
       if (p === 'replenish' && !this.canReplenish) p = 'product';
       if (p === 'price1688' && !this.canPriceCheck) p = 'board';
       if (p === 'market' && !this.canMarket) p = 'board';
@@ -7230,6 +7295,7 @@ const vm = new Vue({
       if (p === 'waybill') this.loadWaybills();
       if (p === 'replenishOrder') this.loadReplenishOrders();
       if (p === 'price1688') { this.loadPrice1688(); this.loadPriceRef(); }
+      if (p === 'slowmove') { this.loadSlowMovers(); if (this.isAdmin) this.loadProducts(); }
       if (p === 'audit') this.loadOpLog();
       if (p === 'profit' || p === 'refund' || p === 'after' || p === 'pdd' || p === 'pddCollect'
           || p === 'qnhcfg' || p === 'refundalert') {
@@ -9486,7 +9552,8 @@ const vm = new Vue({
       if (!this.canProfit) return;
       if (this.qnhNeedPick) return;
       try {
-        const d = await this.qnhApi('/api/qnh/profit?limit=100');
+        const dt = (this.rq.profitDate || '').trim();
+        const d = await this.qnhApi('/api/qnh/profit?limit=100' + (dt ? '&date=' + encodeURIComponent(dt) : ''));
         this.rq.profit.rows = d.rows || [];
         this.rq.profit.total = d.total || 0;
         this.rq.profit.alerts = d.alerts || 0;
@@ -10874,19 +10941,35 @@ const vm = new Vue({
       } catch (e) { this.$message.error('商品加载失败: ' + e.message); }
       finally { this.product.loading = false; }
     },
+    /** 滞销品列表（独立菜单权限 slowmove）：1688- 供应商 + 月/周/日销 0 + 最近补货≥2月，货值倒序 */
+    async loadSlowMovers() {
+      if (!this.canSlowMove) return;
+      this.slow.loading = true;
+      try {
+        const q = new URLSearchParams();
+        if (this.isAdmin && this.slow.brand) q.set('brand', this.slow.brand);
+        const d = await this.api('/api/products/slow-moving' + (q.toString() ? '?' + q.toString() : ''));
+        if (d && d.error) { this.$message.error(d.error); this.slow.rows = []; return; }
+        this.slow.rows = d.rows || [];
+        this.slow.total = d.total || 0;
+        this.slow.filteredValue = d.filteredValue || 0;
+        this.slow.hint = d.hint || '';
+      } catch (e) { this.$message.error('滞销品加载失败: ' + e.message); }
+      finally { this.slow.loading = false; }
+    },
     /**
-     * 商品同步（仅超管）：先弹框选品牌方，再按品牌依次拉取牵牛花商品写入 brand_product。
+     * 商品同步（超管 / 被授权的普通用户）：先弹框选品牌方（普通用户固定自己品牌），再按品牌依次拉取牵牛花商品写入 brand_product。
      * 每个品牌方一套牵牛花账号，单个品牌约 170 页 × 1 秒，耗时 4~5 分钟。
      */
     openSyncDlg() {
-      if (!this.isAdmin) { this.$message.warning('仅超级管理员可同步商品'); return; }
-      // 默认勾选当前筛选的品牌；没筛选时勾自己所属品牌
-      const pre = this.product.brand
+      if (!this.canProductSync) { this.$message.warning('未开通「商品同步」权限'); return; }
+      // 普通用户固定同步自己品牌方（弹窗不展示选品牌），超管可勾选当前筛选品牌/全部
+      const pre = this.isAdmin && this.product.brand
         ? [Number(this.product.brand)]
         : [(this.me && Number(this.me.brandId)) || 1];
       this.product.syncDlg.brandIds = pre.filter((x) => Number.isInteger(x) && x > 0);
       this.product.syncDlg.visible = true;
-      this.loadBrandsQnh();
+      if (this.isAdmin) this.loadBrandsQnh();
     },
     /** 各品牌方的牵牛花登录状态 + 现有商品数（同步弹框里展示） */
     async loadBrandsQnh() {
