@@ -758,6 +758,9 @@ function publicUser(u) {
     priceEnabled: u.role === 'admin' ? true : !!Number(u.price_enabled),
     // 1688比价（v0.3.43，独立菜单权限）：超管恒为 true，普通账号由超管在「用户管理/员工管理」授权
     price1688Enabled: u.role === 'admin' ? true : !!Number(u.price1688_enabled),
+    // 滞销品列表 / 商品同步（2026-11-18，两项独立菜单权限）：超管恒为 true
+    slowmoveEnabled: u.role === 'admin' ? true : !!Number(u.slowmove_enabled),
+    productSyncEnabled: u.role === 'admin' ? true : !!Number(u.product_sync_enabled),
     // 所属品牌方（商品数据按品牌方共享：同品牌下所有用户看到同一套商品）
     brandId: Number(u.brand_id) || 1,
     brandName: u.brand_name || '',
@@ -1015,6 +1018,10 @@ const MENU_PERMS = {
   replenishOrder: { col: 'replenish_order_enabled', label: '补货单管理', field: 'replenishOrderEnabled' },
   // 1688比价（v0.3.43）：独立菜单权限，超管在「用户管理/员工管理」授权（与商品/补货解耦）
   price1688: { col: 'price1688_enabled', label: '1688比价', field: 'price1688Enabled' },
+  // 滞销品列表 / 商品同步（2026-11-18）：两项独立菜单权限，超管授权。
+  // 商品同步原仅超管可用，现拆成独立开关；超管仍恒可用（isAdmin 短路，不受列值影响）。
+  slowmove: { col: 'slowmove_enabled', label: '滞销品列表', field: 'slowmoveEnabled' },
+  productSync: { col: 'product_sync_enabled', label: '商品同步', field: 'productSyncEnabled' },
   // 员工管理（v0.3.13）：只有主体账号能开，超管走「用户管理」；员工账号永远没有这一项。
   // ⚠ 员工配菜单时这张表要排除本项（见 staffMenuKeys()），否则会出现「员工管理里再管员工」。
   staff: { col: 'staff_enabled', label: '员工管理', field: 'staffEnabled' },
@@ -3656,6 +3663,7 @@ async function listUsers() {
            u.qnh_refund_enabled, u.qnh_profit_enabled, u.product_enabled, u.market_enabled, u.billing_enabled,
            u.replenish_enabled, u.price_enabled, u.after_sale_enabled, u.brand_id, b.name AS brand_name,
            u.supplier_enabled, u.waybill_enabled, u.replenish_order_enabled, u.staff_enabled,
+           u.slowmove_enabled, u.product_sync_enabled,
            u.owner_id, ow.username AS owner_username, ${EXPIRY_COLS},
            (SELECT COUNT(*) FROM invoice_order o WHERE o.user_id = u.id)              AS order_count,
            (SELECT COUNT(DISTINCT o.seller_company) FROM invoice_order o WHERE o.user_id = u.id) AS company_count,
@@ -3690,6 +3698,9 @@ async function listUsers() {
     waybillEnabled: u.role === 'admin' ? true : !!Number(u.waybill_enabled),
     replenishOrderEnabled: u.role === 'admin' ? true : !!Number(u.replenish_order_enabled),
     price1688Enabled: u.role === 'admin' ? true : !!Number(u.price1688_enabled),
+    // 滞销品列表 / 商品同步（2026-11-18，独立菜单权限）
+    slowmoveEnabled: u.role === 'admin' ? true : !!Number(u.slowmove_enabled),
+    productSyncEnabled: u.role === 'admin' ? true : !!Number(u.product_sync_enabled),
     // 员工管理（v0.3.13）：超管恒为 true（走用户管理），主体账号按列开关
     staffEnabled: u.role === 'admin' ? true : !!Number(u.staff_enabled),
     // 员工号标记（v0.2.104）：ownerId 非空表示数据归属主体账号，自己名下没有业务数据
@@ -4223,6 +4234,12 @@ const server = http.createServer(async (req, res) => {
     // 1688比价（v0.3.43）：独立菜单权限，超管授权后方可使用（与商品/补货解耦）
     const canPriceCheck = isAdmin || !!Number(user.price1688_enabled);
     const denyPriceCheck = () => sendJson(res, 403, { error: '未开通「1688比价」权限，请联系超级管理员在「用户管理/员工管理」授权' });
+    // 商品同步（2026-11-18）：独立菜单权限，超管授权后可同步（原来仅超管）
+    const canProductSync = isAdmin || !!Number(user.product_sync_enabled);
+    const denyProductSync = () => sendJson(res, 403, { error: '未开通「商品同步」权限，请联系超级管理员在「用户管理/员工管理」授权' });
+    // 滞销品列表（2026-11-18）：独立菜单权限
+    const canSlowMove = isAdmin || !!Number(user.slowmove_enabled);
+    const denySlowMove = () => sendJson(res, 403, { error: '未开通「滞销品列表」权限，请联系超级管理员在「用户管理/员工管理」授权' });
     // 平台取价权限（v0.2.95）：齐货通登录/取价、阿发Token/匹配/取价、选购加购都要动平台真实账号，
     // 默认只给超级管理员；普通账号须由超管在「菜单权限 → 平台取价」里单独授权
     const canPrice = isAdmin || !!Number(user.price_enabled);
@@ -5114,6 +5131,48 @@ const server = http.createServer(async (req, res) => {
         latestBatch: latest[0] || null,
         brandFilter: { brandId: bo.brandId, all: bo.all },
         brandStats,
+      });
+    }
+
+    // ── 滞销品列表（2026-11-18，独立菜单权限 slowmove）──
+    //   口径：供应商名以「1688-」开头 + 月/周/日销全为 0 + 最近补货距今 ≥ 2 个月，
+    //         按货值倒序（货值 = (可用库存 + 在途库存) × 采购价，与商品列表同口径）。
+    //   ⚠ 月/周/日销、最近补货、供应商标识来自商品同步接口，字段键名以候选键兜底；
+    //     接口没有对应字段时这些列为 0/NULL/''，此时筛选结果为空，msg 会明确提示。
+    if (method === 'GET' && p === '/api/products/slow-moving') {
+      if (!canSlowMove) return denySlowMove();
+      const bo = brandOf(req, url, user);
+      // 超管可看全部品牌；普通用户只锁自己品牌方（防越权看别家商品）
+      const brandWhere = bo.all ? '' : ' AND brand_id = ?';
+      const brandArgs = bo.all ? [] : [bo.brandId || (Number(user.brand_id) || 1)];
+      const wsql = " WHERE supplier_flag REGEXP '^1688[-—]'"
+        + ' AND sales_30d = 0 AND sales_7d = 0 AND sales_1d = 0'
+        + ' AND (last_replenish_at IS NULL OR last_replenish_at <= DATE_SUB(NOW(), INTERVAL 2 MONTH))'
+        + brandWhere;
+      const valueExpr = '((available_stock + transit_stock) * purchase_price)';
+      const totalR = await db.query(`SELECT COUNT(*) AS n FROM brand_product${wsql}`, brandArgs);
+      const rows = await db.query(
+        `SELECT id, brand_id, sku, goods_name, image_url, supplier_flag,
+                purchase_price, available_stock, transit_stock,
+                sales_30d, sales_7d, sales_1d, last_replenish_at, synced_at,
+                ${valueExpr} AS goods_value
+           FROM brand_product${wsql}
+          ORDER BY goods_value DESC, id DESC
+          LIMIT 500`,
+        brandArgs
+      );
+      const valueR = await db.query(`SELECT COALESCE(SUM(${valueExpr}), 0) AS v FROM brand_product${wsql}`, brandArgs);
+      // 诊断提示：全库商品都没有任何销量，多半是接口字段没 mapped 上（候选键未命中）
+      const hasSalesFieldR = await db.query(
+        'SELECT COUNT(*) AS n FROM brand_product WHERE (sales_30d > 0 OR sales_7d > 0 OR sales_1d > 0) LIMIT 1'
+      );
+      return sendJson(res, 200, {
+        total: totalR[0] ? totalR[0].n : 0,
+        rows,
+        filteredValue: valueR[0] ? Number(valueR[0].v) || 0 : 0,
+        hint: (hasSalesFieldR[0] && hasSalesFieldR[0].n === 0)
+          ? '商品同步接口尚未解析到销量/补货/供应商字段，滞销筛选可能为空；请确认助手在线并重新执行商品同步'
+          : '',
       });
     }
 
@@ -6017,16 +6076,18 @@ const server = http.createServer(async (req, res) => {
       });
     }
 
-    // 商品同步（仅超级管理员）：按页拉取牵牛花前置仓商品（筛选「正常采购」），
+    // 商品同步（超管，或被授权「商品同步」菜单的普通用户）：按页拉取牵牛花前置仓商品（筛选「正常采购」），
     // 按 sku 回写商品主图 —— 表里已有则更新、没有则插入；超管一次写所有「已有商品数据」的租户（B 方案）
     if (method === 'POST' && p === '/api/admin/products/sync') {
-      if (!isAdmin) return sendJson(res, 403, { error: '仅超级管理员可同步商品' });
+      if (!canProductSync) return denyProductSync();
       const body = await readBody(req).catch(() => ({}));
-      // 目标品牌方：前端弹框多选；不传则默认当前超管所属品牌（优购哆）
+      // 目标品牌方：超管前端弹框多选；不传则默认其所属品牌（优购哆）。
+      // 普通用户即使被授权也只能同步自己品牌方 —— 防止伪造 brandIds 越权写别家商品。
       const bo = brandOf(req, url, user);
       let brandIds = Array.isArray(body && body.brandIds) ? body.brandIds.map((x) => Number(x)) : [];
       brandIds = brandIds.filter((x) => Number.isInteger(x) && x > 0);
-      if (!brandIds.length) brandIds = [bo.all ? (Number(user.brand_id) || 1) : bo.brandId];
+      if (!isAdmin) brandIds = [Number(user.brand_id) || 1];
+      else if (!brandIds.length) brandIds = [bo.all ? (Number(user.brand_id) || 1) : bo.brandId];
       // 诊断模式：只拉第 1 页，回报真实字段名与样本（不写库），用于字段映射不对时快速校准
       if (body && body.diagnose) {
         return sendJson(res, 200, await qnh.syncProducts({ userId: user.id, brandIds, diagnose: true }));
@@ -6102,9 +6163,9 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { ok: true, pending: true, taskId, message: '商品同步已开始' });
     }
 
-    // 商品同步进度（仅超管）：带 taskId 查本次任务，不带则查该用户最近一次快照
+    // 商品同步进度（超管 / 被授权商品同步的普通用户）：带 taskId 查本次任务，不带则查该用户最近一次快照
     if (method === 'GET' && p === '/api/admin/products/sync/progress') {
-      if (!isAdmin) return sendJson(res, 403, { error: '仅超级管理员可查看商品同步进度' });
+      if (!canProductSync) return denyProductSync();
       const tid = String(url.searchParams.get('taskId') || '').trim();
       const ctx = tid ? PRODUCT_SYNC.get(tid) : null;
       if (ctx && ctx.userId !== Number(user.id)) return sendJson(res, 404, { error: '任务不存在' });
@@ -7389,7 +7450,12 @@ const server = http.createServer(async (req, res) => {
       // ── 实时毛利监控 ──
       // 查看毛利数据与告警配置（有毛利监控权限即可看；管理员看到的是代入用户的数据）
       if (method === 'GET' && p === '/api/qnh/profit') {
-        return sendJson(res, 200, await qnh.profitOverview({ limit: url.searchParams.get('limit') || 100, userId: qnhUid }));
+        // date=YYYY-MM-DD 查指定下单日；不传默认当天；date=all 不限日期（明细口径，统计卡不受影响）
+        return sendJson(res, 200, await qnh.profitOverview({
+          limit: url.searchParams.get('limit') || 100,
+          userId: qnhUid,
+          date: url.searchParams.get('date') || undefined,
+        }));
       }
       // 每天毛利总额趋势（按日期聚合线上毛利合计）
       if (method === 'GET' && p === '/api/qnh/profit/trend') {
@@ -8485,6 +8551,8 @@ const server = http.createServer(async (req, res) => {
         supplierEnabled: !!Number(u.supplier_enabled),
         waybillEnabled: !!Number(u.waybill_enabled),
         replenishOrderEnabled: !!Number(u.replenish_order_enabled),
+        slowmoveEnabled: !!Number(u.slowmove_enabled),
+        productSyncEnabled: !!Number(u.product_sync_enabled),
       });
 
       if (method === 'GET' && p === '/api/staff/users') {
@@ -8492,7 +8560,8 @@ const server = http.createServer(async (req, res) => {
           `SELECT id, username, status, display_name, note, last_login_at, created_at,
                   qnh_refund_enabled, qnh_profit_enabled, product_enabled, market_enabled,
                   billing_enabled, replenish_enabled, price_enabled, after_sale_enabled,
-                  supplier_enabled, waybill_enabled, replenish_order_enabled
+                  supplier_enabled, waybill_enabled, replenish_order_enabled,
+                  slowmove_enabled, product_sync_enabled
              FROM app_user WHERE owner_id = ? ORDER BY id ASC`, [ownerId]
         );
         return sendJson(res, 200, {

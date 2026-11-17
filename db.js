@@ -794,6 +794,20 @@ async function migrate(conn, dbName) {
       "COMMENT '是否允许查看「1688比价」页（1688待付款订单采购价核对；1=开启，超级管理员始终可见）'"
     );
   }
+  // ── 滞销品列表 / 商品同步菜单权限（2026-11-18）：两项独立权限，默认 0，超管恒可见。
+  //    滞销品菜单与商品同步解耦（商品同步原仅超管），都由超管在「用户管理/员工管理」逐个授权。
+  if (!(await colExists('app_user', 'slowmove_enabled'))) {
+    await q(
+      'ALTER TABLE `app_user` ADD COLUMN `slowmove_enabled` TINYINT(1) NOT NULL DEFAULT 0 ' +
+      "COMMENT '是否允许查看「滞销品列表」页（1=开启，超级管理员始终可见）'"
+    );
+  }
+  if (!(await colExists('app_user', 'product_sync_enabled'))) {
+    await q(
+      'ALTER TABLE `app_user` ADD COLUMN `product_sync_enabled` TINYINT(1) NOT NULL DEFAULT 0 ' +
+      "COMMENT '是否允许使用「商品同步」（从牵牛花拉商品；1=开启，超级管理员始终可见）'"
+    );
+  }
   // ── 使用期限（v0.2.97）：新建用户默认 1 个月，到期后禁止登录、任何接口都不放行
   //    NULL = 永久有效。存量账号升级时一律为 NULL（永久），避免上线瞬间把现有客户踢下线。
   if (!(await colExists('app_user', 'expires_at'))) {
@@ -1026,6 +1040,10 @@ async function migrate(conn, dbName) {
       "  `purchase_status` VARCHAR(32) NOT NULL DEFAULT '' COMMENT '采购状态（purchaseStatusDesc）'," +
       "  `purchase_status_code` TINYINT NOT NULL DEFAULT 0 COMMENT '采购状态码（接口 purchaseStatuses：1=正常采购 2=已停采）'," +
       "  `sales_30d` INT NOT NULL DEFAULT 0 COMMENT '30天销量（sale30Num）'," +
+      "  `sales_7d` INT NOT NULL DEFAULT 0 COMMENT '7天销量（接口 sale7Num；无则 0）'," +
+      "  `sales_1d` INT NOT NULL DEFAULT 0 COMMENT '1天销量（接口 sale1Num；无则 0）'," +
+      "  `last_replenish_at` DATETIME DEFAULT NULL COMMENT '最近一次补货时间（接口最近补货字段；无则 NULL）'," +
+      "  `supplier_flag` VARCHAR(64) NOT NULL DEFAULT '' COMMENT '供应商标识（1688- 前缀命中；滞销品筛选口径）'," +
       "  `synced_at` DATETIME DEFAULT NULL COMMENT '最近一次同步时间'," +
       "  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '首次同步时间'," +
       "  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '最近更新时间'," +
@@ -1063,6 +1081,19 @@ async function migrate(conn, dbName) {
     }
     if (!(await idxExists('brand_product', 'idx_bp_brand_scode'))) {
       await q('ALTER TABLE `brand_product` ADD KEY `idx_bp_brand_scode` (`brand_id`, `purchase_status_code`)');
+    }
+    // 滞销品列表（2026-11-18）：月/周/日销、最近补货时间、供应商标识，供滞销筛选按下单/补货口径过滤。
+    // 老库一律补 0 / NULL / ''，避免升级瞬间把历史商品误判成滞销或刷掉已有数据。
+    const slowCols = [
+      ['sales_7d', "INT NOT NULL DEFAULT 0 COMMENT '7天销量（接口 sale7Num；无则 0）'"],
+      ['sales_1d', "INT NOT NULL DEFAULT 0 COMMENT '1天销量（接口 sale1Num；无则 0）'"],
+      ['last_replenish_at', "DATETIME DEFAULT NULL COMMENT '最近一次补货时间（接口最近补货字段；无则 NULL）'"],
+      ['supplier_flag', "VARCHAR(64) NOT NULL DEFAULT '' COMMENT '供应商标识（1688- 前缀命中；滞销品筛选口径）'"],
+    ];
+    for (const [col, decl] of slowCols) {
+      if (!(await colExists('brand_product', col))) {
+        await q(`ALTER TABLE \`brand_product\` ADD COLUMN \`${col}\` ${decl} AFTER \`sales_30d\``);
+      }
     }
     // 统一数据源（2026-11-08）：采购价 / 可用库存 / 在途库存 / 建议量的唯一权威表改为
     // brand_product，补货菜单导入会按 (brand_id, sku) upsert 回这里；商品同步不写 suggest_qty，
@@ -1940,6 +1971,7 @@ async function migrate(conn, dbName) {
     'qnh_refund_enabled', 'qnh_profit_enabled', 'product_enabled', 'market_enabled',
     'billing_enabled', 'replenish_enabled', 'price_enabled', 'after_sale_enabled',
     'supplier_enabled', 'waybill_enabled', 'replenish_order_enabled',
+    'slowmove_enabled', 'product_sync_enabled',
   ];
   try {
     const usable = [];
