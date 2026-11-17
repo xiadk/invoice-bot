@@ -2975,7 +2975,18 @@
           <qnh-login-bar :cookie="rq.cookie" :last-run="rq.lastRun" :schedule="rq.config"
                          :who-label="qnhWhoLabel" action-text="立即刷新数据"
                          :action-loading="rq.syncing" :can-logout="true"
-                         @login="onQnhLoginBtn" @logout="logoutQnh" @action="doSync"></qnh-login-bar>
+                         @login="onQnhLoginBtn" @logout="logoutQnh" @action="doSync">
+            <template slot="actions">
+              <span class="loginid" style="margin-right:6px">刷新范围</span>
+              <el-select v-model="rq.syncDays" size="small" style="width:118px"
+                         title="手动刷新拉取的天数；定时任务始终只抓当天">
+                <el-option label="仅当天" :value="0"></el-option>
+                <el-option label="近 3 天" :value="3"></el-option>
+                <el-option label="近 7 天" :value="7"></el-option>
+                <el-option label="近 30 天" :value="30"></el-option>
+              </el-select>
+            </template>
+          </qnh-login-bar>
         </el-card>
 
         <!-- 退单同步定时任务监控：日志 + 开关 + 强制解锁重跑（员工隐藏） -->
@@ -4322,8 +4333,8 @@
           <el-button type="primary" size="small" :loading="rq.savingCfg" @click="saveQnhConfig">保存设置</el-button>
           <el-tag v-if="rq.savedCfg" type="success" size="small" style="margin-left:10px">✓ 已保存</el-tag>
           <div class="form-tip" style="margin-top:8px">
-            「立即刷新数据」只拉当天（补历史可用 API 参数 days/date）。
-            提醒按退单号去重，同一笔退单只推一次；申请超 24 小时仍未处理的退单会另外推送超时提醒。
+            「立即刷新数据」默认只拉当天，需要补历史可在上方状态条把「刷新范围」选成近 3/7/30 天；
+            定时任务始终只抓当天，不受此选择影响。提醒按退单号去重，同一笔退单只推一次；申请超 24 小时仍未处理的退单会另外推送超时提醒。
           </div>
         </el-card>
       </div>
@@ -6095,6 +6106,7 @@ const vm = new Vue({
         trend: [], days: 30, summary: null,
         cookie: { logined: false, loading: false, configured: false, tenantId: '', tenantName: '', message: '' },
         lastRun: null, syncing: false, syncPoll: null, syncStartedAt: null,
+        syncDays: 0,   // 手动刷新的拉取范围：0=仅当天，3/7/30=补历史；定时任务始终只抓当天
         config: {
           scheduleEnabled: false, scheduleTime: '03:00', scheduleTimes: ['03:00'],
           webhook: '', wecomEnabled: false, alertDelivery: true,
@@ -9398,13 +9410,18 @@ const vm = new Vue({
       if (this.qnhNeedPick) { this.$message.warning('请先选择要以哪个账号的身份同步'); return; }
       this.rq.syncing = true;
       try {
-        this.$message.info('已开始同步，完成后会自动刷新列表（可能需要几十秒）');
-        const d = await this.qnhApi('/api/qnh/sync', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+        const days = Number(this.rq.syncDays) || 0;
+        const scope = days ? `近 ${days} 天` : '当天';
+        this.$message.info(`已开始同步（${scope}），完成后会自动刷新列表（可能需要几十秒）`);
+        const d = await this.qnhApi('/api/qnh/sync', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(days ? { days } : {}),
+        });
         if (d.running) { this.$message.warning(d.message || '已有同步任务在运行'); return; }
         if (d.error) { this.$message.error(d.error); return; }
         if (d.ok) {
           const n = d.refunds || 0, nn = d.newRefunds || 0;
-          this.$message.success(`同步完成：当天 ${n} 笔（新增 ${nn} 笔）`
+          this.$message.success(`同步完成：${scope} ${n} 笔（新增 ${nn} 笔）`
             + (d.failed ? `，其中 ${d.failed} 条未成功` : ''));
         } else {
           // 把失败原因完整说出来（以前只显示一句「请查看 logs/sync.log」，排查全靠翻日志）
