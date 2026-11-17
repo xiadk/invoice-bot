@@ -7004,6 +7004,8 @@ const server = http.createServer(async (req, res) => {
       const canAfterSale = isAdmin || !!Number(user.after_sale_enabled);
       const qnhUid = tenantId;   // 本块所有读写的「数据归属用户」
       const profitApi = p === '/api/qnh/profit' || p === '/api/qnh/profit/pull' || p === '/api/qnh/profit/trend';
+      // 定时任务监控：按 taskType 区分权限（refund→退单权限，profit→毛利权限），在各自 handler 内判定
+      const taskLogApi = p === '/api/qnh/task-logs' || p === '/api/qnh/task-reset';
       // 退款原因在退单列表改（商品售后 v0.3.25 起不再读退单，旧售后页的「改原因」已下线）
       const reasonApi = p === '/api/qnh/refunds/reason';
       // 员工账号只读退单：页面上的登录/刷新/提醒配置按钮已隐藏，这里做接口层兜底，
@@ -7021,6 +7023,9 @@ const server = http.createServer(async (req, res) => {
         if (!canRefund) return sendJson(res, 403, { error: '未开启退单列表权限，请联系超级管理员' });
       } else if (profitApi) {
         if (!canProfit) return sendJson(res, 403, { error: '未开启毛利监控权限，请联系超级管理员' });
+      } else if (taskLogApi) {
+        // 按 taskType 细分：在下面 handler 里按 refund/profit 各自校验；这里只挡「两个权限都没有」
+        if (!canRefund && !canProfit) return sendJson(res, 403, { error: '未开启退单或毛利权限，请联系超级管理员' });
       } else if (p === '/api/qnh/status' || p === '/api/qnh/logout') {
         // 两个面板都要用它拿配置 / 退出登录，任一权限即可
         if (!canRefund && !canProfit && !canAfterSale) return sendJson(res, 403, { error: '未开启菜单权限，请联系超级管理员' });
@@ -7124,6 +7129,53 @@ const server = http.createServer(async (req, res) => {
         if (!refundNo) return sendJson(res, 400, { error: '缺少退单号' });
         const out = await qnh.getLogsWithRoute(refundNo, url.searchParams.get('type') || '', qnhUid);
         return sendJson(res, 200, { refundNo, logs: out.logs, route: out.route });
+      }
+
+      // 定时任务日志：taskType=refund（退单同步）/ profit（毛利拉取）。
+      // 权限按 taskType 各自判定；全局 skip 日志（user_id=0）随任一类型一起带出供诊断。
+      if (method === 'GET' && p === '/api/qnh/task-logs') {
+        const taskType = (url.searchParams.get('taskType') || 'refund').trim().slice(0, 16);
+        if (taskType !== 'refund' && taskType !== 'profit') {
+          return sendJson(res, 400, { error: 'taskType 只支持 refund / profit' });
+        }
+        if (taskType === 'refund' && !canRefund) return sendJson(res, 403, { error: '未开启退单列表权限' });
+        if (taskType === 'profit' && !canProfit) return sendJson(res, 403, { error: '未开启毛利监控权限' });
+        const limit = Number(url.searchParams.get('limit')) || 50;
+        const logs = await qnh.listTaskLogs({ taskType, userId: qnhUid, limit, includeGlobal: true });
+        return sendJson(res, 200, { taskType, logs });
+      }
+
+      // 强制解锁并立即重跑：
+      //   refund → 清 running 残留标志后 runSync（generation 保护防旧任务回写）
+      //   profit → 毛利无内存锁，直接重新拉取（助手任务超时本就有 sweeper 兜底）
+      if (method === 'POST' && p === '/api/qnh/task-reset') {
+        const body = await readBody(req);
+        const taskType = String(body.taskType || '').trim().slice(0, 16);
+        if (taskType !== 'refund' && taskType !== 'profit') {
+          return sendJson(res, 400, { error: 'taskType 只支持 refund / profit' });
+        }
+        if (taskType === 'refund' && !canRefund) return sendJson(res, 403, { error: '未开启退单列表权限' });
+        if (taskType === 'profit' && !canProfit) return sendJson(res, 403, { error: '未开启毛利监控权限' });
+        let out;
+        if (taskType === 'refund') {
+          const u = qnh.resetSyncState();
+          out = await qnh.runSync({ trigger: 'retry', userId: qnhUid });
+          await qnh.logTask({
+            taskType: 'refund', userId: qnhUid, trigger: 'retry',
+            status: out.ok ? 'ok' : 'fail',
+            rows: Number(out.newRefunds || out.refunds) || 0,
+            message: `${u.cleared ? '已清除残留运行标志；' : ''}解锁重跑：${out.ok ? '成功' : String(out.message || '失败').slice(0, 160)}`,
+          });
+        } else {
+          out = await qnh.pullProfitOrders({ userId: qnhUid });
+          await qnh.logTask({
+            taskType: 'profit', userId: qnhUid, trigger: 'retry',
+            status: out.ok ? 'ok' : 'fail', rows: out.rows || 0,
+            message: `解锁重拉：${out.ok ? `成功 ${out.rows || 0} 行` : String(out.message || '失败').slice(0, 160)}`,
+          });
+        }
+        await logOp(user, 'qnh.task_reset', { taskType, ok: !!out.ok, tenantId: qnhUid });
+        return sendJson(res, 200, out);
       }
 
       // 「登录牵牛花」：不再由服务器打开浏览器（云端没有显示器/浏览器二进制），
@@ -7238,6 +7290,11 @@ const server = http.createServer(async (req, res) => {
           date: body.date || null,
           userId: qnhUid,
         });
+        await qnh.logTask({
+          taskType: 'refund', userId: qnhUid, trigger: 'manual',
+          status: out.ok ? 'ok' : 'fail', rows: Number(out.newRefunds || out.refunds) || 0,
+          message: out.ok ? `手动同步成功：新增 ${out.newRefunds || 0} 单` : String(out.message || '同步失败').slice(0, 160),
+        }).catch(() => {});
         await logOp(user, 'qnh.sync', { ok: !!out.ok, tenantId: qnhUid });
         return sendJson(res, 200, out);
       }
@@ -7335,6 +7392,11 @@ const server = http.createServer(async (req, res) => {
       // 立即拉取当天毛利明细（经该用户的本机助手页内签名接口）
       if (method === 'POST' && p === '/api/qnh/profit/pull') {
         const out = await qnh.pullProfitOrders({ userId: qnhUid });
+        await qnh.logTask({
+          taskType: 'profit', userId: qnhUid, trigger: 'manual',
+          status: out.ok ? 'ok' : 'fail', rows: out.rows || 0,
+          message: out.ok ? `手动拉取成功：${out.rows || 0} 行` : String(out.message || '拉取失败').slice(0, 160),
+        }).catch(() => {});
         if (out.ok) await logOp(user, 'qnh.profit_pull', { rows: out.rows, alerts: out.alerts, tenantId: qnhUid });
         return sendJson(res, 200, out);
       }
