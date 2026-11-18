@@ -1043,7 +1043,15 @@ function staffMenuKeys(ownerRow) {
  * @returns {{code:number, body:object}}
  */
 async function setMenuPermit(actor, id, menu, enabled) {
-  const m = MENU_PERMS[menu];
+  // 精确匹配失败时做一次大小写不敏感兜底（2026-11-18）：
+  // 两处授权入口对 menu 做了 toLowerCase()，而 productSync / replenishOrder 等 key 是 camelCase，
+  // 直接查表会查不到、误报「未知的菜单」。兜底只在唯一命中时生效，仍不认识才报错。
+  let m = MENU_PERMS[menu];
+  if (!m) {
+    const lc = String(menu || '').toLowerCase();
+    const hits = Object.keys(MENU_PERMS).filter((k) => k.toLowerCase() === lc);
+    if (hits.length === 1) m = MENU_PERMS[hits[0]];
+  }
   if (!m) return { code: 400, body: { error: '未知的菜单：' + menu } };
   const rows = await db.query('SELECT id, username, role, owner_id FROM app_user WHERE id = ?', [id]);
   if (!rows.length) return { code: 404, body: { error: '用户不存在' } };
@@ -1052,7 +1060,8 @@ async function setMenuPermit(actor, id, menu, enabled) {
   }
   const actorIsAdmin = !!(actor && actor.role === 'admin');
   // 员工管理只能超管给主体开：主体不能自我提权，员工更不能管员工（v0.3.13）
-  if (menu === 'staff' && !actorIsAdmin) {
+  // 用权限对象判断而非 menu 字符串，避免大小写兜底后 Staff 之类绕过超管检查
+  if (m === MENU_PERMS.staff && !actorIsAdmin) {
     return { code: 403, body: { error: '只有超级管理员能开通「员工管理」权限，请联系管理员' } };
   }
   // 主体给员工勾菜单时，只能勾自己已经开通的（v0.3.13 用户要求）：
